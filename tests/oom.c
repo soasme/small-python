@@ -1226,6 +1226,11 @@ static const char *const programs[] = {
     "    return b'k' in GI(), b'q' in GI(), b'k' in (BE() for i in range(2))\n"
     "print(gi())\n",
 
+    "def bt():\n"
+    "    it = iter([1, BE(), BE()])\n"
+    "    return b'k' in it, len(list(it)), b'q' in iter((BE(),))\n"
+    "print(bt())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

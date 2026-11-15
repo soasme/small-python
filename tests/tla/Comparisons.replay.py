@@ -72,6 +72,8 @@ SOURCES = {
                      "class G:\n    def __getitem__(s, i):\n        for _ in (): pass\n        if i > 1: raise IndexError\n        return E(i)\n"
                      "def g():\n    yield E(1)\n    yield E(2)\n"
                      "result = (2 in g(), 1 in G(), 5 in G())",
+    "in_list_iterator_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o\n"
+                              "it = iter([0, E(1), E(2), E(3)])\nfound = 2 in it\nresult = (found, [e.n for e in it])",
     "in_seq_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + o.n)\n        return s.n == o.n\n"
                     "result = ((E('a'),) in [(E('b'),), (E('a'),)], [E('c')] in [(E('c'),), [E('d')]])",
     "seq_order_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"

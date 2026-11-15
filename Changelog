@@ -202,7 +202,8 @@ Unreleased (0.10.0):
 - bytes.join and bytearray.join of an iterable instance or a generator take its items without nesting on the C stack,
   as do bytearray.extend and list.__init__ called unbound or again in a loop
 - str.join of an object whose __iter__ fails with a TypeError reports "can only join an iterable"
-- in of a generator or an instance iterated by __iter__ or __getitem__ calls its items' Python __eq__ without nesting on the C stack
+- in of a generator, a list or tuple iterator, or an instance iterated by __iter__ or __getitem__ calls its items'
+  Python __eq__ without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

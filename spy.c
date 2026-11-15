@@ -10322,8 +10322,18 @@ static int dict_walks(SPYValue *, SPYValue *, size_t);
 static NO_INLINE SPYValue *set_compared(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     return set_walks(op, a, b) ? NULL : comparison(c, op, a, b);
 }
+static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
+/* Whether y is a forward iterator over a list or tuple whose next items
+ * hold one that x's comparison calls a Python __eq__ of (python_item),
+ * which an in compares on the machine (contains_call). */
+static NO_INLINE int iterated_python(SPYContext *c, SPYValue *x, SPYValue *y) {
+    if (y->as.iterator.kind != I_SEQUENCE || y->as.iterator.done) return 0;
+    SPYValue *seq = y->as.iterator.source;
+    return (seq->type == SPY_LIST || seq->type == SPY_TUPLE) && python_item(c, x, seq, y->as.iterator.index) < seq->as.seq.len;
+}
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
+    if ((op == O_IN || op == O_NOTIN) && b->type == SPY_ITERATOR && iterated_python(c, a, b)) return NULL;
     /* in of a map holding a key whose comparison may call Python (eq_keyed). */
     if ((op == O_IN || op == O_NOTIN) && hashes_key(b, 1) && eq_keyed(b)) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
@@ -10374,6 +10384,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
      * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(b) || b->type == SPY_GENERATOR ||
+               (b->type == SPY_ITERATOR && iterated_python(c, a, b)) ||
                (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
@@ -10612,7 +10623,6 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
     return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
                   op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
 }
-static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
 static int pair_python(SPYContext *, SPYValue *, SPYValue *);
 /* A builtin scalar, bytes, bytearray or range, or a class of no
  * metaclass, whose == with a builtin value or such a class calls no

@@ -40,7 +40,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
+          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
@@ -147,6 +147,7 @@ Case(c) ==
       [] c = "in_builtin_calls" -> <<"(True, False, True)", <<"'bytes'", "'range'", "'complex'">>>> \* bytes, range, complex x
       [] c = "in_value_calls" -> <<"(True, False, True)", <<"'set'", "'slice'", "'builtin_function_or_method'">>>> \* any builtin x
       [] c = "in_iter_calls" -> <<"(True, True, False)", <<"1", "2", "0", "1", "0", "1">>>> \* generator, __getitem__
+      [] c = "in_list_iterator_calls" -> <<"(True, [3])", <<"1", "2">>>> \* stops past the match
       \* an ordering of sequences orders the first pair unequal by __eq__, by
       \* the item's method or its reflection, and returns that result as is
       [] c = "seq_order_calls" -> <<"('b<c', 'y<x')", <<"'aa'", "'bc'", "'b<c'", "'xy'", "'y<x'">>>>
