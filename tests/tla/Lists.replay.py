@@ -56,6 +56,8 @@ def outcome(p):
             s += (x for x in t)
         elif op == "extend":
             s.extend(t)
+        elif op == "initgen":
+            s.__init__(x for x in t)
         elif op == "imul":
             s *= p["n"]
         elif op == "append":

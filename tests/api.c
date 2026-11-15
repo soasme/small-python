@@ -2020,6 +2020,11 @@ int main(int argc, char **argv) {
     execute(c, "def extended():\n    b = bytearray()\n    b.extend(Byted())\n    b.extend(byte_items())\n    return len(b) + 6\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "extended()", "extended.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 2);
+    /* So does list.__init__'s, bound or given the list. */
+    execute(c, "def inited():\n    l = [9]\n    l.__init__(Byted())\n    k = []\n    list.__init__(k, byte_items())\n"
+               "    return len(l) + len(k) + 7\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "inited()", "inited.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

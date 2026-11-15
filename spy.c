@@ -1183,6 +1183,16 @@ static ALWAYS_INLINE SPYValue *number_new(SPYContext *c, int type) {
     return v;
 }
 /* Exchange the contents of a and b, two values of one type. */
+/* Empty list, releasing its items; an empty one, such as a list a sort
+ * detached, keeps its storage. */
+static void list_clear(SPYValue *list) {
+    if (!list->as.seq.len) return;
+    SPYValue **items = list->as.seq.items;
+    size_t len = list->as.seq.len;
+    list->as.seq.items = NULL; list->as.seq.len = list->as.seq.cap = 0;
+    for (size_t i = 0; i < len; i++) spy_release(items[i]);
+    mem_free(items);
+}
 static void swap_contents(SPYValue *a, SPYValue *b) {
     unsigned char swap[sizeof(a->as)];
     size_t size = value_size(a->type) - offsetof(SPYValue, as);
@@ -13914,13 +13924,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             self->as.map.items = NULL; self->as.map.len = self->as.map.cap = self->as.map.front = 0;
             for (size_t i = 0; i < len; i++) { spy_release(items[i].key); spy_release(items[i].value); }
             mem_free(storage);
-        } else if (self->as.seq.len) {
-            SPYValue **items = self->as.seq.items;
-            size_t len = self->as.seq.len;
-            self->as.seq.items = NULL; self->as.seq.len = self->as.seq.cap = 0;
-            for (size_t i = 0; i < len; i++) spy_release(items[i]);
-            mem_free(items);
-        }
+        } else list_clear(self);
         return spy_none(c);
     case M_COPY: {
         if (argc) break;
@@ -24189,6 +24193,13 @@ static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *,
 static SPYValue *bytearray_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 enum { BA_APPEND, BA_EXTEND, BA_POP, BA_INSERT, BA_REMOVE, BA_CLEAR, BA_COPY, BA_REVERSE };
 static int is_builtin(SPYValue *, int);
+static SPYValue *type_init(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether callee is list.__init__, bound to a list or not. */
+static int list_initing(SPYValue *callee) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    return function->type == SPY_NATIVE && function->as.native.kwcall == type_init &&
+           function->as.native.data == (void *)(intptr_t)SPY_LIST;
+}
 /* Whether callee is a bytearray's extend. */
 static int bytes_extend(SPYValue *callee) {
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
@@ -24234,6 +24245,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_COROUTINE_ITERATOR && is_builtin(callee, B_NEXT))
         return suspended(argv[0]->as.iterator.source) ? B_NEXT : -1;
     if (method >= 0 && callee->type == SPY_ASYNC_GENERATOR_ASEND) return asend_resumes(callee, method, argc, argv) ? B_NEXT : -1;
+    /* list.__init__(self, source) extends self as its bound form does. */
+    if (method < 0 && callee->type == SPY_NATIVE && argc == 2 && list_initing(callee))
+        return builtin_value(c, argv[0], SPY_LIST) && machine_source(c, argv[1]) ? B_EXTEND : -1;
     if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ASEND && is_builtin(callee, B_NEXT))
         return asend_resumes(argv[0], M_NEXT, 0, NULL) ? B_NEXT : -1;
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
@@ -24274,7 +24288,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                   !(pairs && hashed_pairs(c, argv[0])) && !((sets || pairs) && zip_hashed(c, argv[0])))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
-                           (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 :
+                           (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 : list_initing(callee) ? B_EXTEND :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
              callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS : updates != -1 ? updates :
@@ -24317,7 +24331,7 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
                      argv[0]->type == SPY_ASYNC_GENERATOR_ASEND ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
-                       callee->type == SPY_METHOD || callee->type == SPY_CLASS)))) ||
+                       callee->type == SPY_METHOD || callee->type == SPY_CLASS || (callee->type == SPY_NATIVE && argc == 2))))) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR || callee->type == SPY_BOUND_METHOD ||
            callee->type == SPY_ASYNC_GENERATOR_ASEND ? consumer_id(c, callee, method, argc, argv) : -1;
 }
@@ -24497,6 +24511,14 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     }
     /* A set's update extends its set; its other methods start from it (set_items). */
     int which = set_items(id) ? (int)((intptr_t)callee->as.method.function->as.native.data & 255) : -1;
+    /* A list's __init__ empties it, then extends it, the list given first
+     * to list.__init__. */
+    SPYValue *initing = NULL;
+    if (id == B_EXTEND && list_initing(callee)) {
+        if (callee->type == SPY_NATIVE) { callee = initing = generator; generator = start; start = NULL; }
+        else callee = callee->as.method.self;
+        list_clear(callee = builtin_value(c, callee, SPY_LIST));
+    }
     if ((id == B_EXTEND || which >= 0) && callee->type == SPY_METHOD) callee = callee->as.method.self;
     /* An asend or __anext__ awaitable's send or __next__, or next() of it,
      * resumes its async generator (asend_resumes). */
@@ -24522,6 +24544,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
                        id == B_BYTES || id == B_BYTEARRAY ? bytearray_new(c, "", 0) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || id == B_FROMKEYS || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
                                  id == B_DICT || id == B_FROMKEYS ? SPY_DICT : SPY_LIST) : NULL;
+    spy_release(initing);
     SPYValue *searched = id == B_SET_KEEP || id == B_SET_DISJOINT || id == B_SET_SUPERSET || id == B_SET_TOGGLE ? spy_retain(callee) : NULL;
     /* A symmetric difference first makes a set of the source, a frozenset
      * for a frozenset's (set_toggled). */
@@ -39240,6 +39263,11 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     if (!self) return errorf(c, "TypeError", "descriptor '__init__' requires a '%s' object but received a '%s'",
                              name, argc ? type_name(argv[0]) : "nothing");
     if (type == SPY_LIST && replaces(value_class(c, argv[0]), owner, "__new__")) keywords = NULL;
+    /* list.__init__ empties the list, then extends it in place. */
+    if (type == SPY_LIST && argc <= 2 && (!keywords || !keywords->as.map.len)) {
+        list_clear(self);
+        return argc == 2 && list_extend(c, self, argv[1]) ? NULL : spy_none(c);
+    }
     if (type == SPY_BYTEARRAY) {
         /* Once its arguments parse, bytearray.__init__ refuses an exported
          * array and empties it before converting the source. */

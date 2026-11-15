@@ -20,6 +20,7 @@
 (*     s[start:stop:step] = (x for x in t)                                 *)
 (*     s += t   s *= n   s.append(7)   s.clear()   s.copy()   s.extend(t)  *)
 (*     s.insert(i, 7)   s.pop()   s.pop(i)   s.remove(x)   s.reverse()     *)
+(*     s.__init__(x for x in t), which empties s, then extends it         *)
 (*                                                                         *)
 (* The outcome is what the operation returns and s's items afterwards, or  *)
 (* the exception.                                                          *)
@@ -42,7 +43,7 @@ Op == {[op |-> o, i |-> i, by |-> b] : o \in {"set", "del", "insert"}, i \in -4.
       \cup {[op |-> o, start |-> a, stop |-> b, step |-> c, t |-> t] : o \in {"idxslice", "idxgenslice"},
               a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}, t \in Values}
       \cup {[op |-> "idxdel", start |-> a, stop |-> b, step |-> c] : a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}}
-      \cup {[op |-> o, t |-> t] : o \in {"iadd", "extend", "iaddgen"}, t \in Values}
+      \cup {[op |-> o, t |-> t] : o \in {"iadd", "extend", "iaddgen", "initgen"}, t \in Values}
       \cup {[op |-> "imul", n |-> n] : n \in -1..2}
       \cup {[op |-> "remove", x |-> x] : x \in {1, 3}}
       \cup {[op |-> o] : o \in {"append", "clear", "copy", "reverse"}}
@@ -100,6 +101,7 @@ Run(p) ==
           [] p.op = "iaddgen" /\ p.type = "bytearray" -> Error("TypeError")
           [] p.op = "iaddgen" -> Run([p EXCEPT !.op = "iadd"])
           [] p.op \in {"iadd", "extend"} -> Done(s \o p.t)
+          [] p.op = "initgen" -> Done(p.t)                          \* __init__ empties, then extends
           [] p.op = "imul" -> Done(Repeat(s, p.n))
           [] p.op = "append" -> Done(Append(s, 7))
           [] p.op = "clear" -> Done(<<>>)

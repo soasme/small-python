@@ -1196,6 +1196,14 @@ static const char *const programs[] = {
     "    return b\n"
     "print(be2())\n",
 
+    "def li():\n"
+    "    l = [9]\n"
+    "    l.__init__(BI())\n"
+    "    k = [8]\n"
+    "    list.__init__(k, (i for i in range(2)))\n"
+    "    return l, k\n"
+    "print(li())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
