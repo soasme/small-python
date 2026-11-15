@@ -21525,7 +21525,7 @@ enter:
     return spy_retain(function);
 }
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
-static SPYValue *native_entered(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+static SPYValue *native_entered(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* Whether callee of argc arguments argv makes a class class_make makes:
  * type() of a name, bases of no metaclass and a namespace, or
  * type.__new__. */
@@ -26180,12 +26180,13 @@ static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, i
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
-    if (method < 0 && (result = native_entered(c, callee, argc, argv, env))) {
+    if (method < 0 && (result = native_entered(c, m, callee, argc, argv, env))) {
         /* property.__get__ enters its getter, dict.__getitem__ a __missing__ (native_entered). */
         release_all(argc, argv); spy_release(callee);
         return result;
     }
-    if (c->error_type[0]) { release_all(argc, argv); spy_release(callee); return NULL; }
+    /* A view's release left its exporter's __release_buffer__ (native_entered). */
+    if (c->error_type[0] || c->k_fn) { release_all(argc, argv); spy_release(callee); return NULL; }
     if (method < 0 && argc && unbound_called(c, callee, argv[0]) && called_machine(c, argv[0])) {
         /* An unbound type.__call__ calls the class first as a stack call does (class_stack_call). */
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + argc, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
@@ -26785,7 +26786,9 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
         (callee->type == SPY_NATIVE && ((argc && argv[0]->type == SPY_CLASS && (argv[0]->as.map.meta || callee->as.native.kwcall == type_method)) ||
                                         (argc == 1 && (argv[0]->type == SPY_INSTANCE ||
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
-                                                       (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
+                                                       (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)) ||
+                                                       /* memoryview.release() of a view (native_entered) */
+                                                       argv[0]->type == SPY_MEMORYVIEW)) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
                                                        /* round() with ndigits (conversion_method) */
                                                        ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
@@ -27170,10 +27173,10 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     SPYValue *traceback = id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
-    SPYValue *getter = id < 0 && calls ? native_entered(c, callee, argc, argv, env) : NULL;
+    SPYValue *getter = id < 0 && calls ? native_entered(c, m, callee, argc, argv, env) : NULL;
     int plain = 0;
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
-    result = id >= 0 || getter || c->error_type[0] ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, argc, argv, NULL) :
+    result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, argc, argv, NULL) :
              init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -27288,7 +27291,8 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         release_all(argc + 1, held); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
-    if (callee && id < 0 && !(result = calls && method < 0 ? native_entered(c, callee, argc + !skip, argv + skip, env) : NULL) && !c->error_type[0])
+    if (callee && id < 0 && !(result = calls && method < 0 ? native_entered(c, m, callee, argc + !skip, argv + skip, env) : NULL) &&
+        !c->error_type[0] && !c->k_fn)
         result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -36230,6 +36234,27 @@ static int memory_release(SPYContext *c, SPYValue *m) {
     memory_unexport(view);
     return c->error_type[0] ? -1 : 0;
 }
+/* The __release_buffer__ that memory_released called returned result:
+ * view, the view the exporter gave, released too; None. */
+static SPYValue *buffer_released(SPYContext *c, Machine *machine, SPYValue *view, SPYValue *result) {
+    (void)machine;
+    spy_release(result);
+    memory_unexport(view);
+    spy_release(view);
+    return c->error_type[0] ? NULL : spy_none(c);
+}
+/* release() of view m on machine, its exporter's __release_buffer__
+ * Python: m released, the method then machine's call (callk), its view
+ * released when it returns (buffer_released); 1, or 0 to release m as
+ * memory_release does. */
+static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m) {
+    SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function;
+    if (m->as.memory.released || m->as.memory.exports || !view || obj->type != SPY_INSTANCE ||
+        !(function = class_lookup(obj->as.map.parent, "__release_buffer__")) || !machine_function(c, function)) return 0;
+    memory_unexport(m);
+    callk(c, machine, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view)}, buffer_released, spy_retain(view));
+    return 1;
+}
 static int memory_check(SPYContext *c, SPYValue *m) {
     if (!m->as.memory.released) return 0;
     spy_error(c, "ValueError", "operation forbidden on released memoryview object");
@@ -39802,16 +39827,25 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     return c->error_type[0] ? NULL : spy_none(c);
 }
 static int native_absent(SPYContext *, SPYValue *, SPYValue *);
+static int memory_released(SPYContext *, Machine *, SPYValue *);
+static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* A call of callee with argc arguments argv, bound or not, that is
  * property.__get__ of an object whose property's getter is Python, or
  * dict.__getitem__ of a dict subclass's instance whose class has a Python
  * __missing__, with a native key it lacks (native_absent): that getter or
- * __missing__, owned, with *env, to enter as the call; else NULL. */
-static SPYValue *native_entered(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
+ * __missing__, owned, with *env, to enter as the call; else NULL. A
+ * view's release() or __exit__() whose exporter's __release_buffer__ is
+ * Python leaves that call on m (memory_released): NULL, c->k_fn set. */
+static SPYValue *native_entered(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     SPYValue *self = NULL, *function;
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
     if (callee->type != SPY_NATIVE || (!self && !argc--)) return NULL;
     if (!self) self = *argv++;
+    if (callee->as.native.kwcall == memory_method) {
+        intptr_t op = (intptr_t)callee->as.native.data;
+        if (self->type == SPY_MEMORYVIEW && (op == MV_EXIT || (op == MV_RELEASE && !argc))) memory_released(c, m, self);
+        return NULL;
+    }
     if (callee->as.native.kwcall == slot_call) {
         SPYValue *base = self->type == SPY_INSTANCE && argc == 1 && callee->as.native.owner == c->types[SPY_DICT] &&
                          !strcmp(callee->as.native.name->as.string.data, "__getitem__") ? builtin_value(c, self, SPY_DICT) : NULL;

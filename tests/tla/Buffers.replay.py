@@ -25,6 +25,9 @@ def export(p, log):
     elif how == "release":
         data = bytes(m)
         m.release()
+    elif how == "unbound":
+        data = bytes(m)
+        memoryview.release(m)
     else:
         data = bytes(m)
         del m

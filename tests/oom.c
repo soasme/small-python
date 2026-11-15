@@ -1497,6 +1497,18 @@ static const char *const programs[] = {
     "    return out\n"
     "print(mb())\n",
 
+    "class MR:\n"
+    "    def __init__(s): s.d = bytearray(b'ab'); s.log = []\n"
+    "    def __buffer__(s, f): return memoryview(s.d)\n"
+    "    def __release_buffer__(s, v): s.log.append(bytes(v)); return 1\n"
+    "def mr():\n"
+    "    e = MR(); m = memoryview(e)\n"
+    "    out = [m.release(), m.release()]\n"
+    "    with memoryview(e) as w: out.append(w.nbytes)\n"
+    "    out.append(memoryview.release(memoryview(e)))\n"
+    "    return out + e.log\n"
+    "print(mr())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

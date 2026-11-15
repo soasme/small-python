@@ -2230,6 +2230,14 @@ int main(int argc, char **argv) {
                "        return memoryview(bytes(i % 256 for i in range(flags)))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "memoryview(Exporting()).nbytes", "exporting.py"), SPY_STOP_STEPS, &pauses)) == 284 && pauses > 1);
+    /* So do a view's release() and with block, calling its exporter's Python __release_buffer__. */
+    execute(c, "class Releasing(Exporting):\n    def __release_buffer__(self, view):\n        for i in range(3000): pass\n"
+               "        released.append(i)\n"
+               "released = []\n"
+               "def releases():\n    m = memoryview(Releasing())\n    m.release()\n    with memoryview(Releasing()): pass\n"
+               "    return sum(released)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "releases()", "releases.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

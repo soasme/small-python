@@ -17,25 +17,25 @@
 (* its flags, 284, and returns memoryview(b"abc") or b"abc", or raises     *)
 (* ValueError, with or without a __release_buffer__ that logs "release";   *)
 (* then takes bytes(B()), or makes m = memoryview(B()) and reads bytes(m)  *)
-(* inside `with m:`, before m.release(), or before del m. A resize program *)
-(* appends to a bytearray with a view that is unreleased or released; a    *)
-(* plain program takes memoryview(object()). A reenter program releases a  *)
-(* view of a bytearray, and empties the bytearray, from the __index__ of   *)
-(* the key of m[k] or of the item of m[0] = v, from the exporter's         *)
-(* __hash__ during hash(m), or from the __len__ of sep during m.hex(sep).  *)
-(* An index program reads m[k] or stores m[k] = 66, k's __index__ logging  *)
-(* "index" and returning 1, of a view of bytearray(b"ab") that is plain,   *)
-(* released, read-only, of no dimension, or of shape (1, 2): a released    *)
-(* view, one of no dimension, a store into a read-only or two-dimensional  *)
-(* view fail before the index; a two-dimensional item fails after it. A    *)
-(* grid program reads or stores m[a, b] of a (2, 2) view of                *)
-(* bytearray(b"abcd"), a's and b's __index__ logging their names, b        *)
-(* returning 1 and a 0, or 5, out of bounds. The outcome is the log and    *)
-(* the result or the exception.                                            *)
+(* inside `with m:`, before m.release() or memoryview.release(m), or       *)
+(* before del m. A resize program appends to a bytearray with a view that  *)
+(* is unreleased or released; a plain program takes memoryview(object()).  *)
+(* A reenter program releases a view of a bytearray, and empties the       *)
+(* bytearray, from the __index__ of the key of m[k] or of the item of m[0] *)
+(* = v, from the exporter's __hash__ during hash(m), or from the __len__   *)
+(* of sep during m.hex(sep). An index program reads m[k] or stores m[k] =  *)
+(* 66, k's __index__ logging "index" and returning 1, of a view of         *)
+(* bytearray(b"ab") that is plain, released, read-only, of no dimension,   *)
+(* or of shape (1, 2): a released view, one of no dimension, a store into  *)
+(* a read-only or two-dimensional view fail before the index; a            *)
+(* two-dimensional item fails after it. A grid program reads or stores     *)
+(* m[a, b] of a (2, 2) view of bytearray(b"abcd"), a's and b's __index__   *)
+(* logging their names, b returning 1 and a 0, or 5, out of bounds. The    *)
+(* outcome is the log and the result or the exception.                     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : BOOLEAN, how : {"bytes", "with", "release", "del"}]
+Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : BOOLEAN, how : {"bytes", "with", "release", "unbound", "del"}]
             \cup [part : {"resize"}, released : BOOLEAN]
             \cup [part : {"plain"}]
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
