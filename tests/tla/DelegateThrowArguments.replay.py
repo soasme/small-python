@@ -51,12 +51,14 @@ def outcome(p):
         yield from it
     g = handling() if p["handles"] else plain()
     next(g)
-    args = {"instance": (KeyError("k"),), "invalid": (1,), "exit": (GeneratorExit, 1, 2), "made": (Made, 3), "exit_made": (Exit,)}[p["args"]]
+    args = {"instance": (KeyError("k"),), "invalid": (1,), "exit": (GeneratorExit, 1, 2), "made": (Made, 3), "exit_made": (Exit,), "exit_class": (GeneratorExit,)}[p["args"]]
     closed[:] = [lambda: it.gi_frame is None if p["delegate"] == "generator" else p["delegate"] == "bare" or it.closed]
     try:
         result = repr(g.throw(*args))
     except Exit as e:
         result = "Exit after close" if closed[1] else "Exit before close"
+    except GeneratorExit:
+        result = "GeneratorExit after close" if closed[0]() else "GeneratorExit before close"
     except Exception as e:
         result = type(e).__name__
     return {"result": result, "suspended": g.gi_frame is not None}

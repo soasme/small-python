@@ -1413,6 +1413,22 @@ static const char *const programs[] = {
     "    return out + [len(d)]\n"
     "print(sh())\n",
 
+    "class GX(GeneratorExit): pass\n"
+    "def gi(out):\n"
+    "    try: yield 1\n"
+    "    finally: out.append('inner')\n"
+    "def go(out):\n"
+    "    try: yield from gi(out)\n"
+    "    except GeneratorExit as e: out.append(type(e).__name__); raise\n"
+    "def gx():\n"
+    "    out = []\n"
+    "    for k in (GeneratorExit, GX):\n"
+    "        g = go(out); next(g)\n"
+    "        try: g.throw(k)\n"
+    "        except GeneratorExit as e: out.append(type(e) is k)\n"
+    "    return out\n"
+    "print(gx())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

@@ -24001,13 +24001,20 @@ static Machine *innermost(Machine *m) {
 static NO_INLINE int raises_at(Machine *m) {
     return m->awaiting == AWAIT_YIELD || (m->awaiting == AWAIT_DELEGATE && m->delegate->type == SPY_ITERATOR);
 }
+/* Whether making an instance of class k runs no Python: it has no
+ * metaclass, nor a __new__ or __init__ other than a builtin's. */
+static int made_natively(SPYValue *k) {
+    SPYValue *init = class_lookup(k, "__init__"), *made = class_lookup(k, "__new__");
+    return !k->as.map.meta && (!init || init->type == SPY_NATIVE) && (!made || made->type == SPY_NATIVE);
+}
 /* Whether a close, or a throw of k with argc arguments, into generator
  * machine m raises on the machine: a value at its innermost yield
  * (raises_at), a yield from of a generator passing it on as given. A
- * GeneratorExit class is made only after a yield from's delegates
- * close, in C. */
+ * GeneratorExit class whose making runs Python (made_natively) is made
+ * only after a yield from's delegates close, in C. */
 static NO_INLINE int thrown_at(SPYContext *c, Machine *m, size_t argc, SPYValue *k) {
-    if (k && k->type == SPY_CLASS && m->awaiting == AWAIT_DELEGATE && subclass(k, c->exceptions[X_GENERATOR_EXIT])) return 0;
+    if (k && k->type == SPY_CLASS && m->awaiting == AWAIT_DELEGATE && subclass(k, c->exceptions[X_GENERATOR_EXIT]) && !made_natively(k))
+        return 0;
     return argc < 2 || raises_at(innermost(m));
 }
 /* Whether a close of, or a throw of exception into, a generator or

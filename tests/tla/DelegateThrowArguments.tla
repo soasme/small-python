@@ -18,15 +18,16 @@
 (* KeyError("k"), 1, (GeneratorExit, 1, 2), whose third argument is no     *)
 (* traceback, (Made, 3), Made's Python __init__ making the exception, or   *)
 (* Exit, a GeneratorExit class whose Python __init__ notes whether the     *)
-(* delegate is closed yet. it is a generator suspended at a yield, an      *)
-(* iterator whose throw returns "thrown" and whose close returns, or one   *)
-(* with neither. The outcome is the throw()'s result or exception, and     *)
-(* whether g is still suspended.                                           *)
+(* delegate is closed yet, or GeneratorExit itself, made with no Python    *)
+(* code. it is a generator suspended at a yield, an iterator whose throw   *)
+(* returns "thrown" and whose close returns, or one with neither. The      *)
+(* outcome is the throw()'s result or exception, and whether g is still    *)
+(* suspended.                                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [delegate : {"generator", "throws", "bare"},
-             args : {"instance", "invalid", "exit", "made", "exit_made"}, handles : BOOLEAN]
+             args : {"instance", "invalid", "exit", "made", "exit_made", "exit_class"}, handles : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -35,7 +36,7 @@ Pending == [result |-> "pending", suspended |-> TRUE]
 
 \* The exception the delegate raises at the yield from, or "" for none.
 Raised(p) ==
-    CASE p.args \in {"exit", "exit_made"} -> ""
+    CASE p.args \in {"exit", "exit_made", "exit_class"} -> ""
       [] p.delegate = "throws" -> ""
       [] p.delegate = "bare" /\ p.args = "invalid" -> ""
       [] p.args = "instance" -> "KeyError"
@@ -48,6 +49,7 @@ Run(p) ==
          [] e # "" -> [result |-> e, suspended |-> FALSE]
          \* A GeneratorExit class is made once the delegate closed, and ends g.
          [] p.args = "exit_made" -> [result |-> "Exit after close", suspended |-> FALSE]
+         [] p.args = "exit_class" -> [result |-> "GeneratorExit after close", suspended |-> FALSE]
          \* The iterator's throw took the arguments as given.
          [] p.delegate = "throws" /\ p.args # "exit" -> [result |-> "'thrown'", suspended |-> TRUE]
          \* The delegator's own check failed: it did not resume.

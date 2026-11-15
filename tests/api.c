@@ -2197,6 +2197,12 @@ int main(int argc, char **argv) {
                "def subhashed():\n    d, k = Absent(), Hashy(1)\n    d[k] = 1\n    v = d[k] + d[Hashy(2)]\n    del d[k]\n    return v + len(d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "subhashed()", "subhashed.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 4);
+    /* So does a throw of the GeneratorExit class into a yield from, closing its delegates. */
+    execute(c, "def closing():\n    try: yield 1\n    finally:\n        for i in range(3000): pass\n"
+               "def exiting():\n    g = (lambda: (yield from closing()))()\n    next(g)\n"
+               "    try: g.throw(GeneratorExit)\n    except GeneratorExit: return 5\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "exiting()", "exiting.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
