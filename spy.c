@@ -132,7 +132,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
-       F_NAMESPACE = 131072 /* A class body's def, class, annotated assignment or del of a name: a binding through its namespace. */,
+       F_NAMESPACE = 131072 /* A class or module body's def, class, annotated assignment or del of a name: a binding through its namespace. */,
        F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */ };
 struct Node {
     int kind, op, asynchronous, flags;
@@ -15319,8 +15319,8 @@ static int loops(Node *body) {
     }
     return 0;
 }
-/* Flag the statements of class body n that bind names through its
- * namespace (F_NAMESPACE), outside the definitions among them. */
+/* Flag the statements of class or module body n that bind names through
+ * its namespace (F_NAMESPACE), outside the definitions among them. */
 static void namespace_bindings(Node *n) {
     for (; n; n = n->next) {
         if (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) || n->kind == N_DELETE)
@@ -17429,12 +17429,12 @@ static int start_annotations(SPYContext *, Frame *, Node *, const char *);
 /* Enter the frame of unit, whose module body is on the machine
  * (module_program), in env, called from the machine caller; it takes both
  * references, releasing them when it fails. The body's instructions of no
- * node tick on its first statement. */
+ * node tick on its first statement; the first binds its annotation names
+ * (annotation_step). */
 static NO_INLINE Call *unit_enter(SPYContext *c, SPYValue *unit, SPYValue *env, Machine *caller) {
     Frame frame = {env, unit, unit->as.unit.expression == 2};
     if (!enter_frame(c, env, unit)) {
         if (!setup_annotations(c, &frame, unit->as.unit.setup_annotations) &&
-            !start_annotations(c, &frame, unit->as.unit.annotate, "__annotate__") &&
             ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c))) {
             Call *call = c->calls[c->calls_len++];
             call->m.code = unit->as.unit.flat; call->m.pc = 0; call->m.owner = unit->as.unit.body;
@@ -22338,14 +22338,34 @@ static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n
     return result;
 }
 static SPYValue *unpack_step(SPYContext *, Machine *, Frame *, Node *);
+static SPYValue *class_names_call(SPYContext *, Machine *, Frame *, SPYValue *, SPYValue *);
+/* A module body in frame f, on m, binds its annotation function, then
+ * the set of its executed conditional annotations (start_annotations),
+ * through its namespace's Python __setitem__ (class_names_call): None,
+ * or NULL on an error. */
+static NO_INLINE SPYValue *module_annotations(SPYContext *c, Machine *m, Frame *f) {
+    SPYValue *unit = f->unit;
+    if (!hooked_namespace(c, f->env)) return start_annotations(c, f, unit->as.unit.annotate, "__annotate__") ? NULL : spy_none(c);
+    SPYValue *values[] = {unit->as.unit.annotate ? function_new(c, f, unit->as.unit.annotate) : NULL,
+                          unit->as.unit.conditional_annotations ? value_new(c, SPY_SET) : NULL};
+    SPYValue *keys[] = {spy_string(c, "__annotate__", 12), spy_string(c, "__conditional_annotations__", 27)};
+    SPYValue *names = c->error_type[0] ? NULL : value_new(c, SPY_LIST);
+    for (int i = 0; i < 2 && names; i++)
+        if (values[i] && (!keys[i] || sequence_append(c, names, keys[i]) || sequence_append(c, names, values[i]))) { spy_release(names); names = NULL; }
+    release_all(2, keys); release_all(2, values);
+    return names ? class_names_call(c, m, f, names, spy_none(c)) : NULL;
+}
 /* BC_CLASS 12 to 16, an annotation function's body on m (compile_statement):
  * 12 its dict (annotations_begin); 13 whether a conditional entry ran
  * (annotation_ran); 16 a starred entry's single item, above its value, as
  * BC_UNPACK takes it (unpack_step), or NULL, taken on the machine; 14
  * stores an entry's value, above the dict, in it; 15 a lazy value's
- * function returns its value instead. */
+ * function returns its value instead. 17 starts a module body
+ * (start_annotations), through its namespace's Python __setitem__ on the
+ * machine (class_names_call). */
 static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
     Node *entry = ins->node;
+    if (ins->arg == 17) return module_annotations(c, m, f);
     if (ins->arg == 12) return annotations_begin(c, f, entry);
     if (ins->arg == 13) {
         int found = annotation_ran(c, f, entry, NULL);
@@ -22417,6 +22437,10 @@ static int module_program(SPYContext *c, SPYValue *unit) {
     Node *body = unit->as.unit.body, *last = body;
     while (last->next) last = last->next;
     c->code_work++;
+    /* The body starts by binding its annotation names (annotation_step);
+     * like a class body's, its bindings may go through a mapping. */
+    namespace_bindings(body);
+    if (unit->as.unit.annotate || unit->as.unit.conditional_annotations) { emit(c, p, BC_CLASS, NULL, 17); emit(c, p, BC_POP, NULL, 0); }
     for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
     if (last->kind == N_EXPR && !p->display) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
     else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
@@ -22436,7 +22460,7 @@ static Result module_body(SPYContext *c, Frame *f) {
     c->pause_entry = 0;
     /* The walker runs it as an outermost call that does not pause. */
     if (pausable && !m) c->pause_due = 0;
-    if (!m) return c->error_type[0] ? (Result){FLOW_ERROR, NULL} : execute(c, f, body);
+    if (!m) return c->error_type[0] || start_annotations(c, f, unit->as.unit.annotate, "__annotate__") ? (Result){FLOW_ERROR, NULL} : execute(c, f, body);
     m->owner = body; m->frame.interactive = f->interactive;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
@@ -22453,8 +22477,7 @@ static Result execute_module(SPYContext *c, Frame *f) {
         if (status) return (Result){FLOW_ERROR, NULL};
     }
     if (enter_frame(c, f->env, f->unit)) return (Result){FLOW_ERROR, NULL};
-    Result r = setup_annotations(c, f, f->unit->as.unit.setup_annotations) || start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__") ?
-        (Result){FLOW_ERROR, NULL} : module_body(c, f);
+    Result r = setup_annotations(c, f, f->unit->as.unit.setup_annotations) ? (Result){FLOW_ERROR, NULL} : module_body(c, f);
     return r.flow == FLOW_PAUSE ? r : module_left(c, r);
 }
 /* Leave the frame of a module whose body ended with r. */

@@ -1343,6 +1343,18 @@ static const char *const programs[] = {
     "    return t, b, u\n"
     "print(pa())\n",
 
+    "class MS(dict):\n"
+    "    def __setitem__(s, k, v):\n"
+    "        if k == 'z': raise KeyError(k)\n"
+    "        dict.__setitem__(s, k, v)\n"
+    "def ms():\n"
+    "    ns = MS()\n"
+    "    exec('a = 1\\nx: int = 2\\nif a:\\n    y: str = 3\\ndel a', {}, ns)\n"
+    "    try: exec('z: int = 1', {}, MS())\n"
+    "    except KeyError as e: m = e.args\n"
+    "    return sorted(ns), ns['__conditional_annotations__'], m\n"
+    "print(ms())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

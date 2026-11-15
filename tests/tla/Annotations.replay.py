@@ -113,6 +113,7 @@ class Names(dict):
         self.log = []
 
     def __setitem__(self, key, value):
+        for _ in (): pass
         if key not in ("__module__", "__qualname__", "__firstlineno__"):
             self.log.append(key)
         super().__setitem__(key, value)
@@ -137,6 +138,9 @@ def order(p):
             b = 3
         return ",".join(C.log)
     ns = Names()
+    if p["where"] == "conditional":
+        exec("a = 1\nif a:\n    x: int = 2\ndel a\nb: str = 3\n", {}, ns)
+        return ",".join(ns.log)
     exec("a = 1\nx: int = 2\nb = 3\n", {}, ns)
     return ",".join(ns.log)
 

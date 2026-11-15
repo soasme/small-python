@@ -2135,6 +2135,12 @@ int main(int argc, char **argv) {
                "def rounded():\n    return len(ascii(Rounded())) + round(1234, Rounded()) + int(round(2.5, Rounded()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "rounded()", "rounded.py"), SPY_STOP_STEPS, &pauses)) == 1232 && pauses > 2);
+    /* So do a module body's annotation names and annotated stores, run with
+     * a mapping whose __setitem__ is Python. */
+    execute(c, "class Stored(dict):\n    def __setitem__(self, k, v):\n        for i in range(3000): pass\n        dict.__setitem__(self, k, v)\n"
+               "def annotated():\n    ns = Stored()\n    exec('x: int = 2\\nif x:\\n    y: str = 3', {}, ns)\n    return len(ns) + ns['x']\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "annotated()", "annotated.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 3);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
