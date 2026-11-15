@@ -2141,6 +2141,12 @@ int main(int argc, char **argv) {
                "def annotated():\n    ns = Stored()\n    exec('x: int = 2\\nif x:\\n    y: str = 3', {}, ns)\n    return len(ns) + ns['x']\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "annotated()", "annotated.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 3);
+    /* So does a read of a metaclassed class's __annotations__. */
+    execute(c, "def slow_type(t):\n    for i in range(3000): pass\n    return t\nclass Kind(type): pass\n"
+               "def metannotated():\n    class Kept(metaclass=Kind):\n        x: slow_type(int)\n        y: slow_type(str)\n"
+               "    return len(Kept.__annotations__) + len(Kept.__annotations__)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "metannotated()", "metannotated.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

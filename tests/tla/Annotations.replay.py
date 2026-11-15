@@ -162,8 +162,12 @@ def calls(p):
         return x
     if p["owner"] == "function":
         def target(x: note(str)): pass
-    else:
+    elif p["owner"] == "class":
         class target:
+            x: note(str)
+    else:
+        class Meta(type): pass
+        class target(metaclass=Meta):
             x: note(str)
     if p["annotate"] == "dict":
         target.__annotate__ = lambda format: {"w": note(format)}

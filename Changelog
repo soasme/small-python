@@ -213,6 +213,9 @@ Unreleased (0.10.0):
 - %= of a str or bytes target by a container calls its items' Python __repr__ without nesting on the C stack
 - a module run with a mapping binds __annotate__, __conditional_annotations__ and its annotated names through a
   Python __setitem__ without nesting on the C stack
+- a class's __annotations__ under a metaclass calls its Python __annotate__ without nesting on the C stack, and a
+  metaclass's own __annotations__ answers instead
+- a class without annotations caches its empty __annotations__ and keeps None as its __annotate_func__
 - min() and max(), with or without a key, call the best's reflected Python method, after an item's declined or
   when it has only object's, and the Python __bool__ of a result without nesting on the C stack
 - sorted() and list.sort() call the Python __bool__ or __len__ of a comparison's result without nesting on the C stack

@@ -11505,12 +11505,20 @@ static SPYValue *annotation_dict(SPYContext *c, SPYValue *annotate) {
     return value;
 }
 static int machine_function(SPYContext *, SPYValue *);
+static int class_hooked(SPYValue *);
+/* Whether type's own attribute name answers its read on class v: its
+ * metaclass, if any, inherits it. */
+static int type_answers(SPYContext *c, SPYValue *v, const char *name) {
+    return !v->as.map.meta || class_lookup(v->as.map.meta, name) == class_lookup(c->types[SPY_CLASS], name);
+}
 /* The Python __annotate__, a machine function, that a read of the
  * __annotations__ of v, a function, plain class or module, calls first,
  * none being kept yet (annotation_dict); borrowed, else NULL. */
 static NO_INLINE SPYValue *annotate_pending(SPYContext *c, SPYValue *v) {
     SPYValue *own = v->type == SPY_FUNCTION ? v->as.function.metadata : v, *kept, *annotate;
-    if (v->type == SPY_CLASS && v->as.map.meta) return NULL;
+    /* A metaclass's lookup hook, or its own __annotations__ or
+     * __annotate__, answers instead. */
+    if (v->type == SPY_CLASS && (class_hooked(v) || !type_answers(c, v, "__annotations__") || !type_answers(c, v, "__annotate__"))) return NULL;
     kept = name_local(own, "__annotations__");
     if (v->type == SPY_CLASS && !kept) kept = name_local(own, "__annotations_cache__");
     if (kept && (v->type != SPY_FUNCTION || kept->type != SPY_NONE)) return NULL;
@@ -11535,14 +11543,24 @@ static SPYValue *annotations_made(SPYContext *c, Machine *m, SPYValue *owner, SP
     return result;
 }
 static SPYValue *class_annotations(SPYContext *c, SPYValue *cls, const char *name) {
-    SPYValue *annotate = name_local(cls, "__annotate__");
-    if (!annotate) annotate = name_local(cls, "__annotate_func__");
-    if (!strcmp(name, "__annotate__")) return spy_retain(annotate ? annotate : c->none);
-    SPYValue *value = name_local(cls, "__annotations__");
-    if (!value) value = name_local(cls, "__annotations_cache__");
+    int getter = !strcmp(name, "__annotations__");
+    SPYValue *value = getter ? name_local(cls, "__annotations__") : NULL, *annotate;
+    if (getter && !value) value = name_local(cls, "__annotations_cache__");
     if (value) return spy_retain(value);
-    if (!annotate || annotate->type == SPY_NONE) return value_new(c, SPY_DICT);
-    value = annotation_dict(c, annotate);
+    /* The getter reads __annotate__ as an attribute, which a metaclass
+     * may answer. */
+    if (getter && (class_hooked(cls) || !type_answers(c, cls, "__annotate__"))) annotate = attribute(c, cls, "__annotate__");
+    else {
+        annotate = name_local(cls, "__annotate__");
+        if (!annotate) annotate = name_local(cls, "__annotate_func__");
+        /* A class without one keeps None as its __annotate_func__. */
+        if (!annotate && name_set(c, cls, "__annotate_func__", c->none)) return NULL;
+        annotate = spy_retain(annotate ? annotate : c->none);
+        if (!getter) return annotate;
+    }
+    if (!annotate) return NULL;
+    value = annotate->type == SPY_NONE ? value_new(c, SPY_DICT) : annotation_dict(c, annotate);
+    spy_release(annotate);
     if (value && name_set(c, cls, "__annotations_cache__", value)) { spy_release(value); return NULL; }
     return value;
 }
@@ -12104,7 +12122,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     }
     if (v->type == SPY_CLASS || v->type == SPY_INSTANCE) {
         if (v->type == SPY_CLASS) {
-            if ((!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) && !v->as.map.native && v->as.map.flags != 2)
+            if ((!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) && !v->as.map.native && v->as.map.flags != 2 &&
+                type_answers(c, v, name))
                 return class_annotations(c, v, name);
             if (!strcmp(name, "__bases__")) return spy_retain(v->as.map.bases);
             if (!strcmp(name, "__mro__")) return v->as.map.mro ? spy_retain(v->as.map.mro) : spy_none(c);

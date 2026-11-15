@@ -25,18 +25,18 @@
 (* program annotates with a class-body name or an enclosing function's     *)
 (* local. A replacement program assigns a function's or class's            *)
 (* __annotations__ or __annotate__ (a function, or 5) or deletes           *)
-(* __annotate__. An order program lists the names a class body, or a      *)
+(* __annotate__. An order program lists the names a class body, or a       *)
 (* module body run with a mapping, stores: a class's __annotate_func__     *)
 (* after its statements, a module's __annotate__ and then the set of its   *)
 (* executed annotations before them, through a Python __setitem__, also    *)
 (* with an annotation in a block and a del between. A partial program runs *)
 (* a module that stops, or not, between two annotations: every module      *)
 (* annotation is conditional, so only executed ones are reported. A calls  *)
-(* program reads the __annotations__ of a function or class twice, its     *)
-(* __annotate__ the compiler's, whose annotation calls a Python function,  *)
-(* or one assigned that returns a dict or a list. The outcome is the       *)
-(* annotations, value, names, or exception, and for a calls program the    *)
-(* calls made.                                                             *)
+(* program reads the __annotations__ of a function, a class, or a class    *)
+(* with a metaclass twice, its __annotate__ the compiler's, whose          *)
+(* annotation calls a Python function, or one assigned that returns a dict *)
+(* or a list. The outcome is the annotations, value, names, or exception,  *)
+(* and for a calls program the calls made.                                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -49,7 +49,7 @@ Programs == [part : {"function"}, ann : Anns, op : {"annotations", "format1", "f
             \cup [part : {"replace"}, target : {"function", "class"}, op : {"annotations", "annotate", "bad", "delete"}]
             \cup [part : {"order"}, where : {"class", "module", "conditional"}]
             \cup [part : {"partial"}, stop : BOOLEAN]
-            \cup [part : {"calls"}, owner : {"function", "class"}, annotate : {"compiled", "dict", "list"}]
+            \cup [part : {"calls"}, owner : {"function", "class", "metaclassed"}, annotate : {"compiled", "dict", "list"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

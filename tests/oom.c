@@ -1355,6 +1355,19 @@ static const char *const programs[] = {
     "    return sorted(ns), ns['__conditional_annotations__'], m\n"
     "print(ms())\n",
 
+    "class MA(type): pass\n"
+    "class MP(type):\n"
+    "    @property\n"
+    "    def __annotations__(cls): return {'p': 1}\n"
+    "def ma():\n"
+    "    class A(metaclass=MA):\n"
+    "        x: int\n"
+    "    class B(metaclass=MP):\n"
+    "        y: str\n"
+    "    class E: pass\n"
+    "    return A.__annotations__, A.__annotations__ is A.__annotations__, B.__annotations__, E.__annotations__, E.__dict__['__annotate_func__']\n"
+    "print(ma())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
