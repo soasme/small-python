@@ -30246,18 +30246,25 @@ static NO_INLINE Result adapted_flow(SPYContext *c, SPYValue *v, Result flow) {
     if (error_is(c, "StopIteration")) spy_clear_error(c);
     return (Result){FLOW_NORMAL, NULL};
 }
+/* Whether iterator v gives its next item calling no Python: a range's,
+ * or a forward one's over a builtin's value. */
+static int plain_next(SPYValue *v) {
+    return v->type == SPY_ITERATOR && (v->as.iterator.kind == I_RANGE || (v->as.iterator.kind == I_SEQUENCE && v->as.iterator.source->type != SPY_INSTANCE));
+}
 /* For zip or map v, not strict, the generator the machine resumes, *g,
  * borrowed, for the next of its pending items (iterator counter), the
- * items of the list, tuple and range iterators before it taken
- * (iterator_fast): 1 then; else 0, for zip_items to go on; -1 on an
- * error. */
+ * items of the native iterators before it taken (plain_next): 1 then;
+ * else 0, for zip_items to go on; -1 on an error. */
 static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     SPYValue *source = v->as.iterator.source, *item;
     size_t first = v->as.iterator.kind == I_MAP;
     for (size_t i = first + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0); i < source->as.seq.len; i++) {
         SPYValue *s = source->as.seq.items[i];
         if (resumable(s)) { *g = s; return 1; }
-        if (!iterator_fast(c, s, &item)) return 0;
+        if (!iterator_fast(c, s, &item)) {
+            if (!plain_next(s)) return 0;
+            item = iterator_next(c, s);
+        }
         if (!item) return c->error_type[0] ? -1 : 0;
         int failed = (!v->as.iterator.counter && !(v->as.iterator.counter = value_new(c, SPY_TUPLE))) ||
                      sequence_append(c, v->as.iterator.counter, item);

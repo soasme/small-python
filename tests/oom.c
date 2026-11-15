@@ -1089,6 +1089,13 @@ static const char *const programs[] = {
     "    return f.out\n"
     "print(of())\n",
 
+    "def oz(n):\n"
+    "    for i in range(n): yield i\n"
+    "def ozz():\n"
+    "    it = iter('abc')\n"
+    "    return list(zip('ab', oz(3))), list(zip({1: 2}, b'x', oz(2))), list(zip(it, oz(1))), next(it), sum(map(pow, range(2), oz(2)))\n"
+    "print(ozz())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

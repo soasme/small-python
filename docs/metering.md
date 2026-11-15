@@ -312,7 +312,8 @@ These run as machines on the heap, in one native activation of
   instance's `__call__` too, the generator that an `enumerate`, or a
   `filter` whose function is `None` or native, takes items from, and the
   generators that a `zip` or a `map` without `strict` takes items from
-  beside list, tuple and range iterators, and the calls of the maps, and
+  beside iterators over ranges and builtin values such as a `str`, `bytes` or
+  `dict`, and the calls of the maps, and
   the Python `__next__` of the instances, that they and an `enumerate`
   take items from, for a loop, a consumer below or `next`, and the
   Python `__iter__` of the instances that creating a `zip`, `map`,

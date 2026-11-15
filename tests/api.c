@@ -1964,6 +1964,11 @@ int main(int argc, char **argv) {
                "def fetching():\n    print('ab', 3, file=Fetching(), flush=False)\n    return Fetching.n\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "fetching()", "fetching.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
+    /* So does a zip's generator after a str. */
+    execute(c, "def slow_items(n):\n    for i in range(n):\n        for j in range(3000): pass\n        yield i\n"
+               "def zipped_text():\n    return len(list(zip('abc', slow_items(3)))) + len(dict(zip(b'xy', slow_items(2))))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "zipped_text()", "zipped_text.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
