@@ -1676,6 +1676,23 @@ static const char *const programs[] = {
     "    return [a == b, b != a, p < q, q == p, SCL(a) < [SCK(1), SCK(5)]]\n"
     "print(sc())\n",
 
+    "class DMK:\n"
+    "    def __init__(s, v): s.v = v\n"
+    "    def __hash__(s): return s.v % 2\n"
+    "    def __eq__(s, o):\n"
+    "        if s.v < 0: raise LookupError(s.v)\n"
+    "        return s.v == o.v\n"
+    "def dm():\n"
+    "    d = {DMK(1): 'a', DMK(2): 'b'}\n"
+    "    d.update({DMK(1): 'x', DMK(3): 'y'})\n"
+    "    d |= {DMK(4): 'z'}\n"
+    "    e = d | {DMK(5): 'w'}\n"
+    "    f = {**d, **{DMK(2): 'v'}}\n"
+    "    try: {DMK(-1): 0}.update({DMK(3): 1})\n"
+    "    except LookupError: pass\n"
+    "    return [sorted((k.v, v) for k, v in m.items()) for m in (d, e, f)]\n"
+    "print(dm())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

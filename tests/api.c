@@ -2304,6 +2304,11 @@ int main(int argc, char **argv) {
                "    return (a != Seq([Same()])) + (Seq([Same()]) != a) + (Row(r) != (Same(),)) + ((Same(),) != Row(r))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "compared()", "compared.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So does a dict's merge of a dict into one with keys, by update(), |=, | and **. */
+    execute(c, "def merged():\n    d = {Same(): 1}\n    d.update({Same(): 2})\n    d |= {Same(): 3}\n"
+               "    return len(d) + len(d | {Same(): 4}) - len({**d, **{Same(): 5}})\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "merged()", "merged.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

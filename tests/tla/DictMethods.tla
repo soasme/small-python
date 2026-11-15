@@ -2,29 +2,33 @@
 (***************************************************************************)
 (* Dictionaries and dictionary views, as the Built-in Types chapter        *)
 (* specifies them (library/stdtypes.html#mapping-types-dict and            *)
-(* #dictionary-view-objects): dict() builds from a mapping (or any object  *)
-(* with keys()), an iterable of pairs, and keywords, later keys winning;   *)
-(* keys must be hashable, and equal keys (1, 1.0, True) are one key        *)
-(* keeping its first spelling; a dict remembers insertion order, which     *)
-(* reassignment keeps and deletion forgets; d | other and update() (and    *)
-(* |=, which also takes pairs) keep the left operand's order, give the     *)
-(* right operand's values, and append its new keys in its order; equality  *)
-(* ignores order and dicts are unordered and unhashable; get, setdefault,  *)
-(* pop (hashing its key once, but not in an empty dict), popitem (last in, *)
-(* first out), fromkeys (hashing and setting each key before taking the    *)
-(* next), copy (shallow), clear, a merge into an empty dict comparing no   *)
-(* keys, reversed(), and __missing__ in subclasses, which dict.__getitem__ *)
-(* called on an instance also calls, its methods bound to it, behave as    *)
-(* documented, a missing key raising KeyError, a present key of the same   *)
-(* hash compared by its Python __eq__ (which loops) in get, setdefault,    *)
-(* pop and a set's add, discard and remove, and in a subscript, in, get,   *)
-(* setdefault, pop, store and deletion of a dict subclass keeping dict's   *)
-(* methods, its __missing__ called once none is equal, a key's Python      *)
-(* __hash__ called once by a dict subclass's subscript, store and          *)
-(* deletion, a tuple key hashing its items in order, depth first, and      *)
-(* keeping its hash unless an item fails; and keys(), values(), and        *)
-(* items() are live views, keys and items set-like (their operators accept *)
-(* any iterable and return sets) with a mapping attribute, values not.     *)
+(* #dictionary-view-objects): dict() builds from a mapping (or any         *)
+(* object with keys()), an iterable of pairs, and keywords, later keys     *)
+(* winning; keys must be hashable, and equal keys (1, 1.0, True) are       *)
+(* one key keeping its first spelling; a dict remembers insertion          *)
+(* order, which reassignment keeps and deletion forgets; d | other and     *)
+(* update() (and |=, which also takes pairs) keep the left operand's       *)
+(* order, give the right operand's values, and append its new keys in      *)
+(* its order; equality ignores order and dicts are unordered and           *)
+(* unhashable; get, setdefault, pop (hashing its key once, but not in      *)
+(* an empty dict), popitem (last in, first out), fromkeys (hashing and     *)
+(* setting each key before taking the next), copy (shallow), clear, a      *)
+(* merge into an empty dict comparing no keys, and into one with keys      *)
+(* a colliding key by its Python __eq__, before its value replaces an      *)
+(* equal key's, a change of the merged dict's size raising                 *)
+(* RuntimeError, reversed(), and __missing__ in subclasses, which          *)
+(* dict.__getitem__ called on an instance also calls, its methods          *)
+(* bound to it, behave as documented, a missing key raising KeyError,      *)
+(* a present key of the same hash compared by its Python __eq__ (which     *)
+(* loops) in get, setdefault, pop and a set's add, discard and remove,     *)
+(* and in a subscript, in, get, setdefault, pop, store and deletion of     *)
+(* a dict subclass keeping dict's methods, its __missing__ called once     *)
+(* none is equal, a key's Python __hash__ called once by a dict            *)
+(* subclass's subscript, store and deletion, a tuple key hashing its       *)
+(* items in order, depth first, and keeping its hash unless an item        *)
+(* fails; and keys(), values(), and items() are live views, keys and       *)
+(* items set-like (their operators accept any iterable and return          *)
+(* sets) with a mapping attribute, values not.                             *)
 (*                                                                         *)
 (* A program builds dicts d1 and d2 from two maps of at most two entries   *)
 (* over keys 1, 2, 3 and values 10, 20 and applies one of OPS: d1 | d2,    *)
@@ -75,7 +79,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_own_keys_calls", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_slot", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "subclass_equal_key_methods", "subclass_missing_equal_keys", "subclass_hashed", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
-          "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "clear",
+          "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "merge_equal_keys", "merge_mutated", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
           "view_live", "view_mapping", "view_contains", "view_set_ops_iterable", "view_set_ops_return_set",
           "values_no_set_ops", "values_equality", "items_unhashable_value", "items_set_op_unhashable",
@@ -164,6 +168,8 @@ Case(c) ==
       \* A dict merged into an empty one, by dict(), **, a subclass, copy, |
       \* or update, gives its distinct keys comparing none; into a full one,
       \* each stored key of the hash compares itself with the new.
+      [] c = "merge_equal_keys" -> "([('a1', 2), ('b1', 4)], 3, [('a1', 6), ('b1', 4)], ['a2b1', 'a1a2', 'a1b1', 'a1b2', 'b1b2', 'a1c1', 'b1c1', 'a1a3'])"
+      [] c = "merge_mutated" -> "[('dict mutated during update', 2), ('dict mutated during update', 2)]" \* grown, then emptied
       [] c = "merge_empty" -> "([3, 3, 3, 3, 3], 3, 4, ['ab', 'ac', 'bc'])"
       [] c = "clear" -> "{}"
       [] c = "len_iter_reversed" -> "(4, ['one', 'two', 'three', 'four'], ['four', 'three', 'two', 'one'], [4, 3, 2, 1])"

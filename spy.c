@@ -10414,6 +10414,10 @@ static int percent_reaches(SPYContext *c, SPYValue *y) {
 static NO_INLINE int percent_converts(SPYContext *c, SPYValue *a, SPYValue *b) {
     return (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && percent_reaches(c, b);
 }
+static int merges(SPYValue *, SPYValue *);
+static int merge_call(SPYValue *, size_t, SPYValue *const *);
+static SPYValue *update_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
+static SPYValue *merge_walk(SPYContext *, Machine *, SPYValue *, SPYValue *, int, SPYValue **);
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
@@ -10425,7 +10429,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || (is_set(a) && set_walks(op, a, b)) ||
-           class_union(op, a, b) ||
+           class_union(op, a, b) || (op == '|' && merges(a, b)) ||
            (op == '%' && percent_converts(c, a, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -15604,7 +15608,7 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
                 map_set_hash(c, result, entry.key, entry.value, entry.hash);
             spy_release(entry.key); spy_release(entry.value);
             if (status) return -1;
-            if (source->as.map.len != size) { spy_error(c, "RuntimeError", "dictionary changed size during update"); return -1; }
+            if (source->as.map.len != size) { spy_error(c, "RuntimeError", "dict mutated during update"); return -1; }
         }
         return 0;
     }
@@ -26854,6 +26858,8 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                         (argc > 1 && argv[0]->type == SPY_STRING &&
                                          (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
+    /* A dict's update of a dict (update_call). */
+    if (UNLIKELY(method == M_UPDATE) && argc == 1 && merges(callee, argv[0])) return update_call(c, m, callee, argv[0], env);
     if (method < 0 && machine_builtin(callee)) return builtin_call(c, m, n, callee, argc, argv, env);
     SPYValue *result;
     if (method == M_FORMAT && format_reached(c, callee, method, argc, argv)) {
@@ -27190,7 +27196,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     SPYValue *y;
     size_t sets;
     if (calls && argc && argc <= 9 && walk_operand(argv[argc - 1]) &&
-        (set_walk_call(c, callee, argc, argv, &op, &inplace, &y) || set_chain_call(callee, argc, argv, &op, &sets))) {
+        (set_walk_call(c, callee, argc, argv, &op, &inplace, &y) || set_chain_call(callee, argc, argv, &op, &sets) || merge_call(callee, argc, argv))) {
         /* A set method walking another set (set_call) takes them from the stack. */
         SPYValue *held[9];
         memcpy(held, argv, argc * sizeof(*argv));
@@ -27323,6 +27329,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         SPYValue *function = search_call(c, m, id, x, seq, at, tally, env, &result);
         spy_release(x); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
+    }
+    if (callee && calls && method == M_UPDATE && argc == 1 && merges(callee, argv[1])) {
+        /* A dict's update of a dict (update_call). */
+        SPYValue *source = spy_retain(argv[1]);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return update_call(c, m, callee, source, env);
     }
     /* A list's pop() or insert() of an index with a Python __index__ (indexed_call). */
     if (callee && calls && skip && method >= 0 && index_arguments(c, callee, method, argc, argv + 1)) {
@@ -28500,9 +28512,11 @@ static int dict_walks(SPYValue *x, SPYValue *y, size_t at) {
 /* A set walk's op for an update method, which returns None, and for
  * isdisjoint (set_call); a walk whose set searched is its result, which
  * loses each entry found (SET_DISCARDS); a walked entry's second lookup,
- * in the result, which gains it when absent (SET_ADDING). */
-enum { SET_UPDATING = 1 << 16, SET_DISJOINT = 1 << 17, SET_DISCARDS = 1 << 18, SET_ADDING = 1 << 19 };
-static int walk_op(SPYValue *op) { return (int)op->as.integer_data.small & ~(SET_UPDATING | SET_DISCARDS | SET_ADDING); }
+ * in the result, which gains it when absent (SET_ADDING); a dict's merge
+ * into the dict it searches, its first slot the size of the dict it walks
+ * (merge_walk). */
+enum { SET_UPDATING = 1 << 16, SET_DISJOINT = 1 << 17, SET_DISCARDS = 1 << 18, SET_ADDING = 1 << 19, SET_MERGES = 1 << 20 };
+static int walk_op(SPYValue *op) { return (int)op->as.integer_data.small & ~(SET_UPDATING | SET_DISCARDS | SET_ADDING | SET_MERGES); }
 /* Whether set operator or comparison op of x and y, exact sets or
  * frozensets, may call a Python __eq__ (set_walk): one of them holds an
  * instance with one, or a tuple holding one (eq_reaches), and their
@@ -28543,8 +28557,21 @@ static void walk_unequal(SPYContext *c, Machine *m);
  * above the walk (equal_call), whose end pair_returned decides; else
  * NULL, the walk going on with the next entry. */
 static SPYValue *walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t hash, ptrdiff_t found, SPYValue **env) {
-    SPYValue **state = &m->stack[m->len - 7], *result = state[0];
+    SPYValue **state = &m->stack[m->len - 7];
     int flags = (int)state[4]->as.integer_data.small, op = walk_op(state[4]);
+    SPYValue *result = flags & SET_MERGES ? state[2] : state[0];
+    /* A merge stores the walked value, in the place of an equal key's. */
+    if (flags & SET_MERGES) {
+        SPYValue *index = int_value(c, state[3]->as.integer_data.small + 1);
+        if (index) { spy_release(state[3]); state[3] = index; }
+        if (found < 0) map_append(c, result, key, state[5], hash);
+        else {
+            SPYValue *old = result->as.map.items[found].value;
+            result->as.map.items[found].value = spy_retain(state[5]);
+            spy_release(old);
+        }
+        return NULL;
+    }
     SPYValue *index = flags & SET_ADDING ? NULL : int_value(c, state[3]->as.integer_data.small + 1), *phase;
     if (index) { spy_release(state[3]); state[3] = index; }
     if (op == SET_DISJOINT) {
@@ -28656,7 +28683,12 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
     for (;;) {
         SPYValue **state = &m->stack[m->len - 7], *walked = state[1], *map = state[2], *function;
         size_t i = (size_t)state[3]->as.integer_data.small;
-        if (c->error_type[0] || i >= walked->as.map.len) break;
+        if (c->error_type[0]) break;
+        if (UNLIKELY(state[4]->as.integer_data.small & SET_MERGES) && walked->as.map.len != (size_t)state[0]->as.integer_data.small) {
+            spy_error(c, "RuntimeError", "dict mutated during update");
+            break;
+        }
+        if (i >= walked->as.map.len) break;
         Entry entry = map_items(walked)[i];
         ptrdiff_t found;
         /* A dict comparison's walk holds the entry's value while its key is
@@ -28669,6 +28701,12 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
     spy_release(machine_pop(m));
     SPYValue *target = machine_pop(m);
     int flags = (int)m->stack[m->len - 1]->as.integer_data.small, op = walk_op(m->stack[m->len - 1]), compares = rich_kind(op) >= 0 || op == SET_DISJOINT;
+    if (flags & SET_MERGES) {
+        /* A merge's result is the dict it searched, an update's None. */
+        spy_release(target); target = spy_none(c);
+        spy_release(m->stack[m->len - 5]);
+        m->stack[m->len - 5] = flags & SET_UPDATING ? spy_none(c) : spy_retain(m->stack[m->len - 3]);
+    }
     for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
     SPYValue *result = machine_pop(m);
     if (!c->error_type[0] && !compares && target != c->none) {
@@ -28722,6 +28760,48 @@ static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue 
         return NULL;
     }
     return walk_next(c, m, env);
+}
+/* Whether merging dict y into dict x may call a Python __eq__ (merge_walk):
+ * both exact, x not empty, and a key of either an instance with one, or a
+ * tuple holding one (eq_reaches). */
+static NO_INLINE int merges(SPYValue *x, SPYValue *y) {
+    if (x->type != SPY_DICT || y->type != SPY_DICT || x == y || !x->as.map.len) return 0;
+    for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++)
+        if (eq_reaches(i < x->as.map.len ? map_items(x)[i].key : map_items(y)[i - x->as.map.len].key)) return 1;
+    return 0;
+}
+/* Dict source's entries merged into dict target, which it takes, as
+ * dict_merge inserts them: each key, of its stored hash, looked up in
+ * target on the machine (walk_next), its value replacing an equal key's
+ * or added with it (walk_decide); a change of source's size is an error.
+ * The walk's value is target, or None for an update. */
+static NO_INLINE SPYValue *merge_walk(SPYContext *c, Machine *m, SPYValue *target, SPYValue *source, int update, SPYValue **env) {
+    size_t len = m->len;
+    if (machine_push(c, m, int_value(c, (int64_t)source->as.map.len)) || machine_push(c, m, spy_retain(source)) || machine_push(c, m, target) ||
+        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, '|' | SET_MERGES | (update ? SET_UPDATING : 0))) ||
+        machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_retain(c->walking))) {
+        while (m->len > len) spy_release(machine_pop(m));
+        return NULL;
+    }
+    return walk_next(c, m, env);
+}
+/* Whether a call of callee on argc arguments argv is a dict's update of
+ * one dict that merges on the machine (merges). */
+static int merge_call(SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    return callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_UPDATE && argc == 1 &&
+           merges(callee->as.bound.self, argv[0]);
+}
+/* A dict's update of source, a dict, merging on the machine (merges), as
+ * set_call calls: both taken, the first Python __eq__ entered as
+ * c->entering_init with *env, the walk under it, a placeholder for its
+ * value; else None. */
+static NO_INLINE SPYValue *update_call(SPYContext *c, Machine *m, SPYValue *dict, SPYValue *source, SPYValue **env) {
+    SPYValue *function = merge_walk(c, m, dict, source, 1, env);
+    spy_release(source);
+    if (!function) return c->error_type[0] ? NULL : looked(c);
+    c->entering_init = function; c->entering_kind = CALL_OPERATOR;
+    spy_release(function);
+    return spy_retain(c->types[SPY_STRING]);
 }
 /* Whether a call of callee on argc arguments argv is a set's union,
  * intersection, difference or symmetric_difference, one of their updates,
@@ -28782,6 +28862,11 @@ static NO_INLINE SPYValue *set_call(SPYContext *c, Machine *m, SPYValue *callee,
     int op, inplace;
     size_t n;
     SPYValue *y, *x = set_walk_call(c, callee, argc, argv, &op, &inplace, &y), *function, *args;
+    if (merge_call(callee, argc, argv)) {
+        SPYValue *dict = spy_retain(callee->as.bound.self);
+        spy_release(callee);
+        return update_call(c, m, dict, argv[0], env);
+    }
     if (x) function = set_walk(c, m, op, x, y, inplace, env);
     else if (!(x = set_chain_call(callee, argc, argv, &op, &n))) return c->unbound;
     else {
@@ -29214,6 +29299,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             operator_keep(c, m, ins, y);
             return set_walk(c, m, token, swapped ? y : x, swapped ? x : y, kind == OPERATE_INPLACE, env);
         }
+    }
+    /* A dict's | or |= of a dict whose keys may call a Python __eq__ (merge_walk). */
+    if ((kind == OPERATE_BINARY ? op == '|' : kind == OPERATE_INPLACE && op == T_OREQ) && merges(x, y)) {
+        SPYValue *target = kind == OPERATE_INPLACE ? spy_retain(x) : value_new(c, SPY_DICT);
+        if (target && kind == OPERATE_BINARY && extend_container(c, target, x, NULL, 0)) { spy_release(target); return NULL; }
+        return target ? merge_walk(c, m, target, y, 0, env) : NULL;
     }
     /* A dict's item, a dict subclass's by dict's __getitem__, or a dict's
      * or set's member, a dict subclass's by dict's __contains__: its key's
@@ -31905,6 +31996,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_ADD) CASE(BC_EXTEND)
             a = machine_pop(m);
             if (ins->op == BC_EXTEND) {
+                if (UNLIKELY(a->type == SPY_DICT) && merges(m->stack[m->len - 1], a)) {
+                    /* A dict display's ** of a dict merges on the machine (merge_walk), its value the display. */
+                    callee_env = NULL;
+                    value = merge_walk(c, m, machine_pop(m), a, 0, &callee_env);
+                    spy_release(a); a = NULL;
+                    if (value) { special = CALL_OPERATOR; goto enter_special; }
+                    machine_push(c, m, c->error_type[0] ? NULL : looked(c));
+                    break;
+                }
                 if (extend_step(c, m, m->stack[m->len - 1], a, ins->arg, m->stack[m->len - 1]->type != SPY_SET)) { a = NULL; goto consume_generator; }
                 a = NULL;
                 break;
@@ -32020,7 +32120,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (began) break;
             }
             if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || a->type == SPY_SET ||
-                (UNLIKELY(ins->arg == T_MODEQ) && percent_converts(c, a, b))) {
+                (UNLIKELY(ins->arg == T_MODEQ) && percent_converts(c, a, b)) || (UNLIKELY(ins->arg == T_OREQ) && merges(a, b))) {
                 x = a; y = b; goto operator_step;
             }
             machine_push(c, m, augmented(c, ins->arg, a, b)); break;
