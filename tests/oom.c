@@ -435,6 +435,16 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class FN:\n"
+    "    def __repr__(self):\n"
+    "        for _ in (): pass\n"
+    "        return 'f\\xe9'\n"
+    "    def __format__(self, spec): return '3'\n"
+    "def fn():\n"
+    "    for _ in (): pass\n"
+    "    return '{0!r:{1}}|{0!a:>{1}}|{k!s:{k}}'.format(FN(), FN(), k=FN())\n"
+    "print(fn())\n",
+
     "class BQ:\n"
     "    def __index__(self): return 66\n"
     "    def __int__(self): return 7\n"

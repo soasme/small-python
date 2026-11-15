@@ -14,6 +14,10 @@ class BadFormat:
 class U:
     def __repr__(self): return '\xe9u'
     def __str__(self): raise LookupError('u')
+class Spin:
+    def __repr__(self):
+        for _ in (): pass
+        return 'sp'
 class BadRepr:
     def __repr__(self): return 3
 
@@ -91,7 +95,9 @@ SOURCES = {
     "format_builtin_default": "result = (format(5), format('a'), format(None))",
     "str_format_conversion_spec": "result = '{0!r:>5}|{0!s:*^3}|{1!a:.4}|{1!r}'.format(P(), U())",
     "str_format_conversion_str_raises": "result = '{!s}'.format(U())",
-    "str_format_conversion_bad_repr": "result = '{k!r}'.format_map({'k': BadRepr()})"
+    "str_format_conversion_bad_repr": "result = '{k!r}'.format_map({'k': BadRepr()})",
+    "str_format_conversion_nested": "result = '{0!r:{1}}|{0!s:{w}}|{2!a:{1}}|{3!r:{1}}'.format(P(), '>5', U(), Spin(), w='*^3')",
+    "str_format_conversion_nested_raises": "result = '{!s:{}}'.format(U(), 3)"
 }
 
 

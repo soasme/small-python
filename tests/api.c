@@ -1742,6 +1742,10 @@ int main(int argc, char **argv) {
                "def shown():\n    return len('{!r}{!s:>3}{!a}'.format(Shown(), Shown(), Shown()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "shown()", "shown.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* And with a nested spec after the conversion. */
+    execute(c, "def nested():\n    return len('{!r:{}}{!s:>{}}'.format(Shown(), 4, Shown(), 5))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "nested()", "nested.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

@@ -463,7 +463,8 @@ These run as machines on the heap, in one native activation of
   an instance, and
   the `__format__` that `str.format`, also called on `str` itself, and
   `str.format_map` of a dict call on each field's object, a nested
-  spec's fields first;
+  spec's fields first, and the `__str__` and `__repr__` of a field's
+  `!s`, `!r` or `!a` conversion, before its spec, nested or not;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, also of a generic class, when
   the builtin `__build_class__` makes the class.

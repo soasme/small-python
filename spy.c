@@ -12982,9 +12982,10 @@ static SPYValue *conversion_method(SPYContext *, SPYValue *, size_t, SPYValue *c
 /* A format on the machine (suspend) stops at a field whose object's class
  * has a Python __format__, the object and spec pending, the markup to
  * resume at resume; at a field converting an instance by its Python
- * __str__ or __repr__ the same, with the conversion; and at a top-level
- * field with a nested spec, its object pending, the spec from resume to
- * spec_end. */
+ * __str__ or __repr__ the same, with the conversion, or with a top-level
+ * field's nested spec none pending, the spec from resume to spec_end; and
+ * at a top-level field with a nested spec, its object pending, the spec
+ * from resume to spec_end. */
 typedef struct {
     size_t argc; SPYValue *const *argv; SPYValue *keywords; AutoNumber numbering;
     int suspend; size_t resume, spec_end; SPYValue *pending, *pending_spec; unsigned conversion;
@@ -13103,10 +13104,12 @@ static int format_replacement(SPYContext *c, Buffer *out, const char *text, size
     } else if (ch != '}') { spy_error(c, "ValueError", "expected '}' before end of string"); return -1; }
     *pos = at;
     SPYValue *object = format_field_object(c, text, name, name_end, args), *format = NULL, *found[2];
-    if (object && args->suspend && !expanding && object->type == SPY_INSTANCE && (conversion == 's' || conversion == 'r' || conversion == 'a') &&
+    if (object && args->suspend && (!expanding || depth == 2) && object->type == SPY_INSTANCE && (conversion == 's' || conversion == 'r' || conversion == 'a') &&
         conversion_method(c, conversion == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &object, found)) {
         spy_release(found[0]);
         args->pending = object; args->conversion = conversion; args->resume = at;
+        /* A nested spec follows the conversion, from resume to spec_end. */
+        if (expanding) { args->resume = spec; args->spec_end = spec_end; args->pending_spec = NULL; return 3; }
         if ((args->pending_spec = spy_string(c, text + spec, spec_end - spec))) return 3;
         spy_release(object);
         return -1;
@@ -36747,8 +36750,9 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
  * arguments' tuple, the numbering's state and number, the markup's
  * position, the text so far, inside a nested spec its field's object,
  * the spec's end and the spec so far (else None, 0, ""), the keywords'
- * dict or None, and a field's conversion's spec and character (else
- * None), from its next field on: 1 at a field's Python __format__
+ * dict or None, and a field's conversion's spec, or None before a nested
+ * one, its character and the nested spec's end (else None), from its next
+ * field on: 1 at a field's Python __format__
  * (format_function), or its conversion's __str__ or __repr__
  * (conversion_method), the call *function with *env to enter
  * (CALL_CHECKED), the state, c->replacing, the method's name and the
@@ -36802,14 +36806,20 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         }
         SPYValue *method = format_function(c, object), *name = NULL;
         if (status == 3) {
-            /* The conversion's text takes the spec on its return (text_returned). */
-            SPYValue *found[2], *pending[] = {spec, int_value(c, format.conversion)};
+            /* The conversion's text takes the spec, or for None the nested
+             * spec to its end, on its return (text_returned). */
+            SPYValue *found[2], *pending[] = {spec ? spec : c->none, int_value(c, format.conversion), int_value(c, (int64_t)format.spec_end)};
             method = conversion_method(c, format.conversion == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &object, found);
             name = found[0];
             spy_release(items[10]);
-            items[10] = pending[1] ? spy_tuple(c, 2, pending) : NULL;
-            spy_release(pending[1]);
-            if (!items[10]) { items[10] = spy_none(c); spy_release(object); spy_release(spec); spy_release(name); return NULL; }
+            items[10] = pending[1] && pending[2] ? spy_tuple(c, 3, pending) : NULL;
+            spy_release(pending[1]); spy_release(pending[2]);
+            /* The conversion's method may fail to name itself (conversion_method). */
+            if (!method || !items[10]) {
+                if (!items[10]) items[10] = spy_none(c);
+                spy_release(object); spy_release(spec); spy_release(name);
+                return NULL;
+            }
             spy_release(spec);
             spec = NULL;
         }
@@ -36883,17 +36893,25 @@ static NO_INLINE Machine *text_returned(SPYContext *c, Machine *m, SPYValue *tex
     /* A format job's text takes the field's. */
     int format = items[0]->type == SPY_STRING;
     SPYValue *joined = NULL, *part = text ? builtin_value(c, text, SPY_STRING) : NULL;
+    int nesting = 0;
     if (format && part && items[10] != c->none) {
-        /* A conversion's text, escaped for ascii, is formatted by its spec. */
-        SPYValue *pending = items[10], *converted = spy_retain(part);
+        /* A conversion's text, escaped for ascii, is formatted by its spec,
+         * or is the object of the nested spec that follows (format_from). */
+        SPYValue *pending = items[10], *converted = spy_retain(part), *formatted = NULL;
         items[10] = spy_none(c);
         if (pending->as.seq.items[1]->as.integer_data.small == 'a') converted = ascii_text(c, converted, converted);
-        SPYValue *formatted = converted ? format_call(c, converted, pending->as.seq.items[0]) : NULL;
+        if (converted && pending->as.seq.items[0] == c->none) {
+            spy_release(items[6]); items[6] = spy_retain(converted);
+            spy_release(items[7]); items[7] = spy_retain(pending->as.seq.items[2]);
+            formatted = spy_string(c, "", 0);
+            nesting = 1;
+        } else if (converted) formatted = format_call(c, converted, pending->as.seq.items[0]);
         spy_release(converted); spy_release(pending); spy_release(text);
         part = text = formatted && formatted->type == SPY_STRING ? formatted : NULL;
         if (!part) spy_release(formatted);
     }
-    if (format && part) {
+    if (format && part && nesting) joined = part;
+    else if (format && part) {
         /* Into the nested spec, inside one (format_from). */
         Buffer b = {.ctx = c};
         int at = items[6] == c->none ? 5 : 8;
