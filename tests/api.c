@@ -2264,6 +2264,14 @@ int main(int argc, char **argv) {
                "    del d[k]\n    return n + len(d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "missing_compares()", "missing_compares.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 4);
+    /* So do a throw and a close into a yield from of an iterator without those methods. */
+    execute(c, "class Methodless:\n    def __iter__(self): return self\n    def __next__(self): return 1\n"
+               "def passing():\n    try: yield from Methodless()\n    except BaseException:\n        for i in range(3000): pass\n"
+               "        yield i\n"
+               "def passes():\n    g = passing(); next(g)\n    n = g.throw(KeyError)\n    g = passing(); next(g)\n"
+               "    try: g.close()\n    except RuntimeError: n += 1\n    return n\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "passes()", "passes.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

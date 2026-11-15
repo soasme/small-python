@@ -24044,6 +24044,7 @@ static NO_INLINE int thrown_at(SPYContext *c, Machine *m, size_t argc, SPYValue 
  * there, or delegating to a yield (delegating); into an async
  * generator, an asend's throw of an exception. */
 static SPYValue *method_function(SPYContext *, SPYValue *, const char *);
+static int method_absent(SPYValue *, const char *);
 static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     if ((g->type != SPY_GENERATOR && g->type != SPY_COROUTINE && g->type != SPY_ASYNC_GENERATOR) || !suspended(g)) return 0;
     Machine *m = innermost(g->as.generator.machine);
@@ -24061,8 +24062,12 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
      * nor throw, or of an instance with a Python close, or throw, which
      * takes an exception, or a class as given (delegate_next). */
     if (m->delegate->type == SPY_ITERATOR) return 1;
-    SPYValue *function = method_function(c, m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
-    return function && machine_function(c, function);
+    const char *name = subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw";
+    SPYValue *function = method_function(c, m->delegate, name);
+    /* One without the method passes the exception on, an instance or a
+     * class made without Python code, at the yield from (iterator_send). */
+    return function ? machine_function(c, function) : method_absent(m->delegate, name) &&
+                                                      (!exception || exception->type != SPY_CLASS || made_natively(k));
 }
 /* The Python __next__ on the machine of instance v's class, borrowed;
  * else NULL. */
@@ -24228,6 +24233,13 @@ static SPYValue *method_function(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
     SPYValue *function = !hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE) ? class_lookup(cls, name) : NULL;
     return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
+}
+/* Whether plain instance v lacks method name, its class's default
+ * attribute lookup failing with no __getattr__, so no Python runs. */
+static int method_absent(SPYValue *v, const char *name) {
+    if (!plain_instance(v) || name_local(v, name)) return 0;
+    SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
+    return (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) && !class_lookup(cls, name) && !class_lookup(cls, "__getattr__");
 }
 /* The Python keys() that dict() and dict.update() call to merge plain
  * instance v (KEY_KEYS): its class's (method_function), *bound then, or

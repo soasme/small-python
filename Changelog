@@ -230,6 +230,7 @@ Unreleased (0.10.0):
 - a dict subclass's subscript, with a Python __missing__ too, in, store, deletion, get, setdefault and pop compare keys
   by a Python __eq__ without nesting on the C stack
 - an asend's later send and throw while its async generator awaits resume it without nesting on the C stack
+- throw() and close() into a yield from of an iterator without those methods run the generator without nesting on the C stack
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

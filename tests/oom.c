@@ -1584,6 +1584,21 @@ static const char *const programs[] = {
     "    return out + [len(d), d[MK(1)]]\n"
     "print(mk())\n",
 
+    "class NM:\n"
+    "    def __iter__(s): return s\n"
+    "    def __next__(s): return 1\n"
+    "def nm_outer():\n"
+    "    try: yield from NM()\n"
+    "    except BaseException as e: yield type(e).__name__\n"
+    "def nm():\n"
+    "    out = []\n"
+    "    for how in (KeyError, KeyError('k'), None):\n"
+    "        g = nm_outer(); next(g)\n"
+    "        try: out.append(g.throw(how) if how is not None else g.close())\n"
+    "        except RuntimeError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(nm())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
