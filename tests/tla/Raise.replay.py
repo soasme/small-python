@@ -47,6 +47,11 @@ class Renew(ValueError):
         return super().__new__(cls, *args) if args else KeyError()
 
 
+class Reinit(Renew):
+    def __init__(self, *args):
+        if args: log.append("j")
+
+
 class NewOther(TypeError):
     def __new__(cls):
         log.append("m")
@@ -58,7 +63,7 @@ class NewOther(TypeError):
 
 WHATS = {"class": "ValueError", "instance": "ValueError()", "int": "5", "other": "NotAnException", "python": "PyError",
          "returns": "Returns", "new": "PyNew", "new_int": "NewInt",
-         "renew": "Renew"}
+         "renew": "Renew", "reinit": "Reinit"}
 CAUSES = {"class": "TypeError", "instance": "TypeError()", "None": "None", "int": "5", "python": "PyCause",
           "new_other": "NewOther"}
 
@@ -89,7 +94,7 @@ def outcome(p):
         try:
             exec(code, {"NotAnException": NotAnException, "PyError": PyError, "PyCause": PyCause, "Returns": Returns,
                          "PyNew": PyNew, "NewInt": NewInt, "NewOther": NewOther,
-                         "Renew": Renew})
+                         "Renew": Renew, "Reinit": Reinit})
         except BaseException as error:
             results.append("%s cause=%s context=%s suppress=%s log=%s" % (
                 type(error).__name__, name(error.__cause__), name(error.__context__), error.__suppress_context__, "".join(log)))

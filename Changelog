@@ -130,6 +130,8 @@ Unreleased (0.10.0):
   on the C stack
 - dict() and dict.update() with keywords take a Python __iter__'s pairs or keys() and __getitem__'s
   items without nesting on the C stack
+- raise calls a class again with an exception of another class its Python __new__ made, running its
+  __new__ and __init__ without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a

@@ -1771,6 +1771,13 @@ int main(int argc, char **argv) {
     execute(c, "def keyworded():\n    d = dict(Paired(), a=5); d.update(Paired(), **{'b': 6})\n    return sum(d.values())\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "keyworded()", "keyworded.py"), SPY_STOP_STEPS, &pauses)) == 17 && pauses > 2);
+    /* So do the Python __new__ and __init__ a raise calls again with an exception of another class. */
+    execute(c, "class Renewed(Exception):\n    def __new__(cls, *a):\n        for i in range(3000): pass\n"
+               "        return super().__new__(cls, *a) if a else KeyError(i)\n"
+               "    def __init__(self, *a):\n        for i in range(3000): pass\n        self.i = i\n"
+               "def renewing():\n    try: raise Renewed\n    except Renewed as e: return e.i + e.args[0].args[0]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "renewing()", "renewing.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 2);
     /* So do a class body's implicit stores through its namespace's Python __setitem__. */
     execute(c, "class Slowns(dict):\n    def __setitem__(self, k, v):\n        for i in range(3000): pass\n"
                "        super().__setitem__(k, v)\n"

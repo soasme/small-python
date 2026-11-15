@@ -22,8 +22,9 @@
 (* "i", one whose __new__ logs "n" and returns 5, one whose __new__ logs  *)
 (* "r" and returns a KeyError unless it is given one, so the raise calls   *)
 (* the class again with that KeyError, after the cause, the cause staying  *)
-(* on the KeyError, or nothing (a bare                                     *)
-(* raise, which takes no cause), or runs 1 / 0 instead; and CAUSE is      *)
+(* on the KeyError, one like it whose Python __init__ logs "j" in that    *)
+(* second call, or nothing (a bare raise, which takes no cause), or runs   *)
+(* 1 / 0 instead; and CAUSE is                                             *)
 (* absent, TypeError, TypeError(), None, 5, a TypeError subclass whose     *)
 (* Python __init__ logs "c", or one whose Python __new__ logs "m" and      *)
 (* returns a KeyError, the cause without its class's __init__. The        *)
@@ -33,7 +34,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Whats == {"class", "instance", "int", "other", "bare", "divide", "python", "returns", "new", "new_int", "renew"}
+Whats == {"class", "instance", "int", "other", "bare", "divide", "python", "returns", "new", "new_int", "renew", "reinit"}
 Causes == {"absent", "class", "instance", "None", "int", "python", "new_other"}
 Programs == {p \in [what : Whats, cause : Causes, handling : BOOLEAN] : p.what \in {"bare", "divide"} => p.cause = "absent"}
 
@@ -50,9 +51,10 @@ Show(kind, cause, context, suppress) == kind \o " cause=" \o cause \o " context=
 \* A renew's class is called again once the cause is made.
 CauseLog(p) == CASE p.cause = "python" -> "c" [] p.cause = "new_other" -> "m" [] OTHER -> ""
 Inits(p) == (CASE p.what = "python" -> "e" [] p.what = "new" -> "ni" [] p.what = "new_int" -> "n"
-                [] p.what = "renew" -> "r" [] OTHER -> "") \o
-            (IF p.what \in {"class", "instance", "python", "new", "renew"} THEN CauseLog(p) ELSE "") \o
-            (IF p.what = "renew" /\ p.cause # "int" THEN "r" ELSE "")
+                [] p.what \in {"renew", "reinit"} -> "r" [] OTHER -> "") \o
+            (IF p.what \in {"class", "instance", "python", "new", "renew", "reinit"} THEN CauseLog(p) ELSE "") \o
+            (IF p.what = "renew" /\ p.cause # "int" THEN "r" ELSE "") \o
+            (IF p.what = "reinit" /\ p.cause # "int" THEN "rj" ELSE "")
 
 Kind(p) == CASE p.what = "python" -> "PyError" [] p.what = "new" -> "PyNew" [] p.what = "renew" -> "Renew"
              [] OTHER -> "ValueError"
@@ -64,6 +66,7 @@ Raised(p) ==
       [] p.what \in {"int", "other", "returns", "new_int"} -> Show("TypeError", "None", Context(p), "False")
       [] p.cause = "int" -> Show("TypeError", "None", Context(p), "False")
       [] p.what = "renew" -> Show("Renew", "None", Context(p), "False")
+      [] p.what = "reinit" -> Show("Reinit", "None", Context(p), "False")
       [] p.cause = "absent" -> Show(Kind(p), "None", Context(p), "False")
       [] p.cause = "None" -> Show(Kind(p), "None", Context(p), "True")
       [] p.cause = "python" -> Show(Kind(p), "PyCause", Context(p), "True")

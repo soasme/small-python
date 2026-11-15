@@ -20246,16 +20246,21 @@ static void normalization_failed(SPYContext *c, SPYValue *cls, SPYValue *value) 
  * an instance, made, from cause: the cause is set on it; then, as
  * CPython's _PyErr_SetObject, an exception not of raised is raised as
  * raised called with it, its cause left behind. */
-static SPYValue *raise_exception(SPYContext *c, SPYValue *raised, SPYValue *exception, SPYValue *cause) {
-    if (cause) {
-        SPYValue *normalized = cause->type == SPY_NONE ? spy_none(c) : normalize_exception(c, cause, 1);
-        if (normalized) {
-            set_hidden_field(c, exception, "__cause__", normalized);
-            set_hidden_field(c, exception, "__suppress_context__", c->booleans[1]);
-        }
-        spy_release(normalized);
-        if (c->error_type[0]) { spy_release(exception); return NULL; }
+/* Set cause, normalized, on exception: 0, or -1 on an error, exception
+ * then released. */
+static int exception_cause(SPYContext *c, SPYValue *exception, SPYValue *cause) {
+    SPYValue *normalized = cause->type == SPY_NONE ? spy_none(c) : normalize_exception(c, cause, 1);
+    if (normalized) {
+        set_hidden_field(c, exception, "__cause__", normalized);
+        set_hidden_field(c, exception, "__suppress_context__", c->booleans[1]);
     }
+    spy_release(normalized);
+    if (!c->error_type[0]) return 0;
+    spy_release(exception);
+    return -1;
+}
+static SPYValue *raise_exception(SPYContext *c, SPYValue *raised, SPYValue *exception, SPYValue *cause) {
+    if (cause && exception_cause(c, exception, cause)) return NULL;
     if (raised && !subclass(exception->as.map.parent, raised)) {
         SPYValue *fixed = exception_made(c, raised, call(c, raised, 1, &exception), 0);
         if (!fixed) normalization_failed(c, raised, exception);
@@ -20290,6 +20295,55 @@ static SPYValue *raised_instance(SPYContext *c, SPYValue *cls, size_t argc, SPYV
 }
 static SPYValue *raise_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *raise_newed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *raise_fixed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* raise_exception on m: the call of raised with an exception not of it
+ * runs its Python __new__, and then __init__, on m (callk, raise_fixed). */
+static void raise_again(SPYContext *c, Machine *m, SPYValue *raised, SPYValue *exception, SPYValue *cause) {
+    if (cause && exception_cause(c, exception, cause)) return;
+    SPYValue *allocator = subclass(exception->as.map.parent, raised) ? NULL : new_method(c, raised);
+    if (allocator) {
+        SPYValue *state = spy_tuple(c, 3, (SPYValue *[]){raised, exception, c->unbound});
+        if (state) callk(c, m, allocator, 2, (SPYValue *[]){spy_retain(raised), spy_retain(exception)}, raise_fixed, state);
+        spy_release(exception);
+        return;
+    }
+    if (!c->error_type[0]) raise_exception(c, raised, exception, NULL);
+    else spy_release(exception);
+}
+/* What the call raise_again began returned in result, state the class,
+ * the exception, and the instance its __new__ made, or c->unbound when
+ * result is that __new__'s: an instance of the class runs its __init__
+ * with the exception, a Python one on m (callk); the made instance is
+ * raised, else the error with normalization's note. */
+static SPYValue *raise_fixed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *raised = items[0], *made = NULL;
+    if (items[2] == c->unbound) {
+        SPYValue *init = result && result->type == SPY_INSTANCE && subclass(result->as.map.parent, raised) ? special_method(c, result, "__init__") : NULL;
+        if (init && init->type == SPY_METHOD && machine_function(c, init->as.method.function)) {
+            SPYValue *parts[] = {raised, items[1], result}, *next = spy_tuple(c, 3, parts);
+            if (next) callk(c, m, init->as.method.function, 2, (SPYValue *[]){spy_retain(result), spy_retain(items[1])}, raise_fixed, next);
+            else normalization_failed(c, raised, items[1]);
+            spy_release(init); spy_release(result); spy_release(state);
+            return NULL;
+        }
+        if (init) {
+            SPYValue *value = call(c, init, 1, &items[1]);
+            if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+            spy_release(value); spy_release(init);
+        }
+        made = c->error_type[0] ? NULL : result;
+        if (!made) spy_release(result);
+    } else if (result) {
+        if (result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
+        else made = spy_retain(items[2]);
+        spy_release(result);
+    }
+    SPYValue *fixed = made ? exception_made(c, raised, made, 0) : NULL;
+    if (fixed) raise_exception(c, NULL, fixed, NULL);
+    else normalization_failed(c, raised, items[1]);
+    spy_release(state);
+    return NULL;
+}
 /* The raise of exception class cls: its Python __new__, *init, called
  * with cls, which it returns; else raised_instance's. */
 static SPYValue *raise_made(SPYContext *c, SPYValue *cls, SPYValue **init) {
@@ -20306,11 +20360,12 @@ static void raise_step(SPYContext *c, Machine *m, SPYValue *value, SPYValue *cau
     /* The exception is made before the cause; one of another class than
      * the class raised takes its cause in C (raise_exception). */
     if (!made && !c->error_type[0] && cause && (exception = normalize_exception(c, value, 0))) {
-        if (value->type == SPY_CLASS && !subclass(exception->as.map.parent, value)) { raise_exception(c, value, exception, cause); return; }
+        if (value->type == SPY_CLASS && !subclass(exception->as.map.parent, value)) { raise_again(c, m, value, exception, cause); return; }
         made = raise_made(c, cause, &init);
     }
     if (!made) {
-        if (exception) raise_exception(c, value->type == SPY_CLASS ? value : NULL, exception, cause);
+        if (exception && value->type == SPY_CLASS) raise_again(c, m, value, exception, cause);
+        else if (exception) raise_exception(c, NULL, exception, cause);
         else if (!c->error_type[0]) raise_with_cause(c, value, cause);
         return;
     }
@@ -20340,7 +20395,7 @@ static SPYValue *raise_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValu
     }
     if (!made || c->error_type[0]) { spy_release(made); spy_release(init); spy_release(state); return NULL; }
     if (!cause && !subclass(made->as.map.parent, cls)) {
-        raise_exception(c, cls, made, items[1] == c->unbound ? NULL : items[1]);
+        raise_again(c, m, cls, made, items[1] == c->unbound ? NULL : items[1]);
         spy_release(init); spy_release(state);
         return NULL;
     }

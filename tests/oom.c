@@ -435,6 +435,19 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class RO(Exception): pass\n"
+    "class RA(Exception):\n"
+    "    def __new__(cls, *a): return super().__new__(cls, *a) if a else RO('o')\n"
+    "    def __init__(self, *a): self.a = len(a)\n"
+    "class RB(RA):\n"
+    "    def __init__(self, *a): raise KeyError('b')\n"
+    "def rr(k, *c):\n"
+    "    try:\n"
+    "        if c: raise k from c[0]\n"
+    "        raise k\n"
+    "    except BaseException as e: return type(e).__name__, getattr(e, '__notes__', None)\n"
+    "print(rr(RA), rr(RB), rr(RA, KeyError))\n",
+
     "class DK:\n"
     "    def __iter__(self): return iter([(1, 2), (3, 4)])\n"
     "class DM:\n"
