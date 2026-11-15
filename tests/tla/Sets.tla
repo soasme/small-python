@@ -36,13 +36,14 @@
 (*     objects of one hash                                                 *)
 (*     whose Python __eq__ logs "e": merged into an empty set, the         *)
 (*     distinct elements are compared with none (Annex D); or              *)
-(*   - {K(1)}'s union, difference, intersection, isdisjoint, issuperset,   *)
-(*     issubset, symmetric_difference or symmetric_difference_update of a  *)
-(*     list or a generator of K(1) and K(2): each item is hashed and       *)
-(*     compared with the set's K(1) before the next is taken; intersection,*)
-(*     isdisjoint and issubset stop at the first, which decides; the       *)
-(*     symmetric ones make a set of the items, comparing none, then toggle *)
-(*     K(1), comparing it once.                                            *)
+(*   - {K(1)}'s or S({K(1)})'s union, update, difference, intersection,    *)
+(*     isdisjoint, issuperset, issubset, symmetric_difference or           *)
+(*     symmetric_difference_update of a list or a generator of K(1) and    *)
+(*     K(2): each item is hashed and compared with the set's K(1) before   *)
+(*     the next is taken; intersection, isdisjoint and issubset stop at    *)
+(*     the first, which decides; the symmetric ones make a set of the      *)
+(*     items, comparing none, then toggle K(1), comparing it once; a       *)
+(*     subclass's methods make a set, its updates change it.               *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -64,8 +65,8 @@ Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : 
                   fails : {"no", "TypeError", "ValueError", "equal"}, tuple : BOOLEAN]
             \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|=", "S", "F"}]
             \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset", "issubset",
-                                              "symmetric_difference", "symmetric_difference_update"},
-                  source : {"list", "generator"}]
+                                              "symmetric_difference", "symmetric_difference_update", "update"},
+                  source : {"list", "generator"}, kind : {"set", "S"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -114,10 +115,11 @@ RunIterable(p) ==
         log == CASE p.method \in {"intersection", "isdisjoint", "issubset"} -> first
                  [] p.method \in {"symmetric_difference", "symmetric_difference_update"} -> both \o " e1"
                  [] OTHER -> first \o " " \o y("2") \o "h2"
-    IN  CASE p.method = "union" -> <<"set", log, {1, 2}>>
-          [] p.method = "difference" -> <<"set", log, {}>>
-          [] p.method = "intersection" -> <<"set", log, {1}>>
-          [] p.method \in {"symmetric_difference", "symmetric_difference_update"} -> <<"set", log, {2}>>
+        made == IF p.method \in {"update", "symmetric_difference_update"} THEN p.kind ELSE "set"
+    IN  CASE p.method \in {"union", "update"} -> <<made, log, {1, 2}>>
+          [] p.method = "difference" -> <<made, log, {}>>
+          [] p.method = "intersection" -> <<made, log, {1}>>
+          [] p.method \in {"symmetric_difference", "symmetric_difference_update"} -> <<made, log, {2}>>
           [] OTHER -> <<"bool", log, {}>>
 
 Run(p) ==

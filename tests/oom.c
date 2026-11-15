@@ -1599,6 +1599,23 @@ static const char *const programs[] = {
     "    return out\n"
     "print(nm())\n",
 
+    "class SK:\n"
+    "    def __init__(s, v): s.v = v\n"
+    "    def __hash__(s): return s.v % 2\n"
+    "    def __eq__(s, o): return s.v == o.v\n"
+    "class SS(set): pass\n"
+    "class SF(frozenset): pass\n"
+    "def ss():\n"
+    "    out = []\n"
+    "    for name in ('update', 'union', 'intersection', 'difference', 'difference_update', 'symmetric_difference_update', 'issubset', 'isdisjoint'):\n"
+    "        for kind in (SS, SF):\n"
+    "            if kind is SF and name.endswith('update'): continue\n"
+    "            s = kind([SK(1), SK(2)])\n"
+    "            r = getattr(s, name)([SK(2), SK(3)])\n"
+    "            out.append(sorted(k.v for k in s) if r is None else r if type(r) is bool else sorted(k.v for k in r))\n"
+    "    return out\n"
+    "print(ss())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

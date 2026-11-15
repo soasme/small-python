@@ -88,7 +88,7 @@ def merged(p):
 
 def iterable(p):
     log = []
-    a = {K(1, log, "no")}
+    a = {"set": set, "S": S}[p["kind"]]([K(1, log, "no")])
     def generator():
         for v in (1, 2):
             log.append("y%d" % v)

@@ -24488,10 +24488,11 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
     int fromkeys = function && callee->as.method.self == c->types[SPY_DICT] && function->type == SPY_NATIVE &&
                    function->as.native.kwcall == dict_fromkeys;
-    /* So do a set's methods of one source that is not a set (set_items). */
+    /* So do a set's methods, a set subclass's too, of one source that is
+     * not a set (set_items). */
     static const int set_ids[] = {B_SET_UNION, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE, B_EXTEND, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE,
                                   B_SET_KEEP, B_SET_SUPERSET, B_SET_DISJOINT};
-    int updates = function && is_set(callee->as.method.self) && function->type == SPY_NATIVE && function->as.native.kwcall == set_method &&
+    int updates = function && is_set(set_storage(callee->as.method.self)) && function->type == SPY_NATIVE && function->as.native.kwcall == set_method &&
                   argc == 1 && (!(argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base && (is_set(argv[0]->as.map.base) || is_dict(argv[0]->as.map.base))) ||
                                 (((intptr_t)function->as.native.data & 255) == 10 && is_set(argv[0]->as.map.base))) ?
                   set_ids[(intptr_t)function->as.native.data & 255] : -1;
@@ -24749,7 +24750,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     int which = set_items(id) ? (int)((intptr_t)callee->as.method.function->as.native.data & 255) : -1;
     /* A list's __init__ empties it, then extends it. */
     if (id == B_EXTEND && list_initing(callee)) list_clear(callee = builtin_value(c, callee->as.method.self, SPY_LIST));
-    if ((id == B_EXTEND || which >= 0) && callee->type == SPY_METHOD) callee = callee->as.method.self;
+    /* A set subclass's method works on its set. */
+    if ((id == B_EXTEND || which >= 0) && callee->type == SPY_METHOD) callee = set_storage(callee->as.method.self);
     /* An asend or __anext__ awaitable's send, __next__ or throw, or next()
      * of it, resumes its async generator (asend_resumes, asend_open). */
     if (!awaited)

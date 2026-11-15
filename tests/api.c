@@ -2272,6 +2272,12 @@ int main(int argc, char **argv) {
                "    try: g.close()\n    except RuntimeError: n += 1\n    return n\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "passes()", "passes.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 2);
+    /* So do a set subclass's methods of an iterable, comparing keys by a Python __eq__. */
+    execute(c, "class Grown(set): pass\n"
+               "def grows():\n    s = Grown([Same()])\n    s.update([Same()])\n    s.difference_update([Same()])\n"
+               "    return 10 * len(s) + s.issuperset([Same()]) + len(s.union([Same()]))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "grows()", "grows.py"), SPY_STOP_STEPS, &pauses)) == 23 && pauses > 4);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
