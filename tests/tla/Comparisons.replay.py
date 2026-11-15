@@ -68,6 +68,10 @@ SOURCES = {
                         "result = (b'x' in [1, E()], range(2) in (E(),), 3j not in [E()])",
     "in_value_calls": "class E:\n    def __eq__(s, o):\n        for _ in (): pass\n        t(type(o).__name__)\n        return o == {1}\n"
                       "result = ({1} in [1, E()], slice(2) in (E(),), len not in [E()])",
+    "in_iter_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o\n"
+                     "class G:\n    def __getitem__(s, i):\n        for _ in (): pass\n        if i > 1: raise IndexError\n        return E(i)\n"
+                     "def g():\n    yield E(1)\n    yield E(2)\n"
+                     "result = (2 in g(), 1 in G(), 5 in G())",
     "in_seq_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + o.n)\n        return s.n == o.n\n"
                     "result = ((E('a'),) in [(E('b'),), (E('a'),)], [E('c')] in [(E('c'),), [E('d')]])",
     "seq_order_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"

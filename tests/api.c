@@ -2032,6 +2032,12 @@ int main(int argc, char **argv) {
                "    return n\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "joined()", "joined.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 5);
+    /* So does the Python __eq__ of the items an in takes from a generator or a __getitem__ sequence. */
+    execute(c, "def eq_items():\n    for i in range(3):\n        yield Wants()\n"
+               "class Indexed:\n    def __getitem__(self, i):\n        if i > 1: raise IndexError\n        return Wants()\n"
+               "def searched():\n    return (b'k' in eq_items()) + (b'k' in Indexed()) + (b'q' in Indexed()) + 5\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "searched()", "searched.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

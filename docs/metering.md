@@ -355,7 +355,9 @@ These run as machines on the heap, in one native activation of
   with a Python `keys` that a dict display merges by it and their
   `__getitem__`, and those, without
   a `__contains__`, that an `in` or `not in` outside a comparison chain
-  searches, after calling their `__iter__`, comparing the items natively;
+  searches, after calling their `__iter__`, or by their `__getitem__`,
+  and the Python `__eq__` of the items or of what it seeks, also the
+  other's after a `NotImplemented`;
   generators resumed by
   `next` or by their `__next__` and `send` methods, or thrown into or
   closed at a `yield` by `throw` (with one argument, or a class, a value

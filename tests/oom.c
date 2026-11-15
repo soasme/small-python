@@ -1217,6 +1217,15 @@ static const char *const programs[] = {
     "    return out\n"
     "print(bj())\n",
 
+    "class GI:\n"
+    "    def __getitem__(self, i):\n"
+    "        for _ in (): pass\n"
+    "        if i > 2: raise IndexError\n"
+    "        return BE()\n"
+    "def gi():\n"
+    "    return b'k' in GI(), b'q' in GI(), b'k' in (BE() for i in range(2))\n"
+    "print(gi())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

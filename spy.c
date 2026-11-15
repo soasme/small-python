@@ -14496,7 +14496,9 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * sum adds result and item by one (KEY_ADD), the one to call in best, the
  * operator's method of phase (operator_call), with item first when
  * swapped; any() and all() call item's __bool__, or __len__ when phase is
- * set, in best (KEY_BOOL). dict() or dict.update()
+ * set, in best (KEY_BOOL); an in compares item with best, the x it seeks,
+ * by item's or x's Python __eq__, in callee, x first when swapped
+ * (KEY_EQ). dict() or dict.update()
  * of a mapping on the machine (method_function) calls its keys() first
  * (KEY_KEYS), keeps the mapping, lists in listed the keys a generator
  * gives, then is fed those keys, looking each up in the mapping
@@ -14504,7 +14506,7 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * instance source's length hint once it has the iterator (ListExtend).
  * A set's item, or dict.fromkeys's key, whose __hash__ is Python waits in
  * item for that call (KEY_HASH), the key's value in best. */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH, KEY_BOOL, KEY_DONE };
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH, KEY_BOOL, KEY_EQ, KEY_DONE };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
@@ -25073,6 +25075,13 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         spy_release(function);
         return NULL;
     }
+    if (s->keyed == KEY_EQ) {
+        SPYValue *function = s->callee, *args[] = {spy_retain(s->swapped ? s->best : s->item), spy_retain(s->swapped ? s->item : s->best)};
+        s->callee = NULL;
+        if ((*env = function_env(c, function, 2, args, NULL, 1))) return function;
+        spy_release(function);
+        return NULL;
+    }
     /* A set method's decided consumer ends (set_items). */
     if (s->keyed == KEY_DONE) { s->keyed = 0; consumer_took(c, m, f, NULL); return NULL; }
     if (s->keyed == KEY_HASH && (s->item->type == SPY_TUPLE ? !hash_calls(c, s->item) : !hash_function(c, s->item))) {
@@ -25396,6 +25405,30 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         return failed ? -1 : 0;
     }
     if (!key) return -1;
+    if (s->keyed == KEY_EQ) {
+        /* What the __eq__ returned, a NotImplemented leaving the other's
+         * Python method on the machine, else its native one and then
+         * identity (compared), decides whether the in found x, which ends
+         * it (consumer_took). */
+        SPYValue *item = s->item, *x = s->best, *other;
+        int negated;
+        if (key == c->not_implemented && !s->phase && (other = rich_entry(c, s->swapped ? item : x, R_EQ, &negated))) {
+            spy_release(key);
+            s->callee = spy_retain(other); s->swapped = !s->swapped; s->phase = 1;
+            return 0;
+        }
+        s->item = NULL; s->keyed = 0;
+        SPYValue *value = !s->phase ? compared(c, T_EQ, s->swapped ? x : item, s->swapped ? item : x, key) :
+                          key != c->not_implemented ? key : (spy_release(key), comparison_declined(c, T_EQ, item, x));
+        s->phase = 0;
+        int found = value && truthy(value);
+        spy_release(value); spy_release(item);
+        if (c->error_type[0]) return -1;
+        if (!found) return 0;
+        s->result = spy_bool(c, !s->count);
+        consumer_took(c, m, &m->frame, NULL);
+        return 1;
+    }
     if (s->keyed == KEY_BOOL) {
         /* The item's truth goes on to the next item, or decides any() or
          * all(), which ends (consumer_took). */
@@ -27611,13 +27644,14 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
 }
 /* For `x in y` or `x not in y`, as op, a lone test or the last of a chain, y a
  * generator the machine can resume or a plain instance whose class has a
- * Python __iter__ (iter_function) and no __contains__: 1 when the items of
+ * Python __iter__ (iter_function), or a Python __getitem__ and no __iter__
+ * (getitem_iterated), and no __contains__: 1 when the items of
  * y, or of the iterator its __iter__ returns, are compared with x on the
  * machine (BLOCK_CONSUME, CONTAINS_ITEMS), the truth going on the stack at
  * their end; else 0, with an error pending when __iter__ failed, a
  * TypeError replaced as the native search replaces it. */
 static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y) {
-    if (!resumable(y) && (!iter_function(c, y) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
+    if (!resumable(y) && (!(iter_function(c, y) || getitem_iterated(c, y)) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
     /* An __iter__ on the machine is the search's first call (KEY_ITER). */
     SPYValue *items = spy_retain(y);
     int keyed = consumer_source(c, &items);
@@ -36953,7 +36987,12 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         return -1;
     }
     if (s->id == CONTAINS_ITEMS) {
-        int found = item == s->best || equal(item, s->best);
+        /* item == x calls item's Python __eq__, or x's reflected one, first
+         * (contains_call). */
+        SPYValue *x = s->best, *function = item == x ? NULL : rich_function(c, item, x, R_EQ);
+        int swapped = !function && item != x && (function = rich_function(c, x, item, R_EQ));
+        if (function) { s->callee = spy_retain(function); s->item = item; s->swapped = swapped; s->keyed = KEY_EQ; return 0; }
+        int found = item == x || equal(item, x);
         spy_release(item);
         if (c->error_type[0]) return -1;
         if (found) s->result = spy_bool(c, !s->count);
