@@ -11,14 +11,16 @@
 (*                                                                         *)
 (* where a is positional-only, b positional-or-keyword, c keyword-only    *)
 (* (after a bare * when there is no *args), and z names no parameter. The *)
-(* outcome is the value each parameter is bound to, or the exception.     *)
+(* keywords are str, or instances of a str subclass whose Python __eq__   *)
+(* compares as str does, passed by **, which bind alike. The outcome is   *)
+(* the value each parameter is bound to, or the exception.                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 Kinds == {"none", "req", "opt"}      \* absent, required, or with a default
 Names == {"a", "b", "c", "z"}
 Programs == [po : Kinds, pk : Kinds, star : BOOLEAN, ko : Kinds, kw : BOOLEAN,
-             npos : 0..3, keys : SUBSET Names]
+             npos : 0..3, keys : SUBSET Names, named : {"str", "sub"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

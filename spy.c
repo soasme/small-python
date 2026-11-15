@@ -17329,6 +17329,8 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     if (scope->stars & 2) { spy_release(items[kwargs].value); items[kwargs].value = value_new(c, SPY_DICT); }
     for (i = 0; i < kwc; i++) {
         const Entry *keyword = &kw[i];
+        /* A str subclass's name compares by its __eq__ (bind_arguments). */
+        if (keyword->key->type != SPY_STRING) break;
         for (j = posonly; j < count; j++)
             if (items[j].hash == keyword->hash && same_key(items[j].key, keyword->key)) break;
         if (j < count && j >= argc && items[j].value == c->unbound) {

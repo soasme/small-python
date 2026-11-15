@@ -1555,6 +1555,17 @@ static const char *const programs[] = {
     "    return out\n"
     "print(awr())\n",
 
+    "class KN(str):\n"
+    "    __hash__ = str.__hash__\n"
+    "    def __eq__(s, o): return str.__eq__(s, o) or str(s) == o.upper()\n"
+    "def kf(p, /, a, b=2, *, c=3, **r): return p, a, b, c, sorted(r)\n"
+    "def kn():\n"
+    "    out = [kf(0, **{KN('a'): 1, KN('C'): 4}), kf(0, 1, **{KN('B'): 5, KN('p'): 6})]\n"
+    "    try: kf(0, 1, **{KN('A'): 1})\n"
+    "    except TypeError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(kn())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

@@ -25,8 +25,13 @@ def source(p):
     present = [name for name, kind in (("a", p["po"]), ("b", p["pk"]), ("c", p["ko"])) if kind != "none"]
     values = ", ".join(name if name in present else "'-'" for name in "abc")
     rest = ("args" if p["star"] else "()") + ", " + ("frozenset(kw.items())" if p["kw"] else "frozenset()")
-    arguments = [f"'p{i}'" for i in range(1, p["npos"] + 1)] + [f"{k}='k_{k}'" for k in sorted(p["keys"])]
-    return f"def f({', '.join(params)}):\n    return ({values}, {rest})\nresult = f({', '.join(arguments)})\n"
+    arguments = [f"'p{i}'" for i in range(1, p["npos"] + 1)]
+    if p["named"] == "str":
+        arguments += [f"{k}='k_{k}'" for k in sorted(p["keys"])]
+    elif p["keys"]:
+        arguments.append("**{" + ", ".join(f"Name('{k}'): 'k_{k}'" for k in sorted(p["keys"])) + "}")
+    name = "class Name(str):\n    __hash__ = str.__hash__\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return str.__eq__(self, other)\n"
+    return f"{name}def f({', '.join(params)}):\n    return ({values}, {rest})\nresult = f({', '.join(arguments)})\n"
 
 
 def outcome(p):
