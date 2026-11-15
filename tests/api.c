@@ -2192,6 +2192,11 @@ int main(int argc, char **argv) {
                "def missed():\n    d = Over()\n    return d['a'] + dict.__getitem__(d, 'b') + d.__getitem__('c')\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "missed()", "missed.py"), SPY_STOP_STEPS, &pauses)) == 8999 && pauses > 2);
+    /* So do a dict subclass's subscript, store and deletion hashing a key by its Python __hash__. */
+    execute(c, "class Hashy:\n    def __init__(self, n): self.n = n\n    def __hash__(self):\n        for i in range(3000): pass\n        return self.n\n"
+               "def subhashed():\n    d, k = Absent(), Hashy(1)\n    d[k] = 1\n    v = d[k] + d[Hashy(2)]\n    del d[k]\n    return v + len(d)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "subhashed()", "subhashed.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 4);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

@@ -218,6 +218,8 @@ Unreleased (0.10.0):
 - a class without annotations caches its empty __annotations__ and keeps None as its __annotate_func__
 - a class body's chained assignments and del of a target list go through its namespace's Python __setitem__ and
   __delitem__ without nesting on the C stack
+- a dict subclass's subscript, store and deletion call the key's Python __hash__, and an absent key's __missing__,
+  without nesting on the C stack
 - dict.__getitem__ of a dict subclass's instance, unbound, bound or through super(), calls its Python __missing__
   without nesting on the C stack; a dict subclass's builtin methods have the instance as __self__
 - an except or except* handler in a class body or a module stores None in its name before deleting it, also when it

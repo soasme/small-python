@@ -28085,6 +28085,13 @@ static int hashes_key(SPYValue *container, int lookup) {
     return container->type == SPY_DICT || container->type == SPY_FROZENDICT ||
            (lookup && (container->type == SPY_SET || container->type == SPY_FROZENSET));
 }
+/* Whether a subscript's store, deletion or load in object, by its method
+ * name, hashes the key with no other call first: a dict's, or an
+ * instance's whose method is a dict's. */
+static int hashes_first(SPYContext *c, SPYValue *object, const char *name) {
+    SPYValue *base;
+    return hashes_key(object, 0) || (object->type == SPY_INSTANCE && (base = builtin_base(c, object, name, NULL)) && is_dict(base));
+}
 /* Whether comparing key calls a Python __eq__: it is an instance with one
  * (python_eq), or a tuple holding one (pair_reaches). */
 static int eq_reaches(SPYValue *key) {
@@ -28637,6 +28644,7 @@ static NO_INLINE Machine *lookup_returned(SPYContext *c, Machine *m, Instruction
     release_all(10, (SPYValue *[]){test, right, left, candidate, index, changes, at, hash, key, map});
     return m;
 }
+static SPYValue *based_item(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
 /* The __hash__ hash_call entered for step ins returned result, the key's
  * hash, kept for the step to use once: a display's step runs again; an
  * operator or a store runs on the operands it kept under the key, a
@@ -28700,7 +28708,14 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         spy_release(key);
     } else {
         hash_kept(c, key, hashed && !c->looked, hash);
-        m->pc = operator_finish(c, m, ins, y, hashed ? operation(c, ins, x, y) : NULL, pc);
+        /* A dict subclass's absent item is its Python __missing__'s (based_item). */
+        SPYValue *env = NULL, *function = hashed && !contains && x->type == SPY_INSTANCE ? based_item(c, m, x, y, &env) : NULL;
+        Call *call = function ? call_enter(c, function, env, m) : NULL;
+        if (call) call->m.outermost = CALL_OPERATOR;
+        else if (function) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+        else m->pc = operator_finish(c, m, ins, y, hashed ? operation(c, ins, x, y) : NULL, pc);
+        spy_release(x); spy_release(y);
+        return call ? &call->m : m;
     }
     spy_release(x); spy_release(y);
     return m;
@@ -28860,29 +28875,32 @@ static int native_key(SPYContext *c, SPYValue *key) {
     return key->type <= SPY_STRING ||
            (key->type == SPY_TUPLE && (!key->listed || key->as.seq.plain || (!hash_reaches(c, key, 1) && key->as.seq.plain)));
 }
-/* Whether native key (native_key) is absent from dict, found without
- * calling Python. */
+/* Whether key, native (native_key) or with its hash kept (hash_kept),
+ * is absent from dict, found without calling Python; a kept hash is then
+ * used up. */
 static int native_absent(SPYContext *c, SPYValue *dict, SPYValue *key) {
     int64_t hash;
-    if (!native_key(c, key) || hash_value(c, key, &hash)) return 0;
+    int kept = key == c->hashed, native = native_key(c, key);
+    if (kept) hash = c->hashed_value;
+    else if (!native || hash_value(c, key, &hash)) return 0;
     SPYValue *map = namespace_map(dict);
     MapCursor cursor = map_cursor(map, hash);
     for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
         SPYValue *stored = map->as.map.items[i].key;
-        if (stored == key || !native_key(c, stored) || equal(stored, key)) return 0;
+        if (stored == key || !native || !native_key(c, stored) || equal(stored, key)) return 0;
     }
+    if (kept) { c->hashed = NULL; spy_release(key); }
     return 1;
 }
 /* x[y], x an instance of a builtin's subclass: its class's Python
- * __getitem__, or for a dict's subclass, of a key y that is native
- * (native_key) and absent, found without calling Python, its Python
+ * __getitem__, or for a dict's subclass, of a key y that is absent,
+ * found without calling Python (native_absent), its Python
  * __missing__, entered as an operator's method with its env, x, y and the
  * phase pushed on m's stack; else NULL. */
 static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
-    SPYValue *base = builtin_base(c, x, "__getitem__", NULL), *function = NULL;
-    if (!base) function = class_lookup(x->as.map.parent, "__getitem__");
-    else if (is_dict(base) && native_absent(c, base, y)) function = class_lookup(x->as.map.parent, "__missing__");
-    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, OPERATOR_FIRST)) return NULL;
+    SPYValue *base = builtin_base(c, x, "__getitem__", NULL), *function = class_lookup(x->as.map.parent, base ? "__missing__" : "__getitem__");
+    if (!function || !machine_function(c, function) || (base && (!is_dict(base) || !native_absent(c, base, y))) ||
+        operator_push(c, m, x, y, OPERATOR_FIRST)) return NULL;
     SPYValue *args[] = {spy_retain(x), spy_retain(y)};
     if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
@@ -28989,9 +29007,10 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             return set_walk(c, m, token, swapped ? y : x, swapped ? x : y, kind == OPERATE_INPLACE, env);
         }
     }
-    /* A dict's item, or a dict's or set's member: its key's __hash__ first,
-     * the operands on the stack under the key for the operation. */
-    if ((kind == OPERATE_INDEX || contains) && hashes_key(contains ? y : x, contains)) {
+    /* A dict's item, a dict subclass's by dict's __getitem__, or a dict's
+     * or set's member: its key's __hash__ first, the operands on the stack
+     * under the key for the operation. */
+    if (contains ? hashes_key(y, 1) : kind == OPERATE_INDEX && hashes_first(c, x, "__getitem__")) {
         SPYValue *operands[] = {x, y};
         if (((contains ? x : y)->type == SPY_INSTANCE || (contains ? x : y)->type == SPY_TUPLE) &&
             ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0])) return function;
@@ -29616,7 +29635,7 @@ static int store_collides(SPYContext *c, SPYValue *map, SPYValue *key) {
  * a list, or an item's of a view's tuple key (index_call). */
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key) {
     return (object->type == SPY_INSTANCE && setitem_function(c, object)) ||
-           (hashes_key(object, 0) && (hash_calls(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key)))) ||
+           (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key)))) ||
            list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1);
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
@@ -29735,7 +29754,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
         SPYValue *function = store_function(c, args[0], "__delitem__");
-        if (!function && (hashes_key(args[0], 0) ? (function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
+        if (!function && (hashes_first(c, args[0], "__delitem__") ? (function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
                                                    (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], NULL, env))) ||
                                                    c->error_type[0]
                                                  : (function = index_call(c, m, args[1], 2, args, env)) || c->error_type[0])) {
@@ -32285,7 +32304,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A set or dict display's key a, or BC_LOAD_TARGET's: a Python
          * __hash__ is a call (hash_call) before the step runs again. */
         callee_env = NULL;
-        value = ins->op == BC_MAP || hashes_key(m->stack[m->len - 2], 0) ? hash_call(c, m, a, 0, NULL, &callee_env) : NULL;
+        value = ins->op == BC_MAP || hashes_first(c, m->stack[m->len - 2], "__getitem__") ? hash_call(c, m, a, 0, NULL, &callee_env) : NULL;
         spy_release(a);
         if (value) { special = CALL_HASH; goto enter_special; }
         if (c->error_type[0]) continue;

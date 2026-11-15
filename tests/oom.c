@@ -1395,6 +1395,24 @@ static const char *const programs[] = {
     "    return sorted(ns)\n"
     "print(hn())\n",
 
+    "class SK:\n"
+    "    def __init__(s, n): s.n = n\n"
+    "    def __hash__(s):\n"
+    "        if s.n < 0: raise ValueError(s.n)\n"
+    "        return s.n\n"
+    "class SH(dict):\n"
+    "    def __missing__(s, k): return [k.n]\n"
+    "def sh():\n"
+    "    d, k = SH(), SK(1)\n"
+    "    d[k] = [1]\n"
+    "    d[k] += [2]\n"
+    "    out = [d[k], d[SK(3)]]\n"
+    "    del d[k]\n"
+    "    try: d[SK(-1)] = 0\n"
+    "    except ValueError as e: out.append(e.args)\n"
+    "    return out + [len(d)]\n"
+    "print(sh())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
