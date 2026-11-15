@@ -9,7 +9,9 @@
 (* CodeCost so, more than a budget. A host function calling spy_callk     *)
 (* (callk) is native work that leaves its call to the machine: the call's *)
 (* steps follow it as machine steps, and then its continuation (cont),    *)
-(* native work again.                                                      *)
+(* native work again. The first step needing an intrinsic loads their     *)
+(* module (load): LoadCost machine steps of the engine's own code that    *)
+(* spend nothing (intrinsics_step), after which the step runs.            *)
 (*                                                                         *)
 (* With pausing set, the first spent budget of an outermost call makes a  *)
 (* pause due and refills the budget; the call pauses at its next machine  *)
@@ -27,6 +29,7 @@
 (*  - An outermost call, or a resume, spends at most two budgets besides *)
 (*    code work, and code work never stops the call.                      *)
 (*  - A paused call stays paused until it is resumed or freed.            *)
+(*  - The load spends nothing, so no pause comes due inside it.           *)
 (*  - A continuation runs once, after every step of its call, and never   *)
 (*    once the call is stopped or freed before it.                        *)
 (***************************************************************************)
@@ -34,12 +37,13 @@ EXTENDS Naturals, Sequences
 
 CONSTANTS Budget,   \* the largest step budget an outermost call gets
           Cost,     \* the steps of a native call
-          CodeCost  \* the steps of code work
+          CodeCost, \* the steps of code work
+          LoadCost  \* the machine steps of the intrinsics' load
 
 \* The program: its steps and native calls, back to back and apart, and a
 \* host function's spy_callk, its call's steps and its continuation.
 Program == <<"code", "step", "native", "step", "code", "step", "native", "native", "step",
-             "callk", "step", "step", "cont", "step">>
+             "callk", "step", "step", "cont", "step", "load", "step">>
 \* Work in native code, with no pause point inside.
 NativeWork == {"native", "callk", "cont"}
 Cont == 13
@@ -102,6 +106,14 @@ Code == /\ state = "running" /\ pc <= Len(Program) /\ Program[pc] = "code"
            ELSE /\ inside' = inside + 1 /\ UNCHANGED <<ran, pc>>
         /\ UNCHANGED <<state, spent, limit>>
 
+\* The intrinsics' load: machine steps, each a pause point, spending nothing.
+Load == /\ state = "running" /\ pc <= Len(Program) /\ Program[pc] = "load"
+        /\ IF due THEN /\ state' = "paused" /\ UNCHANGED <<pc, inside, ran>>
+           ELSE IF inside + 1 = LoadCost
+           THEN /\ inside' = 0 /\ ran' = [ran EXCEPT ![pc] = @ + 1] /\ pc' = pc + 1 /\ UNCHANGED state
+           ELSE /\ inside' = inside + 1 /\ UNCHANGED <<ran, pc, state>>
+        /\ UNCHANGED <<fuel, due, spent, limit>>
+
 End == /\ state = "running" /\ pc > Len(Program) /\ state' = "done"
        /\ UNCHANGED <<pc, inside, fuel, due, ran, spent, limit>>
 
@@ -116,12 +128,12 @@ Resume == /\ state = "paused" /\ state' = "running"
 Free == /\ state = "paused" /\ state' = "freed"
         /\ UNCHANGED <<pc, inside, fuel, due, ran, spent, limit>>
 
-Next == Start \/ Step \/ Native \/ Code \/ End \/ Resume \/ Free
+Next == Start \/ Step \/ Native \/ Code \/ Load \/ End \/ Resume \/ Free
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK == /\ state \in {"idle", "running", "paused", "stopped", "done", "freed"}
-          /\ pc \in 1..Len(Program) + 1 /\ inside \in 0..Cost + CodeCost /\ fuel \in 0..limit
+          /\ pc \in 1..Len(Program) + 1 /\ inside \in 0..Cost + CodeCost + LoadCost /\ fuel \in 0..limit
 
 \* A pause is due when taken, and never inside a native call.
 PausesAtSteps == state = "paused" => (due /\ inside = 0)
@@ -139,5 +151,7 @@ ContinuesAfter == /\ ran[Cont] = 1 => \A i \in CallSteps : ran[i] = 1
                   /\ state \in {"stopped", "freed"} /\ pc <= Cont => ran[Cont] = 0
 \* A pause can come inside a spy_callk's call, between the host function
 \* and its continuation (a reachable state, checked by its negation).
+\* The load spends nothing: a pause never comes due inside it.
+LoadUnpaused == state = "paused" /\ Program[pc] = "load" => inside = 0
 NoPauseInCallk == ~(state = "paused" /\ pc \in CallSteps)
 =============================================================================

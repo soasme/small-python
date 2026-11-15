@@ -2605,6 +2605,25 @@ int main(int argc, char **argv) {
     assert(!spy_eval(dropped, "call_k(f)", "dropped.py") && spy_paused(dropped));
     spy_context_free(dropped);
     assert(!k_runs);
+    /* A step's first intrinsic, in a pausing call, loads their module on
+     * the machine, spending no budget, and the step runs on: a class's
+     * subscript, a union of names at hand, a generic class, a type alias
+     * and a generic function. */
+    static const char *const firsts[] = {
+        "def f():\n    for i in range(300): pass\n    return len(repr(list[int]))",
+        "def f(x=int):\n    for i in range(300): pass\n    return len(repr(x | None))",
+        "def f():\n    for i in range(300): pass\n    class C[T]: pass\n    return len(C.__type_params__) + 8",
+        "def f():\n    for i in range(300): pass\n    type A = int\n    return len(A.__name__) + 8",
+        "def f():\n    for i in range(300): pass\n    def g[T](): pass\n    return len(g.__type_params__) + 8",
+    };
+    for (size_t i = 0; i < sizeof(firsts) / sizeof(*firsts); i++) {
+        SPYContext *fresh = spy_context_new();
+        assert(fresh && !spy_set_limit(fresh, SPY_LIMIT_STEPS, 100) && !spy_set_limit(fresh, SPY_LIMIT_PAUSE, 1));
+        assert(spy_exec(fresh, firsts[i], "firsts.py") == 0);
+        pauses = 0;
+        assert(integer(fresh, run_paused(fresh, spy_eval(fresh, "f()", "firsts.py"), SPY_STOP_STEPS, &pauses)) == 9 + (i == 1) && pauses > 2);
+        spy_context_free(fresh);
+    }
     spy_set_limit(c, SPY_LIMIT_PAUSE, 0);
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     /* The engine counts the bytes it holds; a memory limit stops the call

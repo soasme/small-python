@@ -242,6 +242,8 @@ Unreleased (0.10.0):
   without nesting on the C stack, and a merged dict's change of size raises "dict mutated during update", as CPython does
 - a list or set subclass whose Python __new__ leaves the builtin __init__ takes a generator's or Python-hashed items
   without nesting on the C stack
+- a class's subscript, a union of classes, a generic class or function and a type alias load the typing intrinsics
+  without nesting on the C stack when they are the first to use them
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

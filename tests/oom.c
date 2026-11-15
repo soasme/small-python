@@ -2501,5 +2501,14 @@ int main(int argc, char **argv) {
     /* The intrinsics make 22,000 allocations when first used; the first are
      * the module they run in. */
     if (argc == 1) check("print(list[int])\n", "<intrinsics>", from, from + 400);
+    /* Their last end the load, run on the machine, and the steps that
+     * needed them run again. */
+    static const char generics[] = "def f[T](x=int):\n    class C[U]: pass\n    type A = list[T]\n"
+                                   "    return [x | None, C.__type_params__, A.__value__]\nprint(f())\n";
+    if (argc == 1) {
+        int status;
+        fail = 0;
+        check(generics, "<intrinsics end>", run(generics, "<intrinsics end>", &status) - 400, 0);
+    }
     return 0;
 }

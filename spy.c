@@ -14679,7 +14679,7 @@ enum { CLOSING = 1, THROWING };
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__, a key's
  * __hash__ (hash_call) or a list index's __index__ (index_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_PATTERN, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_PATTERN, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT, CALL_INTRINSICS };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */
@@ -18600,7 +18600,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
  * defined by the embedded intrinsics module. It runs once per context, on
  * first use, in a private module named typing that imports cannot reach,
  * with the file primitives in its globals. */
-static SPYValue *load_intrinsics(SPYContext *c) {
+static SPYValue *intrinsics_begin(SPYContext *c, SPYValue **unit) {
     SPYValue *module = value_new(c, SPY_MODULE), *module_name = spy_string(c, "typing", 6);
     if (module) module->as.map.parent = spy_retain(c->builtins);
     if (module) module->as.map.namespace = value_new(c, SPY_DICT);
@@ -18610,9 +18610,14 @@ static SPYValue *load_intrinsics(SPYContext *c) {
     Buffer source = {.ctx = c};
     for (size_t i = 0; !failed && i < sizeof(intrinsics_source) / sizeof(*intrinsics_source); i++)
         failed = puts_buffer(&source, intrinsics_source[i]);
-    SPYValue *unit = failed ? NULL : parse(c, source.data, source.len, "<intrinsics>");
+    *unit = failed ? NULL : parse(c, source.data, source.len, "<intrinsics>");
     mem_free(source.data);
-    if (!unit) { spy_release(module); return NULL; }
+    if (!*unit) { spy_release(module); return NULL; }
+    return module;
+}
+static SPYValue *load_intrinsics(SPYContext *c) {
+    SPYValue *unit, *module = intrinsics_begin(c, &unit);
+    if (!module) return NULL;
     Frame frame = {module, unit, 0};
     c->intrinsics_loading = 1;
     Result result = execute_module(c, &frame);
@@ -29212,16 +29217,29 @@ static SPYValue *class_getitem(SPYContext *, size_t, SPYValue *const *, SPYValue
  * nor intercepts the lookup of, or the intrinsic _class_getitem for
  * type and the builtin generic classes, entered as an operator's last
  * method with its env, x, y and the phase pushed on m's stack; else NULL. */
-static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+static SPYValue *class_item_function(SPYContext *c, SPYValue *x, int *generic) {
     SPYValue *meta = x->as.map.meta, *function = meta ? class_lookup(meta, "__getitem__") : NULL;
+    *generic = 0;
     if (!function && (!meta || (!class_lookup(meta, "__class_getitem__") &&
                                 class_lookup(meta, "__getattribute__") == class_lookup(c->types[SPY_CLASS], "__getattribute__")))) {
         function = class_lookup(x, "__class_getitem__");
         function = function && function->type == SPY_CLASSMETHOD ? function->as.wrapper.function : NULL;
-        if (function ? function->type == SPY_NATIVE && function->as.native.kwcall == class_getitem : x == c->types[SPY_CLASS])
-            function = intrinsic(c, "_class_getitem");
+        *generic = function ? function->type == SPY_NATIVE && function->as.native.kwcall == class_getitem : x == c->types[SPY_CLASS];
     }
+    return function;
+}
+static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+    int generic;
+    SPYValue *function = class_item_function(c, x, &generic);
+    if (generic) function = intrinsic(c, "_class_getitem");
     return function && machine_function(c, function) ? last_call(c, m, function, x, y, x, y, env) : NULL;
+}
+/* Whether operator step ins of x and y calls an intrinsic (class_item,
+ * union_call). */
+static NO_INLINE int operator_intrinsic(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y) {
+    int op = 0, kind = step_operation(ins, &op), generic = 0;
+    if (kind == OPERATE_INDEX && x->type == SPY_CLASS) class_item_function(c, x, &generic);
+    return generic || (kind == OPERATE_BINARY && class_union(op, x, y));
 }
 /* Whether x | y is type.__or__ of classes or None, one a class, whose
  * metaclasses take __or__ and __ror__ from type (unionable), the intrinsic
@@ -30187,6 +30205,42 @@ static NO_INLINE int import_returned(SPYContext *c, Machine *m, SPYValue *result
     spy_release(module);
     return module != NULL;
 }
+/* For a step whose operands a and b, borrowed, or NULL when it takes
+ * them at hand, needs an intrinsic before they are loaded: their load
+ * begun on m as a call (CALL_INTRINSICS), a and b pushed back under the
+ * module and the program's fuel, which the load does not spend; its unit
+ * to enter, *env the module. intrinsics_returned runs the step again. */
+static NO_INLINE SPYValue *intrinsics_step(SPYContext *c, Machine *m, SPYValue *a, SPYValue *b, SPYValue **env) {
+    if (c->intrinsics_loading) return spy_error(c, "SystemError", "intrinsics used while loading intrinsics");
+    size_t left = c->fuel;
+    c->fuel = SIZE_MAX;
+    SPYValue *unit, *module = intrinsics_begin(c, &unit), *fuel = module ? int_value(c, (int64_t)left) : NULL;
+    if (!fuel || unit_call(c, unit, module) || grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) {
+        if (module) { spy_release(unit); spy_release(module); }
+        spy_release(fuel);
+        c->fuel = left;
+        return NULL;
+    }
+    if (a) m->stack[m->len++] = spy_retain(a);
+    if (b) m->stack[m->len++] = spy_retain(b);
+    m->stack[m->len++] = spy_retain(module);
+    m->stack[m->len++] = fuel;
+    c->intrinsics_loading = 1;
+    *env = module;
+    return unit;
+}
+/* The load intrinsics_step began on m ended, its body returning result,
+ * or NULL when it raised: whether the step runs again. */
+static NO_INLINE int intrinsics_returned(SPYContext *c, Machine *m, SPYValue *result) {
+    SPYValue *fuel = machine_pop(m), *module = machine_pop(m);
+    c->fuel = (size_t)fuel->as.integer_data.small;
+    c->intrinsics_loading = 0;
+    spy_release(fuel);
+    if (result) c->intrinsics = module;
+    else spy_release(module);
+    spy_release(result);
+    return result != NULL;
+}
 /* The Python __bool__ or __len__ of instance v's class that a test calls
  * on v (truth_function), owned, with its env, v on m's stack under it, and
  * for __len__ False above v; else NULL. */
@@ -30994,6 +31048,12 @@ static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *
         SPYValue *value = y->type == SPY_LIST || y->type == SPY_TUPLE ? sequence_test(c, ins, x, y) :
                           y->type == SPY_DICT && x->type == SPY_DICT ? c->unbound : NULL;
         if (value != c->unbound) return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
+    }
+    if (UNLIKELY(!c->intrinsics) && operator_intrinsic(c, ins, x, y)) {
+        /* Its intrinsic's module loads first, the step taking its operands again (intrinsics_step). */
+        SPYValue *unit = intrinsics_step(c, m, NULL, NULL, env);
+        c->entering_kind = CALL_INTRINSICS;
+        return unit;
     }
     SPYValue *function = operator_call(c, m, ins, x, y, env);
     return function || c->error_type[0] ? function : c->looked ? looked(c) : operate(c, ins->node, x, y);
@@ -31856,6 +31916,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind >= CALL_EXEC) {
                         /* An import's statement runs again, finding the module. */
                         if (kind == CALL_IMPORT) pc -= import_returned(c, m, result);
+                        else if (kind == CALL_INTRINSICS) pc -= intrinsics_returned(c, m, result);
                         else if (result) machine_push(c, m, result);
                     } else {
                         /* CALL_NEXT: a filter's test tries the next item when false. */
@@ -32419,6 +32480,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 machine_push(c, m, value ? class_statement(c, &f, n, value, a, b, NULL, NULL) : NULL);
                 spy_release(value);
             } else {
+                /* A generic class's type parameters and a type alias call intrinsics. */
+                if (UNLIKELY(!c->intrinsics) && (ins->arg == 1 || ins->arg == 11)) goto load_intrinsics;
                 callee_env = NULL;
                 value = class_step(c, m, &f, ins, &callee_env);
                 if (callee_env) goto enter_init;
@@ -32428,6 +32491,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             break;
         CASE(BC_GENERIC_FUNCTION) {
+            if (UNLIKELY(!c->intrinsics)) goto load_intrinsics;
             SPYValue *defaults = spy_list(c);
             for (size_t i = m->len - (size_t)ins->arg; defaults && i < m->len; i++)
                 if (sequence_append(c, defaults, m->stack[i])) { spy_release(defaults); defaults = NULL; }
@@ -32644,6 +32708,13 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
          * BC_UNARY on x, an instance among them: a Python special method
          * is a call (operator_call). */
         callee_env = NULL;
+        if (UNLIKELY(!c->intrinsics) && operator_intrinsic(c, ins, x, y)) {
+            /* Its intrinsic's module loads first, the step taking its operands again. */
+            value = intrinsics_step(c, m, a, b, &callee_env);
+            if (a) spy_release(a);
+            if (b) spy_release(b);
+            goto intrinsics_entered;
+        }
         if ((value = operator_call(c, m, ins, x, y, &callee_env))) {
             if (a) spy_release(a);
             if (b) spy_release(b);
@@ -32702,6 +32773,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     enter_init:
         /* A class call enters its __init__ (class_init). */
         spy_release(value); value = spy_retain(c->entering_init); special = c->entering_kind;
+        goto enter_special;
+    load_intrinsics:
+        /* A step that calls an intrinsic loads their module first, then runs again (intrinsics_step). */
+        callee_env = NULL;
+        value = intrinsics_step(c, m, NULL, NULL, &callee_env);
+    intrinsics_entered:
+        if (!value) continue;
+        special = CALL_INTRINSICS;
         goto enter_special;
     enter_k:
         m->pc = pc;
