@@ -376,7 +376,8 @@ These run as machines on the heap, in one native activation of
   `str`, `bytes` and `bytearray` `%` call for their numbers and `%c`, the `__repr__`
   and `__bytes__` that `bytes` and `bytearray` `%` call, and the items' `__repr__` of a list, tuple,
   dict or set argument and of those inside it, each after the conversions before it, the
-  `__bool__` or `__len__` that `not`, `if`, `and` and `or` test, also of a
+  `__bool__` or `__len__` that `not`, `if`, `and` and `or` test, and that a test or a
+  chain tests of a comparison's result, also of a
   builtin subclass's instance and of a class by its metaclass, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it, and the items' `__repr__` in `repr`, `str`,

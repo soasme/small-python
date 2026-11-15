@@ -620,6 +620,24 @@ static const char *const programs[] = {
     "    return dir(DL()), dir(DR())\n"
     "print(dl())\n",
 
+    "class CB:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __bool__(self): return self.v\n"
+    "class CL:\n"
+    "    def __len__(self): return 1\n"
+    "class CV:\n"
+    "    def __init__(self, r): self.r = r\n"
+    "    def __lt__(self, o): return self.r\n"
+    "def ct():\n"
+    "    out = []\n"
+    "    if CV(CB(True)) < 1: out.append(1)\n"
+    "    out.append(CV(CL()) < 1 < 2)\n"
+    "    out.append((CV(CB(False)) < 1 < 2).v)\n"
+    "    try: CV(CB(3)) < 1 < 2\n"
+    "    except TypeError: out.append(0)\n"
+    "    return out\n"
+    "print(ct())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

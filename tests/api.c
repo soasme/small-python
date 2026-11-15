@@ -1825,6 +1825,15 @@ int main(int argc, char **argv) {
                "def listed():\n    return len(''.join(dir(Listed())) + ''.join(dir(Listed())))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "listed()", "listed.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
+    /* So do a test and a chain of a comparison whose result has a Python __bool__ or __len__. */
+    execute(c, "class Held:\n    def __bool__(self):\n        for i in range(3000): pass\n        return True\n"
+               "    def __len__(self):\n        for i in range(3000): pass\n        return 0\n"
+               "class Less:\n    def __lt__(self, o): return Held()\n"
+               "class Sized:\n    def __len__(self):\n        for i in range(3000): pass\n        return 2\n"
+               "class Small:\n    def __lt__(self, o): return Sized()\n"
+               "def tested():\n    t = 0\n    if Less() < 1: t += 1\n    if Less() < 1 < 2: t += 2\n    while Small() < 1 < 2 and t < 4: t += 1\n    return t\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "tested()", "tested.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

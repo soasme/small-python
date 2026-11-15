@@ -1,6 +1,7 @@
 # Replays Truth.tla: each case builds the spec's classes, as plain classes,
 # list subclasses or metaclasses by the holder, applies the
 # spec's operation to their instances (an if over and or or among them,
+# an if over or a chain of a comparison that returns the left one,
 # any() or all() of a list or a generator of them, or bool() to a built-in
 # value), and compares the result and the logged
 # __bool__ and __len__ calls with the model's.
@@ -43,6 +44,20 @@ def instance(kind, side, log, holder):
     return type(kind, (), namespace)()
 
 
+class Less:
+    def __init__(self, result):
+        self.result = result
+
+    def __lt__(self, other):
+        return self.result
+
+
+def tested_compare(left):
+    if Less(left) < 1:
+        return "then"
+    return "else"
+
+
 def tested_and(left, right):
     if left and right:
         return "then"
@@ -66,6 +81,11 @@ def outcome(p):
             result = str(bool(left))
         elif op == "not":
             result = str(not left)
+        elif op == "if_compare":
+            result = tested_compare(left)
+        elif op == "chain":
+            value = Less(left) < 1 < 2
+            result = "left" if value is left else str(value)
         elif op == "if_and":
             result = tested_and(left, right)
         elif op == "if_or":

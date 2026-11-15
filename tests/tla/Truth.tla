@@ -15,9 +15,12 @@
 (* or y, never testing y; an if over x and y or x or y tests each once,   *)
 (* the operator's test of x being the if's. any() and all() of x and y,  *)
 (* from a list or a generator, test x and then y only when x does not     *)
-(* decide.                                                                 *)
+(* decide. An if over a comparison whose result is x tests x once; so     *)
+(* does a chain x < 1 < 2 whose first comparison returns x, going on to   *)
+(* the next comparison when x is true and yielding x itself when false.   *)
 (*                                                                         *)
-(* A program applies OP (bool, not, and, or, any, all) to instances of     *)
+(* A program applies OP (bool, not, and, or, any, all, an if over a       *)
+(* comparison, a chain) to instances of                                    *)
 (* classes of KIND (the right one only for two), each logging its __bool__ or  *)
 (* __len__ call, or calls bool() on one of the built-in VALUES. A class    *)
 (* has no method (plain), a __bool__ returning True, False, or 1, or None  *)
@@ -36,7 +39,7 @@ Values == {"0", "0.0", "-0.0", "0j", "''", "b''", "[]", "()", "{}", "set()", "fr
            "None", "...", "NotImplemented", "float('nan')", "' '", "[0]", "frozendict()", "bytearray()",
            "memoryview(b'')", "type", "object()", "1e-300 * 1e-300"}
 Holders == {"instance", "list", "class"}
-Programs == [op : {"bool", "not"}, left : Kinds, right : {"plain"}, holder : Holders]
+Programs == [op : {"bool", "not", "if_compare", "chain"}, left : Kinds, right : {"plain"}, holder : Holders]
             \cup [op : {"and", "or", "if_and", "if_or", "any", "all", "any_gen", "all_gen"}, left : Kinds, right : Kinds,
                   holder : Holders]
             \cup [value : Values]
@@ -79,6 +82,8 @@ Run(p) ==
          IN  IF t[1] \notin {"true", "false"} THEN t
              ELSE CASE p.op = "bool" -> <<Show(t[1]), t[2]>>
                     [] p.op = "not" -> <<Show(Not(t[1])), t[2]>>
+                    [] p.op = "if_compare" -> <<IF t[1] = "true" THEN "then" ELSE "else", t[2]>>
+                    [] p.op = "chain" -> <<IF t[1] = "true" THEN "True" ELSE "left", t[2]>>
                     [] p.op = "and" -> <<IF t[1] = "true" THEN "right" ELSE "left", t[2]>>
                     [] p.op = "or" -> <<IF t[1] = "true" THEN "left" ELSE "right", t[2]>>
                     [] p.op \in {"if_and", "if_or"} ->
@@ -104,6 +109,10 @@ ShortCircuit == Done /\ "op" \in DOMAIN program /\ program.op \in {"and", "or"} 
 \* any() and all() request no item after the deciding one.
 NoItemAfter == Done /\ "op" \in DOMAIN program /\ program.op \in {"any", "all", "any_gen", "all_gen"} /\
                Truth(program.left, "L")[1] = Deciding(program.op) => \A i \in DOMAIN outcome[2] : outcome[2][i] \in {"L.bool", "L.len"}
+
+\* A false comparison stops its chain with the comparison's own result.
+ChainStops == Done /\ "op" \in DOMAIN program /\ program.op = "chain" /\ Truth(program.left, "L")[1] = "false" =>
+                  outcome[1] = "left"
 
 \* Each operand's truth is tested at most once, by one of __bool__ and
 \* __len__, the left operand's first.

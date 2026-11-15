@@ -28276,12 +28276,48 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
     spy_release(x); spy_release(y);
     return result;
 }
+/* The Python __bool__ or __len__ (truth_function) that a test, or a
+ * comparison in a chain whose right operand y goes on, calls on its
+ * result v, which it takes: the call left on m (CALL_CHECKED), y, v and
+ * whether it is __bool__ on m's stack for truth_returned, 1, or 1 with an
+ * error; else 0, v kept. */
+static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue *y) {
+    int length = 0;
+    SPYValue *function = v->type == SPY_INSTANCE || metaclassed(v) ? truth_function(c, v, &length) : NULL, *self, *env = NULL;
+    if (!function) return 0;
+    size_t depth = m->len;
+    if (y && machine_push(c, m, spy_retain(y))) spy_release(v);
+    else if (!machine_push(c, m, v) && !machine_push(c, m, spy_retain(c->booleans[!length])))
+        env = function_env(c, function, 1, (self = spy_retain(v), &self), NULL, 1);
+    if (!env) {
+        while (m->len > depth) spy_release(machine_pop(m));
+        return 1;
+    }
+    c->k_fn = spy_retain(function); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
+    return 1;
+}
+/* The truth a test's or a chained comparison's call (truth_call) returned
+ * in result, which it takes, into step ins: the test jumps when false;
+ * the chain goes on with its right operand when true, else jumps out with
+ * the comparison's result. The machine, at its pc. */
+static NO_INLINE Machine *truth_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
+    SPYValue *marker = machine_pop(m), *v = machine_pop(m), *y = ins->op == BC_COMPARE ? machine_pop(m) : NULL;
+    int truth = result ? truth_result(c, v, marker == c->booleans[1], result) : 0;
+    spy_release(marker);
+    if (c->error_type[0]) { spy_release(v); spy_release(y); return m; }
+    if (truth && y) { machine_push(c, m, y); y = NULL; }
+    else if (!truth) { m->pc = ins->target; if (y) { machine_push(c, m, v); v = NULL; } }
+    spy_release(v); spy_release(y);
+    return m;
+}
 /* Operator step ins ends with value, which it takes, its right operand y:
  * a test jumps on its truth, a comparison in a chain goes on with y or
- * jumps out; others push it. The pc to run next. */
+ * jumps out, a Python __bool__ or __len__ a call (truth_call); others push
+ * it. The pc to run next. */
 static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *ins, SPYValue *y, SPYValue *value, size_t pc) {
     if (ins->op == BC_TEST) {
         if (!value) return pc;
+        if (value->type != SPY_BOOL && truth_call(c, m, value, NULL)) return pc;
         int truth = value->type == SPY_BOOL ? (int)value->as.integer_data.small : truthy(value);
         spy_release(value);
         return truth ? pc : ins->target;
@@ -28289,6 +28325,7 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
     if (ins->op == BC_COMPARE) {
         SPYValue *kept = NULL;
         if (m->len && m->stack[m->len - 1] == c->keeping) { spy_release(machine_pop(m)); y = kept = machine_pop(m); }
+        if (value && ins->arg && value->type != SPY_BOOL && truth_call(c, m, value, y)) { spy_release(kept); return pc; }
         if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(y); }
         else {
             if (value && c->error_type[0]) { spy_release(value); value = NULL; }
@@ -29429,6 +29466,8 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
 static int next_ended(SPYContext *, SPYValue *);
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
+    if ((ins->op == BC_TEST || ins->op == BC_COMPARE) && (m->stack[m->len - 1] == c->booleans[0] || m->stack[m->len - 1] == c->booleans[1]))
+        return truth_returned(c, m, ins, result);
     if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
         /* A class's base's __mro_entries__ returned, its step running
          * again (class_part); or its __prepare__. */
@@ -30262,6 +30301,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         else if (result) loop_item(c, m, &f, &code[pc - 1], result);
                         else if (next_ended(c, iterator)) pc = code[pc - 1].target;
                     }
+                    /* A step's finish left a truth call (truth_call). */
+                    if (UNLIKELY(c->k_fn)) { pc = m->pc; goto enter_k; }
                     continue;
                 }
                 if (m->outermost) {
@@ -31002,6 +31043,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : operation(c, ins, x, y), pc);
         if (a) spy_release(a);
         if (b) spy_release(b);
+        if (UNLIKELY(c->k_fn)) goto enter_k;
         continue;
     display_hash:
         /* A set or dict display's key a, or BC_LOAD_TARGET's: a Python
