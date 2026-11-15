@@ -2178,6 +2178,14 @@ int main(int argc, char **argv) {
     execute(c, "def generated():\n    ns = Slots()\n    exec('for i in (x for x in (1, 2)): pass', {}, ns)\n    return ns['i']\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "generated()", "generated.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
+    /* So does a class body's handler left by an exception, which deletes its name. */
+    execute(c, "deleted = []\nclass Gone(Slots):\n    def __delitem__(self, k):\n        for i in range(3000): pass\n"
+               "        deleted.append(k)\n        dict.__delitem__(self, k)\n"
+               "class Going(type):\n    @classmethod\n    def __prepare__(m, n, b): return Gone()\n"
+               "def raised():\n    try:\n        class K(metaclass=Going):\n            try: 1/0\n"
+               "            except ZeroDivisionError as e: raise KeyError\n    except KeyError: return deleted\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(raised())", "raised.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

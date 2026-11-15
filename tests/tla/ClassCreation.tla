@@ -28,7 +28,8 @@
 (* Python __getitem__, and del m, logging "del" by its Python __delitem__, *)
 (* then k = j = 1, logging "chain" for j, and del k, j, logging "del" for  *)
 (* each, then a handler's except ... as e, logging "caught" for its store, *)
-(* "handler" for its store of None, and "del".                             *)
+(* "handler" for its store of None, and "del", then the same of a handler  *)
+(* that raises.                                                            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -51,7 +52,7 @@ Create(p) ==
                    \o (IF p.subclass_hook THEN <<IF p.flag THEN "init_subclass flag" ELSE "init_subclass">> ELSE <<>>)
         logged == p.logged /\ p.meta = "prepare" /\ ~p.call
         before == (IF p.entries /\ ~p.call THEN <<"mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" /\ ~p.call THEN <<"prepare">> ELSE <<>>)
-                  \o (IF logged THEN <<"module">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>) \o (IF logged THEN <<"def", "load", "del", "chain", "del", "del", "caught", "handler", "del", "static">> ELSE <<>>)
+                  \o (IF logged THEN <<"module">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>) \o (IF logged THEN <<"def", "load", "del", "chain", "del", "del", "caught", "handler", "del", "caught", "handler", "del", "static">> ELSE <<>>)
                   \o (IF p.meta \in {"meta", "prepare"} THEN <<"new">> ELSE <<>>) \o typeNew
     IN  IF fails THEN <<before, "TypeError">>
         ELSE <<before \o (IF custom THEN <<"init">> ELSE <<>>) \o (IF p.deco THEN <<"decorate">> ELSE <<>>), "ok">>

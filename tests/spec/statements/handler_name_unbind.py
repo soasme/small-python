@@ -1,10 +1,14 @@
 # spec: PLS-315 15.4.1, 15.4.3, 9.3.5
 # description: an except or except* clause's as name is stored when it
-# matches and, when its block ends normally or by continue or break,
-# stored None and then deleted, by its namespace's Python __setitem__
-# and __delitem__, each of which may loop: a block that deleted the name
-# or rebound it still ends so. A function's handler leaves its local
-# unbound. In class bodies and modules executed with a mapping.
+# matches and, when its block ends normally, by continue or break, or by
+# an exception, stored None and then deleted, by its namespace's Python
+# __setitem__ and __delitem__, each of which may loop: a block that
+# deleted the name or rebound it still ends so, and an exception from
+# the unbinding replaces the one the block raised, its context the
+# exception the clause handles; after a block that ended otherwise, an
+# except clause's unbinding has the exception handled before it. A
+# function's handler leaves its local unbound. In class bodies and
+# modules executed with a mapping.
 from harness import *
 
 log = []
@@ -36,6 +40,34 @@ assert_eq(run("while True:\n    try: 1/0\n    except ZeroDivisionError as e: bre
 assert_eq(run("try: raise ExceptionGroup('g', [ValueError(1), KeyError(2)])\nexcept* ValueError as v: pass\nexcept* KeyError as k: pass\n"),
           [("set", "v", "ExceptionGroup"), ("set", "v", None), ("del", "v"), ("set", "k", "ExceptionGroup"), ("set", "k", None), ("del", "k")])
 
+def raising(source):
+    try: run(source)
+    except Exception as e: return log[:], type(e).__name__, type(e.__context__).__name__
+assert_eq(raising("try: 1/0\nexcept ZeroDivisionError as e: raise KeyError\n"), (caught, "KeyError", "ZeroDivisionError"))
+assert_eq(raising("try: raise ExceptionGroup('g', [ValueError(1)])\nexcept* ValueError as v: raise KeyError\n"),
+          ([("set", "v", "ExceptionGroup"), ("set", "v", None), ("del", "v")], "KeyError", "ExceptionGroup"))
+assert_eq(raising("for i in (1,):\n    try: 1/0\n    except ZeroDivisionError as e:\n        try: raise KeyError\n        finally: del e\n"),
+          ([("set", "i", "int"), ("set", "e", "ZeroDivisionError"), ("del", "e"), ("set", "e", None), ("del", "e")], "KeyError",
+           "ZeroDivisionError"))
+
+class Gone(NS):
+    def __delitem__(self, k):
+        for _ in (): pass
+        raise LookupError(k)
+def gone(source):
+    try: exec(source, {}, Gone())
+    except NameError as e: return str(e), type(e.__context__).__name__
+assert_eq([gone(source) for source in (
+    "try: 1/0\nexcept ZeroDivisionError as e: raise KeyError\n",
+    "try: 1/0\nexcept ZeroDivisionError as e: pass\n",
+    "for i in (1,):\n    try: 1/0\n    except ZeroDivisionError as e: break\n",
+    "try: raise ValueError\nexcept ValueError:\n    try: 1/0\n    except ZeroDivisionError as e: pass\n",
+    "try: raise ExceptionGroup('g', [ValueError(1)])\nexcept* ValueError as v: pass\n",
+    "try: raise ExceptionGroup('g', [ValueError(1)])\nexcept* ValueError as v: raise KeyError\n")],
+    [("name 'e' is not defined", "ZeroDivisionError"), ("name 'e' is not defined", "NoneType"), ("name 'e' is not defined", "NoneType"),
+     ("name 'e' is not defined", "ValueError"), ("name 'v' is not defined", "ExceptionGroup"),
+     ("name 'v' is not defined", "ExceptionGroup")])
+
 class Meta(type):
     @classmethod
     def __prepare__(m, n, b): return NS()
@@ -46,6 +78,13 @@ class K(metaclass=Meta):
     except ZeroDivisionError as e: pass
 assert_eq(log, caught)
 assert_true("e" not in K.__dict__)
+log.clear()
+try:
+    class R(metaclass=Meta):
+        try: 1/0
+        except ZeroDivisionError as e: raise KeyError
+except KeyError: pass
+assert_eq(log, caught)
 
 def inside():
     try: 1/0

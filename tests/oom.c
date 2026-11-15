@@ -1395,6 +1395,22 @@ static const char *const programs[] = {
     "    return sorted(ns)\n"
     "print(hn())\n",
 
+    "class HR(dict):\n"
+    "    def __setitem__(s, k, v): dict.__setitem__(s, k, (k, v is None))\n"
+    "    def __delitem__(s, k):\n"
+    "        if k == 'g': raise KeyError(k)\n"
+    "        dict.__delitem__(s, k)\n"
+    "def hr():\n"
+    "    out = []\n"
+    "    for source in ('try: 1/0\\nexcept ZeroDivisionError as e: raise KeyError\\n',\n"
+    "                   'try: 1/0\\nexcept ZeroDivisionError as g: pass\\n',\n"
+    "                   'try: raise ExceptionGroup(\"x\", [KeyError(1)])\\nexcept* KeyError as e: raise ValueError\\n'):\n"
+    "        ns = HR()\n"
+    "        try: exec(source, {}, ns)\n"
+    "        except Exception as e: out.append((type(e).__name__, type(e.__context__).__name__, sorted(ns)))\n"
+    "    return out\n"
+    "print(hr())\n",
+
     "class MN(dict):\n"
     "    def __setitem__(s, k, v): dict.__setitem__(s, k, [v])\n"
     "    def __delitem__(s, k):\n"

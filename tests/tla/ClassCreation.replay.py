@@ -91,7 +91,8 @@ def source(p):
     lines += ["    %s = D()" % name for name in "ab"[:p["set_names"]]]
     if p["logged"]:
         lines += ["    def m(self): pass", "    m", "    del m", "    k = j = 1", "    del k, j",
-                  "    try: 1/0", "    except ZeroDivisionError as e: pass"]
+                  "    try: 1/0", "    except ZeroDivisionError as e: pass",
+                  "    try:", "        try: 1/0", "        except ZeroDivisionError as e: raise KeyError", "    except KeyError: pass"]
     return "\n".join(lines) + "\n"
 
 
