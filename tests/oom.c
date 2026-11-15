@@ -1021,6 +1021,23 @@ static const char *const programs[] = {
     "    return out\n"
     "print(mr())\n",
 
+    "class SE(str):\n"
+    "    __hash__ = str.__hash__\n"
+    "    def __eq__(self, o):\n"
+    "        for _ in (): pass\n"
+    "        return str(self) == o\n"
+    "class IE(int):\n"
+    "    __hash__ = int.__hash__\n"
+    "    def __eq__(self, o): return int(self) == o\n"
+    "def se():\n"
+    "    d = {SE('a'): 1, IE(2): 2}\n"
+    "    d[SE('a')] = 3\n"
+    "    s = {IE(1)}\n"
+    "    out = [d[SE('a')], SE('b') in d, d.get(SE('a')), sorted(map(int, s.union([1, 3]))), s.isdisjoint([1])]\n"
+    "    del d[SE('a')]\n"
+    "    return out + [len(d)]\n"
+    "print(se())\n",
+
     "def an(x):\n"
     "    for _ in (): pass\n"
     "    return x\n"

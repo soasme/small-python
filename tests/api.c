@@ -1941,6 +1941,11 @@ int main(int argc, char **argv) {
                "def hashed():\n    return {Hashed('k'): 12}[Hashed('k')]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hashed()", "hashed.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 2);
+    /* So does the Python __eq__ of a builtin type's subclass key. */
+    execute(c, "class Same(str):\n    __hash__ = str.__hash__\n    def __eq__(self, o):\n        for i in range(3000): pass\n        return str(self) == o\n"
+               "def same():\n    return {Same('k'): 16}[Same('k')]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "same()", "same.py"), SPY_STOP_STEPS, &pauses)) == 16 && pauses > 2);
     /* So does a compiled __annotate__'s Python annotation call. */
     execute(c, "def slow(x):\n    for i in range(3000): pass\n    return x\n"
                "def annotated():\n    def f(a: slow(15)): pass\n    return f.__annotations__['a']\n");

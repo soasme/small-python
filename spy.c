@@ -24681,11 +24681,11 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     }
     return !status;
 }
-/* The Python rich comparison rich of plain instance x's class that comparing
+/* The Python rich comparison rich of instance x's class that comparing
  * x with y calls first, borrowed: none when y's class is a subclass of x's,
  * whose reflected method comes first; else NULL. */
 static SPYValue *rich_function(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
-    if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
+    if (x->type != SPY_INSTANCE) return NULL;
     SPYValue *cls = x->as.map.parent, *other = value_class(c, y);
     SPYValue *function = other != cls && subclass(other, cls) ? NULL : class_lookup(cls, rich_names[rich]);
     return function && machine_function(c, function) ? function : NULL;
@@ -27256,9 +27256,9 @@ static int sequence_python(SPYContext *c, SPYValue *a, SPYValue *b) {
     size_t end;
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
 }
-/* Whether v is a plain instance whose class has a Python __eq__. */
+/* Whether v is an instance whose class has a Python __eq__. */
 static int python_eq(SPYValue *v) {
-    SPYValue *eq = v->type == SPY_INSTANCE && !v->as.map.base ? class_lookup(v->as.map.parent, "__eq__") : NULL;
+    SPYValue *eq = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__eq__") : NULL;
     return eq && eq->type == SPY_FUNCTION;
 }
 /* Whether instance v's == is identity: its class has no Python __eq__. */
@@ -27637,9 +27637,9 @@ static int eq_reaches(SPYValue *key) {
     return python_eq(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
 }
 /* Whether a lookup of key may compare it by a Python __eq__ on the machine
- * (lookup_call): a plain instance, or a tuple whose items may. */
+ * (lookup_call): an instance, or a tuple whose items may. */
 static ALWAYS_INLINE int lookup_key(SPYValue *key) {
-    return key->type == SPY_INSTANCE ? !key->as.map.base : key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0);
+    return key->type == SPY_INSTANCE || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
 }
 /* Whether a subscript or in of key in map, by operator step ins, looks
  * it up on the machine (lookup_call): an exact dict's or frozendict's
