@@ -1953,6 +1953,11 @@ int main(int argc, char **argv) {
                "def declined():\n    return sorted([Declined(2), Declined(1), Declined(3)])[0].v\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "declined()", "declined.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
+    /* So does a dict subclass's __missing__ of an absent tuple key. */
+    execute(c, "class Absent(dict):\n    def __missing__(self, k):\n        for i in range(3000): pass\n        return len(k)\n"
+               "def absent():\n    return Absent()[(1, 2)] + Absent()[((1,), 'a', 3)]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "absent()", "absent.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

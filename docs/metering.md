@@ -463,7 +463,7 @@ These run as machines on the heap, in one native activation of
   where a step of their own reaches them, a builtin subclass's
   `__getitem__` and a dictionary
   subclass's `__missing__` for an absent `None`, `bool`, `int`, `float`
-  or `str` key, and the `__eq__` that `in` a list or tuple, or an
+  or `str` key, or a tuple key that holds no instance, and the `__eq__` that `in` a list or tuple, or an
   iterator over one, calls on its items, of an instance or of a `None`,
   `bool`, `int`, `float` or `str` after such items, unless it is inside a
   comparison chain, the `__eq__` that `==` or `!=` of two lists or two

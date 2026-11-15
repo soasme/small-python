@@ -1061,6 +1061,15 @@ static const char *const programs[] = {
     "    return [k.v for k in sorted(ks)], [k.v for k in ks], [t[1] for t in sorted([(OD(1), 0), (OD(0), 1)])]\n"
     "print(od())\n",
 
+    "class OM(dict):\n"
+    "    def __missing__(s, k):\n"
+    "        for _ in (): pass\n"
+    "        return [k]\n"
+    "def om():\n"
+    "    d = OM({(1, 'a'): 0})\n"
+    "    return d[(1, 'a')], d[(2, (3,))], d[()], d['k']\n"
+    "print(om())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

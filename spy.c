@@ -28431,21 +28431,27 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
     else if (index && !set_index(c, object, index, value) && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
     release_all(5, (SPYValue *[]){index, object, item, value, key});
 }
+/* Whether key hashes and compares calling no Python: a builtin scalar,
+ * or a tuple that holds no instance (pair_reaches). */
+static int native_key(SPYContext *c, SPYValue *key) {
+    return key->type <= SPY_STRING ||
+           (key->type == SPY_TUPLE && (!key->listed || key->as.seq.plain || (!hash_reaches(c, key, 1) && key->as.seq.plain)));
+}
 /* x[y], x an instance of a builtin's subclass: its class's Python
- * __getitem__, or for a dict's subclass, of a key y that is a builtin
- * scalar and absent, found without calling Python, its Python
+ * __getitem__, or for a dict's subclass, of a key y that is native
+ * (native_key) and absent, found without calling Python, its Python
  * __missing__, entered as an operator's method with its env, x, y and the
  * phase pushed on m's stack; else NULL. */
 static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *base = builtin_base(c, x, "__getitem__", NULL), *function = NULL;
     int64_t hash;
     if (!base) function = class_lookup(x->as.map.parent, "__getitem__");
-    else if (is_dict(base) && y->type <= SPY_STRING && !hash_value(c, y, &hash)) {
+    else if (is_dict(base) && native_key(c, y) && !hash_value(c, y, &hash)) {
         SPYValue *map = namespace_map(base);
         MapCursor cursor = map_cursor(map, hash);
         for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
             SPYValue *key = map->as.map.items[i].key;
-            if (key == y || key->type > SPY_STRING || equal(key, y)) return NULL;
+            if (key == y || !native_key(c, key) || equal(key, y)) return NULL;
         }
         function = class_lookup(x->as.map.parent, "__missing__");
     }

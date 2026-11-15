@@ -68,6 +68,7 @@ SOURCES = {
                            "result = ([{1: E('a', 1)}] == [{1: E('b', 1)}], {1: (E('c', 1),)} != {1: (E('d', 1),)}, log)",
     "pairs_hashed": "H.log.clear()\nd = dict([(H(1), 'a'), (2, 'b')])\nd.update(zip([H(3), H(1)], 'cd'))\nresult = ([getattr(k, 'v', k) for k in d], list(d.values()), H.log)",
     "fromkeys_hash_fails": "H.log.clear()\ntry: dict.fromkeys((H(1), Unhashed(), H(2)))\nexcept TypeError as e: result = (str(e), H.log)",
+    "missing_tuple": "d = Missing({(1, 2): 's'})\nresult = (d[(1, 2)], d[(3,)], d[((1,),)], (3,) not in d)",
     "missing_hook": "d = Missing(a=1)\nresult = (d['a'], d['zz' * 1], 'zz' in d, d.get('q'))",
     "keyerror": "result = {}['k']",
     "keyerror_tuple": 'result = {}[(1,)]',
