@@ -411,6 +411,8 @@ These run as machines on the heap, in one native activation of
   lookups that call an instance key's;
 - the `__next__` of an iterator instance that a `filter` takes its items
   from;
+- the `keys` function that an instance holds itself, which `dict`,
+  `dict.update` and `**` call to merge it;
 - a key's `__hash__`, also of a builtin's subclass defining it, in dict
   and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`

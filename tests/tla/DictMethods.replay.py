@@ -86,6 +86,7 @@ SOURCES = {
     "popitem_lifo": 'd = {1: 1, 2: 2, 3: 3}\nresult = (d.popitem(), d.popitem(), d)',
     "popitem_empty": 'result = {}.popitem()',
     "setdefault": "d = {}\nresult = (d.setdefault('a'), d.setdefault('b', 1), d.setdefault('b', 2), d)",
+    "ctor_own_keys_calls": "log = []\nclass Own:\n    def __init__(s, ks):\n        def keys():\n            for _ in (): pass\n            log.append('k'); return ks\n        s.keys = keys\n    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k); return k * 2\nd = {}\nd.update(Own(['a', 'b']))\nresult = (dict(Own(['c'])), d, {**Own(['e'])}, log)",
     "ctor_keys_attribute": "class Both:\n    def __iter__(s): return iter([('x', 1)])\n    def keys(s): return ['a']\n    def __getitem__(s, k): return k * 2\n"
                            "class Own(Both):\n    def __init__(s): s.keys = lambda: ['o']\n    keys = None\n"
                            "class Pairs:\n    def __iter__(s): yield ('p', 1)\n"

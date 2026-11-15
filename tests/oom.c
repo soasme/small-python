@@ -1035,6 +1035,19 @@ static const char *const programs[] = {
     "    return out\n"
     "print(fn())\n",
 
+    "class OK:\n"
+    "    def __init__(s, ks):\n"
+    "        def keys():\n"
+    "            for _ in (): pass\n"
+    "            return ks\n"
+    "        s.keys = keys\n"
+    "    def __getitem__(s, k): return k * 2\n"
+    "def ok():\n"
+    "    d = {'z': 0}\n"
+    "    d.update(OK(['a']))\n"
+    "    return [dict(OK(['b', 'c'])), d, {**OK(['e'])}, dict(OK([]))]\n"
+    "print(ok())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

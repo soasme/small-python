@@ -24025,6 +24025,15 @@ static SPYValue *method_function(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *function = !hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE) ? class_lookup(cls, name) : NULL;
     return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
 }
+/* The Python keys() that dict() and dict.update() call to merge plain
+ * instance v (KEY_KEYS): its class's (method_function), *bound then, or
+ * a function v holds itself, called alone; else NULL. */
+static SPYValue *keys_function(SPYContext *c, SPYValue *v, int *bound) {
+    SPYValue *own = plain_instance(v) ? name_local(v, "keys") : NULL, *hook = own ? class_lookup(v->as.map.parent, "__getattribute__") : NULL;
+    *bound = !own;
+    if (!own) return method_function(c, v, "keys");
+    return own->type == SPY_FUNCTION && own->ctx == c && (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) ? own : NULL;
+}
 /* Whether plain instance v has no keys that its namespace, its class or
  * an attribute hook could give, so that dict() and dict.update() take
  * its pairs. */
@@ -24191,7 +24200,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates != -1;
     /* As do dict() and dict.update() of pairs. */
     int pairs = callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT);
-    if (!argc || (mapping ? !method_function(c, argv[0], "keys") :
+    if (!argc || (mapping ? !keys_function(c, argv[0], &(int){0}) :
                   !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) &&
                   !(updates != -1 && compared_items(c, set_storage(callee->as.method.self), argv[0], (int)((intptr_t)function->as.native.data & 255))) && !(updates == B_SET_DISJOINT && set_storage(argv[0]) != argv[0]) &&
                   !(pairs && hashed_pairs(c, argv[0])) && !((sets || pairs) && zip_hashed(c, argv[0])))) return -1;
@@ -24492,7 +24501,7 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
  * (KEY_KEYS) when keys() or __getitem__ is on the machine, gives them on the machine (BLOCK_CONSUME, EXTEND_ITEMS);
  * else 0, a extended into the display and released. */
 static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg, int hints) {
-    SPYValue *keys = a->type == SPY_INSTANCE && display->type == SPY_DICT ? method_function(c, a, "keys") : NULL;
+    SPYValue *keys = a->type == SPY_INSTANCE && display->type == SPY_DICT ? keys_function(c, a, &(int){0}) : NULL;
     int merging = keys && (machine_function(c, keys) || getitem_function(c, a));
     if (!merging && ((!(machine_source(c, a) && (!called_iterator(a) || sequence_iterator(a) || next_calls(c, a))) &&
                       !(is_set(display) && hashed_items(c, a))) || is_dict(display))) {
@@ -24938,14 +24947,16 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         return NULL;
     }
     if (s->keyed == KEY_ITER || s->keyed == KEY_KEYS) {
-        SPYValue *function = s->keyed == KEY_ITER ? iter_function(c, items) : method_function(c, items, "keys");
+        int bound = 1;
+        SPYValue *function = s->keyed == KEY_ITER ? iter_function(c, items) : keys_function(c, items, &bound);
         if (!machine_function(c, function)) {
             /* A generator function's keys() makes its generator at once. */
-            if ((result = call(c, function, 1, &items))) key_took(c, m, result);
+            if ((result = call(c, function, (size_t)bound, &items))) key_took(c, m, result);
             return NULL;
         }
         item = spy_retain(items);
-        return (*env = function_env(c, function, 1, &item, NULL, 1)) ? spy_retain(function) : NULL;
+        if (!bound) spy_release(item);
+        return (*env = function_env(c, function, (size_t)bound, &item, NULL, 1)) ? spy_retain(function) : NULL;
     }
     if (s->keyed == KEY_ITEMS) {
         /* The merged mapping's value of the key it was fed: its Python

@@ -1941,6 +1941,12 @@ int main(int argc, char **argv) {
                "def hashed():\n    return {Hashed('k'): 12}[Hashed('k')]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hashed()", "hashed.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 2);
+    /* So does the keys function an instance holds, merged by dict(). */
+    execute(c, "class Held:\n    def __init__(self):\n        def keys():\n            for i in range(3000): pass\n            return [19]\n"
+               "        self.keys = keys\n    def __getitem__(self, k): return k\n"
+               "def held():\n    return dict(Held())[19]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "held()", "held.py"), SPY_STOP_STEPS, &pauses)) == 19 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
