@@ -849,6 +849,20 @@ static const char *const programs[] = {
     "    return out\n"
     "print(yq())\n",
 
+    "def ym(x):\n"
+    "    if x == 3: raise StopIteration([x])\n"
+    "    if x == 4: raise KeyError(x)\n"
+    "    return (x, [x])\n"
+    "def yn(source):\n"
+    "    r = yield from source\n"
+    "    yield r\n"
+    "def yo():\n"
+    "    out = [list(yn(map(ym, [1, 2]))), list(yn(map(ym, [1, 3, 2])))]\n"
+    "    try: list(yn(map(ym, [4])))\n"
+    "    except KeyError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(yo())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

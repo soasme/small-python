@@ -30446,10 +30446,16 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
 static ALWAYS_INLINE int next_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     return v->type == SPY_ITERATOR || v->type == SPY_INSTANCE ? next_call_of(c, m, v, fn, env) : 0;
 }
+/* Whether map v, of no generator or adapter, calls a function on the
+ * machine for its item (next_call_of). */
+static NO_INLINE int map_calls(SPYContext *c, SPYValue *v) {
+    SPYValue *callee = v->type == SPY_ITERATOR && v->as.iterator.kind == I_MAP && !v->as.iterator.removed ? v->as.iterator.source->as.seq.items[0] : NULL;
+    return callee && (machine_function(c, callee) || bound_function(c, callee));
+}
 /* The next step of generator machine m's yield from of a delegate it
  * does not resume as a generator, resumed by m's resumer or not: a call
  * returning into m as *kind, with *env its environment, of an iterator
- * instance's Python __next__, its send of a value not None (CALL_DELEGATE),
+ * instance's Python __next__ or a map's function (map_calls), its send of a value not None (CALL_DELEGATE),
  * its throw of a throw's exception (CALL_THROWN), or its close for a
  * close, that exception on m's stack (CALL_CLOSED); else NULL, the
  * delegate sent to in C, *item what it yields or NULL, the delegation
@@ -30463,7 +30469,9 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
     if (function && machine_function(c, function) && !(closing && machine_push(c, m, spy_retain(thrown)))) {
         SPYValue *args[] = {spy_retain(d), next || closing ? NULL : spy_retain(thrown ? thrown : sent)};
         if ((*env = function_env(c, function, next || closing ? 1 : 2, args, NULL, 1))) call = spy_retain(function);
-    } else if (!c->error_type[0]) *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
+    } else if (!(next && map_calls(c, d) && next_call_of(c, m, d, &call, env) > 0) && !c->error_type[0])
+        /* An ended map raises StopIteration here. */
+        *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
     spy_release(sent); spy_release(thrown);
     if (!call && !*item) { if (thrown && c->handled) delegate_raised(c); finish_delegate(c, m); }
     return call;

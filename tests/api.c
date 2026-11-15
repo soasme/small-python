@@ -1895,6 +1895,12 @@ int main(int argc, char **argv) {
                "def resumed():\n    return sum(delegated())\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "resumed()", "resumed.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
+    /* So does a yield from of a map of a Python function. */
+    execute(c, "def doubled(x):\n    for i in range(3000): pass\n    return 2 * x\n"
+               "def mapped():\n    yield from map(doubled, [1, 2])\n"
+               "def remapped():\n    return sum(mapped())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "remapped()", "remapped.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

@@ -326,7 +326,8 @@ These run as machines on the heap, in one native activation of
 - the generator a `yield from` delegates to, or the coroutine an `await`
   awaits, and those it delegates to in turn, when a step above resumes
   the delegating generator, a generator in a `yield from` of a builtin
-  iterator that such a step resumes, and the async generator whose `asend` or
+  iterator that such a step resumes, the Python function of a map that
+  `yield from` takes, and the async generator whose `asend` or
   `__anext__` an `await` or `async for` awaits, when it waits at a
   `yield` or has not started;
 - generators, maps, and instances whose class has a Python `__iter__`,

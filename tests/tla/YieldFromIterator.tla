@@ -26,13 +26,15 @@
 (* where it's __next__ returns 1, then raises StopIteration(8).            *)
 (* Each of it's send, throw and close is defined (send and throw return 7, *)
 (* close returns None), raises ValueError when called, is missing, or is   *)
-(* broken: looking it up raises ZeroDivisionError. The outcome is the      *)
+(* broken: looking it up raises ZeroDivisionError. Or it is a map whose    *)
+(* Python function acts as that __next__, and has none of the three        *)
+(* methods. The outcome is the                                             *)
 (* step's result or exception, the methods it called, and whether g        *)
 (* finished.                                                               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Kinds == {"defined", "raises", "missing", "broken"}
+Kinds == {"defined", "raises", "missing", "broken", "map"}
 Programs == [kind : Kinds, step : {"close", "throw", "send", "next", "loop", "nested", "consume"}, first : BOOLEAN]
 
 VARIABLES program, outcome

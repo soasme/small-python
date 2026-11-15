@@ -14,6 +14,12 @@ def iterator(kind, called):
             return 1
         called.append("next")
         raise StopIteration(8)
+    if kind == "map":
+        def function(x):
+            for _ in ():
+                pass
+            return __next__(None)
+        return map(function, [0, 1])
     body = {"__iter__": lambda self: self, "__next__": __next__}
     if kind == "defined":
         def send(self, value):
