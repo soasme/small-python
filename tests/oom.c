@@ -898,6 +898,26 @@ static const char *const programs[] = {
     "    return yl\n"
     "print(ye())\n",
 
+    "class YE(Exception):\n"
+    "    def __init__(self, *a):\n"
+    "        super().__init__(*a)\n"
+    "        self.kept = [a]\n"
+    "def yf(source):\n"
+    "    try:\n"
+    "        yield from source\n"
+    "    except YE as e:\n"
+    "        yield e.kept\n"
+    "def yg():\n"
+    "    out = []\n"
+    "    for args in ((YE,), (YE, 1), (YE, (2, 3), None)):\n"
+    "        g = yf(map(str, [1, 2])); next(g)\n"
+    "        out.append(g.throw(*args))\n"
+    "    g = yf([1]); next(g)\n"
+    "    try: g.throw(KeyError, 'k')\n"
+    "    except KeyError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(yg())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

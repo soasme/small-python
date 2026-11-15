@@ -1911,6 +1911,12 @@ int main(int argc, char **argv) {
                "def dropped():\n    g = dropping()\n    next(g)\n    del g\n    return closings[0]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "dropped()", "dropped.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So does an exception class's __init__ a throw into it makes. */
+    execute(c, "class Made(Exception):\n    def __init__(self, n):\n        for i in range(3000): pass\n        self.n = n\n"
+               "def made():\n    try:\n        yield from [1, 2]\n    except Made as e:\n        yield e.n\n"
+               "def thrownclass():\n    g = made()\n    next(g)\n    return g.throw(Made, 8)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "thrownclass()", "thrownclass.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

@@ -18,7 +18,8 @@
 (*     def g():                                                            *)
 (*         return (yield from it)                                          *)
 (*                                                                         *)
-(* after one next(), then one step: close(), throw(KeyError()), send(1),   *)
+(* after one next(), then one step: close(), throw(KeyError()) or         *)
+(* throw(KeyError), the class made at a delegator's raise, send(1),        *)
 (* next(), list() of an outer generator, yield ("ret", (yield from g)), or *)
 (* throw(KeyError()) into one, return (yield from g), started instead of   *)
 (* g, list() of g itself, or dropping g's last reference, which closes    *)
@@ -38,14 +39,14 @@
 EXTENDS Naturals, Sequences
 
 Kinds == {"defined", "raises", "missing", "broken", "map", "builtin"}
-Programs == [kind : Kinds, step : {"close", "throw", "send", "next", "loop", "nested", "consume", "drop"}, first : BOOLEAN]
+Programs == [kind : Kinds, step : {"close", "throw", "throwclass", "send", "next", "loop", "nested", "consume", "drop"}, first : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
 Pending == [result |-> "pending", called |-> "", finished |-> FALSE]
 
-Method(step) == CASE step \in {"close", "drop"} -> "close" [] step \in {"throw", "nested"} -> "throw" [] step \in {"next", "loop", "consume"} -> "next" [] OTHER -> "send"
+Method(step) == CASE step \in {"close", "drop"} -> "close" [] step \in {"throw", "throwclass", "nested"} -> "throw" [] step \in {"next", "loop", "consume"} -> "next" [] OTHER -> "send"
 
 Run(p) ==
     LET m == Method(p.step)
@@ -65,7 +66,7 @@ Run(p) ==
          [] p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]
          [] p.kind = "broken" -> [result |-> "ZeroDivisionError", called |-> called, finished |-> p.step = "send"]
          \* No throw: the exception is raised in the delegator.
-         [] p.step \in {"throw", "nested"} -> [result |-> "KeyError", called |-> called, finished |-> TRUE]
+         [] p.step \in {"throw", "throwclass", "nested"} -> [result |-> "KeyError", called |-> called, finished |-> TRUE]
          [] OTHER -> [result |-> "AttributeError", called |-> called, finished |-> TRUE]
 
 Init == program \in Programs /\ outcome = Pending

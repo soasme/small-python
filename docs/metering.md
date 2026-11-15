@@ -319,7 +319,8 @@ These run as machines on the heap, in one native activation of
   `enumerate` or `filter` calls;
 - the Python `__init__` of the exception class, and then of the cause's
   class, that a `raise` statement's call of the class runs, or a
-  generator's `throw` of the class, and the Python `__new__` either
+  generator's `throw` of the class, also into a `yield from` of a builtin
+  iterator, and the Python `__new__` either
   call runs, also when a raise calls the class again with the exception
   another class's `__new__` made, and the Python `__call__` of the
   class's metaclass that a `raise` statement calls in their place;
@@ -355,7 +356,7 @@ These run as machines on the heap, in one native activation of
   `next` or by their `__next__` and `send` methods, or thrown into or
   closed at a `yield` by `throw` (with one argument, or a class, a value
   and a traceback or `None`) or `close`, also in a `yield from` of a
-  builtin iterator, given an exception instance, and
+  builtin iterator, and
   coroutines resumed by `send`, also through their `__await__` wrapper,
   whose `__next__` and `next` of it send `None`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`, also

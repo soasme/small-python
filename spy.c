@@ -23618,6 +23618,11 @@ static Machine *innermost(Machine *m) {
         m = m->delegate->as.generator.machine;
     return m;
 }
+/* Whether generator machine m raises a throw at its own yield, or yield
+ * from of a builtin iterator, which has no throw. */
+static NO_INLINE int raises_at(Machine *m) {
+    return m->awaiting == AWAIT_YIELD || (m->awaiting == AWAIT_DELEGATE && m->delegate->type == SPY_ITERATOR);
+}
 /* Whether a close of, or a throw of exception into, a generator or
  * coroutine raises at its yield on the machine (consume): one suspended
  * there, or delegating to a yield (delegating). */
@@ -23632,12 +23637,12 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     if (g->as.generator.machine->awaiting == AWAIT_DELEGATE && !(k && subclass(k, c->exceptions[X_BASE_EXCEPTION]))) return 0;
     /* An operation takes a close or throw in C (awaitable_method). */
     if (m->awaiting != AWAIT_DELEGATE || m->operation) return m->awaiting == AWAIT_YIELD;
-    /* Or at a yield from of an instance with a Python close, or throw of
-     * an exception instance, which it takes as thrown (delegate_next), or
-     * of a builtin iterator, which has neither; a throw of a class
-     * reaches it in C as given. */
-    if (exception && exception->type != SPY_INSTANCE) return 0;
+    /* Or at a yield from of a builtin iterator, which has neither close
+     * nor throw, or of an instance with a Python close, or throw of an
+     * exception instance, which it takes as thrown (delegate_next); a
+     * throw of a class reaches the instance in C as given. */
     if (m->delegate->type == SPY_ITERATOR) return 1;
+    if (exception && exception->type != SPY_INSTANCE) return 0;
     SPYValue *function = method_function(c, m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
     return function && machine_function(c, function);
 }
@@ -23942,10 +23947,11 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
-        /* A throw of a class and its value, and a traceback or None, into a yield, too. */
+        /* A throw of a class and its value, and a traceback or None, into a
+         * yield, or a yield from of a builtin iterator, too. */
         return (argc == (method == M_THROW) || (argc >= 2 && method == M_THROW && argv[0]->type == SPY_CLASS &&
                                                 (argc == 2 || argv[2]->type == SPY_NONE || argv[2]->type == SPY_TRACEBACK))) &&
-               throws_in(c, callee, argc ? argv[0] : NULL) && (argc < 2 || callee->as.generator.machine->awaiting == AWAIT_YIELD) ?
+               throws_in(c, callee, argc ? argv[0] : NULL) && (argc < 2 || raises_at(callee->as.generator.machine)) ?
                method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&

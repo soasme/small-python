@@ -75,6 +75,8 @@ def outcome(p):
             result = repr(gen.close())
         elif p["step"] in ("throw", "nested"):
             result = repr(top.throw(KeyError()))
+        elif p["step"] == "throwclass":
+            result = repr(top.throw(KeyError))
         elif p["step"] == "send":
             result = repr(gen.send(1))
         elif p["step"] == "loop":
