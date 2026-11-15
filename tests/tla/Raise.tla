@@ -19,7 +19,10 @@
 (* ValueError, ValueError(), 5, a class that is not an exception, a       *)
 (* ValueError subclass whose Python __init__ logs "e", one whose __init__  *)
 (* returns 1, one whose Python __new__ logs "n" before its __init__ logs   *)
-(* "i", one whose __new__ logs "n" and returns 5, or nothing (a bare      *)
+(* "i", one whose __new__ logs "n" and returns 5, one whose __new__ logs  *)
+(* "r" and returns a KeyError unless it is given one, so the raise calls   *)
+(* the class again with that KeyError, after the cause, the cause staying  *)
+(* on the KeyError, or nothing (a bare                                     *)
 (* raise, which takes no cause), or runs 1 / 0 instead; and CAUSE is      *)
 (* absent, TypeError, TypeError(), None, 5, a TypeError subclass whose     *)
 (* Python __init__ logs "c", or one whose Python __new__ logs "m" and      *)
@@ -30,7 +33,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Whats == {"class", "instance", "int", "other", "bare", "divide", "python", "returns", "new", "new_int"}
+Whats == {"class", "instance", "int", "other", "bare", "divide", "python", "returns", "new", "new_int", "renew"}
 Causes == {"absent", "class", "instance", "None", "int", "python", "new_other"}
 Programs == {p \in [what : Whats, cause : Causes, handling : BOOLEAN] : p.what \in {"bare", "divide"} => p.cause = "absent"}
 
@@ -44,12 +47,15 @@ Context(p) == IF p.handling THEN "KeyError" ELSE "None"
 Show(kind, cause, context, suppress) == kind \o " cause=" \o cause \o " context=" \o context \o " suppress=" \o suppress
 
 \* The Python __new__ and __init__ calls, the exception's and then a valid cause's.
-Inits(p) == (CASE p.what = "python" -> "e" [] p.what = "new" -> "ni" [] p.what = "new_int" -> "n" [] OTHER -> "") \o
-            (IF p.what \in {"class", "instance", "python", "new"}
-             THEN CASE p.cause = "python" -> "c" [] p.cause = "new_other" -> "m" [] OTHER -> ""
-             ELSE "")
+\* A renew's class is called again once the cause is made.
+CauseLog(p) == CASE p.cause = "python" -> "c" [] p.cause = "new_other" -> "m" [] OTHER -> ""
+Inits(p) == (CASE p.what = "python" -> "e" [] p.what = "new" -> "ni" [] p.what = "new_int" -> "n"
+                [] p.what = "renew" -> "r" [] OTHER -> "") \o
+            (IF p.what \in {"class", "instance", "python", "new", "renew"} THEN CauseLog(p) ELSE "") \o
+            (IF p.what = "renew" /\ p.cause # "int" THEN "r" ELSE "")
 
-Kind(p) == CASE p.what = "python" -> "PyError" [] p.what = "new" -> "PyNew" [] OTHER -> "ValueError"
+Kind(p) == CASE p.what = "python" -> "PyError" [] p.what = "new" -> "PyNew" [] p.what = "renew" -> "Renew"
+             [] OTHER -> "ValueError"
 
 Raised(p) ==
     CASE p.what = "bare" /\ p.handling -> Show("KeyError", "None", "None", "False")     \* the same exception again
@@ -57,6 +63,7 @@ Raised(p) ==
       [] p.what = "divide" -> Show("ZeroDivisionError", "None", Context(p), "False")
       [] p.what \in {"int", "other", "returns", "new_int"} -> Show("TypeError", "None", Context(p), "False")
       [] p.cause = "int" -> Show("TypeError", "None", Context(p), "False")
+      [] p.what = "renew" -> Show("Renew", "None", Context(p), "False")
       [] p.cause = "absent" -> Show(Kind(p), "None", Context(p), "False")
       [] p.cause = "None" -> Show(Kind(p), "None", Context(p), "True")
       [] p.cause = "python" -> Show(Kind(p), "PyCause", Context(p), "True")

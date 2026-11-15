@@ -41,6 +41,12 @@ class NewInt(ValueError):
         return 5
 
 
+class Renew(ValueError):
+    def __new__(cls, *args):
+        log.append("r")
+        return super().__new__(cls, *args) if args else KeyError()
+
+
 class NewOther(TypeError):
     def __new__(cls):
         log.append("m")
@@ -51,7 +57,8 @@ class NewOther(TypeError):
 
 
 WHATS = {"class": "ValueError", "instance": "ValueError()", "int": "5", "other": "NotAnException", "python": "PyError",
-         "returns": "Returns", "new": "PyNew", "new_int": "NewInt"}
+         "returns": "Returns", "new": "PyNew", "new_int": "NewInt",
+         "renew": "Renew"}
 CAUSES = {"class": "TypeError", "instance": "TypeError()", "None": "None", "int": "5", "python": "PyCause",
           "new_other": "NewOther"}
 
@@ -81,7 +88,8 @@ def outcome(p):
         del log[:]
         try:
             exec(code, {"NotAnException": NotAnException, "PyError": PyError, "PyCause": PyCause, "Returns": Returns,
-                         "PyNew": PyNew, "NewInt": NewInt, "NewOther": NewOther})
+                         "PyNew": PyNew, "NewInt": NewInt, "NewOther": NewOther,
+                         "Renew": Renew})
         except BaseException as error:
             results.append("%s cause=%s context=%s suppress=%s log=%s" % (
                 type(error).__name__, name(error.__cause__), name(error.__context__), error.__suppress_context__, "".join(log)))

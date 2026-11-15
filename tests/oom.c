@@ -527,6 +527,18 @@ static const char *const programs[] = {
     "    return r\n"
     "print(rn())\n",
 
+    "class NZ(Exception):\n"
+    "    def __new__(cls, *a): return super().__new__(cls, *a) if a else KeyError('k')\n"
+    "class NY(Exception):\n"
+    "    def __new__(cls, *a): return 3 if a else KeyError('y')\n"
+    "def nz():\n"
+    "    r = []\n"
+    "    for k in (NZ, NY):\n"
+    "        try: raise k from ValueError\n"
+    "        except Exception as e: r.append((e, e.__cause__, getattr(e, '__notes__', None)))\n"
+    "    return r\n"
+    "print(nz())\n",
+
     "class DX:\n"
     "    def __dir__(self): return iter(('q', 'p'))\n"
     "    def __index__(self): return True\n"

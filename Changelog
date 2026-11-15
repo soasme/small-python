@@ -109,6 +109,8 @@ Unreleased (0.10.0):
 - str.format's !r, !s and !a call an instance's Python __repr__ and __str__ without nesting on the C stack
 - ascii() calls a Python __repr__, and round() an ndigits' Python __index__, without nesting on the C stack
 - raise of a class, or from a cause class, calls its Python __new__ without nesting on the C stack
+- raise of a class whose call returns an exception of another class raises the class called with it,
+  noting a failure ("Normalization failed")
 - a memoryview's item, and a store into a bytearray or memoryview, call a Python __index__ without nesting
   on the C stack; a multi-dimensional memoryview's item converts its index before it fails
 - print(*objects) calls their Python __str__ without nesting on the C stack

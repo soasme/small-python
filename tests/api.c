@@ -1754,6 +1754,14 @@ int main(int argc, char **argv) {
                "def fresh():\n    try: raise Fresh from Fresh\n    except Fresh as e: return 7 if type(e.__cause__) is Fresh else 0\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "fresh()", "fresh.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* A raise of a class whose __new__ makes another exception raises the
+     * class with it, the first __new__ on the machine. */
+    execute(c, "class Renewed(Exception):\n    def __new__(cls, *a):\n        if a: return super().__new__(cls, *a)\n"
+               "        for i in range(3000): pass\n        return KeyError()\n"
+               "def renewed():\n    try: raise Renewed\n    except Renewed as e: return 8 if type(e.args[0]) is KeyError else 0\n"
+               "    except KeyError: return 1\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "renewed()", "renewed.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
     /* So does the Python __iter__ a comprehension's first iterable calls. */
     execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
                "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");
