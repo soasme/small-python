@@ -2339,6 +2339,12 @@ int main(int argc, char **argv) {
                "def run_plainly():\n    try: plainly().send(None)\n    except StopIteration as e: return e.value\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "run_plainly()", "plainly.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So does an asynchronous generator expression's Python __aiter__. */
+    execute(c, "class Aiters:\n    def __aiter__(self):\n        for i in range(3000): pass\n        return self\n"
+               "    async def __anext__(self): raise StopAsyncIteration\n"
+               "def aitered():\n    g = (x async for x in Aiters())\n    h = (x async for x in Aiters())\n    return 5\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "aitered()", "aitered.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

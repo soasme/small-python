@@ -22,15 +22,17 @@
 (* __anext__ returns 5, or a class whose __aiter__ returns 5; and BODY     *)
 (* appends x and then completes, breaks, or raises KeyError. A             *)
 (* comprehension program builds a list, set, or dict over the              *)
-(* generator. A syntax program compiles async for, async with, await,      *)
-(* or an asynchronous comprehension in a plain function. The outcome       *)
-(* is the values passed out, the items, and whether else ran, or the       *)
+(* generator, or a list over the class whose __anext__ returns 1 and       *)
+(* 2, its Python __aiter__ called as the comprehension is evaluated. A     *)
+(* syntax program compiles async for, async with, await, or an             *)
+(* asynchronous comprehension in a plain function. The outcome is the      *)
+(* values passed out, the items, and whether else ran, or the              *)
 (* exception.                                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [part : {"loop"}, source : {"agen", "class", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
-            \cup [part : {"comprehension"}, kind : {"list", "set", "dict"}]
+            \cup [part : {"comprehension"}, kind : {"list", "set", "dict", "class"}]
             \cup [part : {"syntax"}, construct : {"for", "with", "await", "comprehension"}]
 
 VARIABLES program, outcome
@@ -53,6 +55,7 @@ Loop(p) ==
 Comprehension(p) == CASE p.kind = "list" -> "['tick', 'tick'] [0, 1]"
                       [] p.kind = "set" -> "['tick', 'tick'] {0, 1}"
                       [] p.kind = "dict" -> "['tick', 'tick'] {0: 0, 1: 1}"
+                      [] p.kind = "class" -> "[] [1, 2]"
 
 Run(p) == CASE p.part = "loop" -> Loop(p)
             [] p.part = "comprehension" -> Comprehension(p)

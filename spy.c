@@ -29921,7 +29921,8 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
 static NO_INLINE int iter_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
     if (ins->op == BC_COMPREHENSION) {
         /* A comprehension's step runs again with the iterator under c->unbound. */
-        SPYValue *source = machine_pop(m), *iterator = iterator_returned(c, source, result, "__iter__");
+        SPYValue *source = machine_pop(m);
+        SPYValue *iterator = ins->node->a->op ? async_returned(c, source, result, 1) : iterator_returned(c, source, result, "__iter__");
         spy_release(source);
         return iterator && !machine_push(c, m, iterator) && !machine_push(c, m, spy_retain(c->unbound));
     }
@@ -32253,10 +32254,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_DEFAULT)
             a = machine_pop(m); function_default(c, m->stack[m->len - 1], n, a); break;
         CASE(BC_COMPREHENSION)
-            /* An instance's Python __iter__ is a call (iter_call). */
-            if (!n->a->op && m->stack[m->len - 1]->type == SPY_INSTANCE) {
+            /* An instance's Python __iter__ or __aiter__ is a call (iter_call). */
+            if (m->stack[m->len - 1]->type == SPY_INSTANCE) {
                 callee_env = NULL;
-                if ((value = iter_call(c, m, ins, "__iter__", &callee_env))) {
+                if ((value = iter_call(c, m, ins, n->a->op ? "__aiter__" : "__iter__", &callee_env))) {
                     if (value == c->unbound) { pc--; break; }
                     special = CALL_ITER; goto enter_special;
                 }

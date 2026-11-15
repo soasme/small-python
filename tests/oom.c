@@ -1767,6 +1767,25 @@ static const char *const programs[] = {
     "    return out\n"
     "print(aw())\n",
 
+    "class ACS:\n"
+    "    def __init__(self, bad): self.bad = bad\n"
+    "    def __aiter__(self):\n"
+    "        if self.bad: raise LookupError('aiter')\n"
+    "        self.i = 0\n"
+    "        return self\n"
+    "    async def __anext__(self):\n"
+    "        if self.i == 2: raise StopAsyncIteration\n"
+    "        self.i += 1\n"
+    "        return [self.i]\n"
+    "async def acb():\n"
+    "    return [x async for x in ACS(False)]\n"
+    "def ac():\n"
+    "    try: (x async for x in ACS(True))\n"
+    "    except LookupError as e: out = [str(e)]\n"
+    "    try: acb().send(None)\n"
+    "    except StopIteration as e: return out + e.value\n"
+    "print(ac())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

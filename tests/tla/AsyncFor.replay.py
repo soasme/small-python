@@ -93,6 +93,8 @@ def comprehension(kind):
     async def main():
         if kind == "list":
             return [x async for x in agen()]
+        if kind == "class":
+            return [x async for x in Counter()]
         if kind == "set":
             return {x async for x in agen()}
         return {x: x async for x in agen()}
