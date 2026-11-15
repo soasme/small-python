@@ -2331,6 +2331,14 @@ int main(int argc, char **argv) {
                "def run_ticked():\n    try: ticked().send(None)\n    except StopIteration as e: return e.value\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "run_ticked()", "ticked.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So does an async with's plain Python __aenter__ and __aexit__. */
+    execute(c, "class Done:\n    def __await__(self):\n        return 3\n        yield\n"
+               "class Plainly:\n    def __aenter__(self):\n        for i in range(3000): pass\n        return Done()\n"
+               "    def __aexit__(self, *a):\n        for i in range(3000): pass\n        return Done()\n"
+               "async def plainly():\n    async with Plainly() as v: return v\n"
+               "def run_plainly():\n    try: plainly().send(None)\n    except StopIteration as e: return e.value\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "run_plainly()", "plainly.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

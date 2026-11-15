@@ -14557,7 +14557,7 @@ typedef struct {
     size_t line;
     SPYValue *value;
 } ErrorState;
-enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BLOCK_WITH, BLOCK_ASYNC_WITH, BLOCK_CONSUME };
+enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BLOCK_WITH, BLOCK_CONSUME };
 /* A builtin taking an iterable's items one at a time (consumer_add): sum,
  * any, all, list or tuple; min or max keeping its best item in best; and a sum's float total while it compensates.
  * A set or frozenset adds each item, a dict each pair, counting them; a callee, owned, takes the items
@@ -15085,7 +15085,8 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
         size_t start = last;
         last = p->items[start].other;
         emit(c, p, BC_LEAVE, p->items[start].node, 0); patch(p, start, p->len);
-        emit(c, p, asynchronous ? BC_DELEGATE : BC_CALLN, p->items[start].node, asynchronous ? DELEGATE_AEXIT : 3);
+        emit(c, p, BC_CALLN, p->items[start].node, 3);
+        if (asynchronous) emit(c, p, BC_DELEGATE, p->items[start].node, DELEGATE_AEXIT);
         emit(c, p, BC_END_WITH, p->items[start].node, 0);
     }
 }
@@ -23820,14 +23821,13 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             c->handled = spy_retain(b->error ? b->other ? b->handled : b->error->value : b->other == 1 ? b[-1].handled : b->handled);
             m->pc = b->target; r->flow = FLOW_NORMAL; return 1;
         }
-        if (b->kind == BLOCK_WITH || b->kind == BLOCK_ASYNC_WITH) {
+        if (b->kind == BLOCK_WITH) {
             /* The flow waits in a cleanup block while the steps at its
-             * target call __exit__ (BC_CALLN) or await __aexit__'s result
-             * and end the statement (BC_END_WITH). */
+             * target call __exit__ or __aexit__ (BC_CALLN), await
+             * __aexit__'s result and end the statement (BC_END_WITH). */
             if (r->flow == FLOW_ERROR) b->error = save_error(c);
             if (c->error_type[0]) { pop_block(c, m, f); continue; }
             SPYValue *exit = b->value;
-            int asynchronous = b->kind == BLOCK_ASYNC_WITH;
             b->kind = BLOCK_CLEANUP; b->flow = r->flow;
             b->value = r->value; r->value = NULL;
             b->handled = c->handled;
@@ -23835,10 +23835,8 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             SPYValue *exception = b->error ? b->error->value : NULL;
             SPYValue *args[] = {exception ? exception->as.map.parent : c->none,
                                exception ? exception : c->none, exception_traceback(c, exception)};
-            SPYValue *awaitable = asynchronous ? call(c, exit, 3, args) : exit;
-            if (asynchronous) spy_release(exit);
-            int failed = !awaitable || machine_push(c, m, awaitable);
-            for (int i = 0; i < 3 && !failed && !asynchronous; i++) failed = machine_push(c, m, spy_retain(args[i]));
+            int failed = machine_push(c, m, exit);
+            for (int i = 0; i < 3 && !failed; i++) failed = machine_push(c, m, spy_retain(args[i]));
             if (failed) { pop_block(c, m, f); r->flow = FLOW_ERROR; continue; }
             m->pc = b->target; r->flow = FLOW_NORMAL; return 1;
         }
@@ -32569,8 +32567,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_AENTER) {
             a = machine_pop(m);
             b = special_method(c, a, "__aexit__");
-            SPYValue *enter = b ? special_method(c, a, "__aenter__") : NULL;
+            SPYValue *enter = b ? special_method(c, a, "__aenter__") : NULL, *function;
             if (!enter && !c->error_type[0]) manager_error(c, a, 1, b != NULL);
+            if (enter && enter->type == SPY_METHOD && (function = bound_function(c, enter))) {
+                /* A Python __aenter__ is a call, its value above the __aexit__ (with_enter). */
+                SPYValue *self = spy_retain(enter->as.method.self);
+                spy_retain(function); spy_release(enter); spy_release(a);
+                machine_push(c, m, b);
+                if (!(callee_env = function_env(c, function, 1, &self, NULL, 1))) { spy_release(function); continue; }
+                value = function; goto enter_call;
+            }
             value = enter ? call(c, enter, 0, NULL) : NULL;
             spy_release(enter);
             if (value) { /* A push that fails leaves the error, and unwinding releases what is pushed. */
@@ -32579,15 +32585,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             break;
         }
-        CASE(BC_AWITH) {
-            a = machine_pop(m); b = machine_pop(m);
-            Block *block = push_block(c, m, BLOCK_ASYNC_WITH, ins);
-            if (block) {
-                block->value = spy_retain(b);
-                machine_push(c, m, spy_retain(a));
-            }
+        CASE(BC_AWITH)
+            /* The awaited __aenter__ value above the __aexit__. */
+            value = machine_pop(m);
+            with_entered(c, m, ins, machine_pop(m), value);
             break;
-        }
         CASE(BC_END_WITH) {
             a = machine_pop(m);
             Block *block = &m->blocks[m->block_len - 1];

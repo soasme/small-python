@@ -45,6 +45,29 @@ class Manager:
         return self.exit == "true"
 
 
+class Then:
+    def __init__(self, value):
+        self.value = value
+
+    def __await__(self):
+        yield "tick"
+        return self.value
+
+
+class Plain(Manager):
+    def __aenter__(self):
+        self.log.append("aenter")
+        if self.enter == "raise":
+            raise ValueError
+        return Then(self)
+
+    def __aexit__(self, kind, value, traceback):
+        self.log.append("aexit:" + ("None" if kind is None else kind.__name__))
+        if self.exit == "raise":
+            raise RuntimeError
+        return Then(self.exit == "true")
+
+
 class Sync:
     def __enter__(self):
         return self
@@ -70,7 +93,7 @@ def manager(p):
     log = []
 
     async def main():
-        async with Manager(log, p["enter"], p["exit"]):
+        async with (Plain if p["methods"] == "plain" else Manager)(log, p["enter"], p["exit"]):
             log.append("body")
             if p["body"] == "raise":
                 raise KeyError
