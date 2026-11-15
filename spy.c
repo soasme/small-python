@@ -23390,6 +23390,15 @@ static SPYValue *method_function(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *function = !hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE) ? class_lookup(cls, name) : NULL;
     return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
 }
+/* Whether plain instance v has no keys that its namespace, its class or
+ * an attribute hook could give, so that dict() and dict.update() take
+ * its pairs. */
+static int keyless(SPYValue *v) {
+    if (!plain_instance(v) || name_local(v, "keys")) return 0;
+    SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
+    return (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) && !class_lookup(cls, "keys") &&
+           !class_lookup(cls, "__getattr__");
+}
 /* Whether instance v iterates by a getitem_function, its class having no
  * __iter__. */
 static int getitem_iterated(SPYContext *c, SPYValue *v) {
@@ -23525,8 +23534,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                (method == M_SEND || (method == M_NEXT && (callee->type == SPY_GENERATOR || wrapped))) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
     /* dict() and dict.update() merge an instance as a mapping, on the
-     * machine when its keys() is Python (method_function). */
-    int mapping = argc && argv[0]->type == SPY_INSTANCE &&
+     * machine when its keys() is Python (method_function); one with no
+     * keys as pairs. */
+    int mapping = argc && argv[0]->type == SPY_INSTANCE && !keyless(argv[0]) &&
                   (callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT));
     /* dict.fromkeys, as a set, hashes its keys on the machine. */
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
@@ -23687,8 +23697,9 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
                  which == 6 ? spy_retain(callee) : set_copy_type(c, callee, callee->type);
     /* dict.fromkeys's keys take its value, None by default. */
     SPYValue *value = id != B_FROMKEYS ? NULL : start ? start : spy_none(c);
-    /* dict() and dict.update() of an instance merge it as a mapping (consumer_id). */
-    int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE;
+    /* dict() and dict.update() of an instance with keys merge it as a mapping (consumer_id). */
+    int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE &&
+                  !keyless(generator);
     int hints = id == B_LIST || id == B_SORTED || (id == B_EXTEND && callee->type == SPY_LIST);
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;

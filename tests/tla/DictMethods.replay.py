@@ -49,6 +49,11 @@ SOURCES = {
     "ctor_equal": "a = dict(one=1, two=2, three=3)\nb = {'one': 1, 'two': 2, 'three': 3}\nc = dict(zip(['one', 'two', 'three'], [1, 2, 3]))\nd = dict([('two', 2), ('one', 1), ('three', 3)])\ne = dict({'three': 3, 'one': 1, 'two': 2})\nf = dict({'one': 1, 'three': 3}, two=2)\nresult = a == b == c == d == e == f",
     "ctor_bad_item": 'result = dict([(1, 2, 3)])',
     "ctor_bad_element": 'result = dict([1])',
+    "ctor_iter_pairs": "class P:\n    def __init__(s, items): s.items = items\n    def __iter__(s):\n        for _ in (): pass\n"
+                       "        return iter(s.items)\nd = {'x': 0}\nd.update(P([('x', 1), 'yz']))\n"
+                       "result = [dict(P([('a', 1), ['b', 2], ('a', 3)])), d]",
+    "ctor_iter_bad_pair": "class P:\n    def __iter__(s):\n        for _ in (): pass\n        return iter([('a', 1), (1, 2, 3)])\n"
+                          "result = dict(P())",
     "ctor_two_positional": 'result = dict({}, {})',
     "fromkeys": "result = (dict.fromkeys('ab'), dict.fromkeys([1, 2], 0), type(Missing.fromkeys('a')).__name__)",
     "fromkeys_shared": "d = dict.fromkeys('ab', [])\nd['a'].append(1)\nresult = d",

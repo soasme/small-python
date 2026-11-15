@@ -539,6 +539,18 @@ static const char *const programs[] = {
     "    return r\n"
     "print(nz())\n",
 
+    "class DP:\n"
+    "    def __init__(self, items): self.items = items\n"
+    "    def __iter__(self): return iter(self.items)\n"
+    "def dp():\n"
+    "    d = {0: 0}; d.update(DP([(1, 'a'), 'bc']))\n"
+    "    r = [dict(DP([(2, 3), [4, 5]])), d]\n"
+    "    for items in ([(1, 2, 3)], [7]):\n"
+    "        try: dict(DP(items))\n"
+    "        except (TypeError, ValueError) as e: r.append(e)\n"
+    "    return r\n"
+    "print(dp())\n",
+
     "class DX:\n"
     "    def __dir__(self): return iter(('q', 'p'))\n"
     "    def __index__(self): return True\n"

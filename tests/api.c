@@ -1762,6 +1762,11 @@ int main(int argc, char **argv) {
                "    except KeyError: return 1\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "renewed()", "renewed.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
+    /* So do dict() and dict.update() of pairs a Python __iter__ gives. */
+    execute(c, "class Paired:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([(1, 2), (3, 4)])\n"
+               "def paired():\n    d = dict(Paired()); d.update(Paired())\n    return sum(d) + len(d)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "paired()", "paired.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
     /* So does the Python __iter__ a comprehension's first iterable calls. */
     execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
                "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");
