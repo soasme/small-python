@@ -446,7 +446,8 @@ These run as machines on the heap, in one native activation of
   `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and binary
   operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
   and `__contains__` methods of instances, also of a builtin's subclass
-  defining them before the builtin, and of classes from their metaclass,
+  defining them before the builtin, its reflected comparison also when the
+  other operand is a value of the builtin, and of classes from their metaclass,
   where a step of their own reaches them, a builtin subclass's
   `__getitem__` and a dictionary
   subclass's `__missing__` for an absent `None`, `bool`, `int`, `float`

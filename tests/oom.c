@@ -974,6 +974,22 @@ static const char *const programs[] = {
     "    return out\n"
     "print(mg())\n",
 
+    "class RS(set):\n"
+    "    def __eq__(self, o):\n"
+    "        for _ in (): pass\n"
+    "        return 'own'\n"
+    "class RL(list):\n"
+    "    def __eq__(self, o): return NotImplemented\n"
+    "    def __ge__(self, o): return [o]\n"
+    "class RT(tuple):\n"
+    "    def __lt__(self, o): raise KeyError(o)\n"
+    "def rc():\n"
+    "    out = [{1} == RS({1}), [1] == RL([1]), [0] <= RL([1])]\n"
+    "    try: (1,) > RT((0,))\n"
+    "    except KeyError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(rc())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

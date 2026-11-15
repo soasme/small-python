@@ -1931,6 +1931,11 @@ int main(int argc, char **argv) {
                "def matched():\n    match Sized([4, 6]):\n        case Values.one: return 0\n        case [a, b]: return a + b\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "matched()", "matched.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 2);
+    /* So does the reflected comparison of a builtin's subclass. */
+    execute(c, "class Reflected(set):\n    def __eq__(self, o):\n        for i in range(3000): pass\n        return 11\n"
+               "def reflected():\n    return {0} == Reflected({1})\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "reflected()", "reflected.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

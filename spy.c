@@ -28491,10 +28491,17 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (x->type != SPY_INSTANCE && !metaclassed(x)) {
             /* A builtin's operator comes after the reflected method that
              * y's subclass of its type overrides, but a set's or dict's
-             * in-place one, a number method, before. */
+             * in-place one, a number method, before; its comparison after
+             * the subclass's reflected one. */
             SPYValue *left = value_class(c, x), *right = value_class(c, y);
             int token = o ? o->token : 0;
-            if (!o || right == left || !subclass(right, left) || class_lookup(right, reflected) == class_lookup(left, reflected) ||
+            if (!o) {
+                if (rich < 0 || right == left || !subclass(right, left) ||
+                    !(function = rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
+                self = y; other = x; phase = OPERATOR_REFLECTED;
+                goto found;
+            }
+            if (right == left || !subclass(right, left) || class_lookup(right, reflected) == class_lookup(left, reflected) ||
                 (kind == OPERATE_INPLACE && ((x->type == SPY_SET && (token == '|' || token == '&' || token == '-' || token == '^')) ||
                                              (x->type == SPY_DICT && token == '|'))) ||
                 !(function = item_function(c, y, reflected))) return NULL;

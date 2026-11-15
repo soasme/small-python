@@ -86,6 +86,11 @@ SOURCES = {
                             "    def __ge__(s, o): t(s.n + '>=' + o.n); return NotImplemented\n"
                             "class F(E): pass\n"
                             "result = (E('a') < F('b'), F('c') < E('d'), E('e') >= F('f'))",
+    "builtin_sub_reflected": "class S(set):\n    def __eq__(s, o):\n        for _ in (): pass\n        t('set=='); return 'own'\n"
+                             "class L(list):\n    def __eq__(s, o): t('list=='); return NotImplemented\n"
+                             "    def __ge__(s, o): t('list>='); return 'ge'\n"
+                             "class T(tuple):\n    def __gt__(s, o): t('tuple>'); return NotImplemented\n"
+                             "result = ({1} == S({1}), [1] == L([1]), (2,) < T((1,)), [0] <= L([1]))",
     "dict_key_eq": "class E:\n    def __init__(s, n, v=''): s.n, s.v = n, v\n    def __hash__(s): return 1\n"
                    "    def __eq__(s, o): t(s.n + '==' + o.n); return s.v == o.v\n"
                    "result = ({E('a'): 1, E('b', 'x'): 2} == {E('c'): 1, E('d', 'x'): 2}, {E('e'): 1} != {E('f', 'y'): 1})",

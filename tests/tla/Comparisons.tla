@@ -41,7 +41,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
           "store_keeps_key", "seq_nested", "in_seq_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
-          "ne_by_eq", "sub_object_reflected", "dict_key_eq"}
+          "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -164,6 +164,10 @@ Case(c) ==
       \* __eq__ of each entry of the same hash there, the entry's key first
       \* (building each dict compares its colliding keys first)
       [] c = "dict_key_eq" -> <<"(True, True)", <<"'a==b'", "'c==d'", "'c==a'", "'c==b'", "'d==b'", "'f==e'">>>>
+      \* a builtin's value compared with an instance of its type's subclass:
+      \* the subclass's reflected method first, its NotImplemented going on
+      \* with the builtin's own comparison
+      [] c = "builtin_sub_reflected" -> <<"('own', True, False, 'ge')", <<"'set=='", "'list=='", "'tuple>'", "'list>='">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 

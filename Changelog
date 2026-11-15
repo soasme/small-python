@@ -175,6 +175,8 @@ Unreleased (0.10.0):
 - throw() of a class into a yield from of an instance calls its Python throw without nesting on the C stack
 - a match statement's patterns call a Python __eq__, __len__, get, __instancecheck__ or getter without nesting
   on the C stack
+- a comparison with an instance of a builtin type's subclass calls its reflected Python method without nesting
+  on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
