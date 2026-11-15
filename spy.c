@@ -133,7 +133,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
        F_NAMESPACE = 131072 /* A class body's def, class, annotated assignment or del of a name: a binding through its namespace. */,
-       F_LOADED = 262144 /* A class body's load of a name: through its namespace (name_load). */ };
+       F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -7909,7 +7909,8 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = 2;
         return scope_node(c, scope, n->a);
     case N_NAME:
-        if (scope->kind == S_CLASS) n->flags |= F_LOADED;
+        /* So does code exec() and eval() run, whose locals may be a mapping (name_load). */
+        if (scope->kind == S_CLASS || (scope->kind == S_MODULE && c->string_source)) n->flags |= F_LOADED;
         return scope_record(c, scope, n, S_USE);
     case N_STRING: return n->annotate ? scope_string_annotation(c, n) : 0;
     case N_GLOBAL: case N_NONLOCAL:
@@ -7939,7 +7940,8 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         return 0;
     case N_ASSIGN:
         /* An augmented assignment's name is loaded too. */
-        if (scope->kind == S_CLASS && n->op != '=' && n->a->kind == N_NAME) n->a->flags |= F_LOADED;
+        if ((scope->kind == S_CLASS || (scope->kind == S_MODULE && c->string_source)) && n->op != '=' && n->a->kind == N_NAME)
+            n->a->flags |= F_LOADED;
         if (scope_node(c, scope, n->b) || scope_target(c, scope, n->a, 1)) return -1;
         for (Node *target = n->args; target; target = target->next) if (scope_target(c, scope, target, 1)) return -1;
         return 0;

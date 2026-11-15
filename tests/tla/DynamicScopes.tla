@@ -10,7 +10,8 @@
 (* refers to it; exec() cannot rebind or add a function's local variables, *)
 (* and a function's locals() is an independent snapshot, while a frame's   *)
 (* f_locals writes through; and a class body's eval() sees the names       *)
-(* bound so far in the body.                                               *)
+(* bound so far in the body. A locals mapping's own __getitem__ loads     *)
+(* exec()'s names, a KeyError falling back to the globals.                 *)
 (*                                                                         *)
 (* A program runs one of these in a function with local x = 1 (or in a     *)
 (* class body with a = 1): exec("x = 2") then x; exec("y = 3") then        *)
@@ -18,13 +19,16 @@
 (* an inner function's eval("x") with and without its own reference to x;  *)
 (* d = locals(), d["x"] = 5, then x and locals()["x"]; l = locals(),       *)
 (* x = 2, then l["x"]; sys._getframe().f_locals["x"] = 10 then x;          *)
-(* eval("q", {"q": 2}, {"q": 3}); or the class body's eval("a + 1"). The   *)
-(* outcome is the result or the exception.                                 *)
+(* eval("q", {"q": 2}, {"q": 3}); the class body's eval("a + 1"); or      *)
+(* exec("r = q", {"q": 2}, m) then m["r"] for m a mapping whose Python     *)
+(* __getitem__ has q = 3, has no q, or raises LookupError. The outcome is  *)
+(* the result or the exception.                                            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Cases == {"exec_rebind", "exec_new", "exec_mapping", "eval_local", "eval_free", "eval_free_referenced",
-          "locals_write", "locals_snapshot", "frame_locals", "eval_mappings", "class_eval"}
+          "locals_write", "locals_snapshot", "frame_locals", "eval_mappings", "class_eval", "exec_custom_hit",
+          "exec_custom_miss", "exec_custom_error"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -43,6 +47,9 @@ Run(p) == CASE p.case = "exec_rebind" -> "1"                   \* the snapshot c
             [] p.case = "frame_locals" -> "10"                 \* f_locals writes through
             [] p.case = "eval_mappings" -> "3"
             [] p.case = "class_eval" -> "2"
+            [] p.case = "exec_custom_hit" -> "3"
+            [] p.case = "exec_custom_miss" -> "2"            \* the KeyError falls back to the globals
+            [] p.case = "exec_custom_error" -> "LookupError"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -54,4 +61,7 @@ Done == outcome # Pending
 \* Only a frame's f_locals changes a local variable from outside the code.
 LocalsProtected == Done /\ program.case \in {"exec_rebind", "locals_write", "locals_snapshot"} =>
     outcome \in {"1", "(1, 1)"}
+
+\* A locals mapping is searched before the globals, by its own __getitem__.
+LocalsFirst == Done /\ program.case \in {"eval_mappings", "exec_custom_hit"} => outcome = "3"
 =============================================================================

@@ -299,7 +299,8 @@ These run as machines on the heap, in one native activation of
   for the names the body loads, and the new class's
   `__set_name__` and `__init_subclass__` calls; the type parameters,
   generic base and alias that a generic `def` or `class` or a `type`
-  statement makes;
+  statement makes; the `__getitem__` of a locals mapping for the names
+  that code `exec` and `eval` run loads;
 - `exec` and `eval` of source, also of interactive input (mode
   `'single'`) and the Python `sys.displayhook` its values go to, and the
   module of source an `import` statement runs;

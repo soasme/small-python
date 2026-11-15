@@ -76,10 +76,40 @@ def class_eval():
     return C.b
 
 
+class Custom(dict):
+    def __getitem__(self, key):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        if key == "q" and self.mode == "error":
+            raise LookupError(key)
+        if key == "q" and self.mode == "hit":
+            return 3
+        return dict.__getitem__(self, key)
+
+
+def exec_custom(mode):
+    m = Custom()
+    m.mode = mode
+    exec("r = q", {"q": 2}, m)
+    return dict.__getitem__(m, "r")
+
+
+def exec_custom_hit():
+    return exec_custom("hit")
+
+
+def exec_custom_miss():
+    return exec_custom("miss")
+
+
+def exec_custom_error():
+    return exec_custom("error")
+
+
 def outcome(p):
     try:
         return repr(globals()[p["case"]]())
-    except NameError as error:
+    except (NameError, LookupError) as error:
         return type(error).__name__
 
 

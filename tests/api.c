@@ -1840,6 +1840,11 @@ int main(int argc, char **argv) {
                "def checked():\n    return isinstance(1, ((str, (Kept,)),)) + isinstance(1, Kept) + issubclass(int, ((int,),))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "checked()", "checked.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* So do exec()'s and eval()'s loads through a locals mapping's Python __getitem__. */
+    execute(c, "class Mapped(dict):\n    def __getitem__(self, k):\n        for i in range(3000): pass\n        return dict.__getitem__(self, k)\n"
+               "def mapped():\n    m = Mapped(a=1)\n    exec('b = a + a', {}, m)\n    return eval('a + b', {}, m)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "mapped()", "mapped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

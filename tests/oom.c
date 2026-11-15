@@ -656,6 +656,20 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ic())\n",
 
+    "class XL(dict):\n"
+    "    def __getitem__(self, k):\n"
+    "        if k == 'boom': raise LookupError(k)\n"
+    "        return dict.__getitem__(self, k)\n"
+    "def xl():\n"
+    "    m = XL(a=1)\n"
+    "    exec('b = a + g\\nb += a\\nc = [len(str(b))]', {'g': 2}, m)\n"
+    "    try: exec('boom', {}, m)\n"
+    "    except LookupError: pass\n"
+    "    try: eval('nope', {}, m)\n"
+    "    except NameError: pass\n"
+    "    return dict(m), eval('a + b', {}, m)\n"
+    "print(xl())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"
