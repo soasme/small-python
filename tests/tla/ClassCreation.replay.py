@@ -21,11 +21,18 @@ class InitOnly(type):
         log.append("init")
         super().__init__(name, bases, ns)
 
+class Logged(dict):
+    def __setitem__(self, key, value):
+        for _ in (): pass
+        if key in ("__module__", "__static_attributes__"):
+            log.append("module" if key == "__module__" else "static")
+        super().__setitem__(key, value)
+
 class Prepare(Meta):
     @classmethod
     def __prepare__(mcls, name, bases, **kw):
         log.append("prepare")
-        return {}
+        return Logged() if logged else {}
 
 class Hook:
     def __init_subclass__(cls, **kw):
@@ -71,7 +78,7 @@ def source(p):
 
 
 def outcome(p):
-    namespace = {"log": []}
+    namespace = {"log": [], "logged": p["logged"]}
     exec(HOOKS, namespace)
     namespace["log"].clear()
     try:

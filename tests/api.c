@@ -1767,6 +1767,13 @@ int main(int argc, char **argv) {
                "def paired():\n    d = dict(Paired()); d.update(Paired())\n    return sum(d) + len(d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "paired()", "paired.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
+    /* So do a class body's implicit stores through its namespace's Python __setitem__. */
+    execute(c, "class Slowns(dict):\n    def __setitem__(self, k, v):\n        for i in range(3000): pass\n"
+               "        super().__setitem__(k, v)\n"
+               "class Slowmeta(type):\n    @classmethod\n    def __prepare__(m, n, b): return Slowns()\n"
+               "def namespaced():\n    class K(metaclass=Slowmeta): pass\n    return len(K.__qualname__)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "namespaced()", "namespaced.py"), SPY_STOP_STEPS, &pauses)) == 21 && pauses > 3);
     /* So does the Python __new__ a generator's throw() of a class calls. */
     execute(c, "class Fresh(Exception):\n    def __new__(cls, *a):\n        for i in range(3000): pass\n"
                "        e = super().__new__(cls, *a); e.i = i; return e\n"

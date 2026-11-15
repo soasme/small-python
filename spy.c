@@ -512,7 +512,7 @@ static SPYValue *function_from_code(SPYContext *, SPYValue *, SPYValue *, SPYVal
 static SPYValue *call_module_code(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static int body_arguments(SPYContext *, SPYValue *, size_t, SPYValue *);
 static SPYValue *class_env(SPYContext *, SPYValue *, SPYValue *);
-static int class_body_begin(SPYContext *, SPYValue *, Node *, SPYValue *, SPYValue *);
+static int class_body_begin(SPYContext *, SPYValue *, Node *, SPYValue *, SPYValue *, int);
 static Node *replaced_signature(SPYValue *);
 static SPYValue *forward_env(SPYContext *, Node *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -4181,7 +4181,7 @@ typedef struct {
     /* Future statements: nesting of statement(), top-level statements seen,
      * whether one may still appear, and barry_as_FLUFL. */
     int statement_level, future_closed, barry, future_annotations;
-    int conditional_annotations; /* A body's annotated assignment in a conditional block, or a module's. */
+    int annotated, conditional_annotations; /* A body's annotated assignment; one in a conditional block, or a module's. */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
@@ -6565,7 +6565,7 @@ static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
 /* Collect simple annotated names of a module or class body in order. */
 static int collect_annotations(Parser *p, Node *body, int conditional, Node ***tail, int *index) {
     for (Node *n = body; n; n = n->next) {
-        if (n->kind == N_ANNASSIGN && conditional) p->conditional_annotations = 1;
+        if (n->kind == N_ANNASSIGN) { p->annotated = 1; p->conditional_annotations |= conditional; }
         if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE) && p->future_annotations) {
             /* PEP 563 stores each string in __annotations__ as it runs. */
             n->flags |= F_FUTURE; (*index)++;
@@ -6599,11 +6599,12 @@ static int body_annotations(Parser *p, Node *owner, Node *body, Node **out) {
     int index = 0;
     *out = NULL;
     /* Every annotation of a module, which may run in part, is conditional. */
-    p->conditional_annotations = 0;
+    p->annotated = p->conditional_annotations = 0;
     if (collect_annotations(p, body, !owner, &tail, &index)) return -1;
     if (p->conditional_annotations && owner) owner->flags |= F_CONDITIONAL;
     else if (p->conditional_annotations) p->unit->as.unit.conditional_annotations = 1;
-    if (p->future_annotations && index) {
+    if (p->future_annotations && owner) owner->flags |= F_FUTURE;
+    if (p->future_annotations && p->annotated) {
         if (owner) owner->flags |= F_SETUP_ANNOTATIONS;
         else p->unit->as.unit.setup_annotations = 1;
     }
@@ -15142,7 +15143,8 @@ static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
     /* An annotation or lazy value function's body is one walker statement;
      * while calls can pause, every other body runs on the machine. */
-    if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS || (mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b))))) return 0;
+    if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS ||
+                       (n->kind != N_CLASS && mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b))))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
@@ -15150,8 +15152,10 @@ static int compile_generator(SPYContext *c, Node *n) {
     if (generator) n->code = p;
     else n->flat = p;
     c->code_work++;
-    /* A class body with annotations first sets them up (class_part). */
-    if (UNLIKELY(n->kind == N_CLASS && (n->annotate || (n->flags & F_SETUP_ANNOTATIONS)))) { emit(c, p, BC_CLASS, n, 8); emit(c, p, BC_POP, n, 0); }
+    /* A class body first binds its implicit names, then the set of its
+     * executed conditional annotations (class_part). */
+    if (n->kind == N_CLASS) { emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
+    if (UNLIKELY(n->kind == N_CLASS && (n->flags & F_CONDITIONAL))) { emit(c, p, BC_CLASS, n, 8); emit(c, p, BC_POP, n, 0); }
     compile_body(c, p, n->b);
     c->code_work--;
     /* The implicit return has no node: it runs on the last line executed;
@@ -15718,13 +15722,14 @@ static int code_names_clauses(ClosureNames *w, Node *n, int depth) {
 }
 /* Whether a class body has a scope that can see the class namespace (a
  * def, an annotation, a type alias, or type parameters), so its code has a
- * __classdict__ cell (16.4.1). */
-static int needs_classdict(Node *n, int depth) {
+ * __classdict__ cell (16.4.1); under PEP 563 (future) no def or
+ * annotation has one. */
+static int needs_classdict(Node *n, int depth, int future) {
     for (; n && depth < 1000; n = n->next) {
-        if (n->kind == N_DEF || n->kind == N_ANNASSIGN || n->kind == N_TYPEALIAS || n->kind == N_GENERIC) return 1;
-        if (n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_COMPREHENSION) continue;
-        if (needs_classdict(n->a, depth + 1) || needs_classdict(n->b, depth + 1) || needs_classdict(n->c, depth + 1) ||
-            needs_classdict(n->args, depth + 1))
+        if (n->kind == N_TYPEALIAS || n->kind == N_GENERIC || (!future && (n->kind == N_DEF || n->kind == N_ANNASSIGN))) return 1;
+        if (n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_COMPREHENSION || n->kind == N_DEF || n->kind == N_ANNASSIGN) continue;
+        if (needs_classdict(n->a, depth + 1, future) || needs_classdict(n->b, depth + 1, future) ||
+            needs_classdict(n->c, depth + 1, future) || needs_classdict(n->args, depth + 1, future))
             return 1;
     }
     return 0;
@@ -15736,7 +15741,7 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     if (!w.names || !w.self) return w.names;
     if (closure_scope(&w, w.self) || closure_walk(&w, def->a, 0) || closure_walk(&w, def->b, 0) || closure_walk(&w, def->c, 0) ||
         closure_walk(&w, def->args, 0) || closure_walk(&w, def->params, 0)) { spy_release(w.names); return NULL; }
-    if (cells && def->kind == N_CLASS && needs_classdict(def->b, 0)) {
+    if (cells && def->kind == N_CLASS && needs_classdict(def->b, 0, def->flags & F_FUTURE)) {
         SPYValue *text = spy_string(c, "__classdict__", 13);
         if (!text || sequence_append(c, w.names, text)) { spy_release(text); spy_release(w.names); return NULL; }
         spy_release(text);
@@ -17129,7 +17134,7 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
         if (env && env->type == V_ENV) fn->as.function.attributes = NULL;
         else if (body_arguments(c, fn, argc, kwc ? kw[0].key : NULL) ||
                  !(env = class_env(c, fn->as.function.env, namespace_map(module_env(c, fn->as.function.env)))) ||
-                 class_body_begin(c, fn->as.function.unit, fn->as.function.def, env, NULL)) {
+                 class_body_begin(c, fn->as.function.unit, fn->as.function.def, env, NULL, 1)) {
             spy_release(env); env = NULL;
         }
         if (take) release_all(argc, argv);
@@ -19640,13 +19645,15 @@ static SPYValue *static_attributes(SPYContext *c, Scope *scope) {
 /* Create a class from evaluated bases (a list) and keyword arguments. The
  * body is either a class statement n run in frame f, or a call of function,
  * as builtins.__build_class__ makes it. */
-/* SETUP_ANNOTATIONS: a PEP 563 body starts its own __annotations__. */
-static int setup_annotations(SPYContext *c, Frame *f, int setup) {
-    if (!setup) return 0;
-    SPYValue *dict = value_new(c, SPY_DICT);
-    int status = dict ? name_set(c, f->env, "__annotations__", dict) : -1;
-    spy_release(dict); return status;
+/* SETUP_ANNOTATIONS: a PEP 563 body in env starts its own __annotations__
+ * unless its namespace has one: 0, or -1 on an error. */
+static int annotations_setup(SPYContext *c, SPYValue *env) {
+    SPYValue *present = name_lookup(c, env, name_of("__annotations__")), *dict = present || c->error_type[0] ? NULL : value_new(c, SPY_DICT);
+    int status = present ? 0 : !dict || name_set(c, env, "__annotations__", dict);
+    spy_release(present); spy_release(dict);
+    return status ? -1 : 0;
 }
+static int setup_annotations(SPYContext *c, Frame *f, int setup) { return setup ? annotations_setup(c, f->env) : 0; }
 /* The environment a class body runs in: its namespace, under the nearest
  * enclosing scope that is not a class, with an unbound __class__ cell. */
 static SPYValue *class_env(SPYContext *c, SPYValue *outer, SPYValue *namespace) {
@@ -19667,43 +19674,80 @@ static SPYValue *class_env(SPYContext *c, SPYValue *outer, SPYValue *namespace) 
     if (c->error_type[0] || !unbound) { spy_release(env); return NULL; }
     return env;
 }
-/* Before class statement n's body runs in env (16.4.1 step 8): the
- * implicit names. */
-static int class_body_begin(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPYValue *type_params) {
-    SPYValue *module = name_get(c, env, "__name__"), *qualname = module ? qualified_name(c, n->scope) : NULL;
-    SPYValue *firstline = spy_int(c, (int64_t)(n->decorators ? n->decorators->line : n->line));
-    if (qualname && firstline && !name_set(c, env, "__module__", module) && !name_set(c, env, "__qualname__", qualname))
-        name_set(c, env, "__firstlineno__", firstline);
-    if (!c->error_type[0] && type_params) name_set(c, env, "__type_params__", type_params);
-    spy_release(module); spy_release(qualname); spy_release(firstline);
-    if (c->error_type[0]) return -1;
+static SPYValue *store_function(SPYContext *, SPYValue *, const char *);
+/* The namespace of class body env whose Python __setitem__ or __getitem__
+ * its implicit names go through on the machine (class_part 9 and 6),
+ * borrowed; else NULL. */
+static SPYValue *hooked_namespace(SPYContext *c, SPYValue *env) {
+    SPYValue *namespace = env->as.map.namespace;
+    return namespace && (store_function(c, namespace, "__setitem__") || store_function(c, namespace, "__getitem__")) ? namespace : NULL;
+}
+/* The names class statement n's body binds before its statements, after
+ * module, the value of __name__, as a list of names and values in order:
+ * __module__, __qualname__, __firstlineno__, __type_params__ for type
+ * parameters, __annotations__ under PEP 563, its value c->unbound for a
+ * new dict unless the namespace has one, and __doc__; owned. */
+static SPYValue *class_names_before(SPYContext *c, Node *n, SPYValue *module, SPYValue *type_params) {
+    SPYValue *names = value_new(c, SPY_LIST), *doc = NULL;
     Node *body = n->b;
-    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) {
-        SPYValue *doc = docstring(c, body);
-        if (doc) name_set(c, env, "__doc__", doc);
-        spy_release(doc);
+    if (body && body->kind == N_EXPR && body->a->kind == N_STRING && !(doc = docstring(c, body)) && c->error_type[0]) { spy_release(names); return NULL; }
+    SPYValue *values[] = {module, qualified_name(c, n->scope), spy_int(c, (int64_t)(n->decorators ? n->decorators->line : n->line)),
+                          type_params, n->flags & F_SETUP_ANNOTATIONS ? c->unbound : NULL, doc};
+    static const char *const keys[] = {"__module__", "__qualname__", "__firstlineno__", "__type_params__", "__annotations__", "__doc__"};
+    for (int i = 0; i < 6 && names; i++) {
+        if (i && !values[i] && !c->error_type[0]) continue;
+        SPYValue *key = values[i] ? spy_string(c, keys[i], strlen(keys[i])) : NULL;
+        if (!key || sequence_append(c, names, key) || sequence_append(c, names, values[i])) { spy_release(names); names = NULL; }
+        spy_release(key);
+    }
+    release_all(2, (SPYValue *[]){values[1], values[2]}); spy_release(doc);
+    return names;
+}
+/* Store names, a list of names and values, from position at in class body
+ * env, taking it: 0, or -1 on an error. */
+static int class_names_store(SPYContext *c, SPYValue *env, SPYValue *names, size_t at) {
+    for (size_t i = at; names && i + 1 < names->as.seq.len && !c->error_type[0]; i += 2)
+        if (names->as.seq.items[i + 1] == c->unbound) annotations_setup(c, env);
+        else name_set(c, env, names->as.seq.items[i]->as.string.data, names->as.seq.items[i + 1]);
+    spy_release(names);
+    return names && !c->error_type[0] ? 0 : -1;
+}
+/* Before class statement n's body runs in env (16.4.1 step 8): the
+ * implicit names, which a body on the machine, unless generic, binds
+ * itself through a Python __setitem__ or __getitem__ of its namespace
+ * (class_part 9). */
+static int class_body_begin(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPYValue *type_params, int machine) {
+    if (!machine || n->params || !hooked_namespace(c, env)) {
+        SPYValue *module = name_get(c, env, "__name__");
+        int status = !module || class_names_store(c, env, class_names_before(c, n, module, type_params), 0);
+        spy_release(module);
+        if (status) return -1;
     }
     env->as.map.scope = n->scope;
     env->as.map.unit = spy_retain(unit);
     declare_locals(c, env);
     return c->error_type[0] ? -1 : 0;
 }
-/* After the body in frame f (16.4.1 step 10): __annotate_func__,
- * __static_attributes__, __classdictcell__ and __classcell__.
- * *classcell receives the __class__ cell when a method needs one. */
-static int class_body_end(SPYContext *c, Node *n, Frame *f, SPYValue **classcell) {
-    SPYValue *env = f->env;
-    if (store_annotate(c, f, n->annotate, "__annotate_func__")) return -1;
-    SPYValue *attributes = static_attributes(c, n->scope);
-    if (attributes) name_set(c, env, "__static_attributes__", attributes);
-    spy_release(attributes);
-    if (c->error_type[0]) return -1;
+/* The names class statement n's body binds after its statements in frame
+ * f (16.4.1 step 10), as a list of names and values in order:
+ * __annotate_func__, __static_attributes__, __classdictcell__ and
+ * __classcell__; owned. *classcell receives the __class__ cell when a
+ * method needs one. */
+static SPYValue *class_names_after(SPYContext *c, Node *n, Frame *f, SPYValue **classcell) {
+    SPYValue *env = f->env, *names = value_new(c, SPY_LIST);
+    SPYValue *values[] = {n->annotate ? function_new(c, f, n->annotate) : NULL, static_attributes(c, n->scope)};
+    if (!names || (n->annotate && !values[0]) || !values[1]) { spy_release(names); release_all(2, values); return NULL; }
+    SPYValue *keys[] = {spy_string(c, "__annotate_func__", 17), spy_string(c, "__static_attributes__", 21)};
+    for (int i = 0; i < 2 && names; i++)
+        if (values[i] && (!keys[i] || sequence_append(c, names, keys[i]) || sequence_append(c, names, values[i]))) { spy_release(names); names = NULL; }
+    release_all(2, keys); release_all(2, values);
+    if (!names) return NULL;
     /* A method using __class__ or super() gets a cell that type.__new__
      * fills; annotation scopes read the namespace, then the class's own
      * dictionary once type.__new__ fills the __classdict__ cell with it. */
     if (n->scope && !n->scope->cells) {
         SPYValue *cells = closure_names(c, n, 1);
-        if (!cells) return -1;
+        if (!cells) { spy_release(names); return NULL; }
         n->scope->cells = CELLS_FOUND;
         for (size_t i = 0; i < cells->as.seq.len; i++) {
             const char *cell = cells->as.seq.items[i]->as.string.data;
@@ -19712,18 +19756,27 @@ static int class_body_end(SPYContext *c, Node *n, Frame *f, SPYValue **classcell
         spy_release(cells);
     }
     int cells = n->scope ? n->scope->cells : 0;
-    if ((cells & CLASSDICT_CELL) && (env->as.map.base = cell_new(c, NULL, NULL, env->as.map.namespace)))
-        name_set(c, env, "__classdictcell__", env->as.map.base);
-    if ((cells & CLASS_CELL) && !c->error_type[0] && (*classcell = cell_new(c, env->as.map.class_cell, "__class__", NULL)))
-        name_set(c, env, "__classcell__", *classcell);
-    return c->error_type[0] ? -1 : 0;
+    SPYValue *key = NULL;
+    if ((cells & CLASSDICT_CELL) && (env->as.map.base = cell_new(c, NULL, NULL, env->as.map.namespace)) &&
+        (!(key = spy_string(c, "__classdictcell__", 17)) || sequence_append(c, names, key) || sequence_append(c, names, env->as.map.base))) {}
+    spy_release(key); key = NULL;
+    if ((cells & CLASS_CELL) && !c->error_type[0] && (*classcell = cell_new(c, env->as.map.class_cell, "__class__", NULL)) &&
+        (!(key = spy_string(c, "__classcell__", 13)) || sequence_append(c, names, key) || sequence_append(c, names, *classcell))) {}
+    spy_release(key);
+    if (c->error_type[0]) { spy_release(names); return NULL; }
+    return names;
+}
+/* After the body in frame f (16.4.1 step 10): the names it binds
+ * (class_names_after); 0, or -1 on an error. */
+static int class_body_end(SPYContext *c, Node *n, Frame *f, SPYValue **classcell) {
+    return class_names_store(c, f->env, class_names_after(c, n, f, classcell), 0);
 }
 /* Run class statement n's body in env (16.4.1 steps 8-10), on the walker. */
 static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPYValue *type_params, SPYValue **classcell) {
-    if (class_body_begin(c, unit, n, env, type_params)) return -1;
+    if (class_body_begin(c, unit, n, env, type_params, 0)) return -1;
     Frame frame = {env, unit, 0};
     if (enter_frame(c, env, unit)) return -1;
-    Result r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_conditional(c, &frame, n->flags & F_CONDITIONAL) ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
+    Result r = start_conditional(c, &frame, n->flags & F_CONDITIONAL) ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
     if (r.flow == FLOW_NORMAL && n->annotate && (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_class_line(c, n)) r.flow = FLOW_ERROR;
     leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
     spy_release(r.value);
@@ -28465,7 +28518,7 @@ static Frame generic_frame(Machine *m, Node *n, Frame *f) {
 static SPYValue *class_begin(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue *name, ClassState *s) {
     SPYValue *body = NULL, *items[] = {s->meta, s->tuple, s->namespace, s->env, s->original ? s->original : c->none, s->keywords, name};
     SPYValue *params = n->params ? m->stack[m->len - 1]->as.seq.items[1] : NULL;
-    SPYValue *state = class_body_begin(c, f->unit, n, s->env, params) ? NULL : tuple_of(c, 7, items);
+    SPYValue *state = class_body_begin(c, f->unit, n, s->env, params, 1) ? NULL : tuple_of(c, 7, items);
     if (state && !machine_push(c, m, state) && (body = function_new(c, f, n))) body->as.function.attributes = spy_retain(s->env);
     class_state_free(s);
     return body;
@@ -28481,17 +28534,93 @@ static void class_prepared(SPYContext *c, Machine *m, Node *n, SPYValue *namespa
     else if (!namespace) class_state_free(&s);
     spy_release(pending);
 }
+/* What a class body's namespace's Python __setitem__ or __getitem__
+ * returned in result, the body storing its implicit names (class_part 9
+ * and 6) with state, a list of the namespace, where it is, the value the
+ * step gives when they are stored, and the names and values
+ * (class_names_before, class_names_after): the next call on m (callk),
+ * each store a native one when the namespace has no Python __setitem__.
+ * Where it is: None for the __getitem__ of __name__, whose KeyError the
+ * enclosing names answer; the next name's position; or minus the
+ * position of __annotations__, whose lookup (c->unbound its value) found
+ * it, or its KeyError stores a new dict. */
+static SPYValue *class_names_stored(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *namespace = items[0], *env = m->frame.env;
+    int64_t where = items[1] == c->none ? 0 : items[1]->as.integer_data.small;
+    if (!where) {
+        SPYValue *names = NULL;
+        if (!result && error_is(c, "KeyError")) { spy_clear_error(c); result = name_get(c, env->as.map.parent, "__name__"); }
+        if (result) names = class_names_before(c, env->as.map.scope->owner, result, NULL);
+        spy_release(result);
+        for (size_t i = 0; names && i < names->as.seq.len; i++) sequence_append(c, state, names->as.seq.items[i]);
+        spy_release(names);
+        result = names && !c->error_type[0] ? spy_none(c) : NULL;
+        items = state->as.seq.items;
+        where = 3;
+    }
+    size_t at = (size_t)(where < 0 ? -where : where);
+    if (where < 0 && !result && error_is(c, "KeyError")) {
+        /* No __annotations__: a new dict's store. */
+        spy_clear_error(c);
+        spy_release(items[at + 1]);
+        result = items[at + 1] = value_new(c, SPY_DICT);
+        if (result) spy_retain(result);
+    } else if (where < 0 && result) at += 2;
+    if (!result || c->error_type[0]) { spy_release(result); spy_release(state); return NULL; }
+    spy_release(result);
+    SPYValue *setter = store_function(c, namespace, "__setitem__"), *getter = store_function(c, namespace, "__getitem__");
+    for (; at + 1 < state->as.seq.len && !c->error_type[0]; at += 2) {
+        SPYValue *key = items[at], *value = items[at + 1];
+        if (value == c->unbound && getter) break;
+        if (value == c->unbound) annotations_setup(c, env);
+        else if (setter) break;
+        else set_index(c, namespace, key, value);
+    }
+    if (c->error_type[0]) { spy_release(state); return NULL; }
+    if (at + 1 >= state->as.seq.len) { SPYValue *value = spy_retain(items[2]); spy_release(state); return value; }
+    int lookup = items[at + 1] == c->unbound;
+    spy_release(items[1]); items[1] = int_value(c, lookup ? -(int64_t)at : (int64_t)at + 2);
+    SPYValue *argv[] = {spy_retain(namespace), spy_retain(items[at]), spy_retain(items[at + 1])};
+    if (lookup) spy_release(argv[2]);
+    return callk(c, m, lookup ? getter : setter, 3 - (size_t)lookup, argv, class_names_stored, state);
+}
+/* A class body in frame f, on m, binds names (class_names_before or
+ * after) through the Python __setitem__ of its namespace, which
+ * class_body_begin skipped, then gives value; it takes both. */
+static SPYValue *class_names_call(SPYContext *c, Machine *m, Frame *f, SPYValue *names, SPYValue *value) {
+    SPYValue *namespace = hooked_namespace(c, f->env), *parts[] = {spy_retain(namespace), names ? int_value(c, 3) : spy_none(c), value};
+    /* At 3 the names' first. */
+    SPYValue *state = value_new(c, SPY_LIST);
+    for (int i = 0; i < 3; i++) if (state && sequence_append(c, state, parts[i])) { spy_release(state); state = NULL; }
+    release_all(3, parts);
+    for (size_t i = 0; state && names && i < names->as.seq.len; i++) if (sequence_append(c, state, names->as.seq.items[i])) { spy_release(state); state = NULL; }
+    spy_release(names);
+    if (!state) return NULL;
+    if (state->as.seq.items[1] != c->none) return class_names_stored(c, m, state, spy_none(c));
+    /* Before the body, __name__ is the namespace's first. */
+    SPYValue *getter = store_function(c, state->as.seq.items[0], "__getitem__");
+    if (!getter) return class_names_stored(c, m, state, name_get(c, f->env, "__name__"));
+    SPYValue *argv[] = {spy_retain(state->as.seq.items[0]), spy_string(c, "__name__", 8)};
+    if (!argv[1]) { spy_release(argv[0]); spy_release(state); return NULL; }
+    return callk(c, m, getter, 2, argv, class_names_stored, state);
+}
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->node;
     SPYValue *bases = NULL, *arguments = NULL, *name, *body = NULL;
-    if (ins->arg == 8)
-        return setup_annotations(c, f, n->flags & F_SETUP_ANNOTATIONS) || start_conditional(c, f, n->flags & F_CONDITIONAL) ? NULL : spy_none(c);
+    if (ins->arg == 9)
+        /* The body's implicit names that class_body_begin left (class_names_call). */
+        return n->params || !hooked_namespace(c, f->env) ? spy_none(c) : class_names_call(c, m, f, NULL, spy_none(c));
+    if (ins->arg == 8) return start_conditional(c, f, n->flags & F_CONDITIONAL) ? NULL : spy_none(c);
     if (ins->arg == 6) {
         /* The body's end, in its env, whose scope's owner is the class
          * statement, traced as class_body traces it. */
         SPYValue *classcell = NULL;
         n = f->env->as.map.scope->owner;
         if (n->annotate && (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_class_line(c, n)) return NULL;
+        if (hooked_namespace(c, f->env)) {
+            SPYValue *names = class_names_after(c, n, f, &classcell);
+            return names ? class_names_call(c, m, f, names, classcell ? classcell : spy_none(c)) : (spy_release(classcell), NULL);
+        }
         if (class_body_end(c, n, f, &classcell)) { spy_release(classcell); return NULL; }
         return classcell ? classcell : spy_none(c);
     }
@@ -29977,6 +30106,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 callee_env = NULL;
                 value = class_step(c, m, &f, ins, &callee_env);
                 if (callee_env) goto enter_init;
+                if (!value && c->k_fn) goto enter_k;
                 machine_push(c, m, value);
             }
             break;

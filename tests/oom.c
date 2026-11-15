@@ -539,6 +539,27 @@ static const char *const programs[] = {
     "    return r\n"
     "print(nz())\n",
 
+    "class NN(dict):\n"
+    "    def __setitem__(self, k, v):\n"
+    "        if k == self.get('fail'): raise KeyError(k)\n"
+    "        super().__setitem__(k, v)\n"
+    "    def __getitem__(self, k): return 'n' if k == '__name__' else super().__getitem__(k)\n"
+    "class NM(type):\n"
+    "    @classmethod\n"
+    "    def __prepare__(m, n, b, **kw):\n"
+    "        ns = NN(); dict.update(ns, kw); return ns\n"
+    "    def __new__(m, n, b, ns, **kw): return super().__new__(m, n, b, dict(ns))\n"
+    "class NC(metaclass=NM):\n"
+    "    'd'\n"
+    "    def f(self): self.a = __class__\n"
+    "r = [NC.__module__, NC.__doc__, NC.__static_attributes__]\n"
+    "for k in ('__qualname__', '__classcell__'):\n"
+    "    try:\n"
+    "        class NF(metaclass=NM, fail=k):\n"
+    "            def f(self): return __class__\n"
+    "    except KeyError as e: r.append(e)\n"
+    "print(r)\n",
+
     "class AO(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class AM(type):\n"

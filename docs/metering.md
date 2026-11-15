@@ -287,8 +287,10 @@ These run as machines on the heap, in one native activation of
   subclass of a builtin type or of an exception, after its builtin
   `__new__`; instances with a Python `__call__`; Python
   decorators; a class statement's bases' `__mro_entries__`, its
-  metaclass `__prepare__` and `__new__`, and the new class's
-  `__set_name__` and `__init_subclass__` calls;
+  metaclass `__prepare__` and `__new__`, the Python `__setitem__` and
+  `__getitem__` of the namespace `__prepare__` returned for the names
+  the body binds itself before and after its statements, and the new
+  class's `__set_name__` and `__init_subclass__` calls;
 - `exec` and `eval` of source, also of interactive input (mode
   `'single'`) and the Python `sys.displayhook` its values go to, and the
   module of source an `import` statement runs;

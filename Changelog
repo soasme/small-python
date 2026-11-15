@@ -110,6 +110,9 @@ Unreleased (0.10.0):
 - ascii() calls a Python __repr__, and round() an ndigits' Python __index__, without nesting on the C stack
 - raise of a class, or from a cause class, calls its Python __new__ without nesting on the C stack
 - dict() and dict.update() take the pairs a Python __iter__ gives without nesting on the C stack
+- a class body binds its implicit names through its namespace's Python __setitem__ and __getitem__ without
+  nesting on the C stack
+- from __future__ import annotations keeps an __annotations__ the namespace has; any annotated target sets it up
 - a class body binds __annotate_func__ after its statements, and a module __annotate__ before
   __conditional_annotations__
 - every module annotation is conditional: a module stopped part way reports only those it ran
