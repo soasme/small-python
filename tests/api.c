@@ -2315,6 +2315,12 @@ int main(int argc, char **argv) {
                "def fresh():\n    return len(Fresh(Same() for i in range(2))) + len(Pool([Same(), Same()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "fresh()", "fresh.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So does a metaclass's Python mro() for a class statement, a call of the metaclass and type.__new__. */
+    execute(c, "class Ordered(type):\n    def mro(cls):\n        for i in range(3000): pass\n        return type.mro(cls)\n"
+               "def ordered():\n    class A(metaclass=Ordered): pass\n"
+               "    return len(A.__mro__) + len(Ordered('B', (A,), {}).__mro__) + len(type.__new__(Ordered, 'C', (), {}).__mro__)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "ordered()", "ordered.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

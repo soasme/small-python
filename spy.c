@@ -19664,7 +19664,8 @@ static SPYValue *apply_decorators(SPYContext *c, SPYValue *values, SPYValue *def
     }
     return definition;
 }
-static int finish_class(SPYContext *, SPYValue *, SPYValue *, SPYValue *, SPYValue **);
+static int finish_class(SPYContext *, SPYValue *, SPYValue *);
+static SPYValue *class_callback(SPYContext *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *module_env(SPYContext *, SPYValue *);
 /* The most derived of a requested metaclass and those of the bases. */
 static SPYValue *derived_metaclass(SPYContext *c, SPYValue *meta, SPYValue *bases) {
@@ -19694,40 +19695,56 @@ static int class_layout(SPYContext *c, SPYValue *cls) {
     if (layout < 0 && subclass(cls, c->types[SPY_MODULE])) return LAYOUT_MODULE;
     return layout;
 }
-static int initialize_mro(SPYContext *c, SPYValue *cls) {
-    SPYValue *order;
-    if (!cls->as.map.meta) order = default_mro(c, cls, cls->as.map.bases);
-    else {
-        int layout = -1;
-        for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
-            int kind = class_layout(c, cls->as.map.bases->as.seq.items[i]);
-            if (kind >= 0) layout = kind;
-        }
-        /* A metaclass observes the bases and namespace, but no completed MRO. */
-        cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = NULL;
-        /* Looked up on the metaclass, as a special method is. */
-        SPYValue *method = special_method(c, cls, "mro");
-        if (!method && !c->error_type[0]) method = attribute(c, cls, "mro");
-        SPYValue *result = method ? call(c, method, 0, NULL) : NULL;
-        order = result ? value_new(c, SPY_TUPLE) : NULL;
-        if (order) extend_display(c, order, result);
-        spy_release(result); spy_release(method);
-        if (order && !c->error_type[0] && !order->as.seq.len) spy_error(c, "TypeError", "type MRO must not be empty");
-        for (size_t i = 0; order && i < order->as.seq.len && !c->error_type[0]; i++) {
-            SPYValue *base = order->as.seq.items[i];
-            const char *name = name_text(cls, "__name__")->as.string.data;
-            if (base->type != SPY_CLASS) errorf(c, "TypeError", "%s.mro() returned a non-class ('%s')", name, type_name(base));
-            else if (base != cls) {
-                int kind = class_layout(c, base);
-                if (kind >= 0 && kind != layout)
-                    errorf(c, "TypeError", "%s.mro() returned base with unsuitable layout ('%s')", name,
-                           name_text(base, "__name__")->as.string.data);
-            }
-        }
-    }
+/* cls's MRO becomes order, owned, unless NULL with an error. */
+static int mro_set(SPYContext *c, SPYValue *cls, SPYValue *order) {
     if (!order || c->error_type[0]) { spy_release(order); return -1; }
     cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = order;
     return 0;
+}
+/* A metaclass's mro() observes the bases and namespace, but no completed MRO. */
+static void mro_clear(SPYValue *cls) {
+    cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = NULL;
+}
+/* cls's MRO from what its metaclass's mro() returned, result, or NULL on
+ * its error. */
+static int mro_install(SPYContext *c, SPYValue *cls, SPYValue *result) {
+    int layout = -1;
+    for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
+        int kind = class_layout(c, cls->as.map.bases->as.seq.items[i]);
+        if (kind >= 0) layout = kind;
+    }
+    SPYValue *order = result ? value_new(c, SPY_TUPLE) : NULL;
+    if (order) extend_display(c, order, result);
+    if (order && !c->error_type[0] && !order->as.seq.len) spy_error(c, "TypeError", "type MRO must not be empty");
+    for (size_t i = 0; order && i < order->as.seq.len && !c->error_type[0]; i++) {
+        SPYValue *base = order->as.seq.items[i];
+        const char *name = name_text(cls, "__name__")->as.string.data;
+        if (base->type != SPY_CLASS) errorf(c, "TypeError", "%s.mro() returned a non-class ('%s')", name, type_name(base));
+        else if (base != cls) {
+            int kind = class_layout(c, base);
+            if (kind >= 0 && kind != layout)
+                errorf(c, "TypeError", "%s.mro() returned base with unsuitable layout ('%s')", name,
+                       name_text(base, "__name__")->as.string.data);
+        }
+    }
+    return mro_set(c, cls, order);
+}
+static int initialize_mro(SPYContext *c, SPYValue *cls) {
+    if (!cls->as.map.meta) return mro_set(c, cls, default_mro(c, cls, cls->as.map.bases));
+    mro_clear(cls);
+    /* Looked up on the metaclass, as a special method is. */
+    SPYValue *method = special_method(c, cls, "mro");
+    if (!method && !c->error_type[0]) method = attribute(c, cls, "mro");
+    SPYValue *result = method ? call(c, method, 0, NULL) : NULL;
+    int status = mro_install(c, cls, result);
+    spy_release(result); spy_release(method);
+    return status;
+}
+/* The Python mro() of cls's metaclass, which the machine runs
+ * (class_callback); borrowed. */
+static SPYValue *mro_function(SPYContext *c, SPYValue *cls) {
+    SPYValue *function = cls->as.map.meta ? class_lookup(cls->as.map.meta, "mro") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether cls is base or one of its bases, through __bases__ links: an MRO
  * a reentrant mro() has yet to rebuild cannot hide a cycle. */
@@ -19979,8 +19996,18 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     SPYValue *qualname = name_local(cls, "__qualname__");
     if (!builtin_value(c, qualname, SPY_STRING)) errorf(c, "TypeError", "type __qualname__ must be a str, not %s", type_name(qualname));
     if (meta != c->types[SPY_CLASS]) cls->as.map.meta = spy_retain(meta);
-    if (!c->error_type[0] && !initialize_mro(c, cls) && !class_slots(c, cls, namespace)) finish_class(c, cls, keywords, classdict, state);
-    if (c->error_type[0]) { spy_release(cls); return NULL; }
+    /* The callbacks' state; given state, a Python mro() is first, with
+     * the namespace for class_slots (class_callback). */
+    SPYValue *list = c->error_type[0] ? NULL : spy_list(c);
+    SPYValue *prefix[] = {c->none, c->none, classdict ? classdict : c->none, keywords ? keywords : c->none, namespace};
+    size_t count = state && mro_function(c, cls) ? 5 : 4;
+    for (size_t i = 0; list && i < count && !sequence_append(c, list, prefix[i]); i++) {}
+    if (list && count == 4 && !c->error_type[0] && !initialize_mro(c, cls) && !class_slots(c, cls, namespace) &&
+        !finish_class(c, cls, list) && !state)
+        class_callback(c, cls, list, NULL);
+    if (c->error_type[0]) { spy_release(list); spy_release(cls); return NULL; }
+    if (state) *state = list;
+    else spy_release(list);
     return cls;
 }
 /* result gains the bases entries, owned, a base's __mro_entries__
@@ -20286,13 +20313,20 @@ static void class_made(SPYContext *c, SPYValue *cls, SPYValue *name, SPYValue *e
                                    name->as.string.data, text->as.string.data);
     spy_release(text); spy_release(other);
 }
+/* Whether a call of meta makes its class as type's does: type.__call__,
+ * type.__new__ and type.__init__. */
+static int type_made(SPYContext *c, SPYValue *meta) {
+    SPYValue *type = c->types[SPY_CLASS], *outer = meta->type == SPY_CLASS ? meta->as.map.meta : NULL;
+    return meta->type == SPY_CLASS && subclass(meta, type) && (!outer || class_lookup(outer, "__call__") == name_local(type, "__call__")) &&
+           class_lookup(meta, "__new__") == name_local(type, "__new__") && class_lookup(meta, "__init__") == name_local(type, "__init__");
+}
 /* A class statement's class; for machine m, a class of type leaves its
  * callbacks' state (finish_class) and __class__ cell or None on m's stack
  * for class_step, which then runs them. */
 static SPYValue *class_create(SPYContext *c, SPYValue *name, ClassState *s, SPYValue *classcell, Machine *m) {
     SPYValue *cls = NULL, *state = NULL;
     if (s->original && name_set(c, s->env, "__orig_bases__", s->original)) goto done;
-    if (s->meta == c->types[SPY_CLASS]) {
+    if (s->meta == c->types[SPY_CLASS] || (m && type_made(c, s->meta))) {
         cls = create_class(c, s->meta, name, s->tuple, s->namespace, s->keywords, m ? &state : NULL);
         if (state) {
             spy_release(state->as.seq.items[0]); spy_release(state->as.seq.items[1]);
@@ -21427,13 +21461,12 @@ static void error_note(SPYContext *c, const char *text) {
     spy_release(note);
     restore_error(c, &error);
 }
-static SPYValue *class_callback(SPYContext *, SPYValue *, SPYValue *, SPYValue **);
 /* A new class's wrapped methods and defaults; then its callbacks, which
  * class_callback runs from a list: two Nones (a class statement's name and
  * body env in class_create), the __classdictcell__ and keywords or Nones,
  * then each namespace key and value, last first. Given state, the list is
  * left in *state. */
-static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords, SPYValue *classdict, SPYValue **state) {
+static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *list) {
     static const char *names[] = {"__new__", "__init_subclass__", "__class_getitem__"};
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
         SPYValue *method = name_local(cls, names[i]);
@@ -21447,13 +21480,9 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords, SPYVal
     if (name_local(cls, "__eq__") && !name_local(cls, "__hash__")) name_set(c, cls, "__hash__", c->none);
     /* The original namespace is notified in definition order. A callback may
      * add, replace, or delete attributes, including itself and later ones. */
-    SPYValue *list = spy_list(c), *dict = namespace_map(cls);
-    if (!list || sequence_grow(c, list, 4 + 2 * dict->as.map.len)) { spy_release(list); return -1; }
-    SPYValue **items = list->as.seq.items;
-    *items++ = spy_retain(c->none);
-    *items++ = spy_retain(c->none);
-    *items++ = spy_retain(classdict ? classdict : c->none);
-    *items++ = spy_retain(keywords ? keywords : c->none);
+    SPYValue *dict = namespace_map(cls);
+    if (c->error_type[0] || sequence_grow(c, list, 4 + 2 * dict->as.map.len)) return -1;
+    SPYValue **items = list->as.seq.items + 4;
     for (size_t i = dict->as.map.len; i-- > 0;) {
         /* Most values are of types special_method finds no method for. */
         SPYValue *value = map_items(dict)[i].value;
@@ -21462,18 +21491,20 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords, SPYVal
         *items++ = spy_retain(value);
     }
     list->as.seq.len = (size_t)(items - list->as.seq.items);
-    if (state) *state = list;
-    else {
-        class_callback(c, cls, list, NULL);
-        spy_release(list);
-    }
-    return c->error_type[0] ? -1 : 0;
+    return 0;
 }
 /* A callback's result, NULL on its error, which a __set_name__'s error
  * notes; its items leave cls's state. */
 static void class_called(SPYContext *c, SPYValue *cls, SPYValue *state, SPYValue *result) {
     size_t len = state->as.seq.len;
     SPYValue **items = state->as.seq.items;
+    if (len == 5) {
+        /* mro() returned: then the slots and the other callbacks. */
+        SPYValue *namespace = items[--state->as.seq.len];
+        if (!mro_install(c, cls, result) && !class_slots(c, cls, namespace)) finish_class(c, cls, state);
+        spy_release(namespace); spy_release(result);
+        return;
+    }
     if (len > 4 && !result && c->error_type[0]) {
         ErrorState error = take_error(c);
         Buffer message = {.ctx = c};
@@ -21501,7 +21532,13 @@ static SPYValue *class_callback(SPYContext *c, SPYValue *cls, SPYValue *state, S
     while (state->as.seq.len > 2 && !c->error_type[0]) {
         SPYValue **items = state->as.seq.items, *result = NULL, *method;
         size_t len = state->as.seq.len;
-        if (len == 3) {
+        if (len == 5) {
+            /* First, the metaclass's Python mro() (create_class). */
+            function = mro_function(c, cls);
+            mro_clear(cls);
+            if (!(*env = function_env(c, function, 1, &cls, NULL, 0))) return NULL;
+            goto enter;
+        } else if (len == 3) {
             /* Last, as the class's attributes then move into the dictionary. */
             SPYValue *dict = items[2] != c->none ? instance_dict(c, cls) : NULL;
             if (dict) cell_set(c, items[2], dict);
@@ -21548,13 +21585,13 @@ enter:
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *native_entered(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* Whether callee of argc arguments argv makes a class class_make makes:
- * type() of a name, bases of no metaclass and a namespace, or
- * type.__new__. */
+ * type() or a metaclass type_made of a name, bases of no more derived
+ * metaclass and a namespace, or type.__new__. */
 static int class_maker(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_NATIVE) return argc == 4 && callee->as.native.kwcall == type_method && !callee->as.native.data;
-    if (callee != c->types[SPY_CLASS] || argc != 3 || argv[1]->type != SPY_TUPLE) return 0;
+    if (argc != 3 || argv[1]->type != SPY_TUPLE || !type_made(c, callee)) return 0;
     for (size_t i = 0; i < argv[1]->as.seq.len; i++)
-        if (argv[1]->as.seq.items[i]->type != SPY_CLASS || argv[1]->as.seq.items[i]->as.map.meta) return 0;
+        if (argv[1]->as.seq.items[i]->type != SPY_CLASS || !subclass(callee, value_class(c, argv[1]->as.seq.items[i]))) return 0;
     return 1;
 }
 /* The class of state, its first item, once its callbacks ran, each Python
@@ -21575,9 +21612,9 @@ static SPYValue *class_made_k(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 }
 /* A call (class_maker) of argc arguments argv and keywords: the class,
  * each Python callback of which is the calling step's call (class_next). */
-static SPYValue *class_make(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    SPYValue *meta = c->types[SPY_CLASS], *state = NULL;
-    if (argc == 4 && new_check(c, meta, argc, argv)) return NULL;
+static SPYValue *class_make(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *meta = callee, *state = NULL;
+    if (argc == 4 && new_check(c, c->types[SPY_CLASS], argc, argv)) return NULL;
     if (argc == 4) meta = *argv++;
     SPYValue *cls = create_class(c, meta, argv[0], argv[1], argv[2], keywords, &state);
     if (!cls) { spy_release(state); return NULL; }
@@ -26248,7 +26285,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     if (method < 0 && class_maker(c, callee, argc, argv)) {
         /* type() or type.__new__ runs its class's callbacks on m. */
-        result = class_make(c, argc, argv, NULL);
+        result = class_make(c, callee, argc, argv, NULL);
         release_all(argc, argv); spy_release(callee);
         return result;
     }
@@ -27242,7 +27279,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     SPYValue *getter = id < 0 && calls ? native_entered(c, m, callee, argc, argv, env) : NULL;
     int plain = 0;
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
-    result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, argc, argv, NULL) :
+    result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, callee, argc, argv, NULL) :
              init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -27381,7 +27418,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     }
     if (callee && id < 0 && !(result = calls && method < 0 ? native_entered(c, m, callee, argc + !skip, argv + skip, env) : NULL) &&
         !c->error_type[0] && !c->k_fn)
-        result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, argc + !skip, argv + skip, NULL) :
+        result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, callee, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start, traceback);
@@ -27535,7 +27572,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         if (c->error_type[0]) { spy_release(result); result = NULL; }
     } else {
         SPYValue *keywords = entries_dict(c, kw, kwc);
-        if (keywords) result = calls && class_maker(c, callee, positional, argv) ? class_make(c, positional, argv, keywords) :
+        if (keywords) result = calls && class_maker(c, callee, positional, argv) ? class_make(c, callee, positional, argv, keywords) :
                                step_keywords(c, m, callee, positional, argv, keywords);
         spy_release(keywords);
     }
@@ -27633,7 +27670,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = operand_dispatch(c, m, n, spy_retain(callee), -1, args->as.seq.len, argv, env);
     } else if (calls && class_maker(c, callee, args->as.seq.len, args->as.seq.items) && string_keys(c, keywords) && !c->error_type[0])
-        result = class_make(c, args->as.seq.len, args->as.seq.items, keywords);
+        result = class_make(c, callee, args->as.seq.len, args->as.seq.items, keywords);
     else if (!c->error_type[0]) result = step_keywords(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
     if (self) {
         SPYValue *all = spy_list(c);

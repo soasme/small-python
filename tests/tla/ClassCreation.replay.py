@@ -21,6 +21,12 @@ class InitOnly(type):
         log.append("init")
         super().__init__(name, bases, ns)
 
+class MroOnly(type):
+    def mro(cls):
+        for _ in (): pass
+        log.append("mro")
+        return type.mro(cls)
+
 class Logged(dict):
     def __setitem__(self, key, value):
         for _ in (): pass
@@ -72,7 +78,7 @@ def deco(cls):
 def source(p):
     base = "Hook" if p["subclass_hook"] else "Plain"
     if p["call"]:
-        meta = {"none": "type", "meta": "Meta", "prepare": "Prepare", "init": "InitOnly"}[p["meta"]]
+        meta = {"none": "type", "meta": "Meta", "prepare": "Prepare", "init": "InitOnly", "mro": "MroOnly"}[p["meta"]]
         lines = ["def body():", "    log.append('body')" if p["calls"] else "    pass",
                  "    return {'n': 1%s}" % "".join(", %r: D()" % name for name in "ab"[:p["set_names"]])]
         made = "%s('C', (%s,), body()%s)" % (meta, base, ", flag=1" if p["flag"] else "")
@@ -80,7 +86,7 @@ def source(p):
         return "\n".join(lines) + "\n"
     arguments = ["Entries(%s)" % base if p["entries"] else base]
     if p["meta"] != "none":
-        arguments.append("metaclass=" + {"meta": "Meta", "prepare": "Prepare", "init": "InitOnly"}[p["meta"]])
+        arguments.append("metaclass=" + {"meta": "Meta", "prepare": "Prepare", "init": "InitOnly", "mro": "MroOnly"}[p["meta"]])
     if p["flag"]:
         arguments.append("flag=1")
     lines = ["@deco"] if p["deco"] else []

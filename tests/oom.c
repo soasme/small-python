@@ -1707,6 +1707,21 @@ static const char *const programs[] = {
     "    return out\n"
     "print(cn())\n",
 
+    "class MOM(type):\n"
+    "    def mro(cls):\n"
+    "        if cls.__name__ == 'Bad': raise LookupError('mro')\n"
+    "        return type.mro(cls)\n"
+    "class MOS:\n"
+    "    def __set_name__(self, owner, name): owner.named = name\n"
+    "def mo():\n"
+    "    class A(metaclass=MOM):\n"
+    "        x = MOS()\n"
+    "    out = [A.named, len(MOM('B', (A,), {}).__mro__), type.__new__(MOM, 'C', (), {}).__name__]\n"
+    "    try: MOM('Bad', (), {})\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(mo())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
