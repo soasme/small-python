@@ -2131,6 +2131,10 @@ int main(int argc, char **argv) {
                "def rounded():\n    return len(ascii(Rounded())) + round(1234, Rounded()) + int(round(2.5, Rounded()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "rounded()", "rounded.py"), SPY_STOP_STEPS, &pauses)) == 1232 && pauses > 2);
+    /* So does round() given ndigits by keyword. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 1250 && pauses > 1);
     /* So does a memoryview's or bytearray's item at a Python __index__. */
     execute(c, "class Viewed:\n    def __index__(self):\n        for i in range(3000): pass\n        return 1\n"
                "def viewed():\n    b = bytearray(b'ab'); m = memoryview(b)\n    m[Viewed()] = 5; b[Viewed()] += 1\n"

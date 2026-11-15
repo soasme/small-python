@@ -52,7 +52,7 @@ Digits(n, base) == IF n < base THEN SubSeq("0123456789abcdef", n + 1, n + 1)
 Based(n, base, prefix) == "'" \o (IF n < 0 THEN "-" ELSE "") \o prefix \o Digits(Abs(n), base) \o "'"
 
 
-Cases == {"round_half_even", "round_float_digits", "round_none", "round_hook", "round_no_hook", "round_inf",
+Cases == {"round_half_even", "round_float_digits", "round_none", "round_keyword_calls", "round_hook", "round_no_hook", "round_inf",
           "round_nan", "round_bad_ndigits", "abs_hook", "abs_bad", "divmod_float", "divmod_hook",
           "divmod_complex", "divmod_zero_float", "pow_float", "pow_mod_float", "pow_keywords",
           "pow_zero_zero", "sum_floats", "sum_compensated", "sum_stages", "sum_add", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
@@ -88,6 +88,7 @@ Generated(p) ==
 Case(c) ==
     CASE c = "round_half_even" -> "(0, 2, 2, 0, -2)"
       [] c = "round_float_digits" -> "(2.67, 1200.0, 0.12, 'float')"
+      [] c = "round_keyword_calls" -> "(2.2, 20, [1, -1])" \* ndigits by keyword, either order
       [] c = "round_none" -> "(4, 'int', 5)"
       [] c = "round_hook" -> "(('round', None), ('round', 2))"
       [] c = "round_no_hook" -> "TypeError: type object doesn't define __round__ method"

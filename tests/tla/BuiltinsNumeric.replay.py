@@ -50,6 +50,8 @@ SOURCES = {
     "round_half_even": 'result = (round(0.5), round(1.5), round(2.5), round(-0.5), round(-1.5))',
     "round_float_digits": 'result = (round(2.675, 2), round(1234.5, -2), round(0.125, 2), type(round(1.5, 0)).__name__)',
     "round_none": 'result = (round(3.7, None), type(round(3.7, None)).__name__, round(5, None))',
+    "round_keyword_calls": "log = []\nclass D:\n    def __init__(s, n): s.n = n\n    def __index__(s):\n        for _ in (): pass\n        log.append(s.n)\n        return s.n\n"
+                           "result = (round(2.25, ndigits=D(1)), round(ndigits=D(-1), number=15), log)",
     "round_hook": 'result = (round(R()), round(R(), 2))',
     "round_no_hook": 'result = round(object())',
     "round_inf": "result = round(float('inf'))",

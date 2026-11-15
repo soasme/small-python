@@ -26801,6 +26801,7 @@ static SPYValue *class_stack_call(SPYContext *c, Machine *m, SPYValue *callee, s
     if (machine_push(c, m, args) || !*env) { *env = NULL; spy_release(callee); return NULL; }
     return spy_retain(callee);
 }
+static SPYValue *round_enter(SPYContext *, Machine *, SPYValue *, SPYValue **);
 /* Whether callee calls type.__call__ of a class whose Python __init__ or
  * __new__ runs on the machine (class_stack_call); the class, owned, then
  * replaces *slot, which held callee. */
@@ -26929,17 +26930,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
-    if (!convert && calls && argc == 2 && is_builtin(callee, B_ROUND) && is_number(argv[0]) && (convert = index_function(c, argv[1]))) {
-        c->entering_kind = CALL_CHECKED;
-        /* So does round() of a number by its ndigits' __index__, "round"
-         * and the pair taking the stack's places (conversion_value). */
-        SPYValue *digits = machine_pop(m), *x = machine_pop(m), *pair = round_pair(c, x, digits);
-        spy_release(machine_pop(m)); spy_release(x);
-        if (machine_push(c, m, spy_string(c, "round", 5)) || machine_push(c, m, pair)) { spy_release(digits); return NULL; }
-        if (!(*env = function_env(c, convert, 1, &digits, NULL, 1))) return NULL;
-        c->entering_init = convert;
-        return spy_retain(c->types[SPY_STRING]);
-    }
+    if (!convert && calls && argc == 2 && is_builtin(callee, B_ROUND) && is_number(argv[0]) && (convert = index_function(c, argv[1])))
+        return round_enter(c, m, convert, env);
     if (convert) {
         /* The method's name takes the callee's place (CALL_CHECKED); a
          * spec leaves the stack. */
@@ -27122,6 +27114,29 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     spy_release(callee); spy_release(traceback);
     return result;
 }
+/* round() of a number atop m's stack, under its callee, by its ndigits
+ * above it, whose __index__ is convert: that call to enter (CALL_CHECKED),
+ * str's class with *env set, "round" and the pair taking the stack's
+ * places (conversion_value); else NULL. */
+static NO_INLINE SPYValue *round_enter(SPYContext *c, Machine *m, SPYValue *convert, SPYValue **env) {
+    c->entering_kind = CALL_CHECKED;
+    SPYValue *digits = machine_pop(m), *x = machine_pop(m), *pair = round_pair(c, x, digits);
+    spy_release(machine_pop(m)); spy_release(x);
+    if (machine_push(c, m, spy_string(c, "round", 5)) || machine_push(c, m, pair)) { spy_release(digits); return NULL; }
+    if (!(*env = function_env(c, convert, 1, &digits, NULL, 1))) return NULL;
+    c->entering_init = convert;
+    return spy_retain(c->types[SPY_STRING]);
+}
+/* Whether round()'s argc arguments argv, positional ones and then the
+ * keywords kw, are its number and ndigits once ordered so in place. */
+static int round_keywords(size_t positional, SPYValue **argv, const Entry *kw, size_t kwc) {
+    if (positional + kwc != 2 || positional > 1) return 0;
+    int first = !positional && !strcmp(kw[0].key->as.string.data, "ndigits");
+    if (strcmp(kw[kwc - 1].key->as.string.data, first ? "number" : "ndigits") || (!positional && !first && strcmp(kw[0].key->as.string.data, "number")))
+        return 0;
+    if (first) { SPYValue *t = argv[0]; argv[0] = argv[1]; argv[1] = t; }
+    return 1;
+}
 /* BC_CALLK: call node n of argc arguments, positional and then keyword
  * ones, taken from the stack after its callee; a generator's machine
  * (calls 0) enters no call. A keyword's name is kept on its node. */
@@ -27227,6 +27242,11 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
             return NULL;
         }
     }
+    SPYValue *convert;
+    if (calls && is_builtin(callee, B_ROUND) && round_keywords(positional, argv, kw, kwc) && is_number(argv[0]) &&
+        (convert = index_function(c, argv[1])))
+        /* As a plain call's step (stack_call). */
+        return round_enter(c, m, convert, env);
     Node *def = callee->type == SPY_FUNCTION && callee->ctx == c ? callee->as.function.def : NULL;
     if (def && def->kind != N_CLASS && def->kind != N_COMPREHENSION) {
         SPYValue *callee_env = keyword_env(c, callee, positional, argv, kw, kwc, NULL, 0);

@@ -1322,6 +1322,15 @@ static const char *const programs[] = {
     "    return ascii([AR('\\xe9'), (AR('b'), {1: AR('\\u20ac')})]), ascii(l), ascii({'\\xe9': [AR('c')]}), m\n"
     "print(oa())\n",
 
+    "class RK:\n"
+    "    def __init__(s, n): s.n = n\n"
+    "    def __index__(s): return s.n\n"
+    "def rk():\n"
+    "    try: round(2.5, ndigits=RK('x'))\n"
+    "    except TypeError as e: m = str(e)\n"
+    "    return round(2.25, ndigits=RK(1)), round(ndigits=RK(-1), number=15), round(number=1.5, ndigits=RK(0)), m\n"
+    "print(rk())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
