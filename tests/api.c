@@ -2238,6 +2238,10 @@ int main(int argc, char **argv) {
                "    return sum(released)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "releases()", "releases.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 2);
+    /* So do bytes() and bytearray() of it, copying the view and then releasing it. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(bytes(Releasing())) + len(bytearray(Releasing())) + sum(released)", "copies.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 12564 && pauses > 3);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

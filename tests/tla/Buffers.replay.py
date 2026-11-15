@@ -18,6 +18,8 @@ def export(p, log):
     how = p["how"]
     if how == "bytes":
         return repr(bytes(B()))
+    if how == "bytearray":
+        return repr(bytes(bytearray(B())))
     m = memoryview(B())
     if how == "with":
         with m:

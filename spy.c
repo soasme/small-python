@@ -22789,7 +22789,7 @@ static int percent_mapping(SPYContext *c, SPYValue *v, int bytes) {
     return special_dispatch(v) && percent_has(c, v, "__getitem__");
 }
 static SPYValue *conversion_method(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
-static SPYValue *conversion_value(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+static SPYValue *conversion_value(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *percent_converted(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *index_function(SPYContext *, SPYValue *);
 /* Of percent_build's spec ch at its arguments' value v, on m: 1 when
@@ -22805,7 +22805,7 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
     int index = ch == 'o' || ch == 'x' || ch == 'X' || ch == 'c', bytes = held[0]->type != SPY_STRING, number = ch != 's' && ch != 'r' && ch != 'a' && ch != 'b';
     SPYValue *callee = bytes && (ch == 's' || ch == 'b') ? c->types[SPY_BYTES] : ch == 's' ? c->types[SPY_STRING] : !number ? c->field_calls[0] :
                        c->types[ch == 'd' || ch == 'i' || ch == 'u' ? SPY_INT : SPY_FLOAT];
-    SPYValue *found[2], *function = NULL, *job = NULL, *env = NULL;
+    SPYValue *found[2] = {NULL, NULL}, *function = NULL, *job = NULL, *env = NULL;
     if (index) {
         if (!(function = index_function(c, v)) || !(found[0] = bytes && ch == 'c' ? spy_string(c, "index", 5) : spy_string(c, "int", 3))) return 0;
     } else if (v->type == SPY_INSTANCE ? !(function = conversion_method(c, callee, 1, &v, found)) : number || !repr_job(c, callee, v)) return 0;
@@ -22816,7 +22816,9 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
     for (int k = 0; k < 9; k++) whole = whole && parts[k];
     if (whole) job = spy_tuple(c, 9, parts);
     release_all(9, parts);
-    if (job && function) callk(c, m, function, 1, (SPYValue *[]){spy_retain(v)}, percent_converted, job);
+    /* A __buffer__ takes the flags (conversion_method). */
+    if (!job || !function) spy_release(found[1]);
+    if (job && function) callk(c, m, function, 1 + (found[1] != NULL), (SPYValue *[]){spy_retain(v), found[1]}, percent_converted, job);
     else if (!machine_push(c, m, job) && !machine_push(c, m, spy_retain(c->replacing)) && !machine_push(c, m, spy_retain(callee)) &&
              !machine_push(c, m, spy_retain(v)) && (*piece = repr_call(c, m, &env))) {
         if (!env) {
@@ -23041,7 +23043,7 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
  * number's TypeError, c->unbound, is the spec's (percent_type). */
 static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **saved = state->as.seq.items;
-    SPYValue *text = !result ? NULL : saved[8] == c->none ? spy_retain(result) : conversion_value(c, saved[7], saved[8], result);
+    SPYValue *text = !result ? NULL : saved[8] == c->none ? spy_retain(result) : conversion_value(c, NULL, saved[7], saved[8], result);
     const char *name = saved[8] == c->none ? "" : saved[8]->as.string.data;
     if (!text && error_is(c, "TypeError") && (!strcmp(name, "int") || !strcmp(name, "float") || !strcmp(name, "__int__") || !strcmp(name, "__float__"))) {
         spy_clear_error(c);
@@ -25870,13 +25872,16 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         return argc <= 2 && callee->type == SPY_NATIVE && callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_NEXT ?
                sequence_next(c, argv[0], found) : NULL;
     if (argc > 2 || (argv[0]->type == SPY_CLASS && !argv[0]->as.map.meta)) return NULL;
-    /* memoryview() of an instance with no bytes or bytearray base asks its
-     * __buffer__ for a view (memory_exported). */
-    if (callee == c->types[SPY_MEMORYVIEW] && argc == 1 && argv[0]->type == SPY_INSTANCE && !builtin_value(c, argv[0], SPY_BYTES) &&
-        !builtin_value(c, argv[0], SPY_BYTEARRAY)) {
+    /* memoryview(), bytearray() and bytes() with no __bytes__ of an
+     * instance with no bytes or bytearray base ask its __buffer__ for a
+     * view (memory_exported), the latter two named by their types. */
+    int array = callee == c->types[SPY_BYTEARRAY];
+    if (argc == 1 && argv[0]->type == SPY_INSTANCE && !builtin_value(c, argv[0], SPY_BYTES) && !builtin_value(c, argv[0], SPY_BYTEARRAY) &&
+        (callee == c->types[SPY_MEMORYVIEW] || array || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")))) {
         SPYValue *function = class_lookup(argv[0]->as.map.parent, "__buffer__");
+        const char *made = callee == c->types[SPY_MEMORYVIEW] ? "__buffer__" : array ? "bytearray" : "bytes";
         if (!function || !machine_function(c, function) || !(*spec = spy_int(c, BUFFER_FLAGS))) return NULL;
-        if (!(*name = spy_string(c, "__buffer__", 10))) { spy_release(*spec); return NULL; }
+        if (!(*name = spy_string(c, made, strlen(made)))) { spy_release(*spec); return NULL; }
         c->entering_kind = CALL_CHECKED;
         return function;
     }
@@ -30549,13 +30554,15 @@ static NO_INLINE int check_truth_call(SPYContext *c, Machine *m, SPYValue *name,
  * and reversed() return theirs, or reversed() a sequence's ("reversed" its
  * __len__), hex(), oct(), bin() and chr() ("hex" and so on their
  * __index__) the int's, as int() and float() ("int", "float") do, and
- * a bytes %c's ("index") the int,
+ * a bytes %c's ("index") the int, bytes() and bytearray() ("bytes",
+ * "bytearray" their __buffer__) copy the view (buffer_copied),
  * dir() lists and sorts it, print's write and flush return theirs,
  * isinstance() and issubclass() take the
  * result's truth, ascii() ("ascii" its __repr__) escapes the text,
  * round() ("round" an ndigits' __index__, v the number and ndigits)
  * rounds by the int, and the others' text is a str. */
-static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue *name, SPYValue *result) {
+static SPYValue *buffer_copied(SPYContext *, Machine *, SPYValue *, int, SPYValue *);
+static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue *v, SPYValue *name, SPYValue *result) {
     SPYValue *whole = NULL;
     Buffer b = { .ctx = c, .whole = &whole };
     int64_t length;
@@ -30591,6 +30598,7 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
     }
     if (!strcmp(method, "__hash__")) return hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "__buffer__")) return memory_exported(c, v, spy_retain(result));
+    if (!strcmp(method, "bytes") || !strcmp(method, "bytearray")) return buffer_copied(c, m, v, method[4] == 'a', result);
     if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));
     if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);
     if (!strcmp(method, "__bool__"))
@@ -30691,8 +30699,10 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     if (ins->op != BC_FALSE && ins->op != BC_SHORT && ins->op != BC_UNARY) {
         SPYValue *name = machine_pop(m);
         if (dir_listing(c, m, name, result) || check_truth_call(c, m, name, result)) { spy_release(v); spy_release(name); return m; }
-        SPYValue *string = conversion_value(c, v, name, result);
+        SPYValue *string = conversion_value(c, m, v, name, result);
         spy_release(result); spy_release(v); spy_release(name);
+        /* A copied buffer's Python __release_buffer__ (buffer_copied). */
+        if (c->k_fn) { c->consuming = 1; return m; }
         if (m->len && m->stack[m->len - 1] == c->replacing && (string || m->stack[m->len - 2]->type == SPY_LIST))
             return text_returned(c, m, string);
         if (string) machine_push(c, m, string);
@@ -31194,13 +31204,13 @@ static SPYValue *new_converted(SPYContext *c, Machine *m, SPYValue *cls, SPYValu
 }
 /* What a next call of kind that convert_call or init_convert made
  * returned in result, which it takes: the item's conversion, owned
- * (conversion_value), or the new instance item when name is its class,
+ * (conversion_value, a buffer released here), or the new instance item when name is its class,
  * whose __init__ returned None, or for an arguments' tuple item what its
  * __new__ made (new_converted); else NULL with an error, or with the
  * next call in c->k_fn. The item and name leave m's stack. */
 static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *result, int kind) {
     spy_release(machine_pop(m));
-    SPYValue *name = machine_pop(m), *item = machine_pop(m), *value = !result ? NULL : name->type != SPY_CLASS ? conversion_value(c, item, name, result) :
+    SPYValue *name = machine_pop(m), *item = machine_pop(m), *value = !result ? NULL : name->type != SPY_CLASS ? conversion_value(c, NULL, item, name, result) :
                     item->type == SPY_TUPLE ? new_converted(c, m, name, item, spy_retain(result), kind) :
                     result->type == SPY_NONE ? spy_retain(item) : errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
     spy_release(result); spy_release(name); spy_release(item);
@@ -36235,24 +36245,28 @@ static int memory_release(SPYContext *c, SPYValue *m) {
     return c->error_type[0] ? -1 : 0;
 }
 /* The __release_buffer__ that memory_released called returned result:
- * view, the view the exporter gave, released too; None. */
-static SPYValue *buffer_released(SPYContext *c, Machine *machine, SPYValue *view, SPYValue *result) {
+ * the view the exporter gave, pair's first, released too; its second. */
+static SPYValue *buffer_released(SPYContext *c, Machine *machine, SPYValue *pair, SPYValue *result) {
     (void)machine;
     spy_release(result);
-    memory_unexport(view);
-    spy_release(view);
-    return c->error_type[0] ? NULL : spy_none(c);
+    memory_unexport(pair->as.seq.items[0]);
+    SPYValue *value = c->error_type[0] ? NULL : spy_retain(pair->as.seq.items[1]);
+    spy_release(pair);
+    return value;
 }
-/* release() of view m on machine, its exporter's __release_buffer__
+/* The release of view m on machine, its exporter's __release_buffer__
  * Python: m released, the method then machine's call (callk), its view
- * released when it returns (buffer_released); 1, or 0 to release m as
- * memory_release does. */
-static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m) {
-    SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function;
+ * released when it returns (buffer_released), value, which it takes, the
+ * call's; 1, or 0 to release m as memory_release does. */
+static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m, SPYValue *value) {
+    SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function, *pair;
     if (m->as.memory.released || m->as.memory.exports || !view || obj->type != SPY_INSTANCE ||
         !(function = class_lookup(obj->as.map.parent, "__release_buffer__")) || !machine_function(c, function)) return 0;
     memory_unexport(m);
-    callk(c, machine, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view)}, buffer_released, spy_retain(view));
+    pair = tuple_of(c, 2, (SPYValue *[]){view, value});
+    spy_release(value);
+    if (!pair) { memory_unexport(view); return 1; }
+    callk(c, machine, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view)}, buffer_released, pair);
     return 1;
 }
 static int memory_check(SPYContext *c, SPYValue *m) {
@@ -36550,6 +36564,23 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
     SPYValue *m = memory_new(c, object, source, "B", 1, 1, source->type == SPY_BYTES);
     if (m) { memory_shape(m)[0] = (ptrdiff_t)source->as.string.len; memory_strides(m)[0] = 1; }
     return m;
+}
+/* bytes() or bytearray() (array) of object, whose __buffer__ returned
+ * view: a copy of the view's bytes, the view then released, by a Python
+ * __release_buffer__ as m's call (memory_released) leaving NULL, c->k_fn
+ * set, the copy its value. */
+static SPYValue *buffer_copied(SPYContext *c, Machine *m, SPYValue *object, int array, SPYValue *view) {
+    SPYValue *exported = memory_exported(c, object, spy_retain(view)), *copy = NULL;
+    if (!exported) return NULL;
+    if (!memory_check(c, exported)) {
+        SPYValue *bytes = memory_bytes(c, exported);
+        copy = bytes && array ? bytearray_new(c, bytes->as.string.data, bytes->as.string.len) : spy_retain(bytes);
+        spy_release(bytes);
+    }
+    if (copy && m && memory_released(c, m, exported, copy)) copy = NULL;
+    else if (memory_release(c, exported)) { spy_release(copy); copy = NULL; }
+    spy_release(exported);
+    return copy;
 }
 static SPYValue *memory_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     static const char *const names[] = {"object"};
@@ -39827,7 +39858,7 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     return c->error_type[0] ? NULL : spy_none(c);
 }
 static int native_absent(SPYContext *, SPYValue *, SPYValue *);
-static int memory_released(SPYContext *, Machine *, SPYValue *);
+static int memory_released(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* A call of callee with argc arguments argv, bound or not, that is
  * property.__get__ of an object whose property's getter is Python, or
@@ -39843,7 +39874,7 @@ static SPYValue *native_entered(SPYContext *c, Machine *m, SPYValue *callee, siz
     if (!self) self = *argv++;
     if (callee->as.native.kwcall == memory_method) {
         intptr_t op = (intptr_t)callee->as.native.data;
-        if (self->type == SPY_MEMORYVIEW && (op == MV_EXIT || (op == MV_RELEASE && !argc))) memory_released(c, m, self);
+        if (self->type == SPY_MEMORYVIEW && (op == MV_EXIT || (op == MV_RELEASE && !argc))) memory_released(c, m, self, spy_none(c));
         return NULL;
     }
     if (callee->as.native.kwcall == slot_call) {

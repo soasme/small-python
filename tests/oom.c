@@ -1509,6 +1509,19 @@ static const char *const programs[] = {
     "    return out + e.log\n"
     "print(mr())\n",
 
+    "class MC:\n"
+    "    def __init__(s, d): s.d = bytearray(d); s.log = []\n"
+    "    def __buffer__(s, f):\n"
+    "        if s.d == b'x': raise KeyError(f)\n"
+    "        return memoryview(s.d)[1:]\n"
+    "    def __release_buffer__(s, v): s.log.append(bytes(v))\n"
+    "def mc():\n"
+    "    e = MC(b'abc'); out = [bytes(e), bytearray(e), list(map(bytes, [e]))]\n"
+    "    try: bytearray(MC(b'x'))\n"
+    "    except KeyError as x: out.append(x.args)\n"
+    "    return out + e.log\n"
+    "print(mc())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
