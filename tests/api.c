@@ -2242,6 +2242,13 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(bytes(Releasing())) + len(bytearray(Releasing())) + sum(released)", "copies.py"),
                                  SPY_STOP_STEPS, &pauses)) == 12564 && pauses > 3);
+    /* So do a dict subclass's subscript, in and get, comparing keys by a Python __eq__. */
+    execute(c, "class Same:\n    def __hash__(self): return 1\n    def __eq__(self, other):\n        for i in range(3000): pass\n"
+               "        return other is self\n"
+               "class Sub(dict): pass\n"
+               "def compares():\n    k = Same()\n    d = Sub({Same(): 1, k: 2})\n    return d[k] + (k in d) + d.get(k)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "compares()", "compares.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

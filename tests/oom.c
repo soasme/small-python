@@ -1522,6 +1522,22 @@ static const char *const programs[] = {
     "    return out + e.log\n"
     "print(mc())\n",
 
+    "class DK:\n"
+    "    def __init__(s, n): s.n = n\n"
+    "    def __hash__(s): return 1\n"
+    "    def __eq__(s, o):\n"
+    "        if o.n < 0: raise KeyError(o.n)\n"
+    "        return s.n == o.n\n"
+    "class DS(dict): pass\n"
+    "def dk():\n"
+    "    d = DS({DK(1): 'a', DK(2): 'b'})\n"
+    "    out = [d[DK(2)], DK(3) in d, d.get(DK(1)), d.setdefault(DK(4), 'c'), d.pop(DK(2))]\n"
+    "    for k in (5, -1):\n"
+    "        try: d[DK(k)]\n"
+    "        except KeyError as x: out.append(x.args[0] if k < 0 else x.args[0].n)\n"
+    "    return out + [len(d)]\n"
+    "print(dk())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

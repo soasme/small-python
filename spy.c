@@ -28197,6 +28197,14 @@ static int eq_reaches(SPYValue *key) {
 static int machine_lookup(SPYValue *map, SPYValue *key, int contains) {
     return hashes_key(map, contains) && (lookup_key(key) || eq_keyed(map));
 }
+/* The map a subscript, or an in when contains, of object looks a key up
+ * in: object, or the dict of a dict subclass's instance whose class's
+ * __contains__, or __getitem__ with no __missing__, is dict's. */
+static SPYValue *lookup_storage(SPYContext *c, SPYValue *object, int contains) {
+    if (object->type != SPY_INSTANCE || !object->as.map.base) return object;
+    SPYValue *base = builtin_base(c, object, contains ? "__contains__" : "__getitem__", NULL);
+    return base && is_dict(base) && (contains || !class_lookup(object->as.map.parent, "__missing__")) ? base : object;
+}
 /* Whether step ins's lookup of key, of hash, in map compares key with a
  * stored key; else, when key itself is the first entry of hash or, for
  * an in, there is none, its result is c->looked. */
@@ -28796,8 +28804,9 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     SPYValue *y = machine_pop(m), *x = machine_pop(m);
     int contains = step_operation(ins, &op) != OPERATE_INDEX;
     if (!hashed) hash_failed(c, contains ? y : x, key);
-    if (hashed && machine_lookup(contains ? y : x, key, contains) && lookup_found(c, ins, contains ? y : x, key, hash)) {
-        m = lookup_step(c, m, ins, contains ? y : x, key, hash, map_cursor(namespace_map(contains ? y : x), hash), pc);
+    SPYValue *map = hashed ? lookup_storage(c, contains ? y : x, contains) : NULL;
+    if (hashed && machine_lookup(map, key, contains) && lookup_found(c, ins, map, key, hash)) {
+        m = lookup_step(c, m, ins, map, key, hash, map_cursor(namespace_map(map), hash), pc);
         spy_release(key);
     } else {
         hash_kept(c, key, hashed && !c->looked, hash);
@@ -29101,15 +29110,17 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         }
     }
     /* A dict's item, a dict subclass's by dict's __getitem__, or a dict's
-     * or set's member: its key's __hash__ first, the operands on the stack
-     * under the key for the operation. */
-    if (contains ? hashes_key(y, 1) : kind == OPERATE_INDEX && hashes_first(c, x, "__getitem__")) {
+     * or set's member, a dict subclass's by dict's __contains__: its key's
+     * __hash__ first, the operands on the stack under the key for the
+     * operation. */
+    SPYValue *map = kind == OPERATE_INDEX || contains ? lookup_storage(c, contains ? y : x, contains) : NULL;
+    if (contains ? hashes_key(map, 1) : kind == OPERATE_INDEX && hashes_first(c, x, "__getitem__")) {
         SPYValue *operands[] = {x, y};
         if (((contains ? x : y)->type == SPY_INSTANCE || (contains ? x : y)->type == SPY_TUPLE) &&
             ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0])) return function;
         c->entering_kind = CALL_OPERATOR;
         /* A key hashed in C whose Python __eq__ the lookup may call. */
-        if (machine_lookup(contains ? y : x, contains ? x : y, contains)) return native_lookup(c, m, ins, contains ? y : x, contains ? x : y, env);
+        if (machine_lookup(map, contains ? x : y, contains)) return native_lookup(c, m, ins, map, contains ? x : y, env);
     }
     /* A view's item at a tuple of an instance's Python __index__ (memory_key_call). */
     if (kind == OPERATE_INDEX && memory_key_calls(c, x, y, 0)) return memory_key_call(c, m, x, y, 0);
@@ -36131,12 +36142,13 @@ static const char *const set_item_names[] = {"add", "discard", "remove", "pop", 
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* The dict or set a call of callee, method number method of it or -1,
  * with argc arguments argv looks argv[*at] up in: a dict's get,
- * setdefault or pop, or a set's add, discard or remove, bound or given
- * the set first; borrowed, else NULL. */
+ * setdefault or pop, a dict subclass's instance's its storage, or a set's
+ * add, discard or remove, bound or given the set first; borrowed, else
+ * NULL. */
 static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue *const *argv, size_t *at) {
     *at = 0;
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
-    if (method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP) return argc && argc <= 2 ? callee : NULL;
+    if (method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP) return argc && argc <= 2 ? storage(callee) : NULL;
     SPYValue *function = callee, *self = NULL;
     if (method < 0 && callee->type == SPY_METHOD) { function = callee->as.method.function; self = callee->as.method.self; }
     else if (method < 0 && argc == 2 && (argv[0]->type == SPY_SET || argv[0]->type == SPY_FROZENSET)) { self = argv[0]; *at = 1; }
