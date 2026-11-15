@@ -29020,16 +29020,49 @@ static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instructi
     spy_release(x); spy_release(iterator);
     return m;
 }
-/* A pair's next call after its __eq__ (equal_call) returned: function
- * entered with argc args, which it takes, a and b, phase c->unbound and
- * c->pairing pushed for pair_returned; else NULL with an error. */
-static NO_INLINE Call *pair_enter(SPYContext *c, Machine *m, SPYValue *function, size_t argc, SPYValue **args, SPYValue *a, SPYValue *b,
-                                  int phase) {
+/* An item comparison's __eq__, entered under marker on m's stack (popped),
+ * returned result, which it takes: whether the items are equal, the
+ * operands popped too; or *call set, the comparison's next call entered
+ * (equal_enter): b's reflected __eq__ when a's declined, one c->unbound
+ * over them, or the __bool__ or __len__ of a result, two. */
+static Call *equal_enter(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, SPYValue *, int);
+static NO_INLINE int equal_found(SPYContext *c, Machine *m, SPYValue *marker, SPYValue *result, Call **call) {
+    int phase = 0, found, length = 0, negated;
+    while (m->stack[m->len - 1] == c->unbound) { spy_release(machine_pop(m)); phase++; }
+    SPYValue *b = machine_pop(m), *a = machine_pop(m), *test = result, *function;
+    if (phase == 2) found = result ? truth_result(c, a, b == c->booleans[1], result) : 0;
+    else {
+        /* a's __eq__ declined: b's reflected one, then identity. */
+        if (result == c->not_implemented && phase) {
+            spy_release(result);
+            test = comparison_declined(c, T_EQ, a, b);
+        } else if (result == c->not_implemented && (function = rich_entry(c, b, R_EQ, &negated))) {
+            SPYValue *args[] = {spy_retain(b), spy_retain(a)};
+            spy_release(result); test = NULL;
+            *call = equal_enter(c, m, marker, function, 2, args, a, b, 1);
+        } else test = compared(c, T_EQ, a, b, result);
+        if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) &&
+            (function = truth_function(c, test, &length))) {
+            SPYValue *self = spy_retain(test);
+            *call = equal_enter(c, m, marker, function, 1, &self, test, c->booleans[!length], 2);
+            spy_release(test); test = NULL;
+        }
+        found = test ? truthy(test) : 0;
+        spy_release(test);
+    }
+    spy_release(a); spy_release(b);
+    return found;
+}
+/* An item comparison's next call after its __eq__ returned (equal_found):
+ * function entered with argc args, which it takes, a and b, phase
+ * c->unbound and marker pushed; else NULL with an error. */
+static NO_INLINE Call *equal_enter(SPYContext *c, Machine *m, SPYValue *marker, SPYValue *function, size_t argc, SPYValue **args,
+                                   SPYValue *a, SPYValue *b, int phase) {
     size_t len = m->len;
     SPYValue *env;
     int failed = machine_push(c, m, spy_retain(a)) || machine_push(c, m, spy_retain(b));
     while (!failed && phase--) failed = machine_push(c, m, spy_retain(c->unbound));
-    if (failed || machine_push(c, m, spy_retain(c->pairing))) release_all(argc, args);
+    if (failed || machine_push(c, m, spy_retain(marker))) release_all(argc, args);
     else if ((env = function_env(c, function, argc, args, NULL, 1))) {
         Call *call = call_enter(c, spy_retain(function), env, m);
         if (call) { call->m.outermost = CALL_OPERATOR; return call; }
@@ -29046,33 +29079,8 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
     int op = 0;
     step_operation(ins, &op);
     spy_release(machine_pop(m));
-    /* One c->unbound marks the reflected __eq__'s call, two the __bool__ or
-     * __len__ of a result. */
-    int phase = 0, found, length = 0, negated;
-    while (m->stack[m->len - 1] == c->unbound) { spy_release(machine_pop(m)); phase++; }
-    SPYValue *b = machine_pop(m), *a = machine_pop(m), *test = result, *function;
     Call *call = NULL;
-    if (phase == 2) found = result ? truth_result(c, a, b == c->booleans[1], result) : 0;
-    else {
-        /* a's __eq__ declined: b's reflected one, then identity. */
-        if (result == c->not_implemented && phase) {
-            spy_release(result);
-            test = comparison_declined(c, T_EQ, a, b);
-        } else if (result == c->not_implemented && (function = rich_entry(c, b, R_EQ, &negated))) {
-            SPYValue *args[] = {spy_retain(b), spy_retain(a)};
-            spy_release(result); test = NULL;
-            call = pair_enter(c, m, function, 2, args, a, b, 1);
-        } else test = compared(c, T_EQ, a, b, result);
-        if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) &&
-            (function = truth_function(c, test, &length))) {
-            SPYValue *self = spy_retain(test);
-            call = pair_enter(c, m, function, 1, &self, test, c->booleans[!length], 2);
-            spy_release(test); test = NULL;
-        }
-        found = test ? truthy(test) : 0;
-        spy_release(test);
-    }
-    spy_release(a); spy_release(b);
+    int found = equal_found(c, m, c->pairing, result, &call);
     if (call) return &call->m;
     for (;;) {
         SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
@@ -29153,9 +29161,9 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         int op = 0;
         step_operation(ins, &op);
         spy_release(machine_pop(m));
-        SPYValue *right = machine_pop(m), *left = machine_pop(m), *test = compared(c, T_EQ, left, right, result);
-        int found = test ? truthy(test) : 0;
-        spy_release(test); spy_release(left); spy_release(right);
+        Call *call = NULL;
+        int found = equal_found(c, m, c->unbound, result, &call);
+        if (call) return &call->m;
         if (ins->op == BC_CALLN) {
             /* An item's comparison for index, count or remove (search_call):
              * the method's value, or the next item's comparison. */

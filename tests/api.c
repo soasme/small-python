@@ -2054,6 +2054,10 @@ int main(int argc, char **argv) {
                "def truths():\n    return ([Odd(), Odd()] == [1, 2]) + ({1: Odd()} == {1: 2}) + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "truths()", "truths.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 1);
+    /* And an item's in a search of a list, after the other's declined. */
+    execute(c, "def searches():\n    return (Reflects() in [Declines()]) + (1 in [Odd()]) + [Declines(), Odd()].count(Reflects()) + 7\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "searches()", "searches.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

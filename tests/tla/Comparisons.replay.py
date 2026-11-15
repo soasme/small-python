@@ -81,6 +81,10 @@ SOURCES = {
     "seq_reflected_calls": "class D:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return NotImplemented\n"
                            "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o.n\n"
                            "d = D(0)\nresult = ([D(1)] == [E(1)], [d] == [d], [D(2)] == [D(3)])",
+    "in_reflected_truth_calls": "class T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n        t(s.v)\n        return s.v\n"
+                                "class D:\n    def __eq__(s, o):\n        for _ in (): pass\n        t('d')\n        return NotImplemented\n"
+                                "class X:\n    def __eq__(s, o):\n        for _ in (): pass\n        t('x')\n        return T(True)\n"
+                                "result = (X() in [D()], [D()].count(X()), 1 in [X()])",
     "in_seq_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + o.n)\n        return s.n == o.n\n"
                     "result = ((E('a'),) in [(E('b'),), (E('a'),)], [E('c')] in [(E('c'),), [E('d')]])",
     "seq_order_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"
