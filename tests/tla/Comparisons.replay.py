@@ -89,6 +89,11 @@ SOURCES = {
                            "class O:\n    def __init__(s, r): s.r = r\n    def __eq__(s, o): return s.r\n"
                            "def g():\n    yield O(T(False))\n    yield O(T(True))\n    yield 5\n"
                            "it = g()\nresult = (1 in it, list(it))",
+    "result_truth_calls": "class T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n        t(s.v)\n        return s.v\n"
+                          "class L:\n    def __len__(s):\n        for _ in (): pass\n        t(0)\n        return 0\n"
+                          "class O:\n    def __eq__(s, o): return T(True)\n"
+                          "class B:\n    def __init__(s, r): s.r = r\n    def __contains__(s, x): return s.r\n"
+                          "result = (O() != 1, 1 in B(T(True)), 1 in B(L()))",
     "in_seq_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + o.n)\n        return s.n == o.n\n"
                     "result = ((E('a'),) in [(E('b'),), (E('a'),)], [E('c')] in [(E('c'),), [E('d')]])",
     "seq_order_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"

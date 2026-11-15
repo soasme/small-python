@@ -29037,14 +29037,14 @@ static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instructi
 /* An item comparison's __eq__, entered under marker on m's stack (popped),
  * returned result, which it takes: whether the items are equal, the
  * operands popped too; or *call set, the comparison's next call entered
- * (equal_enter): b's reflected __eq__ when a's declined, one c->unbound
+ * (operator_enter): b's reflected __eq__ when a's declined, one c->unbound
  * over them, or the __bool__ or __len__ of a result, two. */
-static Call *equal_enter(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, SPYValue *, int);
+static Call *operator_enter(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, size_t, SPYValue *const *);
 static NO_INLINE int equal_found(SPYContext *c, Machine *m, SPYValue *marker, SPYValue *result, Call **call) {
     int phase = 0, found, length = 0, negated;
     while (m->stack[m->len - 1] == c->unbound) { spy_release(machine_pop(m)); phase++; }
     SPYValue *b = machine_pop(m), *a = machine_pop(m), *test = result, *function;
-    if (phase == 2) found = result ? truth_result(c, a, b == c->booleans[1], result) : 0;
+    if (phase == 2) found = truth_result(c, a, b == c->booleans[1], result);
     else {
         /* a's __eq__ declined: b's reflected one, then identity. */
         if (result == c->not_implemented && phase) {
@@ -29053,12 +29053,12 @@ static NO_INLINE int equal_found(SPYContext *c, Machine *m, SPYValue *marker, SP
         } else if (result == c->not_implemented && (function = rich_entry(c, b, R_EQ, &negated))) {
             SPYValue *args[] = {spy_retain(b), spy_retain(a)};
             spy_release(result); test = NULL;
-            *call = equal_enter(c, m, marker, function, 2, args, a, b, 1);
+            *call = operator_enter(c, m, function, 2, args, 4, (SPYValue *[]){a, b, c->unbound, marker});
         } else test = compared(c, T_EQ, a, b, result);
         if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) &&
             (function = truth_function(c, test, &length))) {
             SPYValue *self = spy_retain(test);
-            *call = equal_enter(c, m, marker, function, 1, &self, test, c->booleans[!length], 2);
+            *call = operator_enter(c, m, function, 1, &self, 5, (SPYValue *[]){test, c->booleans[!length], c->unbound, c->unbound, marker});
             spy_release(test); test = NULL;
         }
         found = test ? truthy(test) : 0;
@@ -29067,22 +29067,32 @@ static NO_INLINE int equal_found(SPYContext *c, Machine *m, SPYValue *marker, SP
     spy_release(a); spy_release(b);
     return found;
 }
-/* An item comparison's next call after its __eq__ returned (equal_found):
- * function entered with argc args, which it takes, a and b, phase
- * c->unbound and marker pushed; else NULL with an error. */
-static NO_INLINE Call *equal_enter(SPYContext *c, Machine *m, SPYValue *marker, SPYValue *function, size_t argc, SPYValue **args,
-                                   SPYValue *a, SPYValue *b, int phase) {
+/* An operator's next call after a method returned (equal_found,
+ * operator_truth): function entered with argc args, which it takes, the
+ * count values pushed on m's stack for its return; else NULL with an
+ * error. */
+static NO_INLINE Call *operator_enter(SPYContext *c, Machine *m, SPYValue *function, size_t argc, SPYValue **args, size_t count,
+                                      SPYValue *const *pushed) {
     size_t len = m->len;
     SPYValue *env;
-    int failed = machine_push(c, m, spy_retain(a)) || machine_push(c, m, spy_retain(b));
-    while (!failed && phase--) failed = machine_push(c, m, spy_retain(c->unbound));
-    if (failed || machine_push(c, m, spy_retain(marker))) release_all(argc, args);
-    else if ((env = function_env(c, function, argc, args, NULL, 1))) {
+    for (size_t i = 0; i < count; i++)
+        if (machine_push(c, m, spy_retain(pushed[i]))) { release_all(argc, args); goto fail; }
+    if ((env = function_env(c, function, argc, args, NULL, 1))) {
         Call *call = call_enter(c, spy_retain(function), env, m);
         if (call) { call->m.outermost = CALL_OPERATOR; return call; }
     }
+fail:
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
+}
+/* The Python __bool__ or __len__ (truth_function) that an operator calls
+ * on its result v for its truth, entered on m with v and whether it is
+ * __bool__ pushed (operator_enter) for operator_returned; else NULL, maybe
+ * with an error. */
+static NO_INLINE Call *operator_truth(SPYContext *c, Machine *m, SPYValue *v) {
+    int length = 0;
+    SPYValue *function = v->type != SPY_BOOL && (v->type == SPY_INSTANCE || metaclassed(v)) ? truth_function(c, v, &length) : NULL, *self;
+    return function ? operator_enter(c, m, function, 1, (self = spy_retain(v), &self), 2, (SPYValue *[]){v, c->booleans[!length]}) : NULL;
 }
 /* The __eq__ equal_call entered for step ins returned result: the pair
  * unequal, or the next pair's comparison, or the native comparison of the
@@ -29159,14 +29169,23 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
  * run on, at its pc. */
 static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
+    if (m->stack[m->len - 1] == c->booleans[0] || m->stack[m->len - 1] == c->booleans[1]) {
+        /* A result's __bool__ or __len__ (operator_truth) returned its truth. */
+        SPYValue *marker = machine_pop(m), *v = machine_pop(m);
+        int truth = truth_result(c, v, marker == c->booleans[1], result);
+        spy_release(marker); spy_release(v);
+        result = c->error_type[0] ? NULL : spy_bool(c, truth);
+    }
     if (m->stack[m->len - 1] == c->replacing) return fold_returned(c, m, result);
     if (m->stack[m->len - 1] == c->probing) return lookup_returned(c, m, ins, result, pc);
     if (m->stack[m->len - 1] == c->pairing) return pair_returned(c, m, ins, result, pc);
     /* object's __ne__ inverts the truth of the __eq__ it called (rich_entry). */
     if (m->stack[m->len - 1] == c->negating) {
+        Call *call = result && result != c->not_implemented ? operator_truth(c, m, result) : NULL;
+        if (call) { spy_release(result); return &call->m; }
         spy_release(machine_pop(m));
-        if (result != c->not_implemented) {
-            int truth = truthy(result);
+        if (result && result != c->not_implemented) {
+            int truth = !c->error_type[0] && truthy(result);
             spy_release(result);
             result = c->error_type[0] ? NULL : spy_bool(c, !truth);
         }
@@ -29199,8 +29218,12 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         }
         return contains_returned(c, m, ins, op, found, pc);
     }
+    int op = 0, kind = step_operation(ins, &op);
+    /* An in tests a Python __contains__ result's truth by a call too. */
+    Call *call = result && (op == O_IN || op == O_NOTIN) ? operator_truth(c, m, result) : NULL;
+    if (call) { spy_release(result); return &call->m; }
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
-    int op = 0, kind = step_operation(ins, &op), phase = (int)marker->as.integer_data.small, called = phase & ~3;
+    int phase = (int)marker->as.integer_data.small, called = phase & ~3;
     spy_release(marker);
     /* divmod() and pow() keep their operator with the phase (operator_call). */
     if (called) { op = phase >> 2; kind = OPERATE_BINARY; phase &= 3; }
@@ -29233,7 +29256,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         } else result = key && !c->error_type[0] ? operation(c, ins, x, key) : NULL;
         spy_release(key);
     } else if (op == O_IN || op == O_NOTIN) {
-        int truth = truthy(result);
+        int truth = result && !c->error_type[0] && truthy(result);
         spy_release(result);
         result = c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == !!truth);
     } else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {

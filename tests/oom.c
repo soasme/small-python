@@ -1265,6 +1265,12 @@ static const char *const programs[] = {
     "    return 1 in it, list(it), RO(True) in (d for d in [RD()])\n"
     "print(ri())\n",
 
+    "class RC:\n"
+    "    def __contains__(self, x): return RT(x)\n"
+    "def rn():\n"
+    "    return RO(True) != 1, RO(False) != 1, True in RC(), False not in RC()\n"
+    "print(rn())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

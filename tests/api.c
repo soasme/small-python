@@ -2063,6 +2063,11 @@ int main(int argc, char **argv) {
                "def generated():\n    return (1 in odds()) + (Odd() in (i for i in [Declines()])) + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "generated()", "generated.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 1);
+    /* And of what object's __ne__ and a Python __contains__ returned. */
+    execute(c, "class Holds:\n    def __contains__(self, x): return Truth()\n"
+               "def results():\n    return (Odd() != 1) + (1 in Holds()) + (1 not in Holds()) + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "results()", "results.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
