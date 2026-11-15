@@ -38,12 +38,13 @@
 (*     distinct elements are compared with none (Annex D); or              *)
 (*   - {K(1)}'s or S({K(1)})'s union, update, difference, intersection,    *)
 (*     isdisjoint, issuperset, issubset, symmetric_difference or           *)
-(*     symmetric_difference_update of a list or a generator of K(1) and    *)
-(*     K(2): each item is hashed and compared with the set's K(1) before   *)
-(*     the next is taken; intersection, isdisjoint and issubset stop at    *)
-(*     the first, which decides; the symmetric ones make a set of the      *)
-(*     items, comparing none, then toggle K(1), comparing it once; a       *)
-(*     subclass's methods make a set, its updates change it.               *)
+(*     symmetric_difference_update of a list, its iterator or a generator  *)
+(*     of K(1) and K(2), called alone or as another call's argument: each  *)
+(*     item is hashed and compared with the set's K(1) before the next is  *)
+(*     taken; intersection, isdisjoint and issubset stop at the first,     *)
+(*     which decides; the symmetric ones make a set of the items,          *)
+(*     comparing none, then toggle K(1), comparing it once; a subclass's   *)
+(*     methods make a set, its updates change it.                          *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -66,7 +67,7 @@ Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : 
             \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|=", "S", "F"}]
             \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset", "issubset",
                                               "symmetric_difference", "symmetric_difference_update", "update"},
-                  source : {"list", "generator"}, kind : {"set", "S"}]
+                  source : {"list", "generator", "iterator"}, kind : {"set", "S"}, form : {"statement", "argument"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -109,7 +110,7 @@ RunHashed(p) ==
 \* hash both items into a set, then look K(1) up in it, or its K(1) up in
 \* the set, and drop it.
 RunIterable(p) ==
-    LET y(v) == IF p.source = "generator" THEN "y" \o v \o " " ELSE ""
+    LET y(v) == IF p.source = "generator" THEN "y" \o v \o " " ELSE ""   \* a list's iterator logs none
         first == y("1") \o "h1 e1"
         both == y("1") \o "h1 " \o y("2") \o "h2"
         log == CASE p.method \in {"intersection", "isdisjoint", "issubset"} -> first
@@ -156,6 +157,9 @@ Done == outcome # Pending
 \* a <= b and a >= b together are a == b.
 Antisymmetric == Done /\ program.op = "<=" /\ outcome = Bool(TRUE) /\ Run([program EXCEPT !.op = ">="]) = Bool(TRUE)
                  => Run([program EXCEPT !.op = "=="]) = Bool(TRUE)
+
+\* A method called as another call's argument behaves as one called alone.
+FormFree == Done /\ program.op = "iterable" => outcome = Run([program EXCEPT !.form = "statement"])
 
 \* intersection, isdisjoint and issubset take no item past the one that decides.
 Decided == Done /\ program.op = "iterable" /\ program.method \in {"intersection", "isdisjoint", "issubset"} =>

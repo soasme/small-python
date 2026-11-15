@@ -93,9 +93,16 @@ def iterable(p):
         for v in (1, 2):
             log.append("y%d" % v)
             yield K(v, log, "no")
-    source = generator() if p["source"] == "generator" else [K(1, log, "no"), K(2, log, "no")]
+    items = [K(1, log, "no"), K(2, log, "no")]
+    source = generator() if p["source"] == "generator" else iter(items) if p["source"] == "iterator" else items
     del log[:]
-    r = getattr(a, p["method"])(source)
+    if p["form"] == "argument":
+        # The operands of a call as another's argument, names, need no steps.
+        space = {"a": a, "source": source, "keep": lambda v: v}
+        exec("r = keep(a.%s(source))" % p["method"], space)
+        r = space["r"]
+    else:
+        r = getattr(a, p["method"])(source)
     if r is None:
         r = a
     if type(r) is bool:

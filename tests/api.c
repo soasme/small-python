@@ -2287,6 +2287,11 @@ int main(int argc, char **argv) {
     execute(c, "def bounded():\n    return [1, Same(), 2].index(2, 1) + (Same(), Same(), 2).index(2, -3, 3)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "bounded()", "bounded.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So do a set's methods of a list or its iterator called as another call's argument. */
+    execute(c, "def operands():\n    s = {Same()}\n    src, it = [Same()], iter([Same()])\n"
+               "    return len(s.union(src)) + len(set.union(s, it))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "operands()", "operands.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

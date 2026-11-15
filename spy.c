@@ -24305,11 +24305,13 @@ static ALWAYS_INLINE int hashed_pair(SPYContext *c, SPYValue *pair) {
     return (pair->type == SPY_LIST || pair->type == SPY_TUPLE) && pair->as.seq.len == 2 &&
            ((key = pair->as.seq.items[0])->type == SPY_INSTANCE || key->type == SPY_TUPLE) && hashed_item(c, key);
 }
-/* Whether a set takes v's items on the machine, a list or tuple holding
- * a hashed_item. */
+/* Whether a set takes v's items on the machine, a list or tuple, or a
+ * forward iterator's next items of one, holding a hashed_item. */
 static int hashed_items(SPYContext *c, SPYValue *v) {
+    size_t i = 0;
+    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE && !v->as.iterator.done) { i = v->as.iterator.index; v = v->as.iterator.source; }
     if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
-    for (size_t i = 0; i < v->as.seq.len; i++)
+    for (; i < v->as.seq.len; i++)
         if (hashed_item(c, v->as.seq.items[i])) return 1;
     return 0;
 }
@@ -26309,6 +26311,14 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
                  (argc == 1 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
+    /* A set's method given its set first, as a method call's operands
+     * give it, consumes its source as the bound method does. */
+    if (method < 0 && argc == 2 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method && set_like(argv[0])) {
+        SPYValue *bound = bind_method(c, argv[0], callee);
+        if (!bound) { release_all(argc, argv); spy_release(callee); return NULL; }
+        spy_release(callee); spy_release(argv[0]);
+        callee = bound; argv++; argc--;
+    }
     int id = consumer_of(c, callee, method, argc, argv);
     if (id >= 0)
         consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
@@ -26821,8 +26831,9 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
                                                        /* round() with ndigits (conversion_method) */
                                                        ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
-                                                       /* a set method given its set (set_call) */
-                                                       (walk_operand(argv[1]) && (callee->as.native.kwcall == set_method || callee->as.native.kwcall == slot_call)) ||
+                                                       /* a set method given its set (set_call, consumer_of) */
+                                                       callee->as.native.kwcall == set_method ||
+                                                       (walk_operand(argv[1]) && callee->as.native.kwcall == slot_call) ||
                                                        (argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||

@@ -1636,6 +1636,19 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ib())\n",
 
+    "class OPK:\n"
+    "    def __init__(s, v): s.v = v\n"
+    "    def __hash__(s): return s.v % 2\n"
+    "    def __eq__(s, o): return s.v == o.v\n"
+    "class OPS(set): pass\n"
+    "def keep(v): return sorted(k.v for k in v) if isinstance(v, (set, frozenset)) else v\n"
+    "def op():\n"
+    "    s, src, it, sub = {OPK(1)}, [OPK(2), OPK(3)], iter([OPK(1), OPK(4)]), OPS([OPK(2)])\n"
+    "    out = [keep(s.union(src)), keep(set.union(s, it)), keep(sub.union(src)), str(s.update(src)), keep(s)]\n"
+    "    it = iter([OPK(5)])\n"
+    "    return out + [keep({*it})]\n"
+    "print(op())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
