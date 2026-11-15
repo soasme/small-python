@@ -10323,13 +10323,19 @@ static NO_INLINE SPYValue *set_compared(SPYContext *c, int op, SPYValue *a, SPYV
     return set_walks(op, a, b) ? NULL : comparison(c, op, a, b);
 }
 static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
+static int python_at(SPYContext *, SPYValue *, SPYValue *);
 /* Whether y is a forward iterator over a list or tuple whose next items
  * hold one that x's comparison calls a Python __eq__ of (python_item),
- * which an in compares on the machine (contains_call). */
+ * which an in compares on the machine (contains_call); or a reversed one,
+ * holding one before any that is x (contains_step). */
 static NO_INLINE int iterated_python(SPYContext *c, SPYValue *x, SPYValue *y) {
-    if (y->as.iterator.kind != I_SEQUENCE || y->as.iterator.done) return 0;
     SPYValue *seq = y->as.iterator.source;
-    return (seq->type == SPY_LIST || seq->type == SPY_TUPLE) && python_item(c, x, seq, y->as.iterator.index) < seq->as.seq.len;
+    if ((y->as.iterator.kind != I_SEQUENCE && y->as.iterator.kind != I_REVERSED) || y->as.iterator.done ||
+        (seq->type != SPY_LIST && seq->type != SPY_TUPLE)) return 0;
+    if (y->as.iterator.kind == I_SEQUENCE) return python_item(c, x, seq, y->as.iterator.index) < seq->as.seq.len;
+    for (size_t at = y->as.iterator.index < seq->as.seq.len ? y->as.iterator.index : seq->as.seq.len; at--;)
+        if (python_at(c, x, seq->as.seq.items[at])) return seq->as.seq.items[at] != x;
+    return 0;
 }
 static SPYValue *rich_function(SPYContext *, SPYValue *, SPYValue *, int);
 /* Whether y, a dict's values, holds before any value that is x one whose
@@ -27382,16 +27388,16 @@ static int step_operation(Instruction *ins, int *op) {
     *op = n->op;
     return OPERATE_BINARY;
 }
-/* The first item of seq, a list or tuple, from at on that is x or whose
- * comparison with x calls a Python __eq__ (rich_function); seq's length
- * when none. */
+/* Whether item is x or its comparison with x calls a Python __eq__
+ * (rich_function), or its pairs' (pair_python). */
+static int python_at(SPYContext *c, SPYValue *x, SPYValue *item) {
+    return item == x || ((x->type == SPY_INSTANCE || item->type == SPY_INSTANCE) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))) ||
+           pair_python(c, x, item);
+}
+/* The first item of seq, a list or tuple, from at on that is x or calls
+ * a Python __eq__ with it (python_at); seq's length when none. */
 static size_t python_item(SPYContext *c, SPYValue *x, SPYValue *seq, size_t at) {
-    for (int instance = x->type == SPY_INSTANCE; at < seq->as.seq.len; at++) {
-        SPYValue *item = seq->as.seq.items[at];
-        if (item == x || ((instance || item->type == SPY_INSTANCE) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))) ||
-            pair_python(c, x, item))
-            break;
-    }
+    while (at < seq->as.seq.len && !python_at(c, x, seq->as.seq.items[at])) at++;
     return at;
 }
 /* index, count or remove, as method, of x in seq, a list or tuple, from
@@ -27741,7 +27747,7 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
  * their end; else 0, with an error pending when __iter__ failed, a
  * TypeError replaced as the native search replaces it. */
 static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y) {
-    if (y->type != SPY_DICT_VALUES && !resumable(y) &&
+    if (y->type != SPY_DICT_VALUES && !(y->type == SPY_ITERATOR && y->as.iterator.kind == I_REVERSED) && !resumable(y) &&
         (!(iter_function(c, y) || getitem_iterated(c, y)) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
     /* An __iter__ on the machine is the search's first call (KEY_ITER). */
     SPYValue *items = spy_retain(y);

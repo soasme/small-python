@@ -1298,6 +1298,11 @@ static const char *const programs[] = {
     "    return 1 in d.values(), RE() in {1: 2}.values(), 3 not in {1: 3}.values()\n"
     "print(rv())\n",
 
+    "def rr():\n"
+    "    it = reversed([RO(True), RO(False), 3])\n"
+    "    return 1 in it, len(list(it)), RE() in reversed((1, 2))\n"
+    "print(rr())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

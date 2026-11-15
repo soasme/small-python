@@ -2089,6 +2089,10 @@ int main(int argc, char **argv) {
     execute(c, "def valued_in():\n    return (Reflects() in {1: 2, 3: 4}.values()) + (1 in {5: Odd()}.values()) + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "valued_in()", "valued_in.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 1);
+    /* And of a reversed list. */
+    execute(c, "def reversed_in():\n    return (Reflects() in reversed([1, 2])) + (1 in reversed((Odd(), 3))) + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "reversed_in()", "reversed_in.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
