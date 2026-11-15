@@ -2009,6 +2009,13 @@ int main(int argc, char **argv) {
     execute(c, "def valued():\n    return ({1} in [Wants()]) + (slice(1) in (Wants(),)) + (len not in [Wants()]) + 6\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "valued()", "valued.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 1);
+    /* So does bytes() or bytearray() of an instance's Python __iter__ and __len__, or of a generator. */
+    execute(c, "class Byted:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
+               "    def __len__(self):\n        for i in range(3000): pass\n        return 2\n"
+               "def byte_items():\n    for i in range(2):\n        for j in range(3000): pass\n        yield i\n"
+               "def byted():\n    return len(bytes(Byted()) + bytearray(Byted()) + bytes(byte_items())) + 3\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "byted()", "byted.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 3);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

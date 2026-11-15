@@ -23535,6 +23535,13 @@ static Block *push_block(SPYContext *c, Machine *m, int kind, Instruction *ins) 
     return b;
 }
 static void sort_restore(SPYContext *, SPYValue *, SPYValue *);
+/* bytes() or bytearray(), id, of v replaces a TypeError getting its
+ * iterator. */
+static void bytes_refused(SPYContext *c, int id, SPYValue *v) {
+    if (!error_is(c, "TypeError")) return;
+    spy_clear_error(c);
+    errorf(c, "TypeError", "cannot convert '%s' object to %s", type_name(v), id == B_BYTES ? "bytes" : "bytearray");
+}
 /* in over y replaces a TypeError getting y's iterator, as
  * _PySequence_IterSearch does. */
 static void contains_refused(SPYContext *c, SPYValue *y) {
@@ -23547,6 +23554,8 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     Block b = m->blocks[--m->block_len];
     /* An in whose search an __iter__ began (KEY_ITER) ends with its error. */
     if (b.consumer && b.consumer->id == CONTAINS_ITEMS && b.consumer->keyed == KEY_ITER) contains_refused(c, b.value);
+    if (b.consumer && (b.consumer->id == B_BYTES || b.consumer->id == B_BYTEARRAY) && b.consumer->keyed == KEY_ITER)
+        bytes_refused(c, b.consumer->id, b.value);
     while (m->len > b.depth) spy_release(machine_pop(m));
     if (b.kind == BLOCK_HANDLER || b.kind == BLOCK_CLEANUP) {
         spy_release(c->handled); c->handled = b.handled; b.handled = NULL;
@@ -24260,8 +24269,14 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
              callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS : updates != -1 ? updates :
+             callee == c->types[SPY_BYTES] ? B_BYTES : callee == c->types[SPY_BYTEARRAY] ? B_BYTEARRAY :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
-    if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
+    /* bytes() and bytearray() of an iterable, an instance neither a bytes
+     * source (__bytes__, __buffer__) nor a size (__index__). */
+    if ((id == B_BYTES || id == B_BYTEARRAY) && argv[0]->type == SPY_INSTANCE &&
+        (argv[0]->as.map.base || class_lookup(argv[0]->as.map.parent, "__index__") || buffer_exporter(c, argv[0]) ||
+         (id == B_BYTES && class_lookup(argv[0]->as.map.parent, "__bytes__")))) return -1;
+    if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN && id != B_BYTES && id != B_BYTEARRAY &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
         (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0])))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : 1u)) return -1;
@@ -24493,7 +24508,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     if (id == B_CLOSE) sent = close_exception(c);
     int collects = id == B_SORTED || id == B_JOIN;
     Consumer *consumer = allocate(c, sizeof(*consumer));
-    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || id == B_FROMKEYS || collects ?
+    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) :
+                       id == B_BYTES || id == B_BYTEARRAY ? bytearray_new(c, "", 0) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || id == B_FROMKEYS || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
                                  id == B_DICT || id == B_FROMKEYS ? SPY_DICT : SPY_LIST) : NULL;
     SPYValue *searched = id == B_SET_KEEP || id == B_SET_DISJOINT || id == B_SET_SUPERSET || id == B_SET_TOGGLE ? spy_retain(callee) : NULL;
@@ -24508,9 +24524,12 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     /* dict() and dict.update() of an instance with keys merge it as a mapping (consumer_id). */
     int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE &&
                   !keyless(generator);
-    int hints = id == B_LIST || id == B_SORTED || (id == B_EXTEND && callee->type == SPY_LIST);
+    /* bytes(), not bytearray(), asks the length hint too (7.7.7). */
+    int hints = id == B_LIST || id == B_SORTED || id == B_BYTES || (id == B_EXTEND && callee->type == SPY_LIST);
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
+    SPYValue *given = id == B_BYTES || id == B_BYTEARRAY ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
+    if (given) { bytes_refused(c, id, given); spy_release(given); }
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); release_all(8, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
@@ -26214,12 +26233,12 @@ static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
  * __index__, in turn, as a
  * mask, when one of them is an instance (indexed_call): all of range()'s,
  * a list's pop() and insert() index, and the size of bytes() of a plain
- * instance without __bytes__ or of bytearray(); else 0. */
+ * instance with __index__ and without __bytes__ or of bytearray(); else 0. */
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) :
                     callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
-                    argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base &&
+                    argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
     for (size_t i = 0; i < argc; i++) if (mask >> i & 1 && argv[i]->type == SPY_INSTANCE) return mask;
     return 0;
@@ -36911,6 +36930,15 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(item);
         return status;
     }
+    if (s->id == B_BYTES || s->id == B_BYTEARRAY) {
+        SPYValue *index = index_object(c, item);
+        size_t len = s->result->as.string.len;
+        if (index && (index->as.integer_data.big || index->as.integer_data.small < 0 || index->as.integer_data.small > 255))
+            spy_error(c, "ValueError", s->id == B_BYTES ? "bytes must be in range(0, 256)" : "byte must be in range(0, 256)");
+        else if (index && !bytearray_resize(c, s->result, len + 1)) s->result->as.string.data[len] = (char)index->as.integer_data.small;
+        spy_release(index); spy_release(item);
+        return c->error_type[0] ? -1 : 0;
+    }
     if (s->id == B_LIST || s->id == B_TUPLE || s->callee || s->id == UNPACK_ITEMS || s->id == B_EXTEND) {
         int status = sequence_append(c, s->result, item);
         spy_release(item);
@@ -37015,6 +37043,11 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
     if (!c->error_type[0]) consumer_settle(c, s);
     SPYValue *result = s->result;
     s->result = NULL;
+    if (s->id == B_BYTES && result) {
+        SPYValue *bytes = c->error_type[0] ? NULL : spy_bytes(c, result->as.string.data, result->as.string.len);
+        spy_release(result);
+        return bytes;
+    }
     if (s->callee && !c->error_type[0]) {
         SPYValue *items = result;
         result = s->method >= 0 ? call_native_method(c, s->callee, s->method, s->name, 1, &items) : call_keywords(c, s->callee, 1, &items, NULL);

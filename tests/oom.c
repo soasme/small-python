@@ -1178,6 +1178,17 @@ static const char *const programs[] = {
     "    return {1} in [1, BE()], slice(1) in (BE(),), len not in [BE()], frozenset() in [BE()]\n"
     "print(bv())\n",
 
+    "class BI:\n"
+    "    def __iter__(self):\n"
+    "        for _ in (): pass\n"
+    "        return iter([104, 105])\n"
+    "    def __len__(self):\n"
+    "        for _ in (): pass\n"
+    "        return 2\n"
+    "def bi():\n"
+    "    return bytes(BI()), bytearray(BI()), bytes(i for i in range(2))\n"
+    "print(bi())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

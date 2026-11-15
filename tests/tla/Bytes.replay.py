@@ -46,6 +46,12 @@ SOURCES = {
     "literal_non_ascii": 'compile("b\'\\u00e9\'", \'s\', \'eval\')',
     "ctor_forms": "result = (bytes(), bytes(3), bytes(range(3)), bytes(b'ab'), bytes(bytearray(b'c')), bytes(memoryview(b'm')), bytes(B()), bytes(I()))",
     "ctor_str_encoding": "result = (bytes('\xe9', 'utf-8'), bytes('\xe9', encoding='latin-1'), bytes('a', 'ascii', 'strict'))",
+    "ctor_iter_calls": "class It:\n    def __init__(s, items, log): s.items, s.log = items, log\n"
+                       "    def __iter__(s):\n        for _ in (): pass\n        s.log.append('iter')\n        return iter(s.items)\n"
+                       "    def __len__(s): s.log.append('len'); return 2\n"
+                       "class N:\n    def __iter__(s):\n        for _ in (): pass\n        return 5\n"
+                       "log = []\ntry: bytes(N())\nexcept TypeError as e: refused = f'TypeError: {e}'\n"
+                       "result = (bytes(It([97, 98], log)), bytearray(It((1,), log)), log, refused)",
     "ctor_index_calls": "log = []\nresult = (bytes(J(2, log)), bytearray(J(1, log)), log)",
     "ctor_index_big": "result = bytes(J(1 << 70, []))",
     "ctor_negative": 'result = bytes(-1)',
