@@ -168,6 +168,8 @@ Unreleased (0.10.0):
 - a list's += of a generator or a Python iterator takes its items without nesting on the C stack
 - super() reads a base's property or descriptor through its Python getter or __get__ without nesting on
   the C stack, also in getattr() and hasattr()
+- a loop or consumer resumes a generator in a yield from of a builtin iterator without nesting on the
+  C stack; one in a yield from of an instance after a yield statement no longer crashes
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a

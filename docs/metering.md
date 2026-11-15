@@ -325,7 +325,8 @@ These run as machines on the heap, in one native activation of
   class's metaclass that a `raise` statement calls in their place;
 - the generator a `yield from` delegates to, or the coroutine an `await`
   awaits, and those it delegates to in turn, when a step above resumes
-  the delegating generator, and the async generator whose `asend` or
+  the delegating generator, a generator in a `yield from` of a builtin
+  iterator that such a step resumes, and the async generator whose `asend` or
   `__anext__` an `await` or `async for` awaits, when it waits at a
   `yield` or has not started;
 - generators, maps, and instances whose class has a Python `__iter__`,

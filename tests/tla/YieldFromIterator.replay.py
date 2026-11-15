@@ -46,6 +46,8 @@ def outcome(p):
     it = iterator(p["kind"], called)
 
     def g():
+        if p["first"]:
+            yield "a"
         return (yield from it)
     gen = g()
 
@@ -53,6 +55,8 @@ def outcome(p):
         return (yield from gen)
     top = nested() if p["step"] == "nested" else gen
     next(top)
+    if p["first"]:
+        next(top)
     try:
         if p["step"] == "close":
             result = repr(gen.close())
@@ -64,6 +68,8 @@ def outcome(p):
             def outer():
                 yield ("ret", (yield from gen))
             result = repr(list(outer()))
+        elif p["step"] == "consume":
+            result = repr(list(gen))
         else:
             result = repr(next(gen))
     except StopIteration as error:

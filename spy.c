@@ -23614,7 +23614,8 @@ static NO_INLINE int delegable(SPYValue *v) { return (v->type == SPY_GENERATOR |
 /* The machine a yield from or await of machine m's waits on at last, or m:
  * the one waiting on an iterator not a generator, or on an operation. */
 static Machine *innermost(Machine *m) {
-    while (m->awaiting == AWAIT_DELEGATE && m->delegate->type != SPY_INSTANCE && !m->operation) m = m->delegate->as.generator.machine;
+    while (m->awaiting == AWAIT_DELEGATE && m->delegate->type != SPY_INSTANCE && m->delegate->type != SPY_ITERATOR && !m->operation)
+        m = m->delegate->as.generator.machine;
     return m;
 }
 /* Whether a close of, or a throw of exception into, a generator or
@@ -23648,14 +23649,16 @@ static NO_INLINE SPYValue *next_function(SPYContext *c, SPYValue *v) {
 static NO_INLINE int next_method(SPYContext *c, SPYValue *v) { return next_function(c, v) != NULL; }
 /* Whether generator machine m's yield from waits on a generator, or a
  * chain of them, that a step may resume in its place (resume_generator),
- * or on an iterator whose __next__ the machine calls. */
+ * or on an iterator whose __next__ the machine calls, or a builtin
+ * iterator a generator's step takes from (delegate_next). */
 static NO_INLINE int delegating(Machine *m) {
     if (m->generator->type == SPY_ASYNC_GENERATOR) return 0;
     while (m->awaiting == AWAIT_DELEGATE) {
         SPYValue *d = m->delegate;
         /* An iterator's Python __next__ is a call (delegate_next). */
         if ((d->type != SPY_GENERATOR && d->type != SPY_COROUTINE && !m->operation) || d->as.generator.running || d->as.generator.done ||
-            !d->as.generator.machine) return d->type == SPY_INSTANCE ? next_method(m->generator->ctx, d) : 0;
+            !d->as.generator.machine)
+            return d->type == SPY_INSTANCE ? next_method(m->generator->ctx, d) : d->type == SPY_ITERATOR && m->generator->type == SPY_GENERATOR;
         if ((m = d->as.generator.machine)->awaiting < AWAIT_DELEGATE) return 1;
     }
     return 0;
@@ -24226,7 +24229,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
          * outermost (delegate_closed). */
         int closing = id == B_CLOSE || subclass(sent->as.map.parent, c->exceptions[X_GENERATOR_EXIT]);
         if (id == B_THROW && closing && g->awaiting == AWAIT_DELEGATE) { consumer->made = sent; consumer->sent = close_exception(c); }
-        for (; g->awaiting == AWAIT_DELEGATE && g->delegate->type != SPY_INSTANCE; g = g->delegate->as.generator.machine) g->throwing = closing ? CLOSING : THROWING;
+        for (; g->awaiting == AWAIT_DELEGATE && g->delegate->type != SPY_INSTANCE && g->delegate->type != SPY_ITERATOR; g = g->delegate->as.generator.machine)
+            g->throwing = closing ? CLOSING : THROWING;
         consumer->count = (size_t)g->drop + 1; g->drop = 0;
     }
 }
@@ -30999,12 +31003,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 a->type != SPY_COROUTINE ? get_iterator(c, a) : iterable_coroutine(m->generator) ? await_iterator(c, a, NULL) :
                 spy_error(c, "TypeError", "cannot 'yield from' a coroutine object in a non-coroutine generator");
             if (m->delegate) {
-                m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
+                m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE; m->drop = 0;
                 /* A generator this yield from may resume yields or ends
                  * into this machine (generator_left). */
                 if ((ins->arg <= DELEGATE_AWAITABLE && delegable(m->delegate)) ||
                     (ins->arg == DELEGATE_AWAITABLE && m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(m))) {
-                    spy_release(a); a = NULL; m->drop = 0; value = m->delegate; goto resume_generator;
+                    spy_release(a); a = NULL; value = m->delegate; goto resume_generator;
                 }
                 spy_release(a); a = NULL; value = NULL;
                 goto delegate_step;
@@ -31297,7 +31301,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* One delegating resumes its delegate in turn. */
         if (m->awaiting == AWAIT_DELEGATE) {
             f = m->frame; code = m->code->items; pc = m->pc; value = m->delegate;
-            if (value->type != SPY_INSTANCE) goto resume_generator;
+            if (value->type != SPY_INSTANCE && value->type != SPY_ITERATOR) goto resume_generator;
             goto delegate_step;
         }
         /* The value it takes, or a close's GeneratorExit raised there. */

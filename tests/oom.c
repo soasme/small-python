@@ -830,6 +830,25 @@ static const char *const programs[] = {
     "        except AttributeError as e: return str(e)\n"
     "print(SE().p, SE().r())\n",
 
+    "class YR:\n"
+    "    def __init__(self): self.i = 0\n"
+    "    def __iter__(self): return self\n"
+    "    def __next__(self):\n"
+    "        self.i += 1\n"
+    "        if self.i > 2: raise StopIteration(self.i)\n"
+    "        return [self.i]\n"
+    "def yr(source):\n"
+    "    yield 'a'\n"
+    "    r = yield from source\n"
+    "    yield r\n"
+    "def yq():\n"
+    "    out = [list(yr(YR())), [x for x in yr(iter(('b', 'c')))], list(yr(map(str, [1, 2])))]\n"
+    "    g = yr([4, 5]); next(g); next(g)\n"
+    "    try: g.throw(KeyError('t'))\n"
+    "    except KeyError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(yq())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"
