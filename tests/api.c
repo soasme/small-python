@@ -1917,6 +1917,13 @@ int main(int argc, char **argv) {
                "def thrownclass():\n    g = made()\n    next(g)\n    return g.throw(Made, 8)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "thrownclass()", "thrownclass.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
+    /* So does an instance's throw a class thrown into its yield from reaches. */
+    execute(c, "class Catcher:\n    def __iter__(self): return self\n    def __next__(self): return 1\n"
+               "    def throw(self, kind):\n        for i in range(3000): pass\n        return 9 if kind is KeyError else 0\n"
+               "def catching():\n    yield from Catcher()\n"
+               "def classthrown():\n    g = catching()\n    next(g)\n    return g.throw(KeyError)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "classthrown()", "classthrown.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

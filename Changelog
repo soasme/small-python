@@ -172,6 +172,7 @@ Unreleased (0.10.0):
   function, without nesting on the C stack
 - resuming a generator in a yield from of an instance after a yield statement no longer crashes
 - throw() and close() of a generator in a yield from of a builtin iterator do not nest on the C stack
+- throw() of a class into a yield from of an instance calls its Python throw without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

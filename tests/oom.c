@@ -918,6 +918,28 @@ static const char *const programs[] = {
     "    return out\n"
     "print(yg())\n",
 
+    "class YH:\n"
+    "    def __iter__(self): return self\n"
+    "    def __next__(self): return [1]\n"
+    "    def throw(self, kind):\n"
+    "        if kind is KeyError: raise StopIteration([kind.__name__])\n"
+    "        if kind is IndexError: return [2]\n"
+    "        raise kind\n"
+    "def yi(): return (yield from YH())\n"
+    "def yj(): return (yield from yi())\n"
+    "def yk():\n"
+    "    out = []\n"
+    "    for make in (yi, yj):\n"
+    "        g = make(); next(g)\n"
+    "        try: g.throw(KeyError)\n"
+    "        except StopIteration as e: out.append(e.value)\n"
+    "        g = make(); next(g); out.append(g.throw(IndexError))\n"
+    "        g = make(); next(g)\n"
+    "        try: g.throw(ValueError)\n"
+    "        except ValueError as e: out.append([repr(e)])\n"
+    "    return out\n"
+    "print(yk())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

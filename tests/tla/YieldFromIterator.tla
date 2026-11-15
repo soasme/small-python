@@ -19,7 +19,8 @@
 (*         return (yield from it)                                          *)
 (*                                                                         *)
 (* after one next(), then one step: close(), throw(KeyError()) or         *)
-(* throw(KeyError), the class made at a delegator's raise, send(1),        *)
+(* throw(KeyError), the class made at a delegator's raise but given as    *)
+(* it is to it's throw (called "throwC"), send(1),                         *)
 (* next(), list() of an outer generator, yield ("ret", (yield from g)), or *)
 (* throw(KeyError()) into one, return (yield from g), started instead of   *)
 (* g, list() of g itself, or dropping g's last reference, which closes    *)
@@ -46,7 +47,7 @@ vars == <<program, outcome>>
 
 Pending == [result |-> "pending", called |-> "", finished |-> FALSE]
 
-Method(step) == CASE step \in {"close", "drop"} -> "close" [] step \in {"throw", "throwclass", "nested"} -> "throw" [] step \in {"next", "loop", "consume"} -> "next" [] OTHER -> "send"
+Method(step) == CASE step \in {"close", "drop"} -> "close" [] step = "throwclass" -> "throwC" [] step \in {"throw", "nested"} -> "throw" [] step \in {"next", "loop", "consume"} -> "next" [] OTHER -> "send"
 
 Run(p) ==
     LET m == Method(p.step)
@@ -87,4 +88,7 @@ ConsumeEnds == Done /\ program.step = "consume" => outcome.result = "[]" /\ outc
 \* A dropped g is closed, its iterator's close called when it has one.
 DropCloses == Done /\ program.step = "drop" =>
     outcome.finished /\ (outcome.called = "close" <=> program.kind \in {"defined", "raises"})
+
+\* A thrown class reaches the iterator's throw as given, not made.
+ThrowClassRaw == Done /\ program.step = "throwclass" /\ program.kind \in {"defined", "raises"} => outcome.called = "throwC"
 =============================================================================

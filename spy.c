@@ -23638,11 +23638,9 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     /* An operation takes a close or throw in C (awaitable_method). */
     if (m->awaiting != AWAIT_DELEGATE || m->operation) return m->awaiting == AWAIT_YIELD;
     /* Or at a yield from of a builtin iterator, which has neither close
-     * nor throw, or of an instance with a Python close, or throw of an
-     * exception instance, which it takes as thrown (delegate_next); a
-     * throw of a class reaches the instance in C as given. */
+     * nor throw, or of an instance with a Python close, or throw, which
+     * takes an exception, or a class as given (delegate_next). */
     if (m->delegate->type == SPY_ITERATOR) return 1;
-    if (exception && exception->type != SPY_INSTANCE) return 0;
     SPYValue *function = method_function(c, m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
     return function && machine_function(c, function);
 }
@@ -24135,6 +24133,14 @@ static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(state);
     return NULL;
 }
+/* Whether a class thrown into generator g reaches, as given, the
+ * instance its yield from, or its delegates', waits on (throws_in). */
+static NO_INLINE int thrown_raw(SPYValue *g) {
+    if (g->type == SPY_BOUND_METHOD) g = g->as.bound.self;
+    if (g->type == SPY_COROUTINE_ITERATOR) g = g->as.iterator.source;
+    Machine *m = (g->type == SPY_GENERATOR || g->type == SPY_COROUTINE) && g->as.generator.machine ? innermost(g->as.generator.machine) : NULL;
+    return m && m->awaiting == AWAIT_DELEGATE && !m->operation && m->delegate->type == SPY_INSTANCE;
+}
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
  * owned. A throw of an exception class, with start its value if given,
@@ -24145,7 +24151,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
                            SPYValue *traceback) {
     SPYValue *init = NULL, *made = NULL, *built = method < 0 ? built_type(c, callee) : NULL, *wrap = built ? spy_retain(callee) : NULL;
     if (built) callee = built;
-    if (id == B_THROW && generator->type == SPY_CLASS) {
+    int raw = id == B_THROW && generator->type == SPY_CLASS && thrown_raw(callee);
+    if (id == B_THROW && generator->type == SPY_CLASS && !raw) {
         /* The value is the instance, the tuple of arguments, none, or the
          * one argument (thrown_exception). */
         size_t argc = start && start->type == SPY_TUPLE ? start->as.seq.len : start && start->type != SPY_NONE;
@@ -24192,7 +24199,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
     if (id == B_THROW) {
-        sent = thrown_exception(c, traceback ? 3 : start ? 2 : 1, (SPYValue *[]){generator, start ? start : c->none, traceback});
+        sent = raw ? spy_retain(generator) : thrown_exception(c, traceback ? 3 : start ? 2 : 1, (SPYValue *[]){generator, start ? start : c->none, traceback});
         spy_release(generator); spy_release(start); start = NULL;
     }
     if ((id == B_NEXT || id == B_CLOSE || id == B_THROW) && method >= 0) generator = spy_retain(callee);
@@ -30473,7 +30480,8 @@ static NO_INLINE int map_calls(SPYContext *c, SPYValue *v) {
  * ended (finish_delegate). */
 static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed, int *kind, SPYValue **env, SPYValue **item) {
     SPYValue *d = m->delegate, *thrown = resumed ? delegate_thrown(m) : NULL, *sent = resumed && !thrown ? resumed_with(c, m->resumer) : NULL;
-    int closing = thrown && subclass(thrown->as.map.parent, c->exceptions[X_GENERATOR_EXIT]), next = !thrown && (!sent || sent->type == SPY_NONE);
+    int closing = thrown && subclass(thrown->type == SPY_CLASS ? thrown : thrown->as.map.parent, c->exceptions[X_GENERATOR_EXIT]),
+        next = !thrown && (!sent || sent->type == SPY_NONE);
     SPYValue *function = thrown ? method_function(c, d, closing ? "close" : "throw") : next ? next_function(c, d) : method_function(c, d, "send"), *call = NULL;
     *kind = !thrown ? CALL_DELEGATE : closing ? CALL_CLOSED : CALL_THROWN;
     *item = NULL;

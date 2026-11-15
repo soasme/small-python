@@ -29,7 +29,7 @@ def iterator(kind, called):
             return 7
 
         def throw(self, *args):
-            called.append("throw")
+            called.append("throwC" if isinstance(args[0], type) else "throw")
             return 7
 
         def close(self):
@@ -38,7 +38,7 @@ def iterator(kind, called):
     elif kind == "raises":
         def method(name):
             def call(self, *args):
-                called.append(name)
+                called.append(name + ("C" if args and isinstance(args[0], type) else ""))
                 raise ValueError
             return call
         body.update(send=method("send"), throw=method("throw"), close=method("close"))
