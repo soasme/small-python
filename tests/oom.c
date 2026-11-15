@@ -1616,6 +1616,15 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ss())\n",
 
+    "class MXK:\n"
+    "    def __init__(s, n): s.n = n\n"
+    "    def __eq__(s, o): return s.n == o\n"
+    "class MXP: pass\n"
+    "def mx():\n"
+    "    x = 2.5\n"
+    "    return [2 in [1, (1,), MXP(), MXK(2)], 3 not in (MXP(), [3], MXK(4)), x in [MXP(), x, MXK(9)]]\n"
+    "print(mx())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

@@ -232,6 +232,7 @@ Unreleased (0.10.0):
 - an asend's later send and throw while its async generator awaits resume it without nesting on the C stack
 - throw() and close() into a yield from of an iterator without those methods run the generator without nesting on the C stack
 - a set or frozenset subclass's set methods of an iterable compare its items by a Python __eq__ without nesting on the C stack
+- in of a list or tuple calls an item's Python __eq__ after a plain instance, tuple or list item without nesting on the C stack
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

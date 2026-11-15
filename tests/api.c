@@ -2278,6 +2278,11 @@ int main(int argc, char **argv) {
                "    return 10 * len(s) + s.issuperset([Same()]) + len(s.union([Same()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "grows()", "grows.py"), SPY_STOP_STEPS, &pauses)) == 23 && pauses > 4);
+    /* So does in of a list or tuple whose Python __eq__ item follows a plain instance or a tuple. */
+    execute(c, "class Bare: pass\n"
+               "def mixes():\n    return (2 in [(), Bare(), Same()]) + 2 * (2 not in ([2], Bare(), Same()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "mixes()", "mixes.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

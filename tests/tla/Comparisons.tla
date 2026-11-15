@@ -40,7 +40,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
+          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
@@ -148,6 +148,7 @@ Case(c) ==
       [] c = "in_value_calls" -> <<"(True, False, True)", <<"'set'", "'slice'", "'builtin_function_or_method'">>>> \* any builtin x
       [] c = "in_iter_calls" -> <<"(True, True, False)", <<"1", "2", "0", "1", "0", "1">>>> \* generator, __getitem__
       [] c = "in_list_iterator_calls" -> <<"(True, [3])", <<"1", "2">>>> \* stops past the match
+      [] c = "in_mixed_calls" -> <<"(True, True)", <<"2", "4">>>> \* past items that call no Python
       [] c = "in_reflected_truth_calls" -> <<"(True, 1, True)", <<"'d'", "'x'", "True", "'d'", "'x'", "True", "'x'", "True">>>> \* reflected, then truth
       [] c = "in_iter_truth_calls" -> <<"(True, [5])", <<"False", "True">>>> \* a generator's search, then truth
       [] c = "in_values_calls" -> <<"(True, False)", <<"1", "2", "1">>>> \* a dict's values in order, to the match

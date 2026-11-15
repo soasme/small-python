@@ -10667,9 +10667,10 @@ static int pure_operand(SPYValue *v) {
 }
 /* Whether seq, a list or tuple, holds x, searched in place as list_contains
  * does: each item is held across a comparison that may change seq; -1 on
- * an error. For the machine, 2 instead at an item whose comparison with
- * x, neither an instance nor a class with a metaclass, calls a Python
- * __eq__ (python_item) after pure items, or with x, a list, tuple or
+ * an error. For the machine, 2 instead at the first item that is not pure
+ * when a later one's comparison with x, neither an instance nor a class
+ * with a metaclass, calls a Python __eq__ before any item identical to x
+ * (python_item), or with x, a list, tuple or
  * dict, one of their items' or an instance item's (pair_python); the
  * machine compares those before it again (contains_call). */
 static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue *seq, int machine) {
@@ -10679,7 +10680,8 @@ static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue 
         if (item == x) return 1;
         if (pairs && (pair_python(c, x, item) || (item->type == SPY_INSTANCE && python_item(c, x, seq, i) == i))) return 2;
         if (scalars && item->type > SPY_STRING && !pure_operand(item)) {
-            if (item->type == SPY_INSTANCE && python_item(c, x, seq, i) == i) return 2;
+            size_t first = python_item(c, x, seq, i);
+            if (first < seq->as.seq.len && seq->as.seq.items[first] != x) return 2;
             scalars = 0;
         }
         spy_retain(item);
