@@ -1312,6 +1312,16 @@ static const char *const programs[] = {
     "    return object.__format__(OF(), ''), f(OF(), ''), m\n"
     "print(of())\n",
 
+    "class AR:\n"
+    "    def __init__(s, t): s.t = t\n"
+    "    def __repr__(s): return s.t\n"
+    "def oa():\n"
+    "    l = [AR('a')]; l.append(l)\n"
+    "    try: ascii([AR(1)])\n"
+    "    except TypeError as e: m = str(e)\n"
+    "    return ascii([AR('\\xe9'), (AR('b'), {1: AR('\\u20ac')})]), ascii(l), ascii({'\\xe9': [AR('c')]}), m\n"
+    "print(oa())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

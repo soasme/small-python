@@ -71,7 +71,7 @@ Sum(s) == IF s = <<>> THEN 0 ELSE Head(s) + Sum(Tail(s))
 Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "ord_long", "ord_empty", "ord_bytes",
           "ord_int", "ascii_object", "repr_bad", "ascii_bad", "str_bad", "repr_recursive", "repr_bytes_quotes",
           "format_hook", "format_fields", "format_map_fields", "format_object_spec", "format_object_empty", "format_bad_return",
-          "format_spec_type", "object_format_calls", "print_sep_end", "print_starred", "print_none_sep", "print_no_args", "print_flush",
+          "format_spec_type", "object_format_calls", "ascii_container_calls", "print_sep_end", "print_starred", "print_none_sep", "print_no_args", "print_flush",
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_file_getattr", "str_base_repr", "print_unknown_kw",
           "print_str_calls", "print_write_each", "print_str_sep", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
           "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
@@ -117,6 +117,7 @@ Case(c) ==
       [] c = "format_bad_return" -> "TypeError: BadFormat.__format__() must return a str, not int"
       [] c = "format_spec_type" -> "TypeError: format() argument 2 must be str, not int"
       \* print(*objects) calls each instance's Python __str__ in turn
+      [] c = "ascii_container_calls" -> "('[a, (\\\\xe9,)]', 2)" \* each item's call, the whole escaped
       [] c = "object_format_calls" -> "('s', 's', ['str', 'str'])" \* an empty spec is ToStr's result
       [] c = "print_starred" -> "(['s1', '-', '2', '-', 's3', '.'], ['str 1', 'str 3'])"
       [] c = "print_sep_end" -> "['1', '|', 'a', '|', 'None', '!\\n']"

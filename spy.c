@@ -22186,6 +22186,7 @@ static ALWAYS_INLINE int repr_job(SPYContext *c, SPYValue *callee, SPYValue *v) 
     return repr_container(v) && repr_items(c, callee, v);
 }
 static SPYValue *repr_call(SPYContext *, Machine *, SPYValue **);
+static SPYValue *ascii_call(SPYContext *, Machine *, SPYValue **);
 static void repr_drop(SPYContext *, SPYValue *);
 static void repr_failed(SPYContext *, Machine *, size_t);
 static Machine *text_returned(SPYContext *, Machine *, SPYValue *);
@@ -26870,6 +26871,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
      * Python __repr__ (repr_call), and str.format of an instance with a
      * Python __format__ (format_job). */
     if (calls && argc == 1 && repr_job(c, callee, argv[0])) return repr_call(c, m, env);
+    if (calls && argc == 1 && is_builtin(callee, B_ASCII) && repr_job(c, c->field_calls[0], argv[0])) return ascii_call(c, m, env);
     if (calls && format_reached(c, callee, -1, argc, argv)) {
         SPYValue *args[8];
         memcpy(args, argv, argc * sizeof(*argv));
@@ -38659,10 +38661,30 @@ static NO_INLINE SPYValue *repr_call(SPYContext *c, Machine *m, SPYValue **env) 
     while (m->len > len - 2) spy_release(machine_pop(m));
     return result;
 }
+/* ascii() of the container atop m's stack, under its callee, whose repr
+ * repr_job takes: that job (repr_call) with c->replacing above the callee,
+ * its text escaped when it ends (text_returned); else the escaped text, or
+ * NULL on an error, all popped. */
+static NO_INLINE SPYValue *ascii_call(SPYContext *c, Machine *m, SPYValue **env) {
+    SPYValue *v = machine_pop(m), *text = NULL;
+    *env = NULL;
+    if (machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_retain(c->field_calls[0])) || machine_push(c, m, v)) {
+        spy_release(v); return NULL;
+    }
+    if ((text = repr_call(c, m, env)) && *env) return text;
+    spy_release(machine_pop(m)); spy_release(machine_pop(m));
+    return text ? ascii_text(c, text, text) : NULL;
+}
 /* The text that the call atop m's stack's job or print returned (or NULL
  * from a job's call): its job or print goes on (repr_from, print_from),
  * the machine to run on. */
 static NO_INLINE Machine *text_returned(SPYContext *c, Machine *m, SPYValue *text) {
+    if (is_builtin(m->stack[m->len - 2], B_ASCII)) {
+        /* An ascii job's (ascii_call). */
+        spy_release(machine_pop(m)); spy_release(machine_pop(m));
+        if (text && (text = ascii_text(c, text, text))) machine_push(c, m, text);
+        return m;
+    }
     if (m->stack[m->len - 2]->type == SPY_TUPLE) return percent_returned(c, m, text);
     if (m->stack[m->len - 2]->type != SPY_LIST) return print_returned(c, m, text);
     spy_release(machine_pop(m));

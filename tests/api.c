@@ -2098,6 +2098,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(object.__format__(Formed(), '')) + len(object.__format__(Formed(), '') * 2)", "formatted.py"),
                                  SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So does ascii() of a list of such items, their Python __repr__. */
+    execute(c, "class Reprs:\n    def __repr__(self):\n        for i in range(3000): pass\n        return '\\xe9'\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(ascii([Reprs(), (Reprs(),)]))", "asciis.py"), SPY_STOP_STEPS, &pauses)) == 15 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
