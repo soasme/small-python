@@ -178,6 +178,11 @@ SOURCES = {
     "sort_tuple_ties": 'class T:\n    def __init__(self, v): self.v = v\n    def __eq__(self, o): log.append(1); return self.v == o.v\n'
                        '    def __lt__(self, o): return self.v < o.v\nlog = []\n'
                        'result = ([t[1].v for t in sorted([(0, T(2)), (0, T(1)), (0, T(0))])], bool(log))',
+    "sort_lt_declined": "class D:\n    def __init__(self, v): self.v = v\n    def __lt__(self, o): return NotImplemented\n"
+                        "    def __eq__(self, o): return NotImplemented\n    def __gt__(self, o):\n        for _ in (): pass\n"
+                        "        if self.v == 9: raise KeyError\n        return self.v > o.v\n"
+                        "try: sorted([D(9), D(1)])\nexcept KeyError as e: err = type(e).__name__\n"
+                        "result = ([x.v for x in sorted([D(2), D(3), D(1)])], [t[1] for t in sorted([(D(1), 0), (D(0), 1)], reverse=True)], err)",
     "sort_gt_reflected": 'class G:\n    def __init__(self, v): self.v = v\n    def __gt__(self, o): return self.v > o.v\nresult = [x.v for x in sorted([G(2), G(1)])]',
     "len_negative": 'result = len(NegLen())',
     "len_big": 'result = len(BigLen())',

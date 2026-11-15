@@ -368,7 +368,8 @@ These run as machines on the heap, in one native activation of
   sources above,
   the Python `__lt__` comparisons of `sorted` and `list.sort`, `sorted`'s
   of a set, a dict, its keys or a list iterator too, also the
-  `__eq__` and `__lt__` of the items of tuples they sort, and the Python
+  `__eq__` and `__lt__` of the items of tuples they sort, the reflected
+  method each calls after one of those returns `NotImplemented`, and the Python
   comparisons of `min`'s and `max`'s instance keys;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
   `__float__`, `__bool__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,

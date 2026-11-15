@@ -14492,12 +14492,13 @@ typedef struct { SPYValue *value, *key; } SortItem;
 /* A sort that stops at each comparison (sort_step). The comparison of
  * two tuple keys stops at each Python one of their items (sorter_call):
  * the pair at item, cx and cy, borrowed, compared by rich; unequal once an
- * item differs, open while the keys' comparison goes on. */
+ * item differs, open while the keys' comparison goes on; reflected while
+ * cy's reflected method is due after cx's NotImplemented. */
 struct Sorter {
     SortItem *from, *to, item;
     SPYValue *x, *y, *cx, *cy;
     size_t *ends, len, runs, merged, r, start, mid, end, i, j, out, lo, stop, left, at_item;
-    int at, less, rich, unequal, open;
+    int at, less, rich, unequal, open, reflected;
     SortItem items[];
 };
 typedef struct {
@@ -24749,13 +24750,19 @@ static int sort_detach_into(SPYContext *, SPYValue *, SPYValue **);
 static SPYValue *bound_function(SPYContext *, SPYValue *);
 static SPYValue *plain_init(SPYContext *, SPYValue *);
 static int key_took(SPYContext *, Machine *, SPYValue *);
+/* The Python method reflecting comparison rich that y's class defines,
+ * which runs on the machine; borrowed, or NULL. */
+static SPYValue *reflected_function(SPYContext *c, SPYValue *y, int rich) {
+    SPYValue *function = y->type == SPY_INSTANCE && !y->as.map.base ? class_lookup(y->as.map.parent, rich_names[rich_reflected[rich]]) : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
 /* The Python comparison min's or max's consumer s calls next on key
  * and its best key: key's own method, or after its NotImplemented
  * (s->phase) the best key's reflected one; borrowed, or NULL. */
 static SPYValue *key_comparison(SPYContext *c, Consumer *s, SPYValue *key) {
     int rich = s->keyed == KEY_MAX ? R_GT : R_LT;
-    SPYValue *best = s->result, *function = !s->phase ? rich_function(c, key, best, rich) :
-                     best->type == SPY_INSTANCE && !best->as.map.base ? class_lookup(best->as.map.parent, rich_names[rich_reflected[rich]]) : NULL;
+    if (s->phase) return reflected_function(c, s->result, rich);
+    SPYValue *function = rich_function(c, key, s->result, rich);
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether key, a builtin function or class, converts one of the n values
@@ -24979,10 +24986,12 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         if (!s->sorter && !(s->sorter = sorter_begin(c, items, s->result, s->descending))) {
             if (c->error_type[0] || sort_list(c, items, NULL, s->descending, (SPYValue *const *)s->result->as.seq.items)) return NULL;
         }
-        while (s->sorter && (s->sorter->open || sort_step(s->sorter))) {
+        while (s->sorter && (s->sorter->open || s->sorter->reflected || sort_step(s->sorter))) {
             struct Sorter *t = s->sorter;
-            if ((function = sorter_call(c, t))) {
-                SPYValue *args[] = {spy_retain(t->cx), spy_retain(t->cy)};
+            /* The pair's comparison, or after its NotImplemented cy's
+             * reflected one, returning into key_took. */
+            if ((function = t->reflected ? reflected_function(c, t->cy, t->rich) : sorter_call(c, t))) {
+                SPYValue *args[] = {spy_retain(t->reflected ? t->cy : t->cx), spy_retain(t->reflected ? t->cx : t->cy)};
                 return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
             }
             if (c->error_type[0] || working(c, &t->left, 1)) return NULL;
@@ -25302,7 +25311,11 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
          * tuple keys by __eq__, which goes on to the next item or decides
          * by __lt__ there, or by __lt__ the answer. */
         struct Sorter *t = s->sorter;
-        SPYValue *test = compared(c, t->rich == R_EQ ? T_EQ : '<', t->cx, t->cy, key);
+        int op = t->rich == R_EQ ? T_EQ : '<', reflected = t->reflected;
+        if (key == c->not_implemented && !reflected && reflected_function(c, t->cy, t->rich)) { spy_release(key); t->reflected = 1; return 0; }
+        t->reflected = 0;
+        if (reflected && key == c->not_implemented) { spy_release(key); key = comparison_declined(c, op, t->cx, t->cy); }
+        SPYValue *test = reflected ? key : compared(c, op, t->cx, t->cy, key);
         int truth = test ? truthy(test) : 0;
         spy_release(test);
         if (t->rich == R_EQ) { t->open = 1; t->at_item += truth; t->unequal = !truth; }

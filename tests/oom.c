@@ -1048,6 +1048,19 @@ static const char *const programs[] = {
     "    return [dict(OK(['b', 'c'])), d, {**OK(['e'])}, dict(OK([]))]\n"
     "print(ok())\n",
 
+    "class OD:\n"
+    "    def __init__(s, v): s.v = v\n"
+    "    def __lt__(s, o): return NotImplemented\n"
+    "    def __eq__(s, o): return NotImplemented\n"
+    "    def __gt__(s, o):\n"
+    "        for _ in (): pass\n"
+    "        return s.v > o.v\n"
+    "def od():\n"
+    "    ks = [OD(3), OD(1), OD(2)]\n"
+    "    ks.sort(reverse=True)\n"
+    "    return [k.v for k in sorted(ks)], [k.v for k in ks], [t[1] for t in sorted([(OD(1), 0), (OD(0), 1)])]\n"
+    "print(od())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
