@@ -2292,6 +2292,12 @@ int main(int argc, char **argv) {
                "    return len(s.union(src)) + len(set.union(s, it))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "operands()", "operands.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So does set.__init__ through super() or unbound, of a list or a generator. */
+    execute(c, "class Reset(set):\n    def __init__(self, source): super().__init__(source)\n"
+               "def resets():\n    s = Reset([Same(), Same()])\n    t = {1}\n    set.__init__(t, (Same() for i in range(2)))\n"
+               "    return len(s) + len(t)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "resets()", "resets.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

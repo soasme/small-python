@@ -1649,6 +1649,21 @@ static const char *const programs[] = {
     "    return out + [keep({*it})]\n"
     "print(op())\n",
 
+    "class SIK:\n"
+    "    def __init__(s, v): s.v = v\n"
+    "    def __hash__(s): return s.v % 2\n"
+    "    def __eq__(s, o): return s.v == o.v\n"
+    "class SIS(set):\n"
+    "    def __init__(self, source): super().__init__(source)\n"
+    "def si():\n"
+    "    a = SIS(SIK(v) for v in (1, 2, 3))\n"
+    "    t = {SIK(9)}\n"
+    "    set.__init__(t, [SIK(4), SIK(6)])\n"
+    "    try: set.__init__(t, [SIK(5), []])\n"
+    "    except TypeError as e: pass\n"
+    "    return [sorted(k.v for k in a), sorted(k.v for k in t)]\n"
+    "print(si())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

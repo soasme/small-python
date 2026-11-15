@@ -22,6 +22,8 @@ MERGES = {"set": "r = set(src)", "frozenset": "r = frozenset(src)", "star": "r =
 
 class S(set): pass
 class F(frozenset): pass
+class SI(set):
+    def __init__(self, source): super().__init__(source)
 
 
 class E:
@@ -59,6 +61,11 @@ def hashed(p):
         if p["form"] == "update":
             r = {0}
             r.update(source)
+        elif p["form"] == "init":
+            r = {0}
+            set.__init__(r, source)
+        elif p["form"] == "SI":
+            r = SI(source)
         else:
             build = {"set": set, "frozenset": frozenset, "S": S, "F": F}.get(p["form"], lambda source: {*source})
             r = build(source)

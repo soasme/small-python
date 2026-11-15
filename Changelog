@@ -235,6 +235,8 @@ Unreleased (0.10.0):
 - in of a list or tuple calls an item's Python __eq__ after a plain instance, tuple or list item without nesting on the C stack
 - a list's or tuple's index() with a start, or a start and a stop, compares items by a Python __eq__ without nesting on the C stack
 - a set's methods called as another call's argument, and of a list's iterator, hash and compare items without nesting on the C stack
+- set.__init__ keeps the items added before an error and names a subclass in its arity error, as CPython does
+- set.__init__, through super() or unbound, hashes and compares items without nesting on the C stack
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack
