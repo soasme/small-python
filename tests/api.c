@@ -2147,6 +2147,14 @@ int main(int argc, char **argv) {
                "    return len(Kept.__annotations__) + len(Kept.__annotations__)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "metannotated()", "metannotated.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So do a class body's chained stores and del of a target list through
+     * its namespace's Python __setitem__ and __delitem__. */
+    execute(c, "class Slots(dict):\n    def __setitem__(self, k, v):\n        for i in range(3000): pass\n        dict.__setitem__(self, k, v)\n"
+               "    def __delitem__(self, k):\n        for i in range(3000): pass\n        dict.__delitem__(self, k)\n"
+               "class Slotted(type):\n    @classmethod\n    def __prepare__(m, n, b): return Slots()\n"
+               "def chained():\n    class K(metaclass=Slotted):\n        a = b = c = 1\n        del a, b\n    return K.c + len([k for k in vars(K) if len(k) == 1])\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "chained()", "chained.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 4);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

@@ -132,7 +132,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
-       F_NAMESPACE = 131072 /* A class or module body's def, class, annotated assignment or del of a name: a binding through its namespace. */,
+       F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */ };
 struct Node {
     int kind, op, asynchronous, flags;
@@ -15066,8 +15066,9 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
 static void compile_delete(SPYContext *c, Program *p, Node *n) {
     /* A class body's deletes a name through its namespace (name_delete), its None popped. */
     if (n->kind == N_NAME && p->namespace) { emit(c, p, BC_DELETE, n, 3); emit(c, p, BC_POP, n, 0); return; }
-    if (!expands(n, p->calls)) { emit(c, p, BC_DELETE, n, 0); return; }
-    if (n->kind == N_LIST || n->kind == N_TUPLE) {
+    int list = n->kind == N_LIST || n->kind == N_TUPLE;
+    if (!expands(n, p->calls) && !(list && p->namespace)) { emit(c, p, BC_DELETE, n, 0); return; }
+    if (list) {
         for (Node *item = n->args; item && !c->error_type[0]; item = item->next) compile_delete(c, p, item);
         return;
     }
@@ -15342,7 +15343,8 @@ static int loops(Node *body) {
  * its namespace (F_NAMESPACE), outside the definitions among them. */
 static void namespace_bindings(Node *n) {
     for (; n; n = n->next) {
-        if (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) || n->kind == N_DELETE)
+        if (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) || n->kind == N_DELETE ||
+            (n->kind == N_ASSIGN && n->op == '=' && n->args))
             n->flags |= F_NAMESPACE;
         /* A type alias's value is a function of its own. */
         if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_TYPEALIAS) continue;

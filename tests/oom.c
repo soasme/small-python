@@ -1368,6 +1368,22 @@ static const char *const programs[] = {
     "    return A.__annotations__, A.__annotations__ is A.__annotations__, B.__annotations__, E.__annotations__, E.__dict__['__annotate_func__']\n"
     "print(ma())\n",
 
+    "class CN(dict):\n"
+    "    def __delitem__(s, k):\n"
+    "        if k == 'gone': raise KeyError(k)\n"
+    "        dict.__delitem__(s, k)\n"
+    "class CM(type):\n"
+    "    @classmethod\n"
+    "    def __prepare__(m, n, b): return CN()\n"
+    "def cn():\n"
+    "    class K(metaclass=CM):\n"
+    "        a = b = c = [1]\n"
+    "        del [a, (b,)]\n"
+    "        try: del c, gone\n"
+    "        except NameError as e: m = str(e)\n"
+    "    return sorted(k for k in vars(K) if not k.startswith('__'))\n"
+    "print(cn())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
