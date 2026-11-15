@@ -2203,6 +2203,13 @@ int main(int argc, char **argv) {
                "    try: g.throw(GeneratorExit)\n    except GeneratorExit: return 5\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "exiting()", "exiting.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
+    /* So does a read through a descriptor whose __get__ is a staticmethod. */
+    execute(c, "def slow_get(d, instance, owner):\n    for i in range(3000): pass\n    return i\n"
+               "class StaticGet:\n    __get__ = staticmethod(slow_get)\n"
+               "class Got:\n    x = StaticGet()\n"
+               "def statics():\n    return Got().x + Got.x\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "statics()", "statics.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

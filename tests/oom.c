@@ -1429,6 +1429,23 @@ static const char *const programs[] = {
     "    return out\n"
     "print(gx())\n",
 
+    "def sg(d, instance, owner):\n"
+    "    if instance == 0: raise LookupError(owner.__name__)\n"
+    "    return [instance is None, owner.__name__]\n"
+    "class SG:\n"
+    "    __get__ = staticmethod(sg)\n"
+    "class SO:\n"
+    "    x = SG()\n"
+    "class ST(SO):\n"
+    "    def up(s): return super().x\n"
+    "def st():\n"
+    "    o = ST()\n"
+    "    out = [o.x, ST.x, o.up()]\n"
+    "    try: SG.__get__(SG(), 0, ST)\n"
+    "    except LookupError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(st())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

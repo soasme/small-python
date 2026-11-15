@@ -12398,12 +12398,19 @@ static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
     return n->attr_kind;
 }
 static int machine_function(SPYContext *, SPYValue *);
+/* The function on the machine that a descriptor of class kind calls as
+ * its __get__, unbound as the descriptor slot calls it: a Python function,
+ * or the one a staticmethod wraps; borrowed, or NULL. */
+static SPYValue *get_function(SPYContext *c, SPYValue *kind) {
+    SPYValue *get = class_lookup(kind, "__get__");
+    if (get && get->type == SPY_STATICMETHOD) get = get->as.wrapper.function;
+    return get && machine_function(c, get) ? get : NULL;
+}
 /* Whether descriptor's getter is a Python function: a property's, or the
- * __get__ of an instance's class. */
+ * __get__ of an instance's class (get_function). */
 static int python_getter(SPYContext *c, SPYValue *descriptor) {
     if (descriptor->type == SPY_PROPERTY) return machine_function(c, descriptor->as.property.get);
-    SPYValue *get = descriptor->type == SPY_INSTANCE && descriptor->ctx == c ? class_lookup(descriptor->as.map.parent, "__get__") : NULL;
-    return get && machine_function(c, get);
+    return descriptor->type == SPY_INSTANCE && descriptor->ctx == c && get_function(c, descriptor->as.map.parent);
 }
 /* Whether class v's metaclass has a __getattr__ or its own
  * __getattribute__, which attribute_lookup calls. */
@@ -12456,7 +12463,7 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
         descriptor = builtin_value(c, descriptor, SPY_PROPERTY);
         return machine_function(c, descriptor->as.property.get) ? spy_retain(descriptor) : NULL;
     }
-    if (!get || !machine_function(c, get) || !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
+    if (!get || !get_function(c, kind) || !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
         return NULL;
     /* The search may delete the descriptor. */
     spy_retain(descriptor);
@@ -29924,8 +29931,7 @@ static NO_INLINE SPYValue *super_getter(SPYContext *c, SPYValue *v, const char *
     if (definition->type == SPY_PROPERTY)
         return self != v->as.super.owner && machine_function(c, definition->as.property.get) ? spy_retain(definition) : NULL;
     SPYValue *kind = definition->type == SPY_INSTANCE && !definition->as.map.base ? definition->as.map.parent : NULL;
-    SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
-    return get && machine_function(c, get) ? spy_retain(definition) : NULL;
+    return kind && get_function(c, kind) ? spy_retain(definition) : NULL;
 }
 /* The function to enter for function, which it takes, the call a read of
  * v's attribute name makes (attribute_step): a property's getter on v, a
@@ -29947,7 +29953,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
             get = spy_retain(function->as.property.get);
         } else {
             argv[0] = function; argv[1] = spy_retain(self); argv[2] = spy_retain(v->as.super.owner); *argc = 3;
-            get = spy_retain(class_lookup(function->as.map.parent, "__get__"));
+            get = spy_retain(get_function(c, function->as.map.parent));
         }
         return get;
     }
@@ -29955,7 +29961,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
     else if (function->type == SPY_INSTANCE) {
         argv[0] = function; *argc = 3;
         getter_args(c, v, name, argv);
-        return spy_retain(class_lookup(function->as.map.parent, "__get__"));
+        return spy_retain(get_function(c, function->as.map.parent));
     } else if (!(argv[1] = spy_string(c, name, strlen(name)))) { spy_release(function); return NULL; }
     else { *argc = 2; get = function; function = NULL; }
     spy_release(function);
