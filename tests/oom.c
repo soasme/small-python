@@ -1008,6 +1008,19 @@ static const char *const programs[] = {
     "    return out\n"
     "print(hc())\n",
 
+    "def ga(name):\n"
+    "    for _ in (): pass\n"
+    "    if name == 'missing': raise AttributeError(name)\n"
+    "    return name * 2\n"
+    "m = type(__build_class__.__self__)('m')\n"
+    "m.__getattr__ = ga\n"
+    "def mr():\n"
+    "    out = [m.ab, getattr(m, 'cd'), hasattr(m, 'missing'), getattr(m, 'missing', 0), m.__eq__(m), type(m.__repr__)]\n"
+    "    try: m.missing\n"
+    "    except AttributeError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(mr())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

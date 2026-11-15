@@ -9,7 +9,10 @@ import builtins
 OPS = {"set": "m.x = 1\nr = m.__dict__['x']", "dictset": "m.__dict__['y'] = 2\nr = m.y",
        "del": "m.x = 1\ndel m.x\nr = hasattr(m, 'x')", "delmiss": "del m.nope", "getmiss": "m.nope",
        "setdict": "m.__dict__ = {}", "global": "exec('__dict__', m.__dict__)",
-       "annotate": "exec('a: int = 1', m.__dict__)\nr = m.__annotations__", "rename": "m.__name__ = 'r'\nr = m.__name__"}
+       "annotate": "exec('a: int = 1', m.__dict__)\nr = m.__annotations__", "rename": "m.__name__ = 'r'\nr = m.__name__",
+       "getattr": "def f(n):\n    for _ in (): pass\n    return n * 2\nm.__getattr__ = f\n"
+                  "r = (m.ab, hasattr(m, 'zz'), m.__eq__(m), 'ab' in m.__dict__)",
+       "typefirst": "m.__getattr__ = lambda n: 'GA'\nr = (type(m.__repr__).__name__, type(m.__init__).__name__)"}
 
 
 def outcome(p):

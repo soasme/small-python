@@ -1941,6 +1941,12 @@ int main(int argc, char **argv) {
                "def hashed():\n    return {Hashed('k'): 12}[Hashed('k')]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hashed()", "hashed.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 2);
+    /* So does a module's Python __getattr__. */
+    execute(c, "def fallback(name):\n    for i in range(3000): pass\n    return len(name)\n"
+               "def dynamic():\n    m = type(__build_class__.__self__)('m')\n    m.__getattr__ = fallback\n"
+               "    return m.thirteen_long + getattr(m, 'x', 0)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "dynamic()", "dynamic.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

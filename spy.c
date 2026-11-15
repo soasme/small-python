@@ -529,6 +529,7 @@ static int callable_value(SPYContext *, SPYValue *);
 static SPYValue *code_names(SPYContext *, SPYValue *, Node *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
 static SPYValue *hash_function(SPYContext *, SPYValue *);
+static SPYValue *module_definition(SPYContext *, SPYValue *, const char *);
 static int hash_reaches(SPYContext *, SPYValue *, int);
 static int key_reaches(SPYContext *, SPYValue *);
 static int hashes_key(SPYValue *, int);
@@ -12096,6 +12097,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (item) return spy_retain(item);
         SPYValue *submodule = lazy_submodule(c, v, name);
         if (submodule || c->error_type[0]) return submodule;
+        /* Then the module type's attributes, such as object's methods. */
+        SPYValue *cls = value_class(c, v), *definition = module_definition(c, cls, name);
+        if (definition) return descriptor_get(c, definition, v, cls);
+        if (c->error_type[0]) return NULL;
         /* PEP 562: a module-level __getattr__ supplies missing attributes. */
         SPYValue *fallback = name_local(v, "__getattr__");
         if (fallback) {
@@ -12350,9 +12355,19 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
  * metaclass's) own Python __getattribute__, else a property's getter or a
  * descriptor's __get__ (instance_getter, class_getter), else the
  * attribute itself natively; the owner's __getattr__ is called after an
- * AttributeError from any of them (getter_call, getattr_call). */
+ * AttributeError from any of them (getter_call, getattr_call). A
+ * module's Python __getattr__ answers a name it lacks (PEP 562). */
 static SPYValue *super_getter(SPYContext *, SPYValue *, const char *);
 static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
+    if (v->type == SPY_MODULE) {
+        SPYValue *fallback = name_local(v, "__getattr__"), *submodule;
+        if (!fallback || !machine_function(c, fallback) || name_local(v, name) || !strcmp(name, "__dict__") ||
+            !strcmp(name, "__annotate__") || !strcmp(name, "__annotations__")) return attribute(c, v, name);
+        if ((submodule = lazy_submodule(c, v, name)) || c->error_type[0]) return submodule;
+        if (module_definition(c, value_class(c, v), name) || c->error_type[0]) return c->error_type[0] ? NULL : attribute(c, v, name);
+        c->fallback = spy_retain(fallback);
+        return NULL;
+    }
     if (v->type == SPY_SUPER) {
         SPYValue *descriptor = super_getter(c, v, name);
         if (!descriptor) return c->error_type[0] ? NULL : attribute(c, v, name);
@@ -25617,9 +25632,10 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return result;
     }
     if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_INSTANCE && is_builtin(callee, B_NEXT)) return next_builtin_call(c, m, n, callee, argc, argv, env);
-    /* getattr() of an instance, class or super object and a str, and a
-     * default, or hasattr() of them, as a stack call's (getattr_call). */
-    int getter = method < 0 && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER) &&
+    /* getattr() of an instance, class, super object or module and a str,
+     * and a default, or hasattr() of them, as a stack call's (getattr_call). */
+    int getter = method < 0 && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER ||
+                                                            argv[0]->type == SPY_MODULE) &&
         argv[1]->type == SPY_STRING ? builtin_id(callee) : -1;
     if (getter == B_GETATTR || (getter == B_HASATTR && argc == 2)) {
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
@@ -26141,6 +26157,11 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
  * function with *env), stepped (operand_call_rest, builtin_call), or
  * called here; NULL with no error when a consumer of a generator began
  * on m. */
+/* Whether v is an instance, class or module, whose attribute getattr()
+ * may read by calling Python (getattr_call). */
+static ALWAYS_INLINE int attribute_owner(SPYValue *v) {
+    return !!(UINT64_C(1) << v->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_MODULE));
+}
 static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
                                                 SPYValue **argv, SPYValue **env) {
     /* A call on the machine takes the arguments and the callee. */
@@ -26164,10 +26185,10 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
                                                        /* a set method given its set (set_call) */
                                                        (walk_operand(argv[1]) && (callee->as.native.kwcall == set_method || callee->as.native.kwcall == slot_call)) ||
-                                                       (argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
+                                                       (argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
-                                        (argc == 3 && argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
+                                        (argc == 3 && argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                         /* type.__new__ (class_make) */
                                         (argc == 4 && callee->as.native.kwcall == type_method) ||
                                         /* a set method given its set and others (set_chain_call) */
@@ -26434,7 +26455,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return result;
     }
-    if (calls && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER) &&
+    if (calls && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER ||
+                  argv[0]->type == SPY_MODULE) &&
         argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin) {
         if (callee->as.native.data == (void *)(intptr_t)B_GETATTR) return getattr_call(c, m, argc == 3, env);
@@ -29214,7 +29236,7 @@ static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue 
 /* The __getattr__ that an AttributeError from function, the call a read
  * of v's attribute makes (attribute_step), calls, or NULL. */
 static SPYValue *getter_fallback(SPYValue *v, SPYValue *function) {
-    SPYValue *owner = v->type == SPY_SUPER ? NULL : v->type == SPY_CLASS ? v->as.map.meta : v->as.map.parent;
+    SPYValue *owner = v->type == SPY_SUPER || v->type == SPY_MODULE ? NULL : v->type == SPY_CLASS ? v->as.map.meta : v->as.map.parent;
     SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
     return fallback == function ? NULL : fallback;
 }
@@ -29243,11 +29265,15 @@ static NO_INLINE SPYValue *super_getter(SPYContext *c, SPYValue *v, const char *
 /* The function to enter for function, which it takes, the call a read of
  * v's attribute name makes (attribute_step): a property's getter on v, a
  * descriptor's __get__ (getter_args), or a __getattribute__ or
- * __getattr__ on v and the name, its arguments in argv and *argc, new
- * references; NULL on an error. */
+ * __getattr__ on v and the name, a module's on the name alone, its
+ * arguments in argv and *argc, new references; NULL on an error. */
 static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, SPYValue *function, SPYValue **argv, size_t *argc) {
     SPYValue *get = NULL;
     *argc = 1;
+    if (v->type == SPY_MODULE) {
+        if (!(argv[0] = spy_string(c, name, strlen(name)))) { spy_release(function); return NULL; }
+        return function;
+    }
     if (v->type == SPY_SUPER) {
         /* super's object, or None for its class, and that class (super_getter). */
         SPYValue *self = v->as.super.self == v->as.super.owner ? c->none : v->as.super.self;
@@ -39298,6 +39324,13 @@ static SPYValue *builtin_slot_before(SPYContext *c, SPYValue *cls, const char *n
         if (descriptor) return descriptor;
     }
     return NULL;
+}
+static SPYValue *builtin_descriptor_lookup(SPYContext *, SPYValue *, const char *);
+/* The definition of name a module's class cls gives its instances, as
+ * attribute_value's last lookup, borrowed; else NULL. */
+static SPYValue *module_definition(SPYContext *c, SPYValue *cls, const char *name) {
+    SPYValue *definition = instance_lookup(cls, name);
+    return definition || c->error_type[0] ? definition : builtin_descriptor_lookup(c, cls, name);
 }
 /* The first builtin class in the MRO that provides the descriptor. */
 static SPYValue *builtin_descriptor_lookup(SPYContext *c, SPYValue *cls, const char *name) {
