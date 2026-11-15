@@ -15,6 +15,8 @@
 (*                                                                         *)
 (*     s[i]  for i in -4..3        s[start:stop:step]                      *)
 (*     x in s  s.count(x)  s.index(x)  for x 1 (present or not) or 3        *)
+(*     s.index(x, start) or s.index(x, start, stop) for start in           *)
+(*     {-4, -1, 1, 4}, stop in {-1, 2, 4}                                  *)
 (*     s + <2> (same type)  s + [2] (a list)   s * n  for n in -1..2       *)
 (*     hash(s)                                                             *)
 (*                                                                         *)
@@ -32,6 +34,7 @@ Steps == {None, 1, 2, -1, -2, 0}
 Op == {[op |-> "index", i |-> i, by |-> b] : i \in -4..3, b \in {"int", "index"}}
       \cup {[op |-> "slice", start |-> a, stop |-> b, step |-> c] : a \in {None, -4, -1, 0, 2, 4}, b \in {None, -4, -1, 0, 2, 4}, c \in Steps}
       \cup {[op |-> o, x |-> x] : o \in {"in", "count", "find"}, x \in {1, 3}}
+      \cup {[op |-> "find from", x |-> x, start |-> a, stop |-> b] : x \in {1, 3}, a \in {-4, -1, 1, 4}, b \in {None, -1, 2, 4}}
       \cup {[op |-> o] : o \in {"concat", "concat list", "hash"}}
       \cup {[op |-> "repeat", n |-> n, by |-> b] : n \in -1..2, b \in {"int", "index"}}
 Programs == {[type |-> t, items |-> s] @@ o : t \in Types, s \in Items, o \in Op}
@@ -63,6 +66,10 @@ Count(s, x) == IF s = <<>> THEN 0 ELSE (IF Head(s) = x THEN 1 ELSE 0) + Count(Ta
 RECURSIVE Repeat(_, _)
 Repeat(s, n) == IF n <= 0 THEN <<>> ELSE s \o Repeat(s, n - 1)
 First(s, x) == CHOOSE k \in DOMAIN s : s[k] = x /\ \A j \in 1..(k - 1) : s[j] # x
+\* s.index(x, start, stop): a bound below zero counts from the end, clipped
+\* at zero, and one past the end clips to it; the first x between them.
+Bound(v, n) == IF v < 0 THEN (IF v + n < 0 THEN 0 ELSE v + n) ELSE IF v > n THEN n ELSE v
+Between(s, x, a, b) == {k \in (Bound(a, Len(s)) + 1)..(IF b = None THEN Len(s) ELSE Bound(b, Len(s))) : s[k] = x}
 
 Run(p) ==
     LET s == p.items  n == Len(s)  t == p.type
@@ -75,6 +82,8 @@ Run(p) ==
           [] p.op = "in" -> <<"bool", "", <<IF Count(s, p.x) > 0 THEN 1 ELSE 0>>>>
           [] p.op = "count" -> <<"int", "", <<Count(s, p.x)>>>>
           [] p.op = "find" -> IF Count(s, p.x) = 0 THEN Error("ValueError") ELSE <<"int", "", <<First(s, p.x) - 1>>>>
+          [] p.op = "find from" -> LET ks == Between(s, p.x, p.start, p.stop)
+                                   IN  IF ks = {} THEN Error("ValueError") ELSE <<"int", "", <<(CHOOSE k \in ks : \A j \in ks : k <= j) - 1>>>>
           [] p.op = "concat" -> Result(Append(s, 2))
           [] p.op = "concat list" -> IF t = "list" THEN Result(Append(s, 2)) ELSE Error("TypeError")
           [] p.op = "repeat" -> Result(Repeat(s, p.n))

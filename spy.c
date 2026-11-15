@@ -8259,16 +8259,18 @@ static int text_call(Node *n) {
            (!strcmp(name, "getattr") && n->args->next && !n->args->next->next) ||
            (!strcmp(name, "setattr") && n->args->next && n->args->next->next && !n->args->next->next->next);
 }
-/* Whether call node n may be index, count or remove of one item, or min
- * or max of positional arguments, whose items' Python comparisons the step
- * of a call with its operands on the stack calls (search_call, fold_call). */
+/* Whether call node n may be index, count or remove of one item, index
+ * with its start and stop too, or min or max of positional arguments,
+ * whose items' Python comparisons the step of a call with its operands on
+ * the stack calls (search_call, fold_call). */
 static int comparing_call(Node *n) {
     if (!n->args) return 0;
-    for (Node *a = n->args; a; a = a->next) if (a->kind == N_STAR || a->kind == N_KEYWORD || a->kind == N_MAPPING) return 0;
+    size_t argc = 0;
+    for (Node *a = n->args; a; a = a->next, argc++) if (a->kind == N_STAR || a->kind == N_KEYWORD || a->kind == N_MAPPING) return 0;
     if (n->a->kind == N_NAME) return !strcmp(n->a->text, "min") || !strcmp(n->a->text, "max");
-    if (n->a->kind != N_ATTR || n->args->next) return 0;
+    if (n->a->kind != N_ATTR) return 0;
     const char *name = n->a->b->text;
-    return !strcmp(name, "index") || !strcmp(name, "count") || !strcmp(name, "remove");
+    return argc == 1 ? !strcmp(name, "index") || !strcmp(name, "count") || !strcmp(name, "remove") : argc <= 3 && !strcmp(name, "index");
 }
 /* A call of at most 8 positional and keyword arguments, with a keyword. */
 static int keyword_plain_call(Node *n) {
@@ -26977,7 +26979,8 @@ static NO_INLINE SPYValue *fold_begin(SPYContext *c, Machine *m, size_t argc, SP
     return function ? spy_retain(c->types[SPY_STRING]) : value;
 }
 static SPYValue *setattr_call(SPYContext *, Machine *, SPYValue **);
-static ALWAYS_INLINE SPYValue *searched(SPYValue *, int, size_t, int *);
+static ALWAYS_INLINE SPYValue *searched(SPYValue *, int, size_t, SPYValue *const *, int *);
+static void search_span(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, size_t *, int64_t *);
 static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, int64_t, SPYValue **, SPYValue **);
 /* The call of class callee in m's stack below its argc arguments, called
  * whether as type.__call__ (type_called), on the machine: its Python
@@ -27186,14 +27189,17 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
     int id;
-    SPYValue *seq = calls ? searched(callee, -1, argc, &id) : NULL;
+    SPYValue *seq = calls ? searched(callee, -1, argc, argv, &id) : NULL;
     if (seq) {
         /* So does a bound index, count or remove of a list or tuple
          * evaluated before its argument (search_call). */
         SPYValue *x = spy_retain(argv[0]);
+        size_t at;
+        int64_t tally;
+        search_span(c, seq, id, argc, argv, &at, &tally);
         spy_retain(callee);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-        SPYValue *function = search_call(c, m, id, x, seq, 0, 0, env, &result);
+        SPYValue *function = search_call(c, m, id, x, seq, at, tally, env, &result);
         spy_release(x); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
@@ -27214,17 +27220,30 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
  * stack; the method found as plain_callee finds it. */
 static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, int64_t, SPYValue **, SPYValue **);
 /* The list or tuple of which a call of callee, or of its native method
- * method, with argc arguments is index, count or remove of one item,
- * which search_call runs, *id that method; else NULL. */
-static ALWAYS_INLINE SPYValue *searched(SPYValue *callee, int method, size_t argc, int *id) {
+ * method, with argc arguments argv is index, count or remove of one item,
+ * index's start and stop ints too, which search_call runs, *id that
+ * method; else NULL. */
+static ALWAYS_INLINE SPYValue *searched(SPYValue *callee, int method, size_t argc, SPYValue *const *argv, int *id) {
     SPYValue *seq = callee;
     if (method < 0) {
         if (callee->type != SPY_BOUND_METHOD || callee->as.bound.module) return NULL;
         method = callee->as.bound.method; seq = callee->as.bound.self;
     }
     *id = method;
-    return (method == M_INDEX || method == M_COUNT || method == M_REMOVE) && argc == 1 &&
+    return (method == M_INDEX || method == M_COUNT || method == M_REMOVE) &&
+           (argc == 1 || (method == M_INDEX && argc <= 3 && is_int(argv[1]) && (argc == 2 || is_int(argv[2])))) &&
            (seq->type == SPY_LIST || seq->type == SPY_TUPLE) ? seq : NULL;
+}
+/* Where index, count or remove of seq with argc arguments argv, of ints
+ * past the item (searched), starts, in *at, and index's stop, normalized
+ * as method_call's, else count's zero tally, in *tally (search_call). */
+static void search_span(SPYContext *c, SPYValue *seq, int method, size_t argc, SPYValue *const *argv, size_t *at, int64_t *tally) {
+    int64_t start = 0, stop = method == M_INDEX ? INT64_MAX : 0;
+    if (argc > 1) slice_index(c, argv[1], &start);
+    if (argc > 2) slice_index(c, argv[2], &stop);
+    if (start < 0) { start += (int64_t)seq->as.seq.len; if (start < 0) start = 0; }
+    if (stop < 0) { stop += (int64_t)seq->as.seq.len; if (stop < 0) stop = 0; }
+    *at = (size_t)start; *tally = stop;
 }
 static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc - 1], *object = argv[0], *self = NULL, *result = NULL;
@@ -27273,12 +27292,15 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         if (skip) spy_release(held[0]);
         return set_call(c, m, callee, argc + !skip, held + skip, env);
     }
-    SPYValue *seq = callee && calls ? searched(callee, method, argc, &id) : NULL;
+    SPYValue *seq = callee && calls ? searched(callee, method, argc, argv + 1, &id) : NULL;
     if (seq) {
         /* index, count or remove of a list or tuple (search_call). */
         SPYValue *x = spy_retain(argv[1]);
+        size_t at;
+        int64_t tally;
+        search_span(c, seq, id, argc, argv + 1, &at, &tally);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-        SPYValue *function = search_call(c, m, id, x, seq, 0, 0, env, &result);
+        SPYValue *function = search_call(c, m, id, x, seq, at, tally, env, &result);
         spy_release(x); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
@@ -27641,7 +27663,8 @@ static size_t python_item(SPYContext *c, SPYValue *x, SPYValue *seq, size_t at) 
     return at;
 }
 /* index, count or remove, as method, of x in seq, a list or tuple, from
- * index at on, count having found tally before it: the Python __eq__ that
+ * index at on, count having found tally before it, index stopping at
+ * tally (search_span): the Python __eq__ that
  * comparing the next item whose comparison calls one (rich_function) with x
  * calls first, the item's or x's, borrowed in c->entering_init with its env
  * (CALL_OPERATOR), the items before it compared natively; x, seq, method,
@@ -27652,7 +27675,7 @@ static NO_INLINE SPYValue *search_call(SPYContext *c, Machine *m, int method, SP
                                        int64_t tally, SPYValue **env, SPYValue **value) {
     size_t found = SIZE_MAX;
     *value = NULL;
-    for (int instance = x->type == SPY_INSTANCE; at < seq->as.seq.len; at++) {
+    for (int instance = x->type == SPY_INSTANCE; at < seq->as.seq.len && (method != M_INDEX || at < (uint64_t)tally); at++) {
         SPYValue *item = seq->as.seq.items[at], *function;
         if (item != x && (instance || item->type == SPY_INSTANCE) &&
             ((function = rich_function(c, item, x, R_EQ)) || (function = rich_function(c, x, item, R_EQ)))) {

@@ -56,6 +56,8 @@ def outcome(p):
             return ("int", "", (s.count(x),))
         elif op == "find":
             return ("int", "", (s.index(x),))
+        elif op == "find from":
+            return ("int", "", (s.index(x, p["start"]) if p["stop"] == 99 else s.index(x, p["start"], p["stop"]),))
         elif op == "concat":
             r = s + build(kind, [2])
         elif op == "concat list":

@@ -1625,6 +1625,17 @@ static const char *const programs[] = {
     "    return [2 in [1, (1,), MXP(), MXK(2)], 3 not in (MXP(), [3], MXK(4)), x in [MXP(), x, MXK(9)]]\n"
     "print(mx())\n",
 
+    "class IBK:\n"
+    "    def __init__(s, n): s.n = n\n"
+    "    def __eq__(s, o): return s.n == o\n"
+    "def ib():\n"
+    "    items = [IBK(0), IBK(1), IBK(2), IBK(1)]\n"
+    "    out = [items.index(1, 2), tuple(items).index(1, -3, 3), items.index(2, True)]\n"
+    "    try: items.index(1, 1, 1)\n"
+    "    except ValueError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(ib())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

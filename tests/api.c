@@ -2283,6 +2283,10 @@ int main(int argc, char **argv) {
                "def mixes():\n    return (2 in [(), Bare(), Same()]) + 2 * (2 not in ([2], Bare(), Same()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "mixes()", "mixes.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 2);
+    /* So does index of a list or tuple from a start, to a stop too. */
+    execute(c, "def bounded():\n    return [1, Same(), 2].index(2, 1) + (Same(), Same(), 2).index(2, -3, 3)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "bounded()", "bounded.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
