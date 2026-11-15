@@ -29,6 +29,11 @@ class Logged(dict):
         if key == "m":
             log.append("def")
         super().__setitem__(key, value)
+    def __getitem__(self, key):
+        for _ in (): pass
+        if key == "m":
+            log.append("load")
+        return super().__getitem__(key)
     def __delitem__(self, key):
         for _ in (): pass
         log.append("del")
@@ -81,7 +86,7 @@ def source(p):
     lines.append("    log.append('body')" if p["calls"] else "    n = 1")
     lines += ["    %s = D()" % name for name in "ab"[:p["set_names"]]]
     if p["logged"]:
-        lines += ["    def m(self): pass", "    del m"]
+        lines += ["    def m(self): pass", "    m", "    del m"]
     return "\n".join(lines) + "\n"
 
 

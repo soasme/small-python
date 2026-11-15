@@ -132,7 +132,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
-       F_NAMESPACE = 131072 /* A class body's def, class, annotated assignment or del of a name: a binding through its namespace. */ };
+       F_NAMESPACE = 131072 /* A class body's def, class, annotated assignment or del of a name: a binding through its namespace. */,
+       F_LOADED = 262144 /* A class body's load of a name: through its namespace (name_load). */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -3109,10 +3110,12 @@ static SPYValue *name_lookup(SPYContext *c, SPYValue *env, Name name) {
 }
 static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
 static int inlined_comprehension(SPYValue *);
-static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
+static SPYValue *name_find(SPYContext *, SPYValue *, Name);
+/* name's value in env, looked up from env from on (name_find), annotation
+ * whether the envs before from are annotation scopes. */
+static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name name, int annotation) {
     const char *text = name.text;
-    int annotation = 1;
-    for (SPYValue *e = env; e; e = e->as.map.parent) {
+    for (SPYValue *e = from; e; e = e->as.map.parent) {
         e = binding_env(c, e, name);
         SPYValue *v = name_lookup(c, e, name);
         if (!v && c->error_type[0]) return NULL;
@@ -3147,6 +3150,7 @@ static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
     }
     return name_error(c, text, 0);
 }
+static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) { return name_from(c, env, env, name, 1); }
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
 /* What the full lookup of name node n does at env, a plain function or
  * comprehension environment: binds the name there (with *key its symbol's
@@ -7900,7 +7904,9 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         }
         if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = 2;
         return scope_node(c, scope, n->a);
-    case N_NAME: return scope_record(c, scope, n, S_USE);
+    case N_NAME:
+        if (scope->kind == S_CLASS) n->flags |= F_LOADED;
+        return scope_record(c, scope, n, S_USE);
     case N_STRING: return n->annotate ? scope_string_annotation(c, n) : 0;
     case N_GLOBAL: case N_NONLOCAL:
         for (Node *name = n->args; name; name = name->next)
@@ -7928,6 +7934,8 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         }
         return 0;
     case N_ASSIGN:
+        /* An augmented assignment's name is loaded too. */
+        if (scope->kind == S_CLASS && n->op != '=' && n->a->kind == N_NAME) n->a->flags |= F_LOADED;
         if (scope_node(c, scope, n->b) || scope_target(c, scope, n->a, 1)) return -1;
         for (Node *target = n->args; target; target = target->next) if (scope_target(c, scope, target, 1)) return -1;
         return 0;
@@ -8167,9 +8175,9 @@ static void invalid_expression_error(Parser *p) {
     c->line = head->line; p->error_start = head->start; p->error_end = last->start + last->len;
 }
 static int at_hand(Node *n) {
-    return n->kind == N_NAME || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING || n->kind == N_BYTES;
+    return (n->kind == N_NAME && !(n->flags & F_LOADED)) || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING || n->kind == N_BYTES;
 }
-static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)) || (n->kind == N_ATTR && n->a->kind == N_NAME); }
+static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)) || (n->kind == N_ATTR && n->a->kind == N_NAME && at_hand(n->a)); }
 /* The right operand of n when n is an index whose operands are literals or
  * names, or arithmetic or a single comparison whose operands are those, an
  * index of those, or an attribute of a name, else NULL. The compiler marks
@@ -14589,8 +14597,9 @@ static int arithmetic(Node *n) {
 }
 static int expands(Node *n, int calls) {
     if (!n) return 0;
-    /* A class body binds through its namespace, whose Python methods are calls (store_call, name_delete). */
-    if (calls >= BODY && (n->flags & F_NAMESPACE)) return 1;
+    /* A class body binds and loads names through its namespace, whose
+     * Python methods are calls (store_call, name_delete, name_load). */
+    if ((n->flags & F_LOADED) || (calls >= BODY && (n->flags & F_NAMESPACE))) return 1;
     if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
         (operator_right(n) || arithmetic(n))) return 0;
     /* An import runs a module of source as a call (import_step), and a
@@ -14662,6 +14671,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     }
     size_t branch, end, parts;
     switch (n->kind) {
+    case N_NAME: emit(c, p, BC_CLASS, n, 10); break;
     case N_JOINED:
         /* The parts stay on the stack for the join, as many as arg. */
         parts = 0;
@@ -14752,7 +14762,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         }
         break;
     case N_CALL:
-        if (plain_call(n) && (n->a->kind == N_NAME || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls) &&
+        if (plain_call(n) && (at_hand(n->a) || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls) &&
             !sort_call(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
             emit(c, p, BC_CALLF, n, 0); break;
         }
@@ -15158,7 +15168,8 @@ static void namespace_bindings(Node *n) {
     for (; n; n = n->next) {
         if (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) || n->kind == N_DELETE)
             n->flags |= F_NAMESPACE;
-        if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA) continue;
+        /* A type alias's value is a function of its own. */
+        if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_TYPEALIAS) continue;
         namespace_bindings(n->a); namespace_bindings(n->b); namespace_bindings(n->c); namespace_bindings(n->args);
     }
 }
@@ -28562,6 +28573,30 @@ static NO_INLINE SPYValue *name_delete(SPYContext *c, Machine *m, Frame *f, Node
     SPYValue *name = spy_string(c, n->text, strlen(n->text));
     return name ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(name)}, name_deleted, name) : NULL;
 }
+/* What the __getitem__ of a class body's load of name state returned in
+ * result: the value; on a KeyError, the name found past the namespace,
+ * a local's in the globals (name_find). */
+static SPYValue *name_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (!result && !c->stopped && error_is(c, "KeyError")) {
+        SPYValue *env = m->frame.env;
+        Name name = name_of(state->as.string.data);
+        Symbol *symbol = scope_find(env->as.map.scope, name);
+        spy_clear_error(c);
+        result = symbol && (symbol->flags & S_LOCAL) ? name_find(c, module_env(c, env), name) :
+                 name_from(c, env, env->as.map.parent, name, annotation_env(env));
+    }
+    spy_release(state);
+    return result;
+}
+/* BC_CLASS 10: name n loaded in a class body, whose namespace's Python
+ * __getitem__ is m's call (callk, name_loaded); else as BC_LOAD's. */
+static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    SPYValue *owner = n->constant ? NULL : binding_env(c, f->env, node_name(n)), *namespace = owner == f->env ? owner->as.map.namespace : NULL;
+    SPYValue *function = namespace && namespace->type != SPY_DICT && owner->as.map.flags != 3 ? store_function(c, namespace, "__getitem__") : NULL;
+    if (!function) { SPYValue *value = leaf_operand(f, n); return value ? spy_retain(value) : eval(c, f, n); }
+    SPYValue *name = spy_string(c, n->text, strlen(n->text));
+    return name ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(name)}, name_loaded, name) : NULL;
+}
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
@@ -28909,6 +28944,7 @@ static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
  * for arg 7, which checks the cell (class_made); a metaclass call they defer
  * is entered first (class_new_call). */
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
+    if (ins->arg == 10) return name_load(c, m, f, ins->node);
     if (ins->arg == 7) {
         SPYValue *state = m->stack[m->len - 3], *cls, *classcell;
         int list = state->type == SPY_LIST;

@@ -555,6 +555,24 @@ static const char *const programs[] = {
     "    return out, MH().n(3).a\n"
     "print(mn())\n",
 
+    "class LN(dict):\n"
+    "    def __getitem__(self, k):\n"
+    "        if k == 'boom': raise LookupError(k)\n"
+    "        return dict.__getitem__(self, k)\n"
+    "class LM(type):\n"
+    "    @classmethod\n"
+    "    def __prepare__(m, n, b): return LN()\n"
+    "def ln():\n"
+    "    free = [1]\n"
+    "    class K(metaclass=LM):\n"
+    "        a = 2\n"
+    "        b = [a + len(free), free]\n"
+    "        a += 1\n"
+    "    try:\n"
+    "        class E(metaclass=LM): x = boom\n"
+    "    except LookupError as e: return K.a, K.b, e\n"
+    "print(ln())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

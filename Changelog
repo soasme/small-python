@@ -146,6 +146,7 @@ Unreleased (0.10.0):
 - raise of an exception class, or from a cause class, calls its metaclass's Python __call__ without nesting on the C stack
 - super().__call__ in a metaclass's __call__ calls the class's Python __new__ and __init__ without nesting on the C stack
 - map() of a class, and a method call of one a Python getter reads, call its Python __new__ without nesting on the C stack
+- a class body loads names through its namespace's Python __getitem__ without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a
