@@ -15067,10 +15067,10 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
 /* A del target that suspends evaluates its object (and key) on the stack;
  * BC_DELETE with argument 0 deletes a target that does not suspend. */
 static void compile_delete(SPYContext *c, Program *p, Node *n) {
-    /* A class body's deletes a name through its namespace (name_delete), its None popped. */
-    if (n->kind == N_NAME && p->namespace) { emit(c, p, BC_DELETE, n, 3); emit(c, p, BC_POP, n, 0); return; }
+    /* A class or module body's deletes a name through its namespace (name_delete), its None popped. */
+    if (n->kind == N_NAME && p->unbinds) { emit(c, p, BC_DELETE, n, 3); emit(c, p, BC_POP, n, 0); return; }
     int list = n->kind == N_LIST || n->kind == N_TUPLE;
-    if (!expands(n, p->calls) && !(list && p->namespace)) { emit(c, p, BC_DELETE, n, 0); return; }
+    if (!expands(n, p->calls) && !(list && p->unbinds)) { emit(c, p, BC_DELETE, n, 0); return; }
     if (list) {
         for (Node *item = n->args; item && !c->error_type[0]; item = item->next) compile_delete(c, p, item);
         return;
@@ -29686,7 +29686,7 @@ static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, Node *
 }
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
-    Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
+    Node *n = ins->op == BC_EXEC ? ins->node->a : ins->op == BC_NEXT ? ins->node->args : ins->node;
     if (n->kind == N_IMPORT || n->kind == N_FROM) return import_step(c, m, f, n, env);
     c->entering_kind = CALL_STORE;
     SPYValue *args[3];
@@ -29733,6 +29733,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         /* A name bound through its namespace's Python __setitem__ (name_mapping). */
         args[0] = spy_retain(name_mapping(c, f->env, n)); args[1] = spy_string(c, n->text, strlen(n->text));
         args[2] = spy_retain(m->stack[m->len - 1]);
+        if (!args[1]) { release_all(3, args); return NULL; }
     } else if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
     else if (ins->op == BC_SET_TARGET) { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
     else {
@@ -31414,7 +31415,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         pc = m->pc;
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
-                        if (result && (code[pc - 1].op == BC_EXEC || (code[pc - 1].op == BC_STORE && code[pc - 1].arg))) spy_release(machine_pop(m));
+                        if (result && (code[pc - 1].op == BC_EXEC || code[pc - 1].op == BC_NEXT || (code[pc - 1].op == BC_STORE && code[pc - 1].arg)))
+                            spy_release(machine_pop(m));
                     } else if (kind == CALL_CHECKED) {
                         m = checked_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
@@ -31941,7 +31943,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 }
                 if (!a) pc = ins->target;
                 else if (ins->other) {
-                    store_target(c, &f, n->args, a);
+                    /* A name bound through a namespace's Python __setitem__ is BC_STORE's (store_call). */
+                    if (UNLIKELY(store_into(c, &f, n->args, a, 1) > 0)) { machine_push(c, m, a); a = NULL; goto store_step; }
                     /* The body and the jump back, while no pass is counted or
                      * watched and the iterator steps itself without raising. */
                     if (ins->other >= 2 && !watched(c)) {

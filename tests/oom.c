@@ -1395,6 +1395,17 @@ static const char *const programs[] = {
     "    return sorted(ns)\n"
     "print(hn())\n",
 
+    "class MN(dict):\n"
+    "    def __setitem__(s, k, v): dict.__setitem__(s, k, [v])\n"
+    "    def __delitem__(s, k):\n"
+    "        if k == 'z': raise KeyError(k)\n"
+    "        dict.__delitem__(s, k)\n"
+    "def mn():\n"
+    "    ns = MN()\n"
+    "    exec('for i in range(3): pass\\na = b = z = 0\\ndel a, b\\ntry: del z\\nexcept NameError as e: m = str(e)\\n', {}, ns)\n"
+    "    return sorted(ns.items())\n"
+    "print(mn())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

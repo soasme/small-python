@@ -106,6 +106,27 @@ def exec_custom_error():
     return exec_custom("error")
 
 
+class Logging(dict):
+    def __setitem__(self, key, value):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        self.log.append(("set", key, value))
+        dict.__setitem__(self, key, value)
+
+    def __delitem__(self, key):
+        for _ in ():
+            pass
+        self.log.append(("del", key))
+        dict.__delitem__(self, key)
+
+
+def exec_custom_loop():
+    m = Logging()
+    m.log = []
+    exec("for i in (1, 2): pass\nk = j = 0\ndel k, j", {}, m)
+    return m.log
+
+
 def outcome(p):
     try:
         return repr(globals()[p["case"]]())

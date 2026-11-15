@@ -2163,6 +2163,10 @@ int main(int argc, char **argv) {
                "    return K.x + ('e' in vars(K))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "handled()", "handled.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* So do an exec()'d module's loop name and del through a locals mapping. */
+    execute(c, "def looped():\n    ns = Slots()\n    exec('for i in (1, 2): pass\\nk = 1\\ndel k', {}, ns)\n    return ns['i'] + len(ns)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "looped()", "looped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
