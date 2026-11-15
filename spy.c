@@ -14624,8 +14624,9 @@ static int expands(Node *n, int calls) {
     /* Applying a decorator is a call, as is the metaclass call of a class
      * with bases or keywords (class_new_call); a class body that holds a
      * call or a loop runs on the machine (class_part). */
+    if (n->kind == N_TYPEALIAS) return calls;
     if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS)
-        return (calls && (n->decorators || (n->kind == N_CLASS && (n->args || list_expands(n->b, CALLS) || loops(n->b))))) ||
+        return (calls && (n->decorators || n->params || (n->kind == N_CLASS && (n->args || list_expands(n->b, CALLS) || loops(n->b))))) ||
                list_expands(n->args, calls) || list_expands(n->decorators, calls);
     return list_expands(n->a, calls) || list_expands(n->b, calls) || list_expands(n->c, calls) || list_expands(n->args, calls);
 }
@@ -15112,6 +15113,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     case N_DELETE: compile_delete(c, p, n->a); break;
     /* A store of None by the statement (import_step). */
     case N_IMPORT: case N_FROM: emit(c, p, BC_NONE, n, 0); emit(c, p, BC_STORE, n, 1); break;
+    /* The alias (alias_step), stored as a name. */
+    case N_TYPEALIAS: emit(c, p, BC_CLASS, n, 11); emit(c, p, BC_STORE, n->a, 1); break;
     default: { /* N_CLASS, the last statement that can contain a yield */
         /* Decorators, then the bases and keywords as __build_class__'s
          * arguments; a generic class's bases cannot suspend. */
@@ -20239,13 +20242,13 @@ static SPYValue *exit_builtin(SPYContext *c, size_t argc, SPYValue *const *argv,
     spy_release(exception);
     return NULL;
 }
-/* PEP 695: bind type parameters in a fresh annotation-scope environment
- * between the current frame and the definition. In a class body it keeps
- * the class environment for annotation-scope lookups. */
-static SPYValue *generic_env(SPYContext *c, Frame *f, Node *generic, SPYValue **params) {
+/* PEP 695: a fresh annotation-scope environment for generic's type
+ * parameters, between the current frame and the definition (make_type_params).
+ * In a class body it keeps the class environment for annotation-scope
+ * lookups. */
+static SPYValue *generic_env(SPYContext *c, Frame *f, Node *generic) {
     SPYValue *env = value_new(c, V_ENV);
-    *params = value_new(c, SPY_TUPLE);
-    if (!env || !*params) { spy_release(env); spy_release(*params); *params = NULL; return NULL; }
+    if (!env) return NULL;
     env->as.map.flags = 5;
     SPYValue *outer = f->env;
     if (outer->type == V_ENV && outer->as.map.flags == 1) {
@@ -20256,84 +20259,127 @@ static SPYValue *generic_env(SPYContext *c, Frame *f, Node *generic, SPYValue **
     env->as.map.scope = generic->scope;
     env->as.map.unit = spy_retain(f->unit);
     declare_locals(c, env);
-    Frame frame = {env, f->unit, 0};
-    for (Node *param = generic->args; param && !c->error_type[0]; param = param->next) {
-        SPYValue *lazy = param->b ? make_function(c, &frame, param->b) : spy_none(c);
-        SPYValue *fallback = !lazy ? NULL : param->c ? make_function(c, &frame, param->c) : spy_none(c);
-        SPYValue *kind = spy_int(c, param->op), *name = spy_string(c, source_name(param), strlen(source_name(param)));
-        if (fallback && kind && name) {
-            int constraints = (param->flags & F_CONSTRAINTS) != 0;
-            SPYValue *args[] = {kind, name, constraints ? c->none : lazy, constraints ? lazy : c->none, fallback};
-            SPYValue *value = call_intrinsic(c, "_type_param", 5, args);
-            if (value && !name_set(c, env, param->text, value)) sequence_append(c, *params, value);
-            spy_release(value);
-        }
-        spy_release(lazy); spy_release(fallback); spy_release(kind); spy_release(name);
-    }
-    if (c->error_type[0]) { spy_release(env); spy_release(*params); *params = NULL; return NULL; }
     return env;
 }
-/* Defaults are evaluated in the enclosing scope, before the type parameters. */
-static SPYValue *generic_function_with(SPYContext *, Frame *, Node *, SPYValue *);
-static NO_INLINE SPYValue *generic_function(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *defaults = spy_list(c);
-    for (Node *arg = n->args; defaults && arg && !c->error_type[0]; arg = arg->next) {
-        if (!arg->a) continue;
-        SPYValue *value = eval(c, f, arg->a);
-        if (value) sequence_append(c, defaults, value);
+static SPYValue *k_state(SPYContext *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *k_resume(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *type_params_from(SPYContext *, Machine *, SPYValue *);
+static SPYValue *method_called(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The intrinsic _type_param made value, the type parameter of the
+ * generic env, first in state, whose index is the number of those in
+ * the tuple second: bound in env and added, it goes on to the next. */
+static SPYValue *type_param_made(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
+    SPYValue *env = state->as.seq.items[0], *params = state->as.seq.items[1];
+    Node *param = env->as.map.scope->owner->args;
+    for (size_t i = 0; i < params->as.seq.len; i++) param = param->next;
+    if (!value || name_set(c, env, param->text, value) || sequence_append(c, params, value)) {
         spy_release(value);
+        return k_resume(c, m, state, NULL);
     }
-    SPYValue *fn = defaults && !c->error_type[0] ? generic_function_with(c, f, n, defaults) : NULL;
-    spy_release(defaults);
+    spy_release(value);
+    return type_params_from(c, m, state);
+}
+/* The type parameters of a generic env (generic_env) from the one after
+ * those in the tuple on, each the intrinsic _type_param's, its bound,
+ * constraints and default lazy functions in env, called on m (callk),
+ * then the continuation k_state holds in state, given the tuple. State:
+ * the env, the tuple, then k_state's. */
+static SPYValue *type_params_from(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue *env = state->as.seq.items[0], *params = state->as.seq.items[1];
+    Node *param = env->as.map.scope->owner->args;
+    for (size_t i = 0; param && i < params->as.seq.len; i++) param = param->next;
+    if (!param) return k_resume(c, m, state, spy_retain(params));
+    Frame frame = {env, env->as.map.unit, 0};
+    int constraints = (param->flags & F_CONSTRAINTS) != 0;
+    SPYValue *lazy = param->b ? make_function(c, &frame, param->b) : spy_none(c);
+    SPYValue *args[] = {spy_int(c, param->op), spy_string(c, source_name(param), strlen(source_name(param))),
+                        constraints ? spy_none(c) : spy_retain(lazy), constraints ? spy_retain(lazy) : spy_none(c),
+                        param->c ? make_function(c, &frame, param->c) : spy_none(c)};
+    SPYValue *function = intrinsic(c, "_type_param");
+    spy_release(lazy);
+    if (!function || !args[0] || !args[1] || !args[2] || !args[3] || !args[4]) { release_all(5, args); return k_resume(c, m, state, NULL); }
+    return callk(c, m, function, 5, args, type_param_made, state);
+}
+/* The type parameters of generic env (generic_env), which it takes, made
+ * on m (type_params_from), then k with ctx, which it takes, given their
+ * tuple, or NULL on an error. */
+static SPYValue *make_type_params(SPYContext *c, Machine *m, SPYValue *env, Continuation k, SPYValue *ctx) {
+    SPYValue *items[4] = {env, value_new(c, SPY_TUPLE)};
+    if (!env || !items[1]) { spy_release(env); spy_release(items[1]); return k(c, m, ctx, NULL); }
+    SPYValue *state = k_state(c, 2, items, k, ctx);
+    return state ? type_params_from(c, m, state) : NULL;
+}
+/* The generic function of state, given its type parameters' tuple. */
+static SPYValue *generic_function_made(SPYContext *c, Machine *m, SPYValue *fn, SPYValue *params) {
+    (void)m;
+    if (params && name_set(c, fn->as.function.metadata, "__type_params__", params)) { spy_release(params); params = NULL; }
+    if (!params) { spy_release(fn); return NULL; }
+    spy_release(params);
     return fn;
 }
-/* The generic function n with its defaults already evaluated, in order. */
-static SPYValue *generic_function_with(SPYContext *c, Frame *f, Node *n, SPYValue *defaults) {
-    SPYValue *params = NULL, *env = generic_env(c, f, n->params, &params), *fn = NULL;
+/* The generic function n with its defaults already evaluated, in order,
+ * defined in its type parameters' env, which are made on m after it. */
+static NO_INLINE SPYValue *generic_function(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue *defaults) {
+    SPYValue *env = generic_env(c, f, n->params), *fn = NULL;
     if (env) {
         Frame frame = {env, f->unit, 0};
         fn = function_new(c, &frame, n);
         size_t i = 0;
         for (Node *arg = n->args; fn && arg && !c->error_type[0]; arg = arg->next)
             if (arg->a) function_default(c, fn, arg, defaults->as.seq.items[i++]);
-        if (fn && !c->error_type[0]) name_set(c, fn->as.function.metadata, "__type_params__", params);
     }
-    spy_release(params); spy_release(env);
-    if (c->error_type[0]) { spy_release(fn); return NULL; }
-    return fn;
+    if (!fn || c->error_type[0]) { spy_release(fn); spy_release(env); return NULL; }
+    return make_type_params(c, m, env, generic_function_made, fn);
 }
-static SPYValue *generic_class(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *params = NULL, *env = generic_env(c, f, n->params, &params), *cls = NULL;
-    SPYValue *base = env ? call_intrinsic(c, "_generic_base", 1, &params) : NULL;
-    if (base) {
-        Frame frame = {env, f->unit, 0};
-        cls = build_class(c, &frame, n, base, params, NULL);
-    }
-    spy_release(base); spy_release(params); spy_release(env);
-    return cls;
+/* A generic class's base, the intrinsic _generic_base's: under it on m's
+ * stack its type parameters' env and tuple, state, as one tuple. */
+static SPYValue *generic_based(SPYContext *c, Machine *m, SPYValue *state, SPYValue *base) {
+    (void)m;
+    SPYValue *items[] = {spy_retain(state->as.seq.items[0]), spy_retain(state->as.seq.items[1]), base};
+    spy_release(state);
+    SPYValue *generic = base ? tuple_of(c, 3, items) : NULL;
+    release_all(3, items);
+    return generic;
+}
+/* A generic class's type parameters' tuple, its env ctx: the intrinsic
+ * _generic_base called on m (callk) with it. */
+static SPYValue *generic_class_params(SPYContext *c, Machine *m, SPYValue *env, SPYValue *params) {
+    SPYValue *items[] = {env, params}, *function = params ? intrinsic(c, "_generic_base") : NULL;
+    SPYValue *state = function ? tuple_of(c, 2, items) : NULL;
+    if (!state) { release_all(2, items); return NULL; }
+    spy_release(env);
+    return callk(c, m, function, 1, &params, generic_based, state);
+}
+/* The intrinsic _type_alias called on m (callk) with a type alias's name,
+ * its value's function and its module name, in ctx, and its type
+ * parameters' tuple. */
+static SPYValue *alias_params(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *params) {
+    SPYValue **items = ctx->as.seq.items, *function = params ? intrinsic(c, "_type_alias") : NULL;
+    SPYValue *args[] = {spy_retain(items[0]), spy_retain(items[1]), params, spy_retain(items[2])};
+    spy_release(ctx);
+    if (!function) { release_all(4, args); return NULL; }
+    return callk(c, m, function, 4, args, method_called, NULL);
 }
 static NO_INLINE void execute_class(SPYContext *c, Frame *f, Node *n) {
     SPYValue *decorators = eval_decorators(c, f, n);
     if (!decorators) return;
-    SPYValue *cls = apply_decorators(c, decorators, n->params ? generic_class(c, f, n) : build_class(c, f, n, NULL, NULL, NULL));
+    SPYValue *cls = apply_decorators(c, decorators, build_class(c, f, n, NULL, NULL, NULL));
     if (cls) name_set(c, f->env, n->a->text, cls);
     spy_release(cls); spy_release(decorators);
 }
-/* type NAME[params] = value creates a lazily evaluated TypeAliasType. */
-static NO_INLINE void execute_type_alias(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *params = NULL, *env = n->params ? generic_env(c, f, n->params, &params) : NULL;
-    if (n->params && !env) return;
-    if (!params && !(params = value_new(c, SPY_TUPLE))) return;
+/* type NAME[params] = value (BC_CLASS 11): the TypeAliasType of the
+ * intrinsic _type_alias, its value lazy, a function in the env of its
+ * type parameters, which are made first on m (make_type_params). */
+static NO_INLINE SPYValue *alias_step(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    SPYValue *env = n->params ? generic_env(c, f, n->params) : NULL;
+    if (n->params && !env) return NULL;
     Frame frame = {env ? env : f->env, f->unit, 0};
-    SPYValue *fn = make_function(c, &frame, n->b);
-    SPYValue *name = fn ? spy_string(c, source_name(n->a), strlen(source_name(n->a))) : NULL;
-    if (name) {
-        SPYValue *args[] = {name, fn, params, globals_name(c, f->env)};
-        SPYValue *alias = call_intrinsic(c, "_type_alias", 4, args);
-        if (alias) name_set(c, f->env, n->a->text, alias);
-        spy_release(alias);
-    }
-    spy_release(fn); spy_release(name); spy_release(params); spy_release(env);
+    SPYValue *items[] = {spy_string(c, source_name(n->a), strlen(source_name(n->a))), make_function(c, &frame, n->b),
+                         spy_retain(globals_name(c, f->env))};
+    SPYValue *ctx = items[0] && items[1] ? tuple_of(c, 3, items) : NULL;
+    release_all(3, items);
+    if (!ctx) { spy_release(env); return NULL; }
+    return env ? make_type_params(c, m, env, alias_params, ctx) : alias_params(c, m, ctx, value_new(c, SPY_TUPLE));
 }
 static void chain_exception(SPYContext *c, SPYValue *exception) {
     SPYValue *context = active_exception(c);
@@ -23046,7 +23092,6 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
             spy_release(r.value); break;
         }
         case N_CLASS: execute_class(c, f, n); break;
-        case N_TYPEALIAS: execute_type_alias(c, f, n); break;
         case N_TRY: {
             Result r = execute_try(c, f, n);
             if (r.flow != FLOW_NORMAL) return r;
@@ -23078,7 +23123,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
         case N_DEF: {
             SPYValue *decorators = eval_decorators(c, f, n);
             if (!decorators) break;
-            SPYValue *fn = apply_decorators(c, decorators, n->params ? generic_function(c, f, n) : make_function(c, f, n));
+            SPYValue *fn = apply_decorators(c, decorators, make_function(c, f, n));
             if (fn) name_set(c, f->env, n->a->text, fn);
             spy_release(fn); spy_release(decorators); break;
         }
@@ -28999,6 +29044,7 @@ static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
  * is entered first (class_new_call). */
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     if (ins->arg == 10) return name_load(c, m, f, ins->node);
+    if (ins->arg == 11) return alias_step(c, m, f, ins->node);
     if (ins->arg == 7) {
         SPYValue *state = m->stack[m->len - 3], *cls, *classcell;
         int list = state->type == SPY_LIST;
@@ -29138,12 +29184,9 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
         return classcell ? classcell : spy_none(c);
     }
     if (ins->arg == 1) {
-        SPYValue *items[3] = {NULL, NULL, NULL};
-        items[0] = generic_env(c, f, n->params, &items[1]);
-        items[2] = items[0] ? call_intrinsic(c, "_generic_base", 1, &items[1]) : NULL;
-        SPYValue *generic = items[2] ? tuple_of(c, 3, items) : NULL;
-        release_all(3, items);
-        return generic;
+        /* A generic class's type parameters and base, made on m. */
+        SPYValue *env = generic_env(c, f, n->params);
+        return env ? make_type_params(c, m, spy_retain(env), generic_class_params, env) : NULL;
     }
     if (ins->arg == 5) {
         SPYValue *classcell = m->stack[m->len - 1], *v = m->stack[m->len - 2], **items = v->as.seq.items;
@@ -30681,8 +30724,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             for (size_t i = m->len - (size_t)ins->arg; defaults && i < m->len; i++)
                 if (sequence_append(c, defaults, m->stack[i])) { spy_release(defaults); defaults = NULL; }
             for (int i = 0; i < ins->arg; i++) spy_release(machine_pop(m));
-            machine_push(c, m, defaults ? generic_function_with(c, &f, n, defaults) : NULL);
-            spy_release(defaults); break;
+            value = defaults ? generic_function(c, m, &f, n, defaults) : NULL;
+            spy_release(defaults);
+            if (c->k_fn) goto enter_k;
+            machine_push(c, m, value); break;
         }
         CASE(BC_DELETE)
             if (!ins->arg) { delete_target(c, &f, n); break; }

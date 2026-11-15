@@ -604,6 +604,22 @@ static const char *const programs[] = {
     "    return r\n"
     "print(tx())\n",
 
+    "class GN(dict):\n"
+    "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
+    "class GM(type):\n"
+    "    @classmethod\n"
+    "    def __prepare__(m, n, b): return GN()\n"
+    "type GA[*U, **V, T: int = str] = list[T]\n"
+    "def gd[T](x: T = 1) -> T: return x\n"
+    "def gk():\n"
+    "    type GL[W] = dict[W, W]\n"
+    "    class GC[X](metaclass=GM):\n"
+    "        type GI = int\n"
+    "        def m[Y](self): pass\n"
+    "    return GL, GC\n"
+    "GL, GC = gk()\n"
+    "print(GA, GA.__type_params__, GA.__value__, gd(), gd.__type_params__, GL, GC.__type_params__, GC.GI, GC.m.__type_params__)\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

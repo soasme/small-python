@@ -1243,7 +1243,7 @@ class TypeAliasType:
         return tuple(params)
 
     def __repr__(self):
-        return self._name
+        return self.__qualname__
 
     def __getitem__(self, parameters):
         if not self._type_params:

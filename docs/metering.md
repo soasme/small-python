@@ -295,9 +295,11 @@ These run as machines on the heap, in one native activation of
   `__getitem__` of the namespace `__prepare__` returned for the names
   the body binds itself before and after its statements, its
   `__setitem__` and `__delitem__` for the body's `def`, `class`,
-  annotated assignment and `del` of a name, its `__getitem__` for the
-  names the body loads, and the new class's
-  `__set_name__` and `__init_subclass__` calls;
+  `type`, annotated assignment and `del` of a name, its `__getitem__`
+  for the names the body loads, and the new class's
+  `__set_name__` and `__init_subclass__` calls; the type parameters,
+  generic base and alias that a generic `def` or `class` or a `type`
+  statement makes;
 - `exec` and `eval` of source, also of interactive input (mode
   `'single'`) and the Python `sys.displayhook` its values go to, and the
   module of source an `import` statement runs;

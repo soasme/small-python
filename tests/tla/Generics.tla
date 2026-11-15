@@ -11,7 +11,8 @@
 (* names come first, but not outside it; a duplicate parameter or a        *)
 (* parameter without a default after one with a default is a syntax        *)
 (* error; and a generic class gets Generic as a base and can be            *)
-(* subscripted.                                                            *)
+(* subscripted. A type alias's repr is its qualified name: the name, after *)
+(* the function or class holding the type statement.                      *)
 (*                                                                         *)
 (* A parameter program defines a function, class, or type alias with one   *)
 (* parameter: T, T: int, T: (str, bytes), T = int, *T, or **T; and reads   *)
@@ -22,7 +23,9 @@
 (* a class annotation after the body binds T = 5, or outside the           *)
 (* definition. A syntax program compiles a duplicate, misordered, or valid *)
 (* list. A class program reads a generic class's __bases__ or              *)
-(* __orig_bases__ or subscripts it with int. The outcome is the result or  *)
+(* __orig_bases__ or subscripts it with int. An alias program defines      *)
+(* type g[T] at module level, in a function f, or in a class C, and reads  *)
+(* its repr, __name__, or __type_params__. The outcome is the result or    *)
 (* the exception.                                                          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
@@ -34,6 +37,7 @@ Programs == [part : {"param"}, kind : {"function", "class", "alias"}, param : Pa
             \cup [part : {"visible"}, where : {"annotation", "body", "method", "shadow", "outside"}]
             \cup [part : {"syntax"}, case : {"duplicate", "order", "ok"}]
             \cup [part : {"class"}, query : {"bases", "orig", "subscript"}]
+            \cup [part : {"alias"}, where : {"module", "function", "class"}, query : {"repr", "name", "params"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -57,11 +61,16 @@ Visible(p) == CASE p.where = "shadow" -> "5" [] p.where = "outside" -> "NameErro
 
 Class(p) == CASE p.query = "bases" -> "(Generic,)" [] p.query = "orig" -> "(Generic[T],)" [] p.query = "subscript" -> "C[int]"
 
+Qualified(where) == CASE where = "function" -> "f.<locals>.g" [] where = "class" -> "C.g" [] OTHER -> "g"
+
+Alias(p) == CASE p.query = "repr" -> Qualified(p.where) [] p.query = "name" -> "g" [] p.query = "params" -> "(T,)"
+
 Run(p) == CASE p.part = "param" -> Param(p)
             [] p.part = "lazy" -> Lazy(p)
             [] p.part = "visible" -> Visible(p)
             [] p.part = "syntax" -> IF p.case = "ok" THEN "ok" ELSE "SyntaxError"
             [] p.part = "class" -> Class(p)
+            [] p.part = "alias" -> Alias(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -72,4 +81,8 @@ Done == outcome # Pending
 
 \* The kind of definition never changes what a parameter is.
 KindIndependent == Done /\ program.part = "param" => outcome = Param([program EXCEPT !.kind = "function"])
+
+\* Where an alias is defined qualifies its repr, never its name or parameters.
+AliasQualified == Done /\ program.part = "alias" /\ program.query # "repr" =>
+                      outcome = Alias([program EXCEPT !.where = "module"])
 =============================================================================

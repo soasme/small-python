@@ -171,11 +171,15 @@ static int64_t integer(SPYContext *c, SPYValue *v) {
     spy_release(v);
     return n;
 }
+/* Execute source, resuming it when the step budget pauses it. */
 static void execute(SPYContext *c, const char *source) {
-    if (spy_exec(c, source, "api.py")) {
+    SPYValue *v = spy_exec(c, source, "api.py") ? NULL : spy_none(c);
+    while (!v && spy_paused(c)) v = spy_resume(c);
+    if (!v) {
         fprintf(stderr, "api.py:%zu: %s: %s\n", spy_error_line(c), spy_error_type(c), spy_error_message(c));
         abort();
     }
+    spy_release(v);
 }
 /* OSError(errno, strerror) is the subclass for the host's value of errno. */
 static void errno_classes(void) {
@@ -1806,6 +1810,15 @@ int main(int argc, char **argv) {
                "def traced():\n    g = traced_gen(); next(g)\n    return g.throw(Traced, 6, tb)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "traced()", "traced.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So does a class body's type statement, stored by its namespace's
+     * Python __setitem__ after its type parameters are made. */
+    execute(c, "class TypeStore(dict):\n    def __setitem__(self, k, v):\n        for i in range(3000): pass\n"
+               "        dict.__setitem__(self, k, v)\n"
+               "class TypeMeta(type):\n    @classmethod\n    def __prepare__(m, n, b): return TypeStore()\n"
+               "def generics():\n    class K(metaclass=TypeMeta):\n        type A[T, *U, **V] = int\n"
+               "    return len(K.A.__type_params__) + len(repr(K.A))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "generics()", "generics.py"), SPY_STOP_STEPS, &pauses)) == 24 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

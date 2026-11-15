@@ -1224,7 +1224,7 @@ static const char *const intrinsics_source[] = {
     "        return tuple(params)\n",
     "\n",
     "    def __repr__(self):\n",
-    "        return self._name\n",
+    "        return self.__qualname__\n",
     "\n",
     "    def __getitem__(self, parameters):\n",
     "        if not self._type_params:\n",

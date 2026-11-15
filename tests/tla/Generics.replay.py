@@ -61,7 +61,15 @@ def klass(p):
     return text(C[int])
 
 
-PARTS = {"param": param, "visible": visible, "syntax": syntax, "class": klass}
+def alias(p):
+    body = "type g[T] = int"
+    source = {"module": body + "\nresult = g", "function": "def f():\n    %s\n    return g\nresult = f()" % body,
+              "class": "class C:\n    %s\nresult = C.g" % body}[p["where"]]
+    made = run(source)
+    return {"repr": repr(made), "name": made.__name__, "params": text(made.__type_params__)}[p["query"]]
+
+
+PARTS = {"param": param, "visible": visible, "syntax": syntax, "class": klass, "alias": alias}
 
 
 def outcome(p):
