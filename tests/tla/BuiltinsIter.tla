@@ -62,7 +62,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
-          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "zip_callable", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth", "filter_builtin",
+          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_callable", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth", "filter_builtin",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
@@ -150,6 +150,7 @@ Case(c) ==
       \* zip and enumerate of iter(f, sentinel) call a Python f for each item, after a str's
       [] c = "zip_callable" -> "([('x', 1), ('y', 2)], [(0, 1), (1, 2)], [1, 2, 3, 1, 2, 3])"
       [] c = "callable_calls" -> "([1, 2], 3, [1, 2], 1, [1, 2, 3, 1, 2, 3, 1, 2, 3, 1])"
+      [] c = "callable_sentinel_eq" -> "([1, 2], [0], [(3, 1), (3, 2), (3, 3), (1, 0), (1, 1)])"
       \* map() of hash hashes a tuple's items in order, nested tuples first
       [] c = "map_hash_tuple" -> "(True, [1, 3, 4])"
       [] c = "map_adapted" -> "([('a', '1'), ('b', '2')], [(0, '3')], [1, 2, 3])"

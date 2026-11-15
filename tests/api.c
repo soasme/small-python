@@ -1862,6 +1862,11 @@ int main(int argc, char **argv) {
     execute(c, "def iterated():\n    return len(sorted(iter([Sized(), [1]]), key=len)) + len(max(iter((Sized(),)), key=len))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "iterated()", "iterated.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So does a callable iterator's Python __eq__ of its sentinel. */
+    execute(c, "class Stop:\n    def __eq__(self, other):\n        for i in range(3000): pass\n        return other == 3\n"
+               "def sentinels():\n    it = iter([1, 2, 3, 4])\n    return sum(iter(lambda: next(it), Stop()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "sentinels()", "sentinels.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

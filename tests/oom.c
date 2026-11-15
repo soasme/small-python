@@ -731,6 +731,24 @@ static const char *const programs[] = {
     "    return [x.n for x in sorted(iter(xs), key=len)], [x.n for x in sorted(it, key=len)], min({IK(4): 0, IK(3): 1}, key=len).n\n"
     "print(ik())\n",
 
+    "class SE:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __eq__(self, other):\n"
+    "        if other is -1: raise KeyError('s')\n"
+    "        if other is -2: return NotImplemented\n"
+    "        return other == self.n\n"
+    "class SF(SE):\n"
+    "    def __eq__(self, other): return NotImplemented\n"
+    "def se():\n"
+    "    def counter(xs):\n"
+    "        it = iter(xs)\n"
+    "        return lambda: next(it)\n"
+    "    try: list(iter(counter([0, -1]), SE(5)))\n"
+    "    except KeyError: pass\n"
+    "    it = iter(counter([SF(1), -2, 3]), SE(3))\n"
+    "    return list(iter(counter([1, 2, 3]), SE(3))), [type(x).__name__ for x in it], next(iter(counter([4]), SE(5)))\n"
+    "print(se())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

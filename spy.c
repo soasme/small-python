@@ -29941,19 +29941,11 @@ static NO_INLINE int filter_call(SPYContext *c, Machine *m, SPYValue *v, SPYValu
     *fn = spy_retain(function);
     return 1;
 }
-/* What callable iterator v's call (sentinel_call) returned in result,
- * taking it: the item, unless it equals the sentinel, which ends v as an
+/* Callable iterator v's item result, which it takes, compared with the
+ * sentinel: result, or NULL when stop, its equality, ends v as an
  * exhausting call does, a StopIteration then pending for next_ended
- * (iterator_next). */
-static NO_INLINE SPYValue *sentinel_returned(SPYContext *c, SPYValue *v, SPYValue *result) {
-    v->as.iterator.index--;
-    if (!result) {
-        if (error_is(c, "StopIteration")) v->as.iterator.done = 1;
-        return NULL;
-    }
-    SPYValue *sentinel = v->as.iterator.done ? NULL : spy_retain(v->as.iterator.counter);
-    int stop = !sentinel || sentinel == result || equal(sentinel, result);
-    spy_release(sentinel);
+ * (iterator_next), or on an error. */
+static SPYValue *sentinel_tested(SPYContext *c, SPYValue *v, SPYValue *result, int stop) {
     if (c->error_type[0] || stop) {
         spy_release(result);
         if (stop && !c->error_type[0]) {
@@ -29968,12 +29960,91 @@ static NO_INLINE SPYValue *sentinel_returned(SPYContext *c, SPYValue *v, SPYValu
     }
     return result;
 }
+/* The Python __eq__ that comparing callable iterator v's sentinel with
+ * item calls first, borrowed, *swapped when it is item's, reflected: the
+ * sentinel's, unless item's class is a subclass of its own, or item's
+ * when the sentinel's is native, declining an instance; else NULL. */
+static SPYValue *sentinel_function(SPYContext *c, SPYValue *sentinel, SPYValue *item, int *swapped) {
+    SPYValue *function = rich_function(c, sentinel, item, R_EQ);
+    *swapped = !function && !(sentinel->type == SPY_INSTANCE && sentinel->as.map.base);
+    return function ? function : *swapped ? rich_function(c, item, sentinel, R_EQ) : NULL;
+}
+/* The next call of kind, Python __eq__ function of self and other, left
+ * in c->k_fn comparing callable iterator v's item, which it takes, with
+ * its sentinel: item, sentinel, round, which of them self is (booleans)
+ * or none for the reflected method's call, and v on m's stack under
+ * c->converting (sentinel_compared); NULL, an error when it fails. */
+static SPYValue *sentinel_eq(SPYContext *c, Machine *m, SPYValue *v, SPYValue *item, SPYValue *sentinel, SPYValue *round,
+                             SPYValue *function, SPYValue *self, SPYValue *other, int kind) {
+    SPYValue *args[] = {spy_retain(self), spy_retain(other)};
+    size_t depth = m->len;
+    if (machine_push(c, m, item) || machine_push(c, m, spy_retain(sentinel)) || machine_push(c, m, spy_retain(round)) ||
+        machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->converting)) ||
+        !(c->k_env = function_env(c, function, 2, args, NULL, 1))) {
+        while (m->len > depth) spy_release(machine_pop(m));
+        return NULL;
+    }
+    c->k_fn = spy_retain(function); c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
+    return NULL;
+}
+/* What callable iterator v's call (sentinel_call) returned in result,
+ * taking it: the item, unless it equals the sentinel (sentinel_tested);
+ * a Python __eq__ comparing them (sentinel_function) the next call
+ * (sentinel_eq), and NULL with no error; with no m, an adapting
+ * iterator's, the comparison runs in C. */
+static NO_INLINE SPYValue *sentinel_returned(SPYContext *c, Machine *m, SPYValue *v, SPYValue *result, int kind) {
+    v->as.iterator.index--;
+    if (!result) {
+        if (error_is(c, "StopIteration")) v->as.iterator.done = 1;
+        return NULL;
+    }
+    SPYValue *sentinel = v->as.iterator.done ? NULL : v->as.iterator.counter, *function;
+    int swapped;
+    if (m && sentinel && sentinel != result && (function = sentinel_function(c, sentinel, result, &swapped)))
+        return sentinel_eq(c, m, v, result, sentinel, c->booleans[swapped], function, swapped ? result : sentinel, swapped ? sentinel : result, kind);
+    spy_retain(sentinel);
+    int stop = !sentinel || sentinel == result || equal(sentinel, result);
+    spy_release(sentinel);
+    return sentinel_tested(c, v, result, stop);
+}
+/* What the Python __eq__ of a sentinel_eq call of kind returned in test,
+ * taking it: after the first's NotImplemented the other's Python method
+ * (sentinel_eq again), or its native one (rich_method); after both, the
+ * default; whose truth tests the item (sentinel_tested). The item, the
+ * sentinel, the round and the iterator leave m's stack. */
+static NO_INLINE SPYValue *sentinel_compared(SPYContext *c, Machine *m, SPYValue *test, int kind) {
+    spy_release(machine_pop(m));
+    SPYValue *v = machine_pop(m), *round = machine_pop(m), *sentinel = machine_pop(m), *item = machine_pop(m), *result = NULL;
+    SPYValue *self = round == c->booleans[1] ? sentinel : item, *other = self == item ? sentinel : item;
+    if (test == c->not_implemented && round != c->none) {
+        /* The reflected method of the one not called: self now. */
+        SPYValue *function = self->type == SPY_INSTANCE && !self->as.map.base ? class_lookup(self->as.map.parent, "__eq__") : NULL;
+        spy_release(test);
+        if (function && machine_function(c, function)) {
+            result = sentinel_eq(c, m, v, item, sentinel, c->none, function, self, other, kind);
+            goto done;
+        }
+        if (!(test = rich_method(c, R_EQ, self, other)) && !c->error_type[0]) test = comparison_declined(c, T_EQ, sentinel, item);
+    } else if (test == c->not_implemented) {
+        spy_release(test);
+        test = comparison_declined(c, T_EQ, sentinel, item);
+    }
+    int stop = test && truthy(test);
+    spy_release(test);
+    result = sentinel_tested(c, v, item, stop);
+done:
+    spy_release(round); spy_release(sentinel); spy_release(v);
+    return result;
+}
+static ALWAYS_INLINE int sentineling(SPYContext *c, Machine *m) {
+    return m->len > 1 && m->stack[m->len - 1] == c->converting && m->stack[m->len - 2]->type == SPY_ITERATOR;
+}
 /* What the function of filter v, given the item waiting in v's counter
  * (filter_call), returned in test, taking it: the item when test is true;
  * else NULL, with *again set unless an error is pending; a callable
  * iterator's call, sentinel_returned. */
-static NO_INLINE SPYValue *filter_returned(SPYContext *c, SPYValue *v, SPYValue *test, int *again) {
-    if (v->as.iterator.kind == I_CALLABLE) return sentinel_returned(c, v, test);
+static NO_INLINE SPYValue *filter_returned(SPYContext *c, Machine *m, SPYValue *v, SPYValue *test, int *again, int kind) {
+    if (v->as.iterator.kind == I_CALLABLE) return sentinel_returned(c, m, v, test, kind);
     SPYValue *item = v->as.iterator.counter;
     v->as.iterator.counter = NULL;
     int keep = test && truthy(test);
@@ -30240,7 +30311,7 @@ static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue 
     /* The iterable called is the first a zip or map has no item of. */
     if (v->as.iterator.kind != I_ENUMERATE)
         inner = source->as.seq.items[(v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0)];
-    if (inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE) result = sentinel_returned(c, inner, result);
+    if (inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE) result = sentinel_returned(c, NULL, inner, result, 0);
     SPYValue *item = result ? adapted_item(c, v, result) : NULL;
     if (!item && !c->error_type[0]) *again = 1;
     else if (!item && v->as.iterator.kind != I_ENUMERATE) { spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL; }
@@ -30426,17 +30497,20 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_ITEM, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
-                        if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_ITEM)) && c->k_fn)
+                        if (sentineling(c, m)) {
+                            if (!(result = sentinel_compared(c, m, result, CALL_ITEM)) && c->k_fn) goto enter_k;
+                        } else if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_ITEM)) && c->k_fn)
                             goto enter_k;
-                        if (m->len && m->stack[m->len - 1] == c->adapting) {
+                        else if (m->len && m->stack[m->len - 1] == c->adapting) {
                             int again = 0;
                             result = adapted_returned(c, m, result, &again);
                             if (again) goto consume_generator;
                         }
                         if (filtering(source)) {
                             int again = 0;
-                            result = filter_returned(c, source, result, &again);
+                            result = filter_returned(c, m, source, result, &again, CALL_ITEM);
                             if (again) goto consume_generator;
+                            if (!result && c->k_fn) goto enter_k;
                         }
                         if (!result) next_ended(c, source);
                         flow.value = result;
@@ -30463,11 +30537,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_NEXT, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
-                        if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_NEXT)) && c->k_fn)
+                        if (sentineling(c, m)) {
+                            if (!(result = sentinel_compared(c, m, result, CALL_NEXT)) && c->k_fn) goto enter_k;
+                        } else if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_NEXT)) && c->k_fn)
                             goto enter_k;
-                        if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_returned(c, m, result, &again);
-                        if (filtering(iterator)) result = filter_returned(c, iterator, result, &again);
+                        else if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_returned(c, m, result, &again);
+                        if (filtering(iterator)) result = filter_returned(c, m, iterator, result, &again, CALL_NEXT);
                         if (again) pc--;
+                        else if (!result && c->k_fn) ;
                         else if (result) loop_item(c, m, &f, &code[pc - 1], result);
                         else if (next_ended(c, iterator)) pc = code[pc - 1].target;
                     }

@@ -306,7 +306,8 @@ These run as machines on the heap, in one native activation of
   module of source an `import` statement runs;
 - a loop's Python `__iter__` and `__next__`, or the `__getitem__` of a
   class without `__iter__`, also through `reversed`, the function of a
-  `map` or `filter` it takes items from, these three also for `next`, a `map`'s bound method or callable
+  `map` or `filter`, or of `iter(f, sentinel)` with the sentinel's
+  `__eq__` and its reflected one, it takes items from, these also for `next`, a `map`'s bound method or callable
   instance's `__call__` too, the generator that an `enumerate`, or a
   `filter` whose function is `None` or native, takes items from, and the
   generators that a `zip` or a `map` without `strict` takes items from
