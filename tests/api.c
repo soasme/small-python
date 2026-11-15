@@ -2321,6 +2321,16 @@ int main(int argc, char **argv) {
                "    return len(A.__mro__) + len(Ordered('B', (A,), {}).__mro__) + len(type.__new__(Ordered, 'C', (), {}).__mro__)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "ordered()", "ordered.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So does an async for's Python __anext__ and an async with's Python __aenter__ and __aexit__. */
+    execute(c, "class Ticks:\n    def __init__(self): self.i = 0\n    def __aiter__(self): return self\n"
+               "    async def __anext__(self):\n        for i in range(3000): pass\n        self.i += 1\n"
+               "        if self.i > 2: raise StopAsyncIteration\n        return self.i\n"
+               "    async def __aenter__(self):\n        for i in range(3000): pass\n        return 4\n"
+               "    async def __aexit__(self, *a):\n        for i in range(3000): pass\n"
+               "async def ticked():\n    n = 0\n    async for i in Ticks(): n += i\n    async with Ticks() as v: n += v\n    return n\n"
+               "def run_ticked():\n    try: ticked().send(None)\n    except StopIteration as e: return e.value\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "run_ticked()", "ticked.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

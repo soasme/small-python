@@ -1722,6 +1722,27 @@ static const char *const programs[] = {
     "    return out\n"
     "print(mo())\n",
 
+    "class AXN:\n"
+    "    def __init__(self, n): self.i, self.n = 0, n\n"
+    "    def __aiter__(self): return self\n"
+    "    async def __anext__(self):\n"
+    "        self.i += 1\n"
+    "        if self.i > self.n: raise StopAsyncIteration\n"
+    "        if self.i < 0: raise LookupError(self.i)\n"
+    "        return self.i\n"
+    "    async def __aenter__(self): return self.n\n"
+    "    async def __aexit__(self, *a): return True\n"
+    "async def axb():\n"
+    "    out = [i async for i in AXN(2)]\n"
+    "    async with AXN(5) as v:\n"
+    "        out.append(v)\n"
+    "        raise KeyError(v)\n"
+    "    return out\n"
+    "def ax():\n"
+    "    try: axb().send(None)\n"
+    "    except StopIteration as e: return e.value\n"
+    "print(ax())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

@@ -246,6 +246,8 @@ Unreleased (0.10.0):
   without nesting on the C stack when they are the first to use them
 - a metaclass's Python mro() runs without nesting on the C stack, for a class statement or a call of a metaclass
   that keeps type's __new__ and __init__
+- an async for's Python __anext__ and an async with's Python __aenter__ and __aexit__ run without nesting on the
+  C stack
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

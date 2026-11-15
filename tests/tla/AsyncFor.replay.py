@@ -43,6 +43,15 @@ class Counter:
         return self.i
 
 
+class Awaiting(Counter):
+    async def __anext__(self):
+        self.i += 1
+        await Step()
+        if self.i > 2:
+            raise StopAsyncIteration
+        return self.i
+
+
 class NoAiter:
     pass
 
@@ -60,7 +69,7 @@ class NoAnext:
         return 5
 
 
-SOURCES = {"agen": agen, "class": Counter, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
+SOURCES = {"agen": agen, "class": Counter, "awaiting": Awaiting, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
 SYNTAX = {"for": "def f():\n    async for x in y: pass", "with": "def f():\n    async with x: pass",
           "await": "def f():\n    await x", "comprehension": "def f():\n    return [x async for x in y]"}
 

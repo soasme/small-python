@@ -13,20 +13,23 @@
 (* async for, async with, await, and asynchronous comprehensions outside   *)
 (* an async function are syntax errors.                                    *)
 (*                                                                         *)
-(* A loop program drives a coroutine running `async for x in SRC: BODY`    *)
-(* with an else clause, where SRC is an async generator that awaits a      *)
-(* step (which passes out "tick") before yielding 0 and 1, a class whose   *)
-(* __anext__ returns 1 and 2, a class without __aiter__, a class whose     *)
+(* A loop program drives a coroutine running `async for x in SRC:          *)
+(* BODY` with an else clause, where SRC is an async generator that         *)
+(* awaits a step (which passes out "tick") before yielding 0 and 1, a      *)
+(* class whose __anext__ returns 1 and 2, a class whose __anext__          *)
+(* awaits a step before returning 1 and 2 and before raising               *)
+(* StopAsyncIteration, a class without __aiter__, a class whose            *)
 (* __anext__ returns 5, or a class whose __aiter__ returns 5; and BODY     *)
 (* appends x and then completes, breaks, or raises KeyError. A             *)
-(* comprehension program builds a list, set, or dict over the generator.   *)
-(* A syntax program compiles async for, async with, await, or an           *)
-(* asynchronous comprehension in a plain function. The outcome is the      *)
-(* values passed out, the items, and whether else ran, or the exception.   *)
+(* comprehension program builds a list, set, or dict over the              *)
+(* generator. A syntax program compiles async for, async with, await,      *)
+(* or an asynchronous comprehension in a plain function. The outcome       *)
+(* is the values passed out, the items, and whether else ran, or the       *)
+(* exception.                                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"loop"}, source : {"agen", "class", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
+Programs == [part : {"loop"}, source : {"agen", "class", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
             \cup [part : {"comprehension"}, kind : {"list", "set", "dict"}]
             \cup [part : {"syntax"}, construct : {"for", "with", "await", "comprehension"}]
 
@@ -35,16 +38,17 @@ vars == <<program, outcome>>
 
 Pending == "pending"
 
-Ticks(n) == CASE n = 0 -> "[]" [] n = 1 -> "['tick']" [] n = 2 -> "['tick', 'tick']"
+Ticks(n) == CASE n = 0 -> "[]" [] n = 1 -> "['tick']" [] n = 2 -> "['tick', 'tick']" [] n = 3 -> "['tick', 'tick', 'tick']"
 
 Loop(p) ==
     IF p.source \in {"noaiter", "badanext", "noanext"} THEN "[] TypeError"
     ELSE LET agen == p.source = "agen"
+             awaiting == p.source = "awaiting"
              first == IF agen THEN "0" ELSE "1"
              second == IF agen THEN "1" ELSE "2"
-         IN  CASE p.body = "normal" -> Ticks(IF agen THEN 2 ELSE 0) \o " [" \o first \o ", " \o second \o ", 'else']"
-               [] p.body = "break" -> Ticks(IF agen THEN 1 ELSE 0) \o " [" \o first \o "]"
-               [] p.body = "raise" -> Ticks(IF agen THEN 1 ELSE 0) \o " KeyError"
+         IN  CASE p.body = "normal" -> Ticks(IF agen THEN 2 ELSE IF awaiting THEN 3 ELSE 0) \o " [" \o first \o ", " \o second \o ", 'else']"
+               [] p.body = "break" -> Ticks(IF agen \/ awaiting THEN 1 ELSE 0) \o " [" \o first \o "]"
+               [] p.body = "raise" -> Ticks(IF agen \/ awaiting THEN 1 ELSE 0) \o " KeyError"
 
 Comprehension(p) == CASE p.kind = "list" -> "['tick', 'tick'] [0, 1]"
                       [] p.kind = "set" -> "['tick', 'tick'] {0, 1}"
