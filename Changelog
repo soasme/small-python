@@ -188,6 +188,8 @@ Unreleased (0.10.0):
 - a dict subclass's __missing__ runs without nesting on the C stack for a tuple key that holds no instance
 - print() reads its file's write and flush through a Python getter or __getattr__ without nesting on the C stack
 - zip() and map() resume a generator after a str, bytes or dict iterable without nesting on the C stack
+- ** of a dict or frozendict subclass that keeps dict iteration merges its own entries, as dict() does,
+  without calling its keys or __getitem__
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

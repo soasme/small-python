@@ -15409,6 +15409,9 @@ static SPYValue *keys_iterator(SPYContext *c, SPYValue *source, SPYValue *keys) 
 }
 static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, SPYValue *callable, int hints) {
     if (is_dict(result)) {
+        /* As dict_update: a dict subclass keeping dict iteration merges its entries. */
+        SPYValue *base = builtin_base(c, source, "__iter__", NULL);
+        if (base && is_dict(base)) source = base;
         if (!is_dict(source)) {
             SPYValue *method = attribute(c, source, "keys");
             if (!method) {

@@ -1096,6 +1096,17 @@ static const char *const programs[] = {
     "    return list(zip('ab', oz(3))), list(zip({1: 2}, b'x', oz(2))), list(zip(it, oz(1))), next(it), sum(map(pow, range(2), oz(2)))\n"
     "print(ozz())\n",
 
+    "class OD2(dict):\n"
+    "    def keys(s): return ['a']\n"
+    "class OI(OD2):\n"
+    "    def __iter__(s): return iter(())\n"
+    "    def __getitem__(s, k): return 1\n"
+    "def od2(**k): return k\n"
+    "def odd():\n"
+    "    d = OD2(q=2)\n"
+    "    return od2(**d), {**d, 'r': 3}, od2(**OI(q=2)), {**frozendict(s=1)}\n"
+    "print(odd())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
