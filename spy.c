@@ -28099,11 +28099,15 @@ static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, 
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
 }
+static int slice_source(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+static int slice_list(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* The __index__ index_call entered for store ins returned result: the
  * store or deletion runs on the operands it kept under the key, at the
  * index, which must fit a Py_ssize_t as the key's; a view's tuple key
  * takes the int for its first instance, and a slice for its part
- * (slice_part), the next one's call then left in c->k_fn (CALL_INDEX). */
+ * (slice_part), the next one's call then left in c->k_fn (CALL_INDEX);
+ * a slice's store of a value slice_source takes, its items then listed
+ * on m (slice_list, c->consuming). */
 static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
     int deletion = ins->op == BC_SET_TARGET && ins->arg;
     SPYValue *key = machine_pop(m), *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m), *index;
@@ -28118,6 +28122,11 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
         if (function) {
             c->k_fn = function; c->k_env = env; c->k = NULL; c->k_kind = CALL_INDEX;
             release_all(5, (SPYValue *[]){index, object, item, value, key});
+            return;
+        }
+        if (index && ins->op == BC_SET_TARGET && !deletion && slice_source(c, object, index, value)) {
+            c->consuming = slice_list(c, m, object, index);
+            release_all(3, (SPYValue *[]){item, value, key});
             return;
         }
         if (c->error_type[0]) { spy_release(index); index = NULL; }
@@ -29534,7 +29543,12 @@ static NO_INLINE int slice_source(SPYContext *c, SPYValue *object, SPYValue *key
  * stack for a list of the value's items, collected on m, then stored
  * (consumer_took); whether the consumer began, else an error is pending. */
 static NO_INLINE int slice_listing(SPYContext *c, Machine *m) {
-    SPYValue *key = machine_pop(m), *object = machine_pop(m), *state = spy_tuple(c, 2, (SPYValue *[]){object, key});
+    SPYValue *key = machine_pop(m), *object = machine_pop(m);
+    return slice_list(c, m, object, key);
+}
+/* slice_listing of object and key, which it takes. */
+static int slice_list(SPYContext *c, Machine *m, SPYValue *object, SPYValue *key) {
+    SPYValue *state = spy_tuple(c, 2, (SPYValue *[]){object, key});
     size_t blocks = m->block_len;
     release_all(2, (SPYValue *[]){object, key});
     if (state) consume(c, m, B_LIST, c->types[SPY_LIST], -1, NULL, spy_retain(m->stack[m->len - 1]), NULL);
@@ -30498,6 +30512,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_INDEX) {
                         index_returned(c, m, &code[pc - 1], result);
                         if (c->k_fn) goto enter_k;
+                        if (UNLIKELY(c->consuming)) { c->consuming = 0; goto consume_generator; }
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;

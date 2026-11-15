@@ -163,7 +163,8 @@ Unreleased (0.10.0):
 - so do sorted(), min() and max() by a builtin key over a list or tuple iterator, a set or a dict
 - iter(f, sentinel), also in a zip, map or enumerate, compares with a Python __eq__ of its sentinel without
   nesting on the C stack
-- a list's slice store or deletion calls its parts' Python __index__ without nesting on the C stack
+- a list's slice store or deletion calls its parts' Python __index__, then takes a generator's items, without
+  nesting on the C stack
 - a list's += of a generator or a Python iterator takes its items without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack

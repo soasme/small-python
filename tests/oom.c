@@ -799,6 +799,22 @@ static const char *const programs[] = {
     "    return a\n"
     "print(ai())\n",
 
+    "class GX:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __index__(self): return self.n\n"
+    "def gy(k):\n"
+    "    for x in k:\n"
+    "        if x == '!': raise KeyError('y')\n"
+    "        yield x\n"
+    "def gx():\n"
+    "    a = list(range(5))\n"
+    "    a[GX(1):GX(3)] = gy('pq')\n"
+    "    a[::GX(2)] = gy('xyz')\n"
+    "    try: a[GX(0):] = gy('a!')\n"
+    "    except KeyError: pass\n"
+    "    return a\n"
+    "print(gx())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"
