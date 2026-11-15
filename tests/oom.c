@@ -881,6 +881,23 @@ static const char *const programs[] = {
     "    return out\n"
     "print(yu())\n",
 
+    "class YC:\n"
+    "    def __iter__(self): return self\n"
+    "    def __next__(self): return [1]\n"
+    "    def close(self): yl.append(['close'])\n"
+    "yl = []\n"
+    "def yd(source):\n"
+    "    try:\n"
+    "        yield from source\n"
+    "    finally:\n"
+    "        yl.append([len(yl)])\n"
+    "def ye():\n"
+    "    for source in ([1, 2], YC(), map(str, [3, 4])):\n"
+    "        g = yd(source); next(g)\n"
+    "        del g\n"
+    "    return yl\n"
+    "print(ye())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

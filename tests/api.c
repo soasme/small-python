@@ -1906,6 +1906,11 @@ int main(int argc, char **argv) {
                "def thrown():\n    g = caught()\n    next(g)\n    return g.throw(KeyError())\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "thrown()", "thrown.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So does closing a dropped generator in a yield from of a list. */
+    execute(c, "closings = []\ndef dropping():\n    try:\n        yield from [1, 2]\n    finally:\n        for i in range(3000): pass\n        closings.append(4)\n"
+               "def dropped():\n    g = dropping()\n    next(g)\n    del g\n    return closings[0]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "dropped()", "dropped.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

@@ -21,7 +21,9 @@
 (* after one next(), then one step: close(), throw(KeyError()), send(1),   *)
 (* next(), list() of an outer generator, yield ("ret", (yield from g)), or *)
 (* throw(KeyError()) into one, return (yield from g), started instead of   *)
-(* g, or list() of g itself. g may first run a yield statement, which one  *)
+(* g, list() of g itself, or dropping g's last reference, which closes    *)
+(* it, its finally clause showing it finished, an error unraisable. g's    *)
+(* body may first run a yield statement, which one                         *)
 (* more next() passes.                                                     *)
 (* where it's __next__ returns 1, then raises StopIteration(8).            *)
 (* Each of it's send, throw and close is defined (send and throw return 7, *)
@@ -36,14 +38,14 @@
 EXTENDS Naturals, Sequences
 
 Kinds == {"defined", "raises", "missing", "broken", "map", "builtin"}
-Programs == [kind : Kinds, step : {"close", "throw", "send", "next", "loop", "nested", "consume"}, first : BOOLEAN]
+Programs == [kind : Kinds, step : {"close", "throw", "send", "next", "loop", "nested", "consume", "drop"}, first : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
 Pending == [result |-> "pending", called |-> "", finished |-> FALSE]
 
-Method(step) == CASE step = "close" -> "close" [] step \in {"throw", "nested"} -> "throw" [] step \in {"next", "loop", "consume"} -> "next" [] OTHER -> "send"
+Method(step) == CASE step \in {"close", "drop"} -> "close" [] step \in {"throw", "nested"} -> "throw" [] step \in {"next", "loop", "consume"} -> "next" [] OTHER -> "send"
 
 Run(p) ==
     LET m == Method(p.step)
@@ -53,6 +55,8 @@ Run(p) ==
          [] p.step = "next" -> [result |-> "StopIteration 8", called |-> called, finished |-> TRUE]
          [] p.step = "loop" -> [result |-> "[('ret', 8)]", called |-> called, finished |-> TRUE]
          [] p.step = "consume" -> [result |-> "[]", called |-> called, finished |-> TRUE]
+         \* The close a dropped g gets reports its errors as unraisable.
+         [] p.step = "drop" -> [result |-> "dropped", called |-> called, finished |-> TRUE]
          [] p.kind = "defined" /\ p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]
          [] p.kind = "defined" -> [result |-> "7", called |-> called, finished |-> FALSE]
          \* The method's own exception propagates, and ends the delegator.
@@ -78,4 +82,8 @@ CloseCloses == Done /\ program.step = "close" /\ program.kind # "raises" =>
 \* A loop or consumer resuming g in its yield from takes the iterator's
 \* items, whether or not a yield statement came first.
 ConsumeEnds == Done /\ program.step = "consume" => outcome.result = "[]" /\ outcome.finished
+
+\* A dropped g is closed, its iterator's close called when it has one.
+DropCloses == Done /\ program.step = "drop" =>
+    outcome.finished /\ (outcome.called = "close" <=> program.kind \in {"defined", "raises"})
 =============================================================================

@@ -24320,9 +24320,12 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
     SPYValue *self = c->finalize_first;
     if (finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->py_depth >= c->recursion_limit)
         return NULL;
-    /* A generator or coroutine, or an async generator without a finalizer
-     * hook, closes at its yield, or its delegate's. */
-    if (self->type == SPY_GENERATOR || self->type == SPY_COROUTINE || (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.origin))
+    /* A generator or coroutine closes where a close raises on the machine
+     * (throws_in), an async generator without a finalizer hook at its
+     * yield, or its delegate's. */
+    if (self->type == SPY_GENERATOR || self->type == SPY_COROUTINE)
+        return self->as.generator.started && throws_in(c, self, NULL) && !close_quietly(c, self) ? self : NULL;
+    if (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.origin)
         return suspended(self) && self->as.generator.started && innermost(self->as.generator.machine)->awaiting == AWAIT_YIELD &&
                !close_quietly(c, self) ? self : NULL;
     SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
