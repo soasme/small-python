@@ -71,7 +71,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_own_keys_calls", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
-          "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
+          "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
           "view_live", "view_mapping", "view_contains", "view_set_ops_iterable", "view_set_ops_return_set",
@@ -131,6 +131,8 @@ Case(c) ==
       [] c = "equal_key_methods" -> "(1, 1, 0, 1, {}, 1, None, set(), ['b1b2', 'b1c1', 'a1a2', 'a1a3', 'a1x1', 'a1a4', 'b1b3'])"
       \* So is a key of a builtin type's subclass, by a subscript and in too.
       [] c = "subclass_key_methods" -> "(1, True, None, 1, ['b1'], ['b1b2', 'b1c1', 'a1a2', 'a1a3', 'a1x1'])"
+      \* A builtin key is compared by a stored key's Python __eq__, which stays.
+      [] c = "stored_key_methods" -> "('b', True, True, False, ['E'], 1, [11, 11, 11, 22, 44, 44])"
       \* A tuple key hashes its items in order, depth first, once.
       [] c = "tuple_key_hashed" -> "(1, 1, 0, [1, 3, 1, 3, 4, 4])"
       [] c = "tuple_key_hash_fails" -> "(\"cannot use 'tuple' as a dict key (no)\", \"cannot use 'tuple' as a dict key (no)\", [1, 1])"

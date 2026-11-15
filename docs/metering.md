@@ -412,6 +412,8 @@ These run as machines on the heap, in one native activation of
   module's `__annotations__` calls, and the calls in its annotations;
 - the `__eq__` of a dict or set key of a builtin type's subclass, in the
   lookups that call an instance key's;
+- the `__eq__` of a stored dict or set key that a subscript, `in`, store,
+  deletion or display of a builtin key calls;
 - the `__next__` of an iterator instance that a `filter` takes its items
   from;
 - the `keys` function that an instance holds itself, which `dict`,

@@ -1119,6 +1119,17 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ok())\n",
 
+    "class OE(int):\n"
+    "    __hash__ = int.__hash__\n"
+    "    def __eq__(self, o): return int(self) == o\n"
+    "def oe():\n"
+    "    d = {OE(1): 'a', (2,): 'b'}\n"
+    "    d[1] = 'c'\n"
+    "    del d[(2,)]\n"
+    "    s = {OE(3)}\n"
+    "    return d[1], 1 in d, 3 in s, 4 not in s, {OE(5): 0, 5: 1}, {OE(6), 6}, frozenset(s) >= {3}\n"
+    "print(oe())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

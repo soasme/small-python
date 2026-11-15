@@ -2747,6 +2747,16 @@ static ptrdiff_t map_find(SPYValue *map, SPYValue *key) {
     int64_t hash;
     return map_hash(map->ctx, map, key, &hash) ? -1 : map_find_hash(map, key, hash);
 }
+static NO_INLINE int pair_reaches(SPYValue *, int);
+/* Whether a lookup of key may compare it by a Python __eq__ on the machine
+ * (lookup_call): an instance, or a tuple whose items may. */
+static ALWAYS_INLINE int lookup_key(SPYValue *key) {
+    return key->type == SPY_INSTANCE || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
+}
+/* A map's odd_keys: 1 once it gains a key not a str, 2 too once one that
+ * is a lookup_key, which the lookup of any other key may compare by a
+ * Python __eq__ (eq_keyed). */
+static int eq_keyed(SPYValue *map) { return namespace_map(map)->as.map.odd_keys & 2; }
 static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value, int64_t hash) {
     if (!map->as.map.items && map->ctx->spare_entries_len) {
         map->as.map.items = map->ctx->spare_entries[--map->ctx->spare_entries_len];
@@ -2764,7 +2774,7 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
     Entry *entry = &map->as.map.items[used];
     map->as.map.len++;
     entry->key = spy_retain(key); entry->value = spy_retain(value); entry->hash = hash;
-    map->as.map.odd_keys |= key->type != SPY_STRING;
+    map->as.map.odd_keys |= key->type == SPY_STRING ? 0 : 1 | lookup_key(key) << 1;
     if (map->type == SPY_DICT) c->dict_keys++;
     class_changed(map);
     if (map->as.map.index && (map->as.map.len + map->as.map.index_dead) * 3 > (size_t)map->as.map.index_cap * 2) { map_unindex(map); map_indexed(map); }
@@ -10305,6 +10315,8 @@ static NO_INLINE SPYValue *set_compared(SPYContext *c, int op, SPYValue *a, SPYV
 }
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
+    /* in of a map holding a key whose comparison may call Python (eq_keyed). */
+    if ((op == O_IN || op == O_NOTIN) && hashes_key(b, 1) && eq_keyed(b)) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
         if (op != T_EQ && op != T_NE) {
             if (order_python(c, op, a, b)) return NULL;
@@ -10353,7 +10365,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
      * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(b) || b->type == SPY_GENERATOR ||
-               (a->type == SPY_TUPLE && hashes_key(b, 1) && key_reaches(c, a)) ? NULL :
+               (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || (is_set(a) && set_walks(op, a, b)) ||
@@ -18983,7 +18995,8 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
      * held across the store. */
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
         SPYValue *object = leaf_operand(f, n->a), *key = object && n->kind == N_INDEX ? leaf_operand(f, n->b) : NULL;
-        if (calls && key && (object->type == SPY_INSTANCE || key->type == SPY_INSTANCE || key->type == SPY_TUPLE) && store_hooked(c, object, key)) return 1;
+        if (calls && key && (object->type == SPY_INSTANCE || key->type == SPY_INSTANCE || key->type == SPY_TUPLE ||
+                             (object->type == SPY_DICT && eq_keyed(object))) && store_hooked(c, object, key)) return 1;
         if (object && (key || n->kind == N_ATTR)) {
             spy_retain(object); spy_retain(key);
             int status = key ? set_index(c, object, key, value) : node_set_attribute(c, object, n, value);
@@ -27700,17 +27713,12 @@ static int hashes_key(SPYValue *container, int lookup) {
 static int eq_reaches(SPYValue *key) {
     return python_eq(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
 }
-/* Whether a lookup of key may compare it by a Python __eq__ on the machine
- * (lookup_call): an instance, or a tuple whose items may. */
-static ALWAYS_INLINE int lookup_key(SPYValue *key) {
-    return key->type == SPY_INSTANCE || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
-}
 /* Whether a subscript or in of key in map, by operator step ins, looks
  * it up on the machine (lookup_call): an exact dict's or frozendict's
  * subscript, or in of an exact dict, frozendict, set or frozenset, with a
- * lookup_key. */
+ * lookup_key, or any key once map holds one (eq_keyed). */
 static int machine_lookup(SPYValue *map, SPYValue *key, int contains) {
-    return lookup_key(key) && hashes_key(map, contains);
+    return hashes_key(map, contains) && (lookup_key(key) || eq_keyed(map));
 }
 /* Whether step ins's lookup of key, of hash, in map compares key with a
  * stored key; else, when key itself is the first entry of hash or, for
@@ -27792,7 +27800,7 @@ static int lookup_stores(Instruction *ins) {
  * (lookup_call): an exact dict's, or a display's into a set too, with a
  * lookup_key. */
 static ALWAYS_INLINE int store_lookup(SPYValue *map, SPYValue *key, int display) {
-    return lookup_key(key) && (map->type == SPY_DICT || (display && map->type == SPY_SET));
+    return (map->type == SPY_DICT || (display && map->type == SPY_SET)) && (lookup_key(key) || eq_keyed(map));
 }
 /* For a call whose key, hashed in C, may be compared by a Python __eq__
  * in map (store_lookup): the lookup's first Python __eq__ (lookup_call),
@@ -28602,10 +28610,10 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     }
     /* A dict's item, or a dict's or set's member: its key's __hash__ first,
      * the operands on the stack under the key for the operation. */
-    if ((kind == OPERATE_INDEX || contains) && ((contains ? x : y)->type == SPY_INSTANCE || (contains ? x : y)->type == SPY_TUPLE) &&
-        hashes_key(contains ? y : x, contains)) {
+    if ((kind == OPERATE_INDEX || contains) && hashes_key(contains ? y : x, contains)) {
         SPYValue *operands[] = {x, y};
-        if ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0]) return function;
+        if (((contains ? x : y)->type == SPY_INSTANCE || (contains ? x : y)->type == SPY_TUPLE) &&
+            ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0])) return function;
         c->entering_kind = CALL_OPERATOR;
         /* A key hashed in C whose Python __eq__ the lookup may call. */
         if (machine_lookup(contains ? y : x, contains ? x : y, contains)) return native_lookup(c, m, ins, contains ? y : x, contains ? x : y, env);
@@ -31134,6 +31142,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
             if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE ||
+                ((a->type == SPY_DICT || a->type == SPY_FROZENDICT) && UNLIKELY(eq_keyed(a))) ||
                 (b->type == SPY_TUPLE && (key_reaches(c, b) || a->type == SPY_MEMORYVIEW)) ||
                 (b->type == SPY_SLICE && index_function(c, slice_part(c, b)))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
@@ -31166,7 +31175,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg) seal_tuple(c, m->stack[m->len - 1]); /* The display's last item. */
             break;
         CASE(BC_MAP)
-            if (m->stack[m->len - 2]->type == SPY_INSTANCE || (m->stack[m->len - 2]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 2]))) {
+            if (m->stack[m->len - 2]->type == SPY_INSTANCE || (m->stack[m->len - 2]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 2])) ||
+                UNLIKELY(eq_keyed(m->stack[m->len - 3]))) {
                 a = spy_retain(m->stack[m->len - 2]); goto display_hash;
             }
             b = machine_pop(m); a = machine_pop(m); map_set(c, m->stack[m->len - 1], a, b); break;

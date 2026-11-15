@@ -1976,6 +1976,12 @@ int main(int argc, char **argv) {
                "def spreading():\n    return spread(**Spread())\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "spreading()", "spreading.py"), SPY_STOP_STEPS, &pauses)) == 22 && pauses > 2);
+    /* So does a stored key's Python __eq__ that a builtin key's lookup calls. */
+    execute(c, "class Stored(int):\n    __hash__ = int.__hash__\n    def __eq__(self, o):\n        for i in range(3000): pass\n"
+               "        return int(self) == o\n"
+               "def stored():\n    d = {Stored(4): 5}\n    d[4] = 6\n    return d[4] + (4 in d) + (4 in {Stored(4)}) + len({Stored(4), 4})\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "stored()", "stored.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 4);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
