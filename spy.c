@@ -25974,11 +25974,10 @@ static int abstract_reaches(SPYContext *c, int sub, SPYValue *a, SPYValue *targe
  * search the __bases__ of what they reach for the target (ABSTRACT_WALK).
  * The slots of its state, a list: sub, a, the target, the stage, the
  * classes still to search, each followed by its depth of multiple bases,
- * the depth of the one whose __bases__ is read, the object read and the
- * __getattr__ its read falls back to, and a tuple's items and the index
- * of the next to test when this one fails (check_from), or None. */
+ * the depth of the one whose __bases__ is read, and a tuple's items and
+ * the index of the next to test when this one fails (check_from), or None. */
 enum { ABSTRACT_DERIVED, ABSTRACT_TARGET, ABSTRACT_CLASS, ABSTRACT_WALK };
-enum { AS_SUB, AS_A, AS_TARGET, AS_STAGE, AS_PENDING, AS_DEPTH, AS_READ, AS_FALLBACK, AS_CHOICES, AS_NEXT, AS_SLOTS };
+enum { AS_SUB, AS_A, AS_TARGET, AS_STAGE, AS_PENDING, AS_DEPTH, AS_CHOICES, AS_NEXT, AS_SLOTS };
 static void slot_put(SPYValue *state, int i, SPYValue *v) {
     spy_release(state->as.seq.items[i]);
     state->as.seq.items[i] = v;
@@ -25986,37 +25985,49 @@ static void slot_put(SPYValue *state, int i, SPYValue *v) {
 static int abstract_stage(SPYValue *state) { return (int)state->as.seq.items[AS_STAGE]->as.integer_data.small; }
 static const char *abstract_name(SPYValue *state) { return abstract_stage(state) == ABSTRACT_CLASS ? "__class__" : "__bases__"; }
 static SPYValue *abstract_go(SPYContext *, Machine *, SPYValue *, SPYValue *, int);
-/* What a Python read of the attribute of state's stage returned: an
- * AttributeError gives way to the __getattr__ the read falls back to, a
- * call on m too (callk); else the protocol goes on (abstract_go). */
-static SPYValue *abstract_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    SPYValue *fallback = state->as.seq.items[AS_FALLBACK];
-    if (result || fallback == c->none || !error_is(c, "AttributeError")) return abstract_go(c, m, state, result, 1);
+/* What attribute_callk's Python read returned, state its object, the
+ * name and the __getattr__ the read falls back to (None for none): an
+ * AttributeError gives way to that __getattr__, a call on m too (callk);
+ * else the continuation has the result (k_resume). */
+static SPYValue *attribute_called(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *fallback = items[2];
+    if (result || fallback == c->none || !error_is(c, "AttributeError")) return k_resume(c, m, state, result);
     spy_clear_error(c);
-    const char *name = abstract_name(state);
-    SPYValue *argv[] = {spy_retain(state->as.seq.items[AS_READ]), spy_string(c, name, strlen(name))};
-    if (!argv[1]) { spy_release(argv[0]); return abstract_go(c, m, state, NULL, 1); }
+    SPYValue *argv[] = {spy_retain(items[0]), spy_retain(items[1])};
     spy_retain(fallback);
-    slot_put(state, AS_FALLBACK, spy_none(c));
-    result = callk(c, m, fallback, 2, argv, abstract_read, state);
+    slot_put(state, 2, spy_none(c));
+    result = callk(c, m, fallback, 2, argv, attribute_called, state);
     spy_release(fallback);
     return result;
 }
-/* The read of state's attribute of v: 0 with its value in *value, owned,
- * or NULL with an error; or 1 when a Python call reads it, on m (callk),
- * taking state, *value what callk returned. */
-static int abstract_get(SPYContext *c, Machine *m, SPYValue *state, SPYValue *v, SPYValue **value) {
-    const char *name = abstract_name(state);
-    SPYValue *function, *get, *argv[3] = {NULL, NULL, NULL};
+/* The read of v's attribute name, which attribute_step left to function,
+ * its c->fallback, which it takes: the Python getter, __getattribute__ or
+ * __getattr__ called on m, then continuation k with ctx, which it takes,
+ * and the value, as callk calls (attribute_called). */
+static SPYValue *attribute_callk(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *function, Continuation k, SPYValue *ctx) {
+    SPYValue *fallback = getter_fallback(v, function), *text = spy_string(c, name, strlen(name)), *argv[3] = {NULL, NULL, NULL}, *get, *state;
     size_t argc;
-    if ((*value = attribute_step(c, v, name)) || c->error_type[0] || !(function = c->fallback)) return 0;
-    c->fallback = NULL;
-    SPYValue *fallback = getter_fallback(v, function);
-    slot_put(state, AS_READ, spy_retain(v));
-    slot_put(state, AS_FALLBACK, spy_retain(fallback ? fallback : c->none));
-    if (!(get = getter_function(c, v, name, function, argv, &argc))) return 0;
-    *value = callk(c, m, get, argc, argv, abstract_read, state);
+    if (!text) { spy_release(function); return k(c, m, ctx, NULL); }
+    if (!(state = k_state(c, 3, (SPYValue *[]){spy_retain(v), text, spy_retain(fallback ? fallback : c->none), NULL, NULL}, k, ctx))) {
+        spy_release(function);
+        return NULL;
+    }
+    if (!(get = getter_function(c, v, name, function, argv, &argc))) return k_resume(c, m, state, NULL);
+    SPYValue *result = callk(c, m, get, argc, argv, attribute_called, state);
     spy_release(get);
+    return result;
+}
+/* What the read of the attribute of state's stage returned: the protocol
+ * goes on (abstract_go). */
+static SPYValue *abstract_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) { return abstract_go(c, m, state, result, 1); }
+/* The read of state's attribute of v: 0 with its value in *value, owned,
+ * or NULL with an error; or 1 when a Python call reads it, on m
+ * (attribute_callk), taking state, *value what it returned. */
+static int abstract_get(SPYContext *c, Machine *m, SPYValue *state, SPYValue *v, SPYValue **value) {
+    if ((*value = attribute_step(c, v, abstract_name(state))) || c->error_type[0] || !c->fallback) return 0;
+    SPYValue *function = c->fallback;
+    c->fallback = NULL;
+    *value = attribute_callk(c, m, v, abstract_name(state), function, abstract_read, state);
     return 1;
 }
 /* Push v, borrowed, and its depth onto state's classes to search. */
@@ -26098,7 +26109,7 @@ static SPYValue *abstract_from(SPYContext *c, Machine *m, int sub, SPYValue *a, 
     if (!sub && target->type == SPY_CLASS && subclass(value_class(c, a), target)) return spy_bool(c, 1);
     SPYValue *slots[AS_SLOTS] = {spy_bool(c, sub), spy_retain(a), spy_retain(target),
                                  int_value(c, sub ? ABSTRACT_DERIVED : target->type == SPY_CLASS ? ABSTRACT_CLASS : ABSTRACT_TARGET),
-                                 spy_list(c), int_value(c, 0), spy_none(c), spy_none(c), spy_retain(choices ? choices : c->none),
+                                 spy_list(c), int_value(c, 0), spy_retain(choices ? choices : c->none),
                                  int_value(c, (int64_t)next)};
     SPYValue *state = spy_list(c);
     int failed = !state;
@@ -26565,7 +26576,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         /* print writes its arguments, an instance's Python __str__ a call
          * (CALL_CHECKED) among them (print_from). */
         int status = print_call_step(c, m, argc, argc, NULL, &convert, env);
-        return status > 0 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
+        return status == 1 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
     }
     /* So do str() and repr() of a container with such an item's
      * Python __repr__ (repr_call), and str.format of an instance with a
@@ -26885,7 +26896,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         SPYValue *keywords = entries_dict(c, kw, kwc);
         int status = keywords ? print_call_step(c, m, argc, positional, keywords, &function, env) : -1;
         spy_release(keywords);
-        if (status > 0) return spy_retain(c->types[SPY_STRING]);
+        if (status == 1) return spy_retain(c->types[SPY_STRING]);
         if (status < 0 && !keywords) goto done;
         return status ? NULL : spy_none(c);
     }
@@ -27030,7 +27041,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
             m->stack[m->len++] = spy_retain(callee);
             for (size_t i = 0; i < argc; i++) m->stack[m->len++] = spy_retain(args->as.seq.items[i]);
             int status = print_call_step(c, m, argc, argc, keywords->as.map.len ? keywords : NULL, &printing, env);
-            result = status > 0 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
+            result = status == 1 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
         }
     } else if (calls && !keywords->as.map.len && args->as.seq.len <= 9 && (callee->type == SPY_NATIVE || callee->type == SPY_CLASS) &&
              !c->error_type[0]) {
@@ -37771,7 +37782,7 @@ static int print_instances(SPYContext *c, SPYValue *callee, size_t positional, S
     for (size_t i = 0; i < positional; i++) if (argv[i]->type == SPY_INSTANCE || repr_job(c, c->types[SPY_STRING], argv[i])) return 1;
     SPYValue *sys = file ? NULL : sys_module(c);
     if (sys) file = name_local(sys, "stdout");
-    return print_method(c, file, "write") || print_method(c, file, "flush");
+    return (file && file->type == SPY_INSTANCE) || print_method(c, file, "write") || print_method(c, file, "flush");
 }
 /* print's call of callee, its file's write with text or flush without it
  * (the host's output when NULL), both taken, going on at position at
@@ -37795,16 +37806,38 @@ static int print_call(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPY
            machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_string(c, text ? "write" : "flush", 5)) ||
            machine_push(c, m, callee) || !(*env = function_env(c, fn, argc + !!text, args, NULL, 1)) ? -1 : 1;
 }
+static SPYValue *print_read(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* print's read of file's attribute name for position at: 0 with it in
+ * *value, owned; 2 when a Python call reads it on m (attribute_callk),
+ * print going on there with it (print_read); -1 on an error. */
+static int print_attribute(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPYValue *file, const char *name, SPYValue **value) {
+    if ((*value = attribute_step(c, file, name))) return 0;
+    SPYValue *function = c->fallback, *index = function ? int_value(c, (int64_t)at) : NULL;
+    SPYValue *ctx = index ? spy_tuple(c, 2, (SPYValue *[]){state, index}) : NULL;
+    c->fallback = NULL;
+    spy_release(index);
+    if (!ctx) { spy_release(function); return -1; }
+    attribute_callk(c, m, file, name, function, print_read, ctx);
+    return c->k_fn ? 2 : -1;
+}
+/* The object print writes at position at, by its state. */
+static SPYValue *print_object(Machine *m, SPYValue *state, size_t at) {
+    SPYValue **items = state->as.seq.items;
+    size_t argc = (size_t)items[5]->as.integer_data.small, end = 4 * (size_t)items[4]->as.integer_data.small;
+    return at == end ? items[2] : at % 4 ? m->stack[m->len - argc + at / 4] : items[1];
+}
 /* print's write of value, as its state says, from position at: the
- * file's write looked up, then str(value), then the call (print_call),
- * going on at at + 2: 0 once it returned; 1 at a call to enter
- * (CALL_CHECKED): an instance's Python __str__ (conversion_method) or a
- * container's repr job, the write below the state, at + 1, c->replacing,
- * the method's name and the instance (print_returned), or the write's;
- * -1 on an error. */
-static int print_unit(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPYValue *value, SPYValue **function, SPYValue **env) {
-    SPYValue *file = print_target(state), *writer = file ? attribute(c, file, "write") : NULL, *found[2], *text;
-    if (file && !writer) return -1;
+ * file's write looked up (print_attribute), unless writer is it, then
+ * str(value), then the call (print_call), going on at at + 2: 0 once it
+ * returned; 1 at a call to enter (CALL_CHECKED): an instance's Python
+ * __str__ (conversion_method) or a container's repr job, the write below
+ * the state, at + 1, c->replacing, the method's name and the instance
+ * (print_returned), or the write's; 2 at a read on m; -1 on an error. */
+static int print_unit(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPYValue *value, SPYValue *writer, SPYValue **function,
+                      SPYValue **env) {
+    SPYValue *file = print_target(state), *found[2], *text;
+    int read = file && !writer ? print_attribute(c, m, state, at, file, "write", &writer) : 0;
+    if (read) return read;
     if (value->type == SPY_INSTANCE && (*function = conversion_method(c, c->types[SPY_STRING], 1, &value, found))) {
         SPYValue *self = spy_retain(value);
         return machine_push(c, m, writer ? writer : spy_none(c)) || machine_push(c, m, spy_retain(state)) ||
@@ -37832,36 +37865,57 @@ static int print_unit(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPY
  * object at 4 * i + 2, the end after the objects, then the flush, each
  * a write (print_unit) whose text a call returns to at + 1 and which goes
  * on at at + 2: 0 once it wrote and flushed; 1 at a call to enter
- * (CALL_CHECKED), print going on on its return (print_returned); -1 on
- * an error. */
+ * (CALL_CHECKED), print going on on its return (print_returned); 2 at
+ * a read of the file's write or flush on m (print_attribute); -1 on an
+ * error. */
 static int print_from(SPYContext *c, Machine *m, size_t at, SPYValue *state, SPYValue **function, SPYValue **env) {
     SPYValue **items = state->as.seq.items, *file = print_target(state);
-    size_t argc = (size_t)items[5]->as.integer_data.small, end = 4 * (size_t)items[4]->as.integer_data.small;
-    for (int status = 0; !status; at += 2) {
+    size_t end = 4 * (size_t)items[4]->as.integer_data.small;
+    int status = 0;
+    for (; !status; at += 2) {
         if (at == end + 4) return 0;
         if (at == end + 2) {
             /* The flush goes on at the end's position + 4. */
-            SPYValue *flush = file && items[3]->as.integer_data.small ? attribute(c, file, "flush") : NULL;
-            if (file && items[3]->as.integer_data.small && !flush) return -1;
-            if (items[3]->as.integer_data.small) status = print_call(c, m, state, at + 2, flush, NULL, function, env);
+            SPYValue *flush = NULL;
+            if (items[3]->as.integer_data.small && !(status = file ? print_attribute(c, m, state, at, file, "flush", &flush) : 0))
+                status = print_call(c, m, state, at + 2, flush, NULL, function, env);
+            if (status) return status;
             continue;
         }
         if (at == 0 && end) continue;
-        status = print_unit(c, m, state, at, at == end ? items[2] : at % 4 ? m->stack[m->len - argc + at / 4] : items[1], function, env);
+        status = print_unit(c, m, state, at, print_object(m, state, at), NULL, function, env);
     }
-    return c->error_type[0] ? -1 : 1;
+    return c->error_type[0] ? -1 : status;
+}
+/* What print's read of its file's write or flush for position at
+ * returned (print_attribute), ctx its state and at: the write or flush
+ * goes on, then print (print_from); a call to enter it leaves for m
+ * (callk); once print ends, None replaces its callee and arguments. */
+static SPYValue *print_read(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *value) {
+    SPYValue *state = ctx->as.seq.items[0], *function = NULL, *env = NULL;
+    size_t at = (size_t)ctx->as.seq.items[1]->as.integer_data.small, end = 4 * (size_t)state->as.seq.items[4]->as.integer_data.small;
+    int status = !value ? -1 : at == end + 2 ? print_call(c, m, state, at + 2, value, NULL, &function, &env) :
+                 print_unit(c, m, state, at, print_object(m, state, at), value, &function, &env);
+    if (!status) status = print_from(c, m, at + 2, state, &function, &env);
+    size_t argc = (size_t)state->as.seq.items[5]->as.integer_data.small;
+    spy_release(ctx);
+    if (status == 1) { c->k_fn = spy_retain(function); c->k_env = env; c->k = NULL; c->k_kind = CALL_CHECKED; }
+    if (status) return NULL;
+    for (size_t j = 0; j <= argc; j++) spy_release(machine_pop(m));
+    return spy_none(c);
 }
 /* The step of print's call of positional objects and keywords, a call
  * step's argc arguments atop m's stack, some of them instances
  * (print_instances): 1 when it calls __str__ (print_from), the call
- * *function, *env and c->entering_init set; else 0 or -1 on an error, its
- * operands popped. */
+ * *function, *env and c->entering_init set; 2 at a read on m, its call
+ * left (callk); else 0 or -1 on an error, its operands popped. */
 static NO_INLINE int print_call_step(SPYContext *c, Machine *m, size_t argc, size_t positional, SPYValue *keywords, SPYValue **function, SPYValue **env) {
     SPYValue *state = NULL;
     int status = print_state(c, argc, positional, keywords, &state);
     status = status ? -(status < 0) : print_from(c, m, 0, state, function, env);
     spy_release(state);
-    if (status > 0) { c->entering_init = *function; c->entering_kind = CALL_CHECKED; return 1; }
+    if (status == 1) { c->entering_init = *function; c->entering_kind = CALL_CHECKED; return 1; }
+    if (status == 2) return 2;
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     return status;
 }
@@ -37881,6 +37935,8 @@ static NO_INLINE Machine *print_returned(SPYContext *c, Machine *m, SPYValue *te
     if (!status) status = print_from(c, m, at + at % 2, state, &function, &env);
     size_t argc = (size_t)state->as.seq.items[5]->as.integer_data.small;
     spy_release(index); spy_release(state); spy_release(text);
+    /* A read on m (print_attribute) leaves its call to enter (callk). */
+    if (status == 2) return m;
     if (status > 0) {
         Call *call = call_enter(c, spy_retain(function), env, m);
         if (!call) return m;

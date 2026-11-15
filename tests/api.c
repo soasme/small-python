@@ -1958,6 +1958,12 @@ int main(int argc, char **argv) {
                "def absent():\n    return Absent()[(1, 2)] + Absent()[((1,), 'a', 3)]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "absent()", "absent.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
+    /* So does print's read of a file's write through a Python __getattr__. */
+    execute(c, "class Fetching:\n    n = 0\n    def __getattr__(self, name):\n        for i in range(3000): pass\n"
+               "        return self.count\n    def count(self, t): Fetching.n += len(t)\n"
+               "def fetching():\n    print('ab', 3, file=Fetching(), flush=False)\n    return Fetching.n\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "fetching()", "fetching.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

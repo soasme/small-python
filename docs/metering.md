@@ -395,7 +395,8 @@ These run as machines on the heap, in one native activation of
   chain tests of a comparison's result, also of a
   builtin subclass's instance and of a class by its metaclass, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
-  the objects before it, and the items' `__repr__` in `repr`, `str`,
+  the objects before it, the property getter, `__getattribute__` or
+  `__getattr__` by which `print` reads its file's `write` and `flush`, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list,
   tuple, dict, frozendict, set or frozenset, also of one inside
   another, items of a builtin's subclass defining it before the builtin

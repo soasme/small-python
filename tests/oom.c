@@ -1070,6 +1070,25 @@ static const char *const programs[] = {
     "    return d[(1, 'a')], d[(2, (3,))], d[()], d['k']\n"
     "print(om())\n",
 
+    "class OF:\n"
+    "    def __init__(s): s.out = []\n"
+    "    def __getattr__(s, name):\n"
+    "        for _ in (): pass\n"
+    "        if name == 'flush': raise AttributeError(name)\n"
+    "        return s.out.append\n"
+    "class OP:\n"
+    "    @property\n"
+    "    def write(s): raise AttributeError('write')\n"
+    "    def __getattr__(s, name): return len\n"
+    "def of():\n"
+    "    f = OF()\n"
+    "    print('a', [1], 2, sep='', file=f)\n"
+    "    print(file=OP(), flush=False)\n"
+    "    try: print('b', file=f, flush=True)\n"
+    "    except AttributeError as e: f.out.append(e.args)\n"
+    "    return f.out\n"
+    "print(of())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

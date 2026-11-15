@@ -186,6 +186,7 @@ Unreleased (0.10.0):
 - dict(), dict.update() and ** call the keys function an instance holds without nesting on the C stack
 - sorted() and list.sort() call a key's reflected method after its NotImplemented without nesting on the C stack
 - a dict subclass's __missing__ runs without nesting on the C stack for a tuple key that holds no instance
+- print() reads its file's write and flush through a Python getter or __getattr__ without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

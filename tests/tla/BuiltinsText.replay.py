@@ -63,6 +63,9 @@ SOURCES = {
     "print_bad_sep": 'print(1, sep=1)',
     "print_bad_end": "print(1, end=b'')",
     "print_file_none_ok": "result = print(end='', file=None) is None",
+    "print_file_getattr": "log = []\nclass G:\n    def __getattr__(s, name):\n        for _ in (): pass\n        log.append(name)\n"
+                          "        return lambda *a: log.extend(a)\nclass P:\n    @property\n    def write(s):\n        log.append('get')\n        return log.append\n"
+                          "print('a', 1, sep='-', file=G(), flush=True)\nprint('b', file=P())\nresult = log",
     "print_file_nowrite": 'print(1, file=1)',
     "print_unknown_kw": 'print(1, x=1)',
     "repr_nested_items": "log = []\nclass Q:\n    def __init__(self, t): self.t = t\n    def __repr__(self):\n        for _ in range(2): pass\n        log.append(self.t); return self.t\n"
