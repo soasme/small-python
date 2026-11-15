@@ -1834,6 +1834,12 @@ int main(int argc, char **argv) {
                "def tested():\n    t = 0\n    if Less() < 1: t += 1\n    if Less() < 1 < 2: t += 2\n    while Small() < 1 < 2 and t < 4: t += 1\n    return t\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "tested()", "tested.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So do isinstance() of a nested tuple and the truth of a check's result. */
+    execute(c, "class Checked(type):\n    def __instancecheck__(cls, x):\n        for i in range(3000): pass\n        return Held()\n"
+               "class Kept(metaclass=Checked): pass\n"
+               "def checked():\n    return isinstance(1, ((str, (Kept,)),)) + isinstance(1, Kept) + issubclass(int, ((int,),))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "checked()", "checked.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

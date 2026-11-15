@@ -638,6 +638,24 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ct())\n",
 
+    "class IB:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __bool__(self): return self.v\n"
+    "class IL:\n"
+    "    def __len__(self): return 0\n"
+    "def im(r):\n"
+    "    class M(type):\n"
+    "        def __instancecheck__(cls, x): return r\n"
+    "        def __subclasscheck__(cls, x): return r\n"
+    "    return M('K', (), {})\n"
+    "IY, IN, IE, IX = im(IB(True)), im(IB(False)), im(IL()), im(IB(2))\n"
+    "def ic():\n"
+    "    out = [isinstance(1, ((IN, (IE,)), IY)), issubclass(int, ((IE,),)), isinstance(1, IY), isinstance(*(1, (IN, (IY,))))]\n"
+    "    try: isinstance(1, (IN, IX))\n"
+    "    except TypeError: out.append(0)\n"
+    "    return out\n"
+    "print(ic())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

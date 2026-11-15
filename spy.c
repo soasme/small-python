@@ -25532,23 +25532,57 @@ static SPYValue *check_next(SPYContext *, Machine *, SPYValue *, SPYValue *);
  * choices from i on, on m: an item's Python __instancecheck__ or
  * __subclasscheck__ is m's call (callk), the test going on with the next
  * item when its result is false (check_next); else the result, as
- * instance_check's. */
+ * instance_check's. A nested tuple's items are walked in a frame
+ * (unbound, items, choices, next, depth) before going on with the rest,
+ * each level charging NESTED_LEVEL bytes of the stack budget. */
+enum { NESTED_LEVEL = 128 };
 static SPYValue *check_from(SPYContext *c, Machine *m, int sub, SPYValue *a, SPYValue *choices, size_t i) {
-    for (; i < choices->as.seq.len; i++) {
-        SPYValue *item = choices->as.seq.items[i], *function;
-        if ((i & 15) == 15 && spend(c, 1)) return NULL;
+    SPYValue *result = NULL;
+    spy_retain(choices);
+    for (;; i++) {
+        SPYValue **frame = choices->as.seq.items;
+        int framed = choices->as.seq.len == 5 && frame[0] == c->unbound;
+        SPYValue *items = framed ? frame[1] : choices;
+        if (i == items->as.seq.len) {
+            if (!framed) { result = spy_bool(c, 0); break; }
+            SPYValue *outer = spy_retain(frame[2]);
+            i = (size_t)frame[3]->as.integer_data.small - 1;
+            spy_release(choices);
+            choices = outer;
+            continue;
+        }
+        SPYValue *item = items->as.seq.items[i], *function, *nested = builtin_value(c, item, SPY_TUPLE);
+        if ((i & 15) == 15 && spend(c, 1)) break;
+        if (nested) {
+            /* A nested tuple's items come before the rest's. */
+            size_t depth = framed ? (size_t)frame[4]->as.integer_data.small + 1 : 1;
+            if (depth > c->stack_size / NESTED_LEVEL) {
+                errorf(c, "RecursionError", "Stack overflow (used %zu kB)%s", depth * NESTED_LEVEL / 1024,
+                       sub ? " in __subclasscheck__" : " in __instancecheck__");
+                break;
+            }
+            SPYValue *parts[] = {c->unbound, nested, choices, int_value(c, (int64_t)i + 1), int_value(c, (int64_t)depth)};
+            SPYValue *inner = parts[3] && parts[4] ? spy_tuple(c, 5, parts) : NULL;
+            spy_release(parts[3]); spy_release(parts[4]);
+            if (!inner) break;
+            spy_release(choices);
+            choices = inner; i = (size_t)-1;
+            continue;
+        }
         if ((sub || value_class(c, a) != item) && (function = item_function(c, item, sub ? "__subclasscheck__" : "__instancecheck__"))) {
             SPYValue *parts[] = {spy_retain(a), spy_retain(choices), int_value(c, (int64_t)i + 1), spy_bool(c, sub)};
             SPYValue *state = spy_tuple(c, 4, parts);
             release_all(4, parts);
-            return state ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(item), spy_retain(a)}, check_next, state) : NULL;
+            result = state ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(item), spy_retain(a)}, check_next, state) : NULL;
+            break;
         }
         /* One by the abstract protocol goes on with the next item when false. */
-        if (abstract_reaches(c, sub, a, item)) return abstract_from(c, m, sub, a, item, choices, i + 1);
-        int result = instance_check(c, a, item, sub, 0);
-        if (result) return result < 0 ? NULL : spy_bool(c, 1);
+        if (abstract_reaches(c, sub, a, item)) { result = abstract_from(c, m, sub, a, item, choices, i + 1); break; }
+        int found = instance_check(c, a, item, sub, 0);
+        if (found) { result = found < 0 ? NULL : spy_bool(c, 1); break; }
     }
-    return spy_bool(c, 0);
+    spy_release(choices);
+    return result;
 }
 /* isinstance() or issubclass(), as id, of argv, two, on m: a tuple tests
  * its items in turn (check_from), an argument by the abstract protocol
@@ -25561,9 +25595,29 @@ static int checks_call(SPYContext *c, Machine *m, int id, size_t argc, SPYValue 
     else return 0;
     return 1;
 }
-/* An item's check that check_from called returned result. */
+/* The truth that a check's result's Python __bool__ or __len__ (check_next)
+ * returned in result: the check goes on (check_next), the state and the
+ * result in held. */
+static SPYValue *check_truth(SPYContext *c, Machine *m, SPYValue *held, SPYValue *result) {
+    SPYValue *state = spy_retain(held->as.seq.items[0]);
+    int truth = result ? truth_result(c, held->as.seq.items[1], held->as.seq.items[2] == c->booleans[1], result) : 0;
+    spy_release(held);
+    return check_next(c, m, state, spy_bool(c, truth));
+}
+/* An item's check that check_from called returned result: its truth, a
+ * Python __bool__ or __len__ a call on m (check_truth), decides it, or the
+ * next item's check. */
 static SPYValue *check_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **items = state->as.seq.items, *value = NULL;
+    int length = 0;
+    SPYValue *function = result && result->type != SPY_BOOL && (result->type == SPY_INSTANCE || metaclassed(result)) ?
+                         truth_function(c, result, &length) : NULL;
+    if (function) {
+        SPYValue *parts[] = {state, spy_retain(result), spy_bool(c, !length)}, *held = spy_tuple(c, 3, parts);
+        release_all(3, parts);
+        if (!held) { spy_release(result); return NULL; }
+        return callk(c, m, function, 1, &result, check_truth, held);
+    }
     int truth = result ? truthy(result) : 0;
     spy_release(result);
     if (!c->error_type[0])
@@ -29403,6 +29457,28 @@ static NO_INLINE int dir_listing(SPYContext *c, Machine *m, SPYValue *name, SPYV
     c->consuming = dir_list(c, m, result);
     return 1;
 }
+/* What a Python __instancecheck__ or __subclasscheck__, name, returned in
+ * result, which it takes when it has a Python __bool__ or __len__
+ * (truth_function): that call left on m (CALL_CHECKED), result and the
+ * name conversion_value takes its truth by on m's stack, 1, or 1 with an
+ * error; else 0. */
+static NO_INLINE int check_truth_call(SPYContext *c, Machine *m, SPYValue *name, SPYValue *result) {
+    int length = 0;
+    SPYValue *function = result && result->type != SPY_BOOL && (result->type == SPY_INSTANCE || metaclassed(result)) &&
+                         name->type == SPY_STRING && (!strcmp(name->as.string.data, "__instancecheck__") ||
+                                                      !strcmp(name->as.string.data, "__subclasscheck__")) ?
+                         truth_function(c, result, &length) : NULL, *self, *env = NULL;
+    if (!function) return 0;
+    size_t depth = m->len;
+    if (machine_push(c, m, length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8))) spy_release(result);
+    else if (!machine_push(c, m, result)) env = function_env(c, function, 1, (self = spy_retain(result), &self), NULL, 1);
+    if (!env) {
+        while (m->len > depth) spy_release(machine_pop(m));
+        return 1;
+    }
+    c->k_fn = spy_retain(function); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
+    return 1;
+}
 /* What v's method name (conversion_method, check_method) returned in
  * result makes the call's value, owned, or NULL with an error: len(),
  * hash(), int(), float(), complex() and bytes() check their results as
@@ -29550,7 +29626,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     }
     if (ins->op != BC_FALSE && ins->op != BC_SHORT && ins->op != BC_UNARY) {
         SPYValue *name = machine_pop(m);
-        if (dir_listing(c, m, name, result)) { spy_release(v); spy_release(name); return m; }
+        if (dir_listing(c, m, name, result) || check_truth_call(c, m, name, result)) { spy_release(v); spy_release(name); return m; }
         SPYValue *string = conversion_value(c, v, name, result);
         spy_release(result); spy_release(v); spy_release(name);
         if (m->len && m->stack[m->len - 1] == c->replacing && (string || m->stack[m->len - 2]->type == SPY_LIST))
