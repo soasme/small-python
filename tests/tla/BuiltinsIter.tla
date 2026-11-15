@@ -60,7 +60,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
-          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "callable_calls", "zip_callable", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth",
+          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "zip_callable", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
@@ -139,6 +139,9 @@ Case(c) ==
       \* with the items, as it takes them; __init__ returns None.
       [] c = "map_class" -> "([(1, 'a'), (2, 'b')], [1, ('t', 1), 2, ('t', 2)])"
       [] c = "map_class_bad" -> "TypeError: __init__() should return None, not 'int'"
+      \* so does one with a Python __new__, called with the class first: an
+      \* instance of the class is initialized, another result is the item.
+      [] c = "map_class_new" -> "(['z', 2, 3], [('n', 0), ('n', 2), ('i', 2), ('n', 3), ('i', 3)])"
       \* a builtin called with starred arguments calls each item's method in turn
       [] c = "starred_calls" -> "(True, 's', 'f', [0, 1, 'str', 'format'])"
       \* iter(f, sentinel) of a Python f calls it for each item, ending at the sentinel

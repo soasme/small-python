@@ -1779,6 +1779,13 @@ int main(int argc, char **argv) {
                "def supered():\n    return Supered(3, 4).v + Supered(*(1, 1)).v\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "supered()", "supered.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 3);
+    /* And map() of a class's Python __new__ and __init__, and a method call of one a getter reads. */
+    execute(c, "class Newed:\n    def __new__(cls, *a):\n        for i in range(3000): pass\n        return super().__new__(cls)\n"
+               "    def __init__(self, a):\n        for i in range(3000): pass\n        self.v = a\n"
+               "class Holds:\n    @property\n    def made(self): return Newed\n"
+               "def newed():\n    return sum(n.v for n in map(Newed, [1, 2])) + Holds().made(4).v\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "newed()", "newed.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 3);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

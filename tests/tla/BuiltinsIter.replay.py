@@ -118,6 +118,10 @@ SOURCES = {
     "map_hash_tuple": "log = []\nclass H:\n    def __init__(s, v): s.v = v\n    def __hash__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return s.v\nresult = (list(map(hash, [(H(1),), (2, (H(3), H(4)))])) == [hash((1,)), hash((2, (3, 4)))], log)",
     "map_class": "log = []\nclass P:\n    def __init__(s, *a):\n        for _ in (): pass\n        log.append(a[0])\n        s.a = a\n"
                  "out = []\nfor p in map(P, [1, 2], 'ab'):\n    out.append(p.a)\n    log.append(('t', p.a[0]))\nresult = (out, log)",
+    "map_class_new": "log = []\nclass Q:\n    def __new__(cls, *a):\n        for _ in (): pass\n        log.append(('n', a[0]))\n"
+                     "        return 'z' if a == (0,) else super().__new__(cls)\n"
+                     "    def __init__(s, *a):\n        for _ in (): pass\n        log.append(('i', a[0]))\n        s.a = a[0]\n"
+                     "result = ([q if q == 'z' else q.a for q in map(Q, [0, 2, 3])], log)",
     "map_class_bad": "class B:\n    def __init__(s, v):\n        for _ in (): pass\n        return v\nresult = list(map(B, [None, 1]))",
     "map_convert_bad": "class W:\n    def __str__(s):\n        for _ in (): pass\n        return 1\nresult = list(map(str, [W()]))",
     "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"

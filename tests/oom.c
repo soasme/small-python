@@ -542,6 +542,19 @@ static const char *const programs[] = {
     "    return TN(1).a, TN(2, k=3).a, TL([4]), TL()\n"
     "print(tc())\n",
 
+    "class MN:\n"
+    "    def __new__(cls, *a): return 'z' if a == (0,) else super().__new__(cls)\n"
+    "    def __init__(self, *a): self.a = a\n"
+    "class MH:\n"
+    "    @property\n"
+    "    def n(self): return MN\n"
+    "def mn():\n"
+    "    for _ in (): pass\n"
+    "    out = [m if m == 'z' else m.a for m in map(MN, [0, 1], 'ab')]\n"
+    "    for m in map(MN, [2]): out.append(m.a)\n"
+    "    return out, MH().n(3).a\n"
+    "print(mn())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

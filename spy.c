@@ -17296,18 +17296,110 @@ static int string_keys(SPYContext *c, SPYValue *keywords) {
 static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
     return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->flat;
 }
+static SPYValue *bound_function(SPYContext *, SPYValue *);
+static SPYValue *class_init(SPYContext *, SPYValue *, int *);
+static SPYValue *init_instance(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *new_method(SPYContext *, SPYValue *);
+static SPYValue *tuple_of(SPYContext *, size_t, SPYValue *const *);
+/* The state of a further continuation, of the n values items, which it
+ * takes, then continuation k with ctx, which it takes, c->unbound for
+ * none: k held by a native value, as a function of another type. */
+static SPYValue *k_state(SPYContext *c, size_t n, SPYValue **items, Continuation k, SPYValue *ctx) {
+    SPYValue *held = value_new(c, SPY_NATIVE), *state = NULL;
+    if (held) held->as.native.call = (SPYNative)(void (*)(void))k;
+    items[n] = held; items[n + 1] = ctx ? ctx : spy_retain(c->unbound);
+    if (held) state = spy_tuple(c, n + 2, items);
+    release_all(n + 2, items);
+    return state;
+}
+/* The continuation state k_state holds last, called with result. State taken. */
+static SPYValue *k_resume(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    size_t n = state->as.seq.len;
+    Continuation k = (Continuation)(void (*)(void))state->as.seq.items[n - 2]->as.native.call;
+    SPYValue *ctx = state->as.seq.items[n - 1] == c->unbound ? NULL : spy_retain(state->as.seq.items[n - 1]);
+    spy_release(state);
+    return k(c, m, ctx, result);
+}
+/* A class's __init__ that callk called returned result: the instance
+ * first in state goes to its continuation (k_resume). */
+static SPYValue *callk_inited(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *self = NULL;
+    if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
+    else if (result) self = spy_retain(state->as.seq.items[0]);
+    spy_release(result);
+    return k_resume(c, m, state, self);
+}
+static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
+/* A class's __new__ that callk called returned result, state the class
+ * and the arguments' tuple: as type_call, an instance of the class runs
+ * its __init__ with them, a Python one on m (callk_inited), before the
+ * continuation has it (k_resume). */
+static SPYValue *callk_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *cls = items[0], *args = items[1];
+    SPYValue *init = result && ((result->type == SPY_INSTANCE && subclass(result->as.map.parent, cls)) ||
+                                (result->type == SPY_CLASS && subclass(value_class(c, result), cls))) ? special_method(c, result, "__init__") : NULL;
+    size_t argc = args->as.seq.len;
+    if (init && init->type == SPY_METHOD && machine_function(c, init->as.method.function) && argc < 9) {
+        SPYValue *argv[10], *parts[3] = {result, spy_retain(items[2]), spy_retain(items[3])}, *function = init->as.method.function;
+        SPYValue *next = spy_tuple(c, 3, parts);
+        argv[0] = spy_retain(result);
+        for (size_t i = 0; i < argc; i++) argv[i + 1] = spy_retain(args->as.seq.items[i]);
+        release_all(3, parts); spy_release(state);
+        if (!next) { release_all(argc + 1, argv); spy_release(init); return NULL; }
+        result = callk(c, m, function, argc + 1, argv, callk_inited, next);
+        spy_release(init);
+        return result;
+    }
+    if (init) {
+        SPYValue *value = call(c, init, argc, args->as.seq.items);
+        if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+        spy_release(value); spy_release(init);
+        if (c->error_type[0]) { spy_release(result); result = NULL; }
+    }
+    return k_resume(c, m, state, result);
+}
+/* callk of class cls on m: its Python __init__ on a new instance
+ * (callk_inited), or its Python __new__ with it first (callk_newed),
+ * then k; else NULL with c->k_fn unset, nothing taken. */
+static SPYValue *class_callk(SPYContext *c, Machine *m, SPYValue *cls, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+    int plain, kind = c->entering_kind;
+    SPYValue *init = class_init(c, cls, &plain), *allocate = !init && !c->error_type[0] ? new_method(c, cls) : NULL, *args[10];
+    c->entering_kind = kind;
+    if (init && machine_function(c, init)) {
+        SPYValue *self = init_instance(c, cls, plain, argc, argv, NULL), *state;
+        if (!self) { release_all(argc, argv); return k(c, m, ctx, NULL); }
+        if (!(state = k_state(c, 1, (SPYValue *[]){spy_retain(self), NULL, NULL}, k, ctx))) { spy_release(self); release_all(argc, argv); return NULL; }
+        args[0] = self;
+        memcpy(args + 1, argv, argc * sizeof(*argv));
+        return callk(c, m, init, argc + 1, args, callk_inited, state);
+    }
+    if (!allocate) return NULL;
+    SPYValue *tuple = tuple_of(c, argc, argv);
+    SPYValue *state = tuple ? k_state(c, 2, (SPYValue *[]){spy_retain(cls), tuple, NULL, NULL}, k, ctx) : (spy_release(ctx), NULL);
+    if (!state) { release_all(argc, argv); return NULL; }
+    args[0] = spy_retain(cls);
+    memcpy(args + 1, argv, argc * sizeof(*argv));
+    return callk(c, m, allocate, argc + 1, args, callk_newed, state);
+}
 /* Call fn on argc arguments argv, which it takes, then continuation k
  * with ctx, which it takes, as Lua's lua_callk. On machine m, a function
- * of the machine (or a method of one) is m's call: callk leaves it in
- * c->k_fn and returns NULL with no error, and the step that called enters
- * it (CALL_K), calling k when it returns, so that no Python code runs on
+ * of the machine, or a method, an instance's __call__ or a metaclass's
+ * __call__ of one (bound_function), or a class's Python __init__ or
+ * __new__ (class_callk), is m's call: callk leaves it in c->k_fn and
+ * returns NULL with no error, and the step that called enters it
+ * (CALL_K), calling k when it returns, so that no Python code runs on
  * the C stack. Otherwise fn runs here and callk returns what k does. */
 static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
-    SPYValue *function = fn->type == SPY_METHOD ? fn->as.method.function : fn;
+    SPYValue *function = machine_function(c, fn) || !m ? fn : bound_function(c, fn);
+    if (!function) function = fn;
     size_t n = fn != function;
+    if (m && !n && fn->type == SPY_CLASS && argc < 9) {
+        SPYValue *result = class_callk(c, m, fn, argc, argv, k, ctx);
+        if (result || c->k_fn || c->error_type[0]) return result;
+    }
     if (m && machine_function(c, function) && n + argc <= 9) {
         SPYValue *args[9];
-        if (n) args[0] = spy_retain(fn->as.method.self);
+        if (n) args[0] = spy_retain(fn->type == SPY_METHOD ? fn->as.method.self : fn);
         if (argc) memcpy(args + n, argv, argc * sizeof(*argv));
         if (!(c->k_env = function_env(c, function, n + argc, args, NULL, 1))) return k(c, m, ctx, NULL);
         c->k_fn = spy_retain(function); c->k = k; c->k_ctx = ctx;
@@ -25757,15 +25849,6 @@ static SPYValue *method_called(SPYContext *c, Machine *m, SPYValue *callee, SPYV
     spy_release(callee);
     return result;
 }
-/* Instance self, which it takes, once the __init__ method_got called
- * returned result. */
-static SPYValue *method_inited(SPYContext *c, Machine *m, SPYValue *self, SPYValue *result) {
-    (void)m;
-    if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
-    if (!result || c->error_type[0]) { spy_release(self); self = NULL; }
-    spy_release(result);
-    return self;
-}
 /* What a method call's getter (method_getter), of state's object, its
  * __getattr__ or None, the attribute's name and the stacked argument
  * count, returned in result: after an AttributeError, the __getattr__'s
@@ -25795,17 +25878,6 @@ static SPYValue *method_got(SPYContext *c, Machine *m, SPYValue *state, SPYValue
         spy_release(machine_pop(m));
     } else for (Node *arg = m->code->items[m->pc - 1].node->args; arg; arg = arg->next, argc++)
         if (!(args[argc] = eval(c, &m->frame, arg))) { release_all(argc, args); spy_release(result); return NULL; }
-    int plain;
-    SPYValue *init = result->type == SPY_CLASS ? class_init(c, result, &plain) : NULL;
-    if (init && machine_function(c, init)) {
-        SPYValue *self = init_instance(c, result, plain, argc, args, NULL);
-        spy_release(result);
-        if (!self) { release_all(argc, args); return NULL; }
-        memmove(args + 1, args, argc * sizeof(*args));
-        args[0] = spy_retain(self);
-        return callk(c, m, init, argc + 1, args, method_inited, self);
-    }
-    if (c->error_type[0]) { release_all(argc, args); spy_release(result); return NULL; }
     return callk(c, m, result, argc, args, method_called, result);
 }
 /* Method call attr() on object, which it takes, whose lookup calls the
@@ -29580,14 +29652,47 @@ static int convert_call(SPYContext *c, Machine *m, SPYValue *function, SPYValue 
     *fn = spy_retain(function);
     return 1;
 }
-/* What a next call that convert_call or init_convert made returned in
- * result, which it takes: the item's conversion, owned (conversion_value),
- * or the new instance item when name is its class, whose __init__
- * returned None; else NULL with an error. The item and name leave m's
- * stack. */
-static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *result) {
+/* What the Python __new__ of class cls, a map's call (init_convert) of
+ * the arguments' tuple args, returned in result, which it takes: as
+ * type_call, an instance of cls runs its __init__ with them, a Python one
+ * the next call of kind left in c->k_fn, the instance and cls on m's
+ * stack under c->converting, NULL; else the item, or NULL on an error. */
+static SPYValue *new_converted(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *args, SPYValue *result, int kind) {
+    SPYValue *init = (result->type == SPY_INSTANCE && subclass(result->as.map.parent, cls)) ||
+                     (result->type == SPY_CLASS && subclass(value_class(c, result), cls)) ? special_method(c, result, "__init__") : NULL;
+    size_t argc = args->as.seq.len;
+    if (init && init->type == SPY_METHOD && machine_function(c, init->as.method.function) && argc < 9) {
+        SPYValue *argv[10] = {result}, *env;
+        size_t depth = m->len;
+        memcpy(argv + 1, args->as.seq.items, argc * sizeof(*argv));
+        if (machine_push(c, m, spy_retain(result)) || machine_push(c, m, spy_retain(cls)) || machine_push(c, m, spy_retain(c->converting)) ||
+            !(env = function_env(c, init->as.method.function, argc + 1, argv, NULL, 0))) {
+            while (m->len > depth) spy_release(machine_pop(m));
+            spy_release(init); spy_release(result);
+            return NULL;
+        }
+        c->k_fn = spy_retain(init->as.method.function); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
+        spy_release(init); spy_release(result);
+        return NULL;
+    }
+    if (init) {
+        SPYValue *value = call(c, init, argc, args->as.seq.items);
+        if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+        spy_release(value); spy_release(init);
+        if (c->error_type[0]) { spy_release(result); return NULL; }
+    }
+    return result;
+}
+/* What a next call of kind that convert_call or init_convert made
+ * returned in result, which it takes: the item's conversion, owned
+ * (conversion_value), or the new instance item when name is its class,
+ * whose __init__ returned None, or for an arguments' tuple item what its
+ * __new__ made (new_converted); else NULL with an error, or with the
+ * next call in c->k_fn. The item and name leave m's stack. */
+static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *result, int kind) {
     spy_release(machine_pop(m));
     SPYValue *name = machine_pop(m), *item = machine_pop(m), *value = !result ? NULL : name->type != SPY_CLASS ? conversion_value(c, item, name, result) :
+                    item->type == SPY_TUPLE ? new_converted(c, m, name, item, spy_retain(result), kind) :
                     result->type == SPY_NONE ? spy_retain(item) : errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
     spy_release(result); spy_release(name); spy_release(item);
     return value;
@@ -29621,10 +29726,25 @@ static NO_INLINE int item_convert(SPYContext *c, Machine *m, SPYValue *callee, S
 /* Class cls's call of items, a map's next ones, whose __init__ is on the
  * machine (class_init): the new instance and cls on m's stack under
  * c->converting, as the call's item (item_converted), its __init__, owned,
- * in *fn with *env, 1; 0 for another class; or -1 on an error. */
+ * in *fn with *env, 1; or whose Python __new__ is, the same with the
+ * items' tuple for the instance (new_converted); 0 for another class; or
+ * -1 on an error. */
 static NO_INLINE int init_convert(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *items, SPYValue **fn, SPYValue **env) {
-    int plain = 0;
-    SPYValue *init = class_init(c, cls, &plain), *self;
+    int plain = 0, kind = c->entering_kind;
+    SPYValue *init = class_init(c, cls, &plain), *self, *allocate = !init && !c->error_type[0] ? new_method(c, cls) : NULL;
+    c->entering_kind = kind;
+    if (allocate && items->as.seq.len < 9) {
+        SPYValue *args[9] = {cls};
+        memcpy(args + 1, items->as.seq.items, items->as.seq.len * sizeof(*args));
+        size_t depth = m->len;
+        if (machine_push(c, m, spy_retain(items)) || machine_push(c, m, spy_retain(cls)) || machine_push(c, m, spy_retain(c->converting)) ||
+            !(*env = function_env(c, allocate, items->as.seq.len + 1, args, NULL, 0))) {
+            while (m->len > depth) spy_release(machine_pop(m));
+            return -1;
+        }
+        *fn = spy_retain(allocate);
+        return 1;
+    }
     if (!init || !machine_function(c, init)) return c->error_type[0] ? -1 : 0;
     size_t argc = items->as.seq.len;
     if (argc > 7 || !(self = init_instance(c, cls, plain, argc, items->as.seq.items, NULL))) return argc > 7 ? 0 : -1;
@@ -29908,7 +30028,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_ITEM, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
-                        if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result);
+                        if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_ITEM)) && c->k_fn)
+                            goto enter_k;
                         if (m->len && m->stack[m->len - 1] == c->adapting) {
                             int again = 0;
                             result = adapted_returned(c, m, result, &again);
@@ -29941,7 +30062,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_NEXT, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
-                        if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result);
+                        if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_NEXT)) && c->k_fn)
+                            goto enter_k;
                         if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_returned(c, m, result, &again);
                         if (filtering(iterator)) result = filter_returned(c, iterator, result, &again);
                         if (again) pc--;
