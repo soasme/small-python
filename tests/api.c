@@ -2093,6 +2093,11 @@ int main(int argc, char **argv) {
     execute(c, "def reversed_in():\n    return (Reflects() in reversed([1, 2])) + (1 in reversed((Odd(), 3))) + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "reversed_in()", "reversed_in.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 1);
+    /* object.__format__ of an empty spec calls a Python __str__ on the machine. */
+    execute(c, "class Formed:\n    def __str__(self):\n        for i in range(3000): pass\n        return 'x'\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(object.__format__(Formed(), '')) + len(object.__format__(Formed(), '') * 2)", "formatted.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

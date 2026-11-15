@@ -25702,8 +25702,13 @@ static NO_INLINE SPYValue *sequence_next(SPYContext *c, SPYValue *v, SPYValue **
  * first argument, an instance, found[0] its name and found[1] the spec
  * format or the ndigits round passes it, or NULL; else NULL. */
 static SPYValue *index_function(SPYContext *, SPYValue *);
+static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
+    /* object.__format__ of an empty spec is str() of its argument. */
+    if (argc == 2 && argv[1]->type == SPY_STRING && !argv[1]->as.string.len && callee->type == SPY_NATIVE && callee->as.native.kwcall == slot_call && callee->as.native.owner == c->object &&
+        !strcmp(callee->as.native.name->as.string.data, "__format__"))
+        return conversion_method(c, c->types[SPY_STRING], 1, argv, found);
     if (argv[0]->type == SPY_ITERATOR)
         return argc <= 2 && callee->type == SPY_NATIVE && callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_NEXT ?
                sequence_next(c, argv[0], found) : NULL;

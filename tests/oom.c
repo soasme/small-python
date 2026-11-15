@@ -1303,6 +1303,15 @@ static const char *const programs[] = {
     "    return 1 in it, len(list(it)), RE() in reversed((1, 2))\n"
     "print(rr())\n",
 
+    "class OF:\n"
+    "    def __str__(self): return 'of' * 3\n"
+    "def of():\n"
+    "    f = object.__format__\n"
+    "    try: f(OF(), 'x')\n"
+    "    except TypeError as e: m = str(e)\n"
+    "    return object.__format__(OF(), ''), f(OF(), ''), m\n"
+    "print(of())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
