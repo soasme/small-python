@@ -14615,6 +14615,7 @@ typedef struct {
     SPYValue *keywords; /* dict()'s or dict.update()'s, merged after the source's items. */
     SPYValue *call; /* A call's ** merge: the callee a duplicate keyword's error names (merge_keyword). */
     SPYValue *awaited; /* An asend or __anext__ awaitable's send or __next__ (asend_resumes): the operation. */
+    SPYValue *instance; /* A class call's instance whose list's or set's __init__ extends it (constructed): the value. */
     int updating, subset;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -14706,6 +14707,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->wrap) visit(b->consumer->wrap, data);
         if (b->consumer && b->consumer->call) visit(b->consumer->call, data);
         if (b->consumer && b->consumer->awaited) visit(b->consumer->awaited, data);
+        if (b->consumer && b->consumer->instance) visit(b->consumer->instance, data);
         if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
         if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
         if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
@@ -23729,7 +23731,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee); spy_release(b.consumer->wrap);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords); spy_release(b.consumer->call);
-        spy_release(b.consumer->awaited);
+        spy_release(b.consumer->awaited); spy_release(b.consumer->instance);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
@@ -30215,6 +30217,14 @@ static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue 
         for (size_t i = 0; i < argc; i++) argv[i + 1] = spy_retain(args->as.seq.items[i]);
         if ((*env = function_env(c, init->as.method.function, argc + 1, argv, keywords, 1)))
             function = spy_retain(init->as.method.function);
+    } else if (!keywords && argc == 1 && init_extends(init) && consumer_of(c, init, -1, 1, args->as.seq.items) == B_EXTEND) {
+        /* A list's or set's __init__ takes its source's items on m
+         * (consume), the instance the call's value (c->consuming). */
+        size_t blocks = m->block_len;
+        SPYValue *instance = machine_pop(m);
+        consume(c, m, B_EXTEND, init, -1, NULL, spy_retain(args->as.seq.items[0]), NULL);
+        if (m->block_len == blocks) machine_push(c, m, instance);
+        else { m->blocks[m->block_len - 1].consumer->instance = instance; c->consuming = 1; }
     } else {
         SPYValue *value = keywords ? call_keywords(c, init, argc, args->as.seq.items, keywords) : call(c, init, argc, args->as.seq.items);
         if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
@@ -37859,10 +37869,12 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         spy_release(s->result);
         s->result = spy_bool(c, all);
     }
-    /* list.extend, dict.update and a set's updates return None. */
+    /* list.extend, dict.update and a set's updates return None; a class
+     * call's __init__, its instance. */
     if (s->id == B_EXTEND || s->updating) {
         spy_release(s->result);
-        s->result = c->error_type[0] ? NULL : spy_none(c);
+        s->result = c->error_type[0] ? NULL : s->instance ? s->instance : spy_none(c);
+        if (!c->error_type[0]) s->instance = NULL;
     }
     if (s->id == CONTAINS_ITEMS && !s->result && !c->error_type[0]) return spy_bool(c, s->count);
     if (s->id == UNPACK_ITEMS && !c->error_type[0]) {

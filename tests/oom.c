@@ -1693,6 +1693,20 @@ static const char *const programs[] = {
     "    return [sorted((k.v, v) for k, v in m.items()) for m in (d, e, f)]\n"
     "print(dm())\n",
 
+    "class CNL(list):\n"
+    "    def __new__(cls, *a): return super().__new__(cls)\n"
+    "class CNS(set):\n"
+    "    def __new__(cls, *a): return super().__new__(cls)\n"
+    "def cng(n, bad):\n"
+    "    yield from range(n)\n"
+    "    if bad: raise LookupError(n)\n"
+    "def cn():\n"
+    "    out = [CNL(cng(3, False)), sorted(CNS(cng(2, False)))]\n"
+    "    try: CNL(cng(2, True))\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(cn())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

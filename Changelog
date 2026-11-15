@@ -240,6 +240,8 @@ Unreleased (0.10.0):
 - a list or tuple compared with a list or tuple subclass's instance calls its items' Python __eq__ without nesting on the C stack
 - a dict merged into a dict with keys, by update(), |=, | or a display's **, compares colliding keys by their Python __eq__
   without nesting on the C stack, and a merged dict's change of size raises "dict mutated during update", as CPython does
+- a list or set subclass whose Python __new__ leaves the builtin __init__ takes a generator's or Python-hashed items
+  without nesting on the C stack
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

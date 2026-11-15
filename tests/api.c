@@ -2309,6 +2309,12 @@ int main(int argc, char **argv) {
                "    return len(d) + len(d | {Same(): 4}) - len({**d, **{Same(): 5}})\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "merged()", "merged.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So does a class call whose Python __new__ leaves list's or set's __init__ to take a source. */
+    execute(c, "class Fresh(list):\n    def __new__(cls, source): return super().__new__(cls)\n"
+               "class Pool(set):\n    def __new__(cls, source): return super().__new__(cls)\n"
+               "def fresh():\n    return len(Fresh(Same() for i in range(2))) + len(Pool([Same(), Same()]))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "fresh()", "fresh.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

@@ -24,6 +24,8 @@ class S(set): pass
 class F(frozenset): pass
 class SI(set):
     def __init__(self, source): super().__init__(source)
+class SN(set):
+    def __new__(cls, source): return super().__new__(cls)
 
 
 class E:
@@ -66,6 +68,8 @@ def hashed(p):
             set.__init__(r, source)
         elif p["form"] == "SI":
             r = SI(source)
+        elif p["form"] == "SN":
+            r = SN(source)
         else:
             build = {"set": set, "frozenset": frozenset, "S": S, "F": F}.get(p["form"], lambda source: {*source})
             r = build(source)
