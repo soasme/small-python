@@ -426,6 +426,8 @@ These run as machines on the heap, in one native activation of
   property or descriptor, that a reference to a class's attribute
   calls, a metaclass's own `__getattribute__`, and the `__getattr__` of
   a class or metaclass that an `AttributeError` from any of them calls,
+  the property getter or `__get__` that an attribute of a `super`
+  object finds in a class after the start,
   also in `getattr` and `hasattr`; an
   attribute store's `__setattr__`, property setter or `__set__` in
   function code, and, in code compiled while pausing, an attribute

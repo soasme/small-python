@@ -12349,7 +12349,14 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
  * descriptor's __get__ (instance_getter, class_getter), else the
  * attribute itself natively; the owner's __getattr__ is called after an
  * AttributeError from any of them (getter_call, getattr_call). */
+static SPYValue *super_getter(SPYContext *, SPYValue *, const char *);
 static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
+    if (v->type == SPY_SUPER) {
+        SPYValue *descriptor = super_getter(c, v, name);
+        if (!descriptor) return c->error_type[0] ? NULL : attribute(c, v, name);
+        c->fallback = descriptor;
+        return NULL;
+    }
     if (v->type == SPY_CLASS && !class_hooked(v)) {
         SPYValue *descriptor = class_getter(c, v, name);
         if (!descriptor) return attribute(c, v, name);
@@ -25486,9 +25493,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return result;
     }
     if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_INSTANCE && is_builtin(callee, B_NEXT)) return next_builtin_call(c, m, n, callee, argc, argv, env);
-    /* getattr() of an instance or class and a str, and a default, or
-     * hasattr() of them, as a stack call's (getattr_call). */
-    int getter = method < 0 && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS) &&
+    /* getattr() of an instance, class or super object and a str, and a
+     * default, or hasattr() of them, as a stack call's (getattr_call). */
+    int getter = method < 0 && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER) &&
         argv[1]->type == SPY_STRING ? builtin_id(callee) : -1;
     if (getter == B_GETATTR || (getter == B_HASATTR && argc == 2)) {
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
@@ -26303,7 +26310,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return result;
     }
-    if (calls && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS) && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
+    if (calls && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER) &&
+        argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin) {
         if (callee->as.native.data == (void *)(intptr_t)B_GETATTR) return getattr_call(c, m, argc == 3, env);
         if (argc == 2 && callee->as.native.data == (void *)(intptr_t)B_HASATTR)
@@ -29072,9 +29080,31 @@ static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue 
 /* The __getattr__ that an AttributeError from function, the call a read
  * of v's attribute makes (attribute_step), calls, or NULL. */
 static SPYValue *getter_fallback(SPYValue *v, SPYValue *function) {
-    SPYValue *owner = v->type == SPY_CLASS ? v->as.map.meta : v->as.map.parent;
+    SPYValue *owner = v->type == SPY_SUPER ? NULL : v->type == SPY_CLASS ? v->as.map.meta : v->as.map.parent;
     SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
     return fallback == function ? NULL : fallback;
+}
+/* The definition bound super object v's read of name finds, as
+ * attribute_value's walk of the classes after its type, when its Python
+ * getter is called: a property's of an instance, or a descriptor
+ * instance's __get__ (instance_getter's); a new reference, else NULL. */
+static NO_INLINE SPYValue *super_getter(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *mro = v->as.super.owner ? v->as.super.owner->as.map.mro : NULL, *self = v->as.super.self, *definition = NULL;
+    size_t i = 0;
+    if (!mro || class_slot_name(name_of(name)) || !strcmp(name, "__module__")) return NULL;
+    while (i < mro->as.seq.len && mro->as.seq.items[i] != v->as.super.type) i++;
+    while (++i < mro->as.seq.len && !definition) {
+        SPYValue *cls = mro->as.seq.items[i];
+        if (!(definition = name_local(cls, name)) &&
+            (builtin_descriptor(c, cls, name) || c->error_type[0] || (cls->as.map.native && self && self->type == SPY_INSTANCE && self->as.map.base)))
+            return NULL;
+    }
+    if (!definition) return NULL;
+    if (definition->type == SPY_PROPERTY)
+        return self != v->as.super.owner && machine_function(c, definition->as.property.get) ? spy_retain(definition) : NULL;
+    SPYValue *kind = definition->type == SPY_INSTANCE && !definition->as.map.base ? definition->as.map.parent : NULL;
+    SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
+    return get && machine_function(c, get) ? spy_retain(definition) : NULL;
 }
 /* The function to enter for function, which it takes, the call a read of
  * v's attribute name makes (attribute_step): a property's getter on v, a
@@ -29084,6 +29114,18 @@ static SPYValue *getter_fallback(SPYValue *v, SPYValue *function) {
 static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, SPYValue *function, SPYValue **argv, size_t *argc) {
     SPYValue *get = NULL;
     *argc = 1;
+    if (v->type == SPY_SUPER) {
+        /* super's object, or None for its class, and that class (super_getter). */
+        SPYValue *self = v->as.super.self == v->as.super.owner ? c->none : v->as.super.self;
+        if (function->type == SPY_PROPERTY) {
+            argv[0] = spy_retain(self);
+            get = spy_retain(function->as.property.get);
+        } else {
+            argv[0] = function; argv[1] = spy_retain(self); argv[2] = spy_retain(v->as.super.owner); *argc = 3;
+            get = spy_retain(class_lookup(function->as.map.parent, "__get__"));
+        }
+        return get;
+    }
     if (function->type == SPY_PROPERTY) get = spy_retain(function->as.property.get);
     else if (function->type == SPY_INSTANCE) {
         argv[0] = function; *argc = 3;

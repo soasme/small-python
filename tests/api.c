@@ -1884,6 +1884,12 @@ int main(int argc, char **argv) {
     execute(c, "def splicegen():\n    a = [0, 1, 2, 3]\n    a[Part():3] = slowly()\n    return len(a) + a[2]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "splicegen()", "splicegen.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
+    /* So does a base's property read through super(). */
+    execute(c, "class Based:\n    @property\n    def p(self):\n        for i in range(3000): pass\n        return 4\n"
+               "class Derived(Based):\n    @property\n    def p(self): return super().p + getattr(super(), 'p')\n"
+               "def supered():\n    return Derived().p\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "supered()", "supered.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

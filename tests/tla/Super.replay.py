@@ -13,12 +13,22 @@ def outcome(p):
         kind = p["kind"][c]
         if kind == "none":
             lines.append("    pass")
+        elif p["name"] == "p":
+            lines.append("    @property")
+            lines.append("    def p(self):")
+            lines.append("        for _ in (): pass")
+            lines.append("        log.append(%r)" % c)
+            if kind == "super":
+                lines.append("        return super().p")
         else:
             lines.append("    def %s(self, *args):" % p["name"])
             lines.append("        log.append(%r)" % c)
             if kind == "super":
                 lines.append("        super().%s(%s)" % (p["name"], "self" if p["name"] == "__get__" else ""))
-    lines.append("%s().%s(%s)" % (p["call"], p["name"], "None" if p["name"] == "__get__" else ""))
+    if p["name"] == "p":
+        lines.append("%s().p" % p["call"])
+    else:
+        lines.append("%s().%s(%s)" % (p["call"], p["name"], "None" if p["name"] == "__get__" else ""))
     log = []
     try:
         exec("\n".join(lines) + "\n", {"log": log})

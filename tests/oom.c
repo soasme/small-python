@@ -815,6 +815,21 @@ static const char *const programs[] = {
     "    return a\n"
     "print(gx())\n",
 
+    "class SB:\n"
+    "    @property\n"
+    "    def p(self): return [self.__class__.__name__]\n"
+    "class SD:\n"
+    "    def __get__(self, o, t): return ('d', t.__name__)\n"
+    "class SC(SB):\n"
+    "    q = SD()\n"
+    "class SE(SC):\n"
+    "    @property\n"
+    "    def p(self): return super().p + [getattr(super(), 'q'), hasattr(super(), 'p')]\n"
+    "    def r(self):\n"
+    "        try: return super().zz\n"
+    "        except AttributeError as e: return str(e)\n"
+    "print(SE().p, SE().r())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"
