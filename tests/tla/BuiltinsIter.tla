@@ -66,7 +66,7 @@ Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_b
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
-          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "len_negative", "len_big",
+          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "sort_truth", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
           "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
 Programs == [op : Ops, l : Lists]
@@ -192,6 +192,8 @@ Case(c) ==
       \* min() and max() call the best's reflected method after an item's
       \* NotImplemented, and a result's __bool__, in order
       [] c = "min_reflected_truth" -> "(1, 3, ['lt', 'gt', 'bool', 'gt', 'bool'])"
+      \* a sort orders a pair by the truth of its __lt__ or __eq__ result
+      [] c = "sort_truth" -> "([1, 2], [(1, 1), (1, 2)], ['lt', 'bool', 'eq', 'bool'])"
       [] c = "len_negative" -> "ValueError: __len__() should return >= 0"
       [] c = "len_big" -> "OverflowError: cannot fit 'int' into an index-sized integer"
       [] c = "len_float" -> "TypeError: 'float' object cannot be interpreted as an integer"

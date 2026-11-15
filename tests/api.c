@@ -2074,6 +2074,11 @@ int main(int argc, char **argv) {
                "def least():\n    return min([Least(2), Least(1), Least(3)]).n + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "least()", "least.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 1);
+    /* And a sort's, ordering a pair by its __lt__ result's __bool__. */
+    execute(c, "class Sorts:\n    def __init__(self, n): self.n = n\n    def __lt__(self, o): return Truth()\n"
+               "def sorts():\n    return sorted([Sorts(2), Sorts(1)])[0].n + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "sorts()", "sorts.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 0);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

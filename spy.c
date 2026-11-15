@@ -14525,12 +14525,14 @@ typedef struct { SPYValue *value, *key; } SortItem;
  * two tuple keys stops at each Python one of their items (sorter_call):
  * the pair at item, cx and cy, borrowed, compared by rich; unequal once an
  * item differs, open while the keys' comparison goes on; reflected while
- * cy's reflected method is due after cx's NotImplemented. */
+ * cy's reflected method is due after cx's NotImplemented; truth while a
+ * result's Python __bool__, or __len__ when 2, is due, the result in the
+ * consumer's item. */
 struct Sorter {
     SortItem *from, *to, item;
     SPYValue *x, *y, *cx, *cy;
     size_t *ends, len, runs, merged, r, start, mid, end, i, j, out, lo, stop, left, at_item;
-    int at, less, rich, unequal, open, reflected;
+    int at, less, rich, unequal, open, reflected, truth;
     SortItem items[];
 };
 typedef struct {
@@ -25064,6 +25066,7 @@ enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST, OPERATOR_INDEX };
 static SPYValue *operator_declined(SPYContext *, const Operator *, int, SPYValue *, SPYValue *, int, SPYValue **, SPYValue **, int *);
 static SPYValue *rich_entry(SPYContext *, SPYValue *, int, int *);
 static int rich_default(SPYContext *, SPYValue *, int);
+static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
 /* The key function the consumer atop m calls next, owned, with its env;
  * or NULL when its items are all taken, then its value on the stack, or
  * an error. */
@@ -25158,8 +25161,15 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         if (!s->sorter && !(s->sorter = sorter_begin(c, items, s->result, s->descending))) {
             if (c->error_type[0] || sort_list(c, items, NULL, s->descending, (SPYValue *const *)s->result->as.seq.items)) return NULL;
         }
-        while (s->sorter && (s->sorter->open || s->sorter->reflected || sort_step(s->sorter))) {
+        while (s->sorter && (s->sorter->open || s->sorter->reflected || s->sorter->truth || sort_step(s->sorter))) {
             struct Sorter *t = s->sorter;
+            int length = 0;
+            if (t->truth) {
+                /* A result's truth, returning into key_took. */
+                SPYValue *self = spy_retain(s->item);
+                function = truth_function(c, self, &length);
+                return (*env = function_env(c, function, 1, &self, NULL, 1)) ? spy_retain(function) : NULL;
+            }
             /* The pair's comparison, or after its NotImplemented cy's
              * reflected one, returning into key_took. */
             if ((function = t->reflected ? reflected_function(c, t->cy, t->rich) : sorter_call(c, t))) {
@@ -25398,7 +25408,6 @@ static SPYValue *consumer_compared(SPYContext *c, Machine *m, SPYValue *state, S
     spy_release(test); spy_release(state);
     return NULL;
 }
-static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
 /* The consumer atop m takes key, its item's key: a sort keeps it, and min
  * or max keeps the item while it is the best; 0, or -1 on an error. */
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
@@ -25518,13 +25527,23 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
          * tuple keys by __eq__, which goes on to the next item or decides
          * by __lt__ there, or by __lt__ the answer. */
         struct Sorter *t = s->sorter;
-        int op = t->rich == R_EQ ? T_EQ : '<', reflected = t->reflected;
-        if (key == c->not_implemented && !reflected && reflected_function(c, t->cy, t->rich)) { spy_release(key); t->reflected = 1; return 0; }
-        t->reflected = 0;
-        if (reflected && key == c->not_implemented) { spy_release(key); key = comparison_declined(c, op, t->cx, t->cy); }
-        SPYValue *test = reflected ? key : compared(c, op, t->cx, t->cy, key);
-        int truth = test ? truthy(test) : 0;
-        spy_release(test);
+        int op = t->rich == R_EQ ? T_EQ : '<', reflected = t->reflected, length = 0, truth;
+        if (t->truth) {
+            truth = truth_result(c, s->item, t->truth == 1, key);
+            spy_release(s->item); s->item = NULL; t->truth = 0;
+        } else {
+            if (key == c->not_implemented && !reflected && reflected_function(c, t->cy, t->rich)) { spy_release(key); t->reflected = 1; return 0; }
+            t->reflected = 0;
+            if (reflected && key == c->not_implemented) { spy_release(key); key = comparison_declined(c, op, t->cx, t->cy); }
+            SPYValue *test = reflected ? key : compared(c, op, t->cx, t->cy, key);
+            /* Its truth by a Python __bool__ or __len__ is a call (key_call). */
+            if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) && truth_function(c, test, &length)) {
+                s->item = test; t->truth = 1 + length;
+                return 0;
+            }
+            truth = test ? truthy(test) : 0;
+            spy_release(test);
+        }
         if (t->rich == R_EQ) { t->open = 1; t->at_item += truth; t->unequal = !truth; }
         else t->less = truth;
         return c->error_type[0] ? -1 : 0;
