@@ -14508,7 +14508,8 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * swapped; any() and all() call item's __bool__, or __len__ when phase is
  * set, in best (KEY_BOOL); an in compares item with best, the x it seeks,
  * by item's or x's Python __eq__, in callee, x first when swapped
- * (KEY_EQ). dict() or dict.update()
+ * (KEY_EQ), then tests a result's Python __bool__, or __len__, in callee
+ * with the result in item, phase 2, or 3 for __len__. dict() or dict.update()
  * of a mapping on the machine (method_function) calls its keys() first
  * (KEY_KEYS), keeps the mapping, lists in listed the keys a generator
  * gives, then is fed those keys, looking each up in the mapping
@@ -25086,9 +25087,11 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         return NULL;
     }
     if (s->keyed == KEY_EQ) {
-        SPYValue *function = s->callee, *args[] = {spy_retain(s->swapped ? s->best : s->item), spy_retain(s->swapped ? s->item : s->best)};
+        int truth = s->phase >= 2;
+        SPYValue *function = s->callee, *args[] = {spy_retain(s->swapped && !truth ? s->best : s->item),
+                                                   truth ? NULL : spy_retain(s->swapped ? s->item : s->best)};
         s->callee = NULL;
-        if ((*env = function_env(c, function, 2, args, NULL, 1))) return function;
+        if ((*env = function_env(c, function, truth ? 1 : 2, args, NULL, 1))) return function;
         spy_release(function);
         return NULL;
     }
@@ -25395,6 +25398,7 @@ static SPYValue *consumer_compared(SPYContext *c, Machine *m, SPYValue *state, S
     spy_release(test); spy_release(state);
     return NULL;
 }
+static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
 /* The consumer atop m takes key, its item's key: a sort keeps it, and min
  * or max keeps the item while it is the best; 0, or -1 on an error. */
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
@@ -25418,21 +25422,31 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     if (s->keyed == KEY_EQ) {
         /* What the __eq__ returned, a NotImplemented leaving the other's
          * Python method on the machine, else its native one and then
-         * identity (compared), decides whether the in found x, which ends
+         * identity (compared), its truth by a Python __bool__ or __len__
+         * on the machine too, decides whether the in found x, which ends
          * it (consumer_took). */
-        SPYValue *item = s->item, *x = s->best, *other;
-        int negated;
+        SPYValue *item = s->item, *x = s->best, *other, *function;
+        int negated, length = 0, found;
         if (key == c->not_implemented && !s->phase && (other = rich_entry(c, s->swapped ? item : x, R_EQ, &negated))) {
             spy_release(key);
             s->callee = spy_retain(other); s->swapped = !s->swapped; s->phase = 1;
             return 0;
         }
-        s->item = NULL; s->keyed = 0;
-        SPYValue *value = !s->phase ? compared(c, T_EQ, s->swapped ? x : item, s->swapped ? item : x, key) :
-                          key != c->not_implemented ? key : (spy_release(key), comparison_declined(c, T_EQ, item, x));
-        s->phase = 0;
-        int found = value && truthy(value);
-        spy_release(value); spy_release(item);
+        if (s->phase >= 2) found = truth_result(c, item, s->phase == 2, key);
+        else {
+            SPYValue *value = !s->phase ? compared(c, T_EQ, s->swapped ? x : item, s->swapped ? item : x, key) :
+                              key != c->not_implemented ? key : (spy_release(key), comparison_declined(c, T_EQ, item, x));
+            if (value && value->type != SPY_BOOL && (value->type == SPY_INSTANCE || metaclassed(value)) &&
+                (function = truth_function(c, value, &length))) {
+                spy_release(item);
+                s->item = value; s->callee = spy_retain(function); s->phase = 2 + length;
+                return 0;
+            }
+            found = value && truthy(value);
+            spy_release(value);
+        }
+        s->item = NULL; s->keyed = 0; s->phase = 0;
+        spy_release(item);
         if (c->error_type[0]) return -1;
         if (!found) return 0;
         s->result = spy_bool(c, !s->count);

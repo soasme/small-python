@@ -2058,6 +2058,11 @@ int main(int argc, char **argv) {
     execute(c, "def searches():\n    return (Reflects() in [Declines()]) + (1 in [Odd()]) + [Declines(), Odd()].count(Reflects()) + 7\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "searches()", "searches.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
+    /* So does the truth of an __eq__ result in a generator's search. */
+    execute(c, "def odds():\n    yield 0\n    yield Odd()\n"
+               "def generated():\n    return (1 in odds()) + (Odd() in (i for i in [Declines()])) + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "generated()", "generated.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

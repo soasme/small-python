@@ -85,6 +85,10 @@ SOURCES = {
                                 "class D:\n    def __eq__(s, o):\n        for _ in (): pass\n        t('d')\n        return NotImplemented\n"
                                 "class X:\n    def __eq__(s, o):\n        for _ in (): pass\n        t('x')\n        return T(True)\n"
                                 "result = (X() in [D()], [D()].count(X()), 1 in [X()])",
+    "in_iter_truth_calls": "class T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n        t(s.v)\n        return s.v\n"
+                           "class O:\n    def __init__(s, r): s.r = r\n    def __eq__(s, o): return s.r\n"
+                           "def g():\n    yield O(T(False))\n    yield O(T(True))\n    yield 5\n"
+                           "it = g()\nresult = (1 in it, list(it))",
     "in_seq_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + o.n)\n        return s.n == o.n\n"
                     "result = ((E('a'),) in [(E('b'),), (E('a'),)], [E('c')] in [(E('c'),), [E('d')]])",
     "seq_order_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"

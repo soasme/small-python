@@ -1257,6 +1257,14 @@ static const char *const programs[] = {
     "    return RE() in [RD()], 1 in (RO(False), RO(True)), [RD(), RO(True)].index(RE()), [RO(False)].count(1)\n"
     "print(rs())\n",
 
+    "def rg():\n"
+    "    yield RO(False)\n"
+    "    yield RO(True)\n"
+    "def ri():\n"
+    "    it = rg()\n"
+    "    return 1 in it, list(it), RO(True) in (d for d in [RD()])\n"
+    "print(ri())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

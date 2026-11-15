@@ -203,7 +203,7 @@ Unreleased (0.10.0):
   as do bytearray.extend and list.__init__ called unbound or again in a loop
 - str.join of an object whose __iter__ fails with a TypeError reports "can only join an iterable"
 - in of a generator, a list or tuple iterator, or an instance iterated by __iter__ or __getitem__ calls its items'
-  Python __eq__ without nesting on the C stack
+  Python __eq__, and the Python __bool__ or __len__ of its result, without nesting on the C stack
 - == of lists, tuples and dicts, and in, index(), count() and remove() of lists and tuples, call an item's reflected
   Python __eq__ after the other's declines, and its result's Python __bool__ or __len__, without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
