@@ -1941,6 +1941,13 @@ int main(int argc, char **argv) {
                "def hashed():\n    return {Hashed('k'): 12}[Hashed('k')]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hashed()", "hashed.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 2);
+    /* So does filter()'s iterator's Python __next__. */
+    execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
+               "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
+               "        if self.n > 3: raise StopIteration\n        return self.n\n"
+               "def filtered():\n    return sum(filter(None, Slow())) + 11\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "filtered()", "filtered.py"), SPY_STOP_STEPS, &pauses)) == 17 && pauses > 2);
     /* So does the Python __eq__ of a builtin type's subclass key. */
     execute(c, "class Same(str):\n    __hash__ = str.__hash__\n    def __eq__(self, o):\n        for i in range(3000): pass\n        return str(self) == o\n"
                "def same():\n    return {Same('k'): 16}[Same('k')]\n");

@@ -24053,11 +24053,13 @@ static int called_iterator(SPYValue *v) {
 /* Whether next() of v takes its item on the machine (consume): one that
  * adapts a map's, or a map or filter whose function is Python. */
 static SPYValue *bound_function(SPYContext *, SPYValue *);
+static int filter_fetches(SPYContext *, SPYValue *);
 static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
     if (adapts(v)) return 1;
     if (kind == I_CALLABLE) return !v->as.iterator.done && machine_function(c, v->as.iterator.source);
+    if (kind == I_FILTER && !v->as.iterator.done && filter_fetches(c, v)) return 1;
     SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
     return function && (machine_function(c, function) || (kind == I_MAP && bound_function(c, function)));
 }
@@ -30224,13 +30226,37 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     return 0;
 }
 static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **, SPYValue **);
+/* Whether filter v's iterator is an instance whose Python __next__ gives
+ * its items on the machine (filter_next). */
+static int filter_fetches(SPYContext *c, SPYValue *v) {
+    SPYValue *source = v->as.iterator.source->as.seq.items[1];
+    return source->type == SPY_INSTANCE && next_function(c, source);
+}
+/* Filter v's next item to test: the one its iterator's Python __next__
+ * gave on the machine (adapted_returned), waiting in its counter, its
+ * index 1; else its iterator's next in C; NULL, with *status -1 at its
+ * end or on an error, or 1 when that __next__'s call begins on m, as
+ * next_call_of's of an instance, v and c->adapting under it. */
+static SPYValue *filter_next(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env, int *status) {
+    SPYValue *source = v->as.iterator.source->as.seq.items[1], *item = v->as.iterator.counter;
+    *status = -1;
+    if (v->as.iterator.index) { v->as.iterator.index = 0; v->as.iterator.counter = NULL; return item; }
+    if (!filter_fetches(c, v)) return iterator_next(c, source);
+    SPYValue *function = next_function(c, source);
+    if (machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->adapting))) return NULL;
+    SPYValue *self = spy_retain(source);
+    if (!(*env = function_env(c, function, 1, &self, NULL, 1))) { spy_release(machine_pop(m)); spy_release(machine_pop(m)); return NULL; }
+    *fn = spy_retain(function); *status = 1;
+    return NULL;
+}
 /* For filter v of None or bool: the next item of its iterator that is
  * true, in *fn, 3; or at an instance whose truth is a Python __bool__ or
  * __len__, that call (convert_call), the item waiting in v's counter for
  * filter_returned, 1; -1 when the iterator ended or raised. */
 static NO_INLINE int filter_truth(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *item;
-    while ((item = iterator_next(c, v->as.iterator.source->as.seq.items[1]))) {
+    int status;
+    while ((item = filter_next(c, m, v, fn, env, &status))) {
         int length = 0;
         SPYValue *function = item->type == SPY_INSTANCE || metaclassed(item) ? truth_function(c, item, &length) : NULL, *name;
         if (function) {
@@ -30243,9 +30269,9 @@ static NO_INLINE int filter_truth(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         int keep = truthy(item);
         if (keep && !c->error_type[0]) { *fn = item; return 3; }
         spy_release(item);
-        if (c->error_type[0]) break;
+        if (c->error_type[0]) return -1;
     }
-    return -1;
+    return status;
 }
 /* For filter v whose function is on the machine: that function, owned,
  * with its env, given the next item of v's iterator, which waits in v's
@@ -30262,8 +30288,9 @@ static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValu
 static NO_INLINE int filter_builtin(SPYContext *c, Machine *m, SPYValue *v, SPYValue *function, SPYValue **fn, SPYValue **env) {
     if (!((function->type == SPY_NATIVE && function->as.native.call == builtin) || (function->type == SPY_CLASS && builtin_class(c, function))))
         return 0;
-    SPYValue *source = v->as.iterator.source->as.seq.items[1], *item, *found[2], *method;
-    while ((item = iterator_next(c, source))) {
+    SPYValue *item, *found[2], *method;
+    int status;
+    while ((item = filter_next(c, m, v, fn, env, &status))) {
         if (item->type == SPY_INSTANCE && (method = conversion_method(c, function, 1, &item, found))) {
             v->as.iterator.counter = item;
             if (convert_call(c, m, method, item, found[0], found[1], fn, env) > 0) return 1;
@@ -30275,16 +30302,17 @@ static NO_INLINE int filter_builtin(SPYContext *c, Machine *m, SPYValue *v, SPYV
         spy_release(test);
         if (keep && !c->error_type[0]) { *fn = item; return 3; }
         spy_release(item);
-        if (c->error_type[0]) break;
+        if (c->error_type[0]) return -1;
     }
-    return -1;
+    return status;
 }
 static NO_INLINE int filter_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function = v->as.iterator.source->as.seq.items[0], *item;
-    if (v->as.iterator.counter) return 0;
+    int status;
+    if (v->as.iterator.counter && !v->as.iterator.index) return 0;
     if (function->type == SPY_NONE || function == c->types[SPY_BOOL]) return filter_truth(c, m, v, fn, env);
     if (!machine_function(c, function)) return filter_builtin(c, m, v, function, fn, env);
-    if (!(item = iterator_next(c, v->as.iterator.source->as.seq.items[1]))) return -1;
+    if (!(item = filter_next(c, m, v, fn, env, &status))) return status;
     v->as.iterator.counter = item;
     if (!(*env = function_env(c, function, 1, &item, NULL, 0))) {
         v->as.iterator.counter = NULL; spy_release(item); return -1;
@@ -30406,7 +30434,7 @@ static NO_INLINE SPYValue *filter_returned(SPYContext *c, Machine *m, SPYValue *
     return NULL;
 }
 static ALWAYS_INLINE int filtering(SPYValue *v) {
-    return v->type == SPY_ITERATOR && ((v->as.iterator.kind == I_FILTER && v->as.iterator.counter) ||
+    return v->type == SPY_ITERATOR && ((v->as.iterator.kind == I_FILTER && v->as.iterator.counter && !v->as.iterator.index) ||
                                        (v->as.iterator.kind == I_CALLABLE && v->as.iterator.index));
 }
 /* next_call_of for a callable iterator v, iter(f, sentinel), of a Python
@@ -30659,6 +30687,13 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
  * with the sentinel's Python __eq__ in c->k_fn, v left on m's stack. */
 static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue *result, int *again, int tested, int kind) {
     SPYValue *v = m->stack[m->len - 2], *source = v->as.iterator.source, *inner = source;
+    if (v->as.iterator.kind == I_FILTER) {
+        /* A filter's iterator's item waits to be tested (filter_next). */
+        spy_release(machine_pop(m)); machine_pop(m);
+        if (result) { v->as.iterator.counter = result; v->as.iterator.index = 1; *again = 1; }
+        spy_release(v);
+        return NULL;
+    }
     /* The iterable called is the first a zip or map has no item of. */
     if (v->as.iterator.kind != I_ENUMERATE)
         inner = source->as.seq.items[(v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0)];

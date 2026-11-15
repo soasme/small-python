@@ -1021,6 +1021,20 @@ static const char *const programs[] = {
     "    return out\n"
     "print(mr())\n",
 
+    "class FN:\n"
+    "    def __init__(s, *v): s.v = list(v)\n"
+    "    def __iter__(s): return s\n"
+    "    def __next__(s):\n"
+    "        for _ in (): pass\n"
+    "        if not s.v: raise StopIteration\n"
+    "        return s.v.pop(0)\n"
+    "def fn():\n"
+    "    out = [list(filter(None, FN(0, 1))), list(filter(abs, FN(0, 2))), list(filter(lambda x: x, FN(3, 0)))]\n"
+    "    for x in filter(None, FN(0, 4)): out.append(x)\n"
+    "    out.append(next(filter(None, FN(5))))\n"
+    "    return out\n"
+    "print(fn())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

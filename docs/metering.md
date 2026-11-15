@@ -409,6 +409,8 @@ These run as machines on the heap, in one native activation of
   module's `__annotations__` calls, and the calls in its annotations;
 - the `__eq__` of a dict or set key of a builtin type's subclass, in the
   lookups that call an instance key's;
+- the `__next__` of an iterator instance that a `filter` takes its items
+  from;
 - a key's `__hash__`, also of a builtin's subclass defining it, in dict
   and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`
