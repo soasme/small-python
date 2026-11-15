@@ -74,6 +74,10 @@ SOURCES = {
                      "result = (2 in g(), 1 in G(), 5 in G())",
     "in_list_iterator_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o\n"
                               "it = iter([0, E(1), E(2), E(3)])\nfound = 2 in it\nresult = (found, [e.n for e in it])",
+    "seq_truth_calls": "class T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n        t(s.v)\n        return s.v\n"
+                       "class L:\n    def __len__(s):\n        for _ in (): pass\n        t(0)\n        return 0\n"
+                       "class O:\n    def __init__(s, r): s.r = r\n    def __eq__(s, o): return s.r\n"
+                       "result = ([O(T(True)), O(T(False)), O(T(True))] == [1, 2, 3], [O(L())] != [1])",
     "seq_reflected_calls": "class D:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return NotImplemented\n"
                            "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o.n\n"
                            "d = D(0)\nresult = ([D(1)] == [E(1)], [d] == [d], [D(2)] == [D(3)])",

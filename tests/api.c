@@ -2048,6 +2048,12 @@ int main(int argc, char **argv) {
                "def reflected():\n    return ([Declines()] == [Reflects()]) + ({1: Declines()} == {1: Reflects()}) + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "reflected()", "reflected.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 0);
+    /* So does the Python __bool__ of a sequence item's __eq__ result. */
+    execute(c, "class Truth:\n    def __bool__(self):\n        for i in range(3000): pass\n        return True\n"
+               "class Odd:\n    def __eq__(self, o): return Truth()\n"
+               "def truths():\n    return ([Odd(), Odd()] == [1, 2]) + ({1: Odd()} == {1: 2}) + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "truths()", "truths.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

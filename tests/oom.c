@@ -1241,6 +1241,18 @@ static const char *const programs[] = {
     "    return [RD()] == [RE()], (RD(), 1) == (RD(), 1), {1: RD()} == {1: RE()}\n"
     "print(rf())\n",
 
+    "class RT:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __bool__(self):\n"
+    "        for _ in (): pass\n"
+    "        return self.v\n"
+    "class RO:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __eq__(self, o): return RT(self.v)\n"
+    "def rt():\n"
+    "    return [RO(True), RO(False)] == [1, 2], [RD()] == [RO(True)], {1: RO(True)} == {1: 2}\n"
+    "print(rt())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

@@ -29020,19 +29020,17 @@ static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instructi
     spy_release(x); spy_release(iterator);
     return m;
 }
-/* A pair's __eq__ (equal_call) declined with NotImplemented: right's
- * Python __eq__ entered with left, the operands, c->unbound and c->pairing
- * pushed again for pair_returned; else NULL, maybe an error pending. */
-static NO_INLINE Call *pair_reflect(SPYContext *c, Machine *m, SPYValue *left, SPYValue *right) {
-    int negated;
-    SPYValue *function = rich_entry(c, right, R_EQ, &negated), *env;
-    if (!function) return NULL;
+/* A pair's next call after its __eq__ (equal_call) returned: function
+ * entered with argc args, which it takes, a and b, phase c->unbound and
+ * c->pairing pushed for pair_returned; else NULL with an error. */
+static NO_INLINE Call *pair_enter(SPYContext *c, Machine *m, SPYValue *function, size_t argc, SPYValue **args, SPYValue *a, SPYValue *b,
+                                  int phase) {
     size_t len = m->len;
-    SPYValue *args[] = {spy_retain(right), spy_retain(left)};
-    if (machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->unbound)) ||
-        machine_push(c, m, spy_retain(c->pairing)))
-        release_all(2, args);
-    else if ((env = function_env(c, function, 2, args, NULL, 1))) {
+    SPYValue *env;
+    int failed = machine_push(c, m, spy_retain(a)) || machine_push(c, m, spy_retain(b));
+    while (!failed && phase--) failed = machine_push(c, m, spy_retain(c->unbound));
+    if (failed || machine_push(c, m, spy_retain(c->pairing))) release_all(argc, args);
+    else if ((env = function_env(c, function, argc, args, NULL, 1))) {
         Call *call = call_enter(c, spy_retain(function), env, m);
         if (call) { call->m.outermost = CALL_OPERATOR; return call; }
     }
@@ -29048,23 +29046,34 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
     int op = 0;
     step_operation(ins, &op);
     spy_release(machine_pop(m));
-    int reflected = m->stack[m->len - 1] == c->unbound;
-    if (reflected) spy_release(machine_pop(m));
-    SPYValue *right = machine_pop(m), *left = machine_pop(m), *test;
-    Call *call;
-    if (reflected && result == c->not_implemented) {
-        spy_release(result);
-        test = comparison_declined(c, T_EQ, left, right);
-    } else if (reflected) test = result;
-    else if (result == c->not_implemented && (call = pair_reflect(c, m, left, right))) {
-        spy_release(result); spy_release(left); spy_release(right);
-        return &call->m;
-    } else if (result == c->not_implemented && c->error_type[0]) {
-        spy_release(result);
-        test = NULL;
-    } else test = compared(c, T_EQ, left, right, result);
-    int found = test ? truthy(test) : 0;
-    spy_release(test); spy_release(left); spy_release(right);
+    /* One c->unbound marks the reflected __eq__'s call, two the __bool__ or
+     * __len__ of a result. */
+    int phase = 0, found, length = 0, negated;
+    while (m->stack[m->len - 1] == c->unbound) { spy_release(machine_pop(m)); phase++; }
+    SPYValue *b = machine_pop(m), *a = machine_pop(m), *test = result, *function;
+    Call *call = NULL;
+    if (phase == 2) found = result ? truth_result(c, a, b == c->booleans[1], result) : 0;
+    else {
+        /* a's __eq__ declined: b's reflected one, then identity. */
+        if (result == c->not_implemented && phase) {
+            spy_release(result);
+            test = comparison_declined(c, T_EQ, a, b);
+        } else if (result == c->not_implemented && (function = rich_entry(c, b, R_EQ, &negated))) {
+            SPYValue *args[] = {spy_retain(b), spy_retain(a)};
+            spy_release(result); test = NULL;
+            call = pair_enter(c, m, function, 2, args, a, b, 1);
+        } else test = compared(c, T_EQ, a, b, result);
+        if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) &&
+            (function = truth_function(c, test, &length))) {
+            SPYValue *self = spy_retain(test);
+            call = pair_enter(c, m, function, 1, &self, test, c->booleans[!length], 2);
+            spy_release(test); test = NULL;
+        }
+        found = test ? truthy(test) : 0;
+        spy_release(test);
+    }
+    spy_release(a); spy_release(b);
+    if (call) return &call->m;
     for (;;) {
         SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
         size_t at = (size_t)index->as.integer_data.small, end = at,
