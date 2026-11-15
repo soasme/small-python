@@ -539,6 +539,20 @@ static const char *const programs[] = {
     "    return r\n"
     "print(nz())\n",
 
+    "class TN(Exception):\n"
+    "    def __new__(cls, *a):\n"
+    "        return super().__new__(cls, *a) if a else KeyError('k')\n"
+    "    def __init__(self, *a): self.a = a\n"
+    "def tn():\n"
+    "    r = []\n"
+    "    try:\n"
+    "        while True: r.append((yield))\n"
+    "    except BaseException as e: r.append(e)\n"
+    "    yield r\n"
+    "for v in ((1, 2), None):\n"
+    "    g = tn(); next(g)\n"
+    "    print(g.throw(TN, v))\n",
+
     "class PW:\n"
     "    def __init__(self): self.parts = []\n"
     "    def write(self, t): self.parts.append(t)\n"

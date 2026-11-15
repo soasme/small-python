@@ -110,6 +110,8 @@ Unreleased (0.10.0):
 - ascii() calls a Python __repr__, and round() an ndigits' Python __index__, without nesting on the C stack
 - raise of a class, or from a cause class, calls its Python __new__ without nesting on the C stack
 - dict() and dict.update() take the pairs a Python __iter__ gives without nesting on the C stack
+- a generator's throw() of a class calls its Python __new__ without nesting on the C stack
+- throw() of a class whose call makes an exception of another class throws the class called with it
 - print() calls a file's Python write and flush without nesting on the C stack, looking write up for each
   write; a str subclass sep or end is accepted
 - raise of a class whose call returns an exception of another class raises the class called with it,

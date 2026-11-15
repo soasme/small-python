@@ -30,7 +30,8 @@
 (*     return 'done'                                                       *)
 (*                                                                         *)
 (* A throw is of ValueError or KeyError, or of PyValueError, a ValueError  *)
-(* subclass whose Python __init__ throw() calls to make the exception.     *)
+(* subclass whose Python __init__ throw() calls to make the exception, or  *)
+(* of NewValueError, one whose Python __new__ and __init__ it calls.       *)
 (* A throw passes the class alone or, in its three-argument form, with a  *)
 (* None value and traceback, which changes nothing.                       *)
 (* A throw is made while its caller handles `handled` (an IndexError) or   *)
@@ -46,7 +47,7 @@ CONSTANT K          \* iterations of the body's loop
 Kinds == {"generator", "coroutine"}
 Variants == {"plain", "stubborn", "bare"}
 Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
-Thrown == {"ValueError", "KeyError", "PyValueError"}
+Thrown == {"ValueError", "KeyError", "PyValueError", "NewValueError"}
 Handled == {"None", "IndexError"}               \* what the caller of a throw handles
 Forms == {"one", "three"}                        \* throw(e) or throw(e, None, None)
 Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h, f>> : e \in Thrown, h \in Handled, f \in Forms} \cup {<<"close">>, <<"drop">>}
@@ -101,7 +102,7 @@ Send(v) ==
 (* shows: the body's handler sees no context.                             *)
 Throw(e, h, f) ==
     /\ op' = <<"throw", e, h, f>>
-    /\ CASE pc = "loop" /\ e \in {"ValueError", "PyValueError"} /\ variant # "bare" -> Continue("caught")
+    /\ CASE pc = "loop" /\ e \in {"ValueError", "PyValueError", "NewValueError"} /\ variant # "bare" -> Continue("caught")
          [] pc = "done" /\ kind = "coroutine" -> Stay(<<"raise", "RuntimeError">>)  \* cannot reuse already awaited coroutine
          [] OTHER -> Finish(<<"raise", e>>)  \* a just-started body never runs; elsewhere nothing catches e
 

@@ -1767,6 +1767,12 @@ int main(int argc, char **argv) {
                "def paired():\n    d = dict(Paired()); d.update(Paired())\n    return sum(d) + len(d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "paired()", "paired.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
+    /* So does the Python __new__ a generator's throw() of a class calls. */
+    execute(c, "class Fresh(Exception):\n    def __new__(cls, *a):\n        for i in range(3000): pass\n"
+               "        e = super().__new__(cls, *a); e.i = i; return e\n"
+               "def freshly():\n    try: yield 0\n    except Fresh as e: yield e.i + len(e.args)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "(g := freshly(), next(g), g.throw(Fresh, 1))[2]", "fresh.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 2);
     /* So do print()'s calls of a file's Python write and flush. */
     execute(c, "class Written:\n    def __init__(self): self.n = 0\n"
                "    def write(self, text):\n        for i in range(3000): pass\n        self.n += len(text)\n"

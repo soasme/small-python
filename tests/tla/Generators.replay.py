@@ -14,7 +14,16 @@ class PyValueError(ValueError):
         for _ in range(2): pass
 
 
-THROWN = {"ValueError": ValueError, "KeyError": KeyError, "PyValueError": PyValueError}
+class NewValueError(ValueError):
+    def __new__(cls):
+        for _ in range(2): pass
+        return super().__new__(cls)
+
+    def __init__(self):
+        for _ in range(2): pass
+
+
+THROWN = {"ValueError": ValueError, "KeyError": KeyError, "PyValueError": PyValueError, "NewValueError": NewValueError}
 
 
 class Y:

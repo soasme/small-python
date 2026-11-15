@@ -23621,14 +23621,69 @@ static SPYValue *join_listed(SPYContext *c, Machine *m, SPYValue *it) {
     return result;
 }
 static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *);
+static SPYValue *throw_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *throw_newed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* A throw, for the consumer's callee, method and name, of exception class
+ * cls with argc arguments argv, all borrowed, calls its Python __new__
+ * allocator on m (callk, throw_newed), to call cls again with what it
+ * made when that is not exactly an instance of again, the class or None. */
+static void throw_new(SPYContext *c, Machine *m, SPYValue *const *consumer, SPYValue *cls, SPYValue *again, SPYValue *allocator,
+                      size_t argc, SPYValue *const *argv) {
+    SPYValue *parts[13] = {spy_retain(consumer[0]), spy_retain(consumer[1]), spy_retain(consumer[2]), spy_retain(cls), spy_retain(again)}, *args[8];
+    for (size_t i = 0; i < argc; i++) parts[i + 5] = spy_retain(argv[i]);
+    SPYValue *state = spy_tuple(c, argc + 5, parts);
+    release_all(argc + 5, parts);
+    args[0] = spy_retain(cls);
+    for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(argv[i]);
+    if (state) callk(c, m, allocator, argc + 1, args, throw_newed, state);
+    else release_all(argc + 1, args);
+}
+/* The Python __new__ that a throw of an exception class called
+ * (throw_new) returned result: an instance of the class in state's place
+ * runs its __init__ with the arguments, a Python one on m (callk), as a
+ * class call does; the throw goes on with what the call made
+ * (throw_inited). */
+static SPYValue *throw_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *cls = items[3], *args[8];
+    size_t argc = state->as.seq.len - 5;
+    SPYValue *init = result && result->type == SPY_INSTANCE && subclass(result->as.map.parent, cls) ? special_method(c, result, "__init__") : NULL;
+    SPYValue *made = exception_made(c, cls, result, 0), *function = NULL;
+    if (made && init && init->type == SPY_METHOD && machine_function(c, init->as.method.function)) function = init->as.method.function;
+    else if (made && init) {
+        SPYValue *value = call(c, init, argc, items + 5);
+        if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+        spy_release(value);
+    }
+    if (made && c->error_type[0]) { spy_release(made); made = NULL; }
+    SPYValue *parts[] = {spy_retain(items[0]), spy_retain(items[1]), spy_retain(items[2]), made ? made : spy_none(c), spy_retain(items[4])};
+    SPYValue *next = spy_tuple(c, 5, parts);
+    release_all(5, parts);
+    if (next && function) {
+        args[0] = spy_retain(next->as.seq.items[3]);
+        for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(items[i + 5]);
+        callk(c, m, function, argc + 1, args, throw_inited, next);
+    } else if (next) throw_inited(c, m, next, made && !c->error_type[0] ? spy_none(c) : NULL);
+    spy_release(init); spy_release(state);
+    return NULL;
+}
 /* The __init__ that a throw of an exception class called (consume)
  * returned result: the throw goes on with state's instance, or with the
- * error the call raised, as thrown_exception's. */
+ * error the call raised, as thrown_exception's; an instance not exactly
+ * of the class after it, when given, is the argument of the class's
+ * call again (throw_new). */
 static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **items = state->as.seq.items, *exception = NULL;
     if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
     else if (result) exception = spy_retain(items[3]);
     spy_release(result);
+    SPYValue *again = exception && state->as.seq.len > 4 && items[4] != c->none && exception->as.map.parent != items[4] ? items[4] : NULL;
+    SPYValue *allocator = again ? new_method(c, again) : NULL;
+    if (allocator) {
+        throw_new(c, m, items, again, c->none, allocator, 1, &exception);
+        spy_release(exception); spy_release(state);
+        return NULL;
+    }
+    if (again) { SPYValue *fixed = instantiate_exception(c, again, 1, &exception, 0); spy_release(exception); exception = fixed; }
     if (!exception && !c->stopped) {
         if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
         ErrorState error = take_error(c);
@@ -23641,8 +23696,8 @@ static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
  * owned. A throw of an exception class, with start its value if given,
- * whose call runs a Python __init__ calls it first, on m (callk), and goes
- * on with the instance (throw_inited). */
+ * whose call runs a Python __new__ or __init__ calls it first, on m
+ * (callk), and goes on with the instance (throw_newed, throw_inited). */
 static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
     SPYValue *init = NULL, *made = NULL, *built = method < 0 ? built_type(c, callee) : NULL, *wrap = built ? spy_retain(callee) : NULL;
     if (built) callee = built;
@@ -23652,6 +23707,13 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
         size_t argc = start && start->type == SPY_TUPLE ? start->as.seq.len : start && start->type != SPY_NONE;
         SPYValue *const *argv = start && start->type == SPY_TUPLE ? start->as.seq.items : &start;
         int given = start && start->type == SPY_INSTANCE && subclass(start->as.map.parent, generator);
+        SPYValue *allocator = given || argc > 6 || !subclass(generator, c->exceptions[X_BASE_EXCEPTION]) ? NULL : new_method(c, generator);
+        if (allocator) {
+            SPYValue *consumer[] = {callee, int_value(c, method), name ? name : c->none};
+            if (consumer[1]) throw_new(c, m, consumer, generator, generator, allocator, argc, argv);
+            spy_release(consumer[1]); spy_release(generator); spy_release(start);
+            return;
+        }
         made = given || argc > 6 ? NULL : raised_instance(c, generator, argc, argv, &init);
         if (made) {
             SPYValue *parts[] = {spy_retain(callee), int_value(c, method), spy_retain(name ? name : c->none), made}, *args[8];
@@ -30370,9 +30432,16 @@ static SPYValue *thrown_exception(SPYContext *c, size_t argc, SPYValue *const *a
     if (argc == 3 && argv[2]->type != SPY_NONE && argv[2]->type != SPY_TRACEBACK)
         return spy_error(c, "TypeError", "throw() third argument must be a traceback object");
     if (exception->type == SPY_CLASS && subclass(exception, c->exceptions[X_BASE_EXCEPTION])) {
+        SPYValue *cls = exception;
         if (argc > 1 && argv[1]->type == SPY_INSTANCE && subclass(argv[1]->as.map.parent, exception)) exception = spy_retain(argv[1]);
         else if (argc > 1 && argv[1]->type == SPY_TUPLE) exception = instantiate_exception(c, exception, argv[1]->as.seq.len, argv[1]->as.seq.items, 0);
         else exception = instantiate_exception(c, exception, argc > 1 && argv[1]->type != SPY_NONE ? 1 : 0, argv + 1, 0);
+        /* What the call made, not exactly an instance of the class, is the
+         * argument of its call again. */
+        if (exception && !(argc > 1 && exception == argv[1]) && exception->as.map.parent != cls) {
+            SPYValue *fixed = instantiate_exception(c, cls, 1, &exception, 0);
+            spy_release(exception); exception = fixed;
+        }
         /* An instantiation's own error is the one thrown, as CPython's,
          * before the throw's frame sees it. */
         if (!exception && !c->stopped) {
