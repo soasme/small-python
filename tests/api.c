@@ -1767,6 +1767,10 @@ int main(int argc, char **argv) {
                "def paired():\n    d = dict(Paired()); d.update(Paired())\n    return sum(d) + len(d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "paired()", "paired.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
+    /* And with keywords, merged after the pairs. */
+    execute(c, "def keyworded():\n    d = dict(Paired(), a=5); d.update(Paired(), **{'b': 6})\n    return sum(d.values())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyworded()", "keyworded.py"), SPY_STOP_STEPS, &pauses)) == 17 && pauses > 2);
     /* So do a class body's implicit stores through its namespace's Python __setitem__. */
     execute(c, "class Slowns(dict):\n    def __setitem__(self, k, v):\n        for i in range(3000): pass\n"
                "        super().__setitem__(k, v)\n"

@@ -69,7 +69,7 @@ SortedItems(S) == LET s == SelectSeq(AllItems, LAMBDA e : e \in S) IN List([i \i
 Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
-Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
+Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "clear",
@@ -108,6 +108,8 @@ Case(c) ==
       [] c = "ctor_bad_element" -> "TypeError: object is not iterable"
       [] c = "ctor_iter_pairs" -> "[{'a': 3, 'b': 2}, {'x': 1, 'y': 'z'}]"
       [] c = "ctor_iter_bad_pair" -> "ValueError: dictionary update sequence element #1 has length 3; 2 is required"
+      [] c = "ctor_iter_keywords" -> "[{'a': 0, 'b': 2}, {'a': 1, 'b': 3, 'c': 4}]"
+      [] c = "ctor_iter_keywords_fails" -> "{'a': 1}"
       [] c = "ctor_two_positional" -> "TypeError: dict expected at most 1 argument, got 2"
       [] c = "fromkeys" -> "({'a': None, 'b': None}, {1: 0, 2: 0}, 'Missing')"
       [] c = "fromkeys_shared" -> "{'a': [1], 'b': [1]}"

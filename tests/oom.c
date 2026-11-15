@@ -435,6 +435,15 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class DK:\n"
+    "    def __iter__(self): return iter([(1, 2), (3, 4)])\n"
+    "class DM:\n"
+    "    def keys(self): return ['m']\n"
+    "    def __getitem__(self, k): return k\n"
+    "class DS(dict): pass\n"
+    "d = {}; d.update(DK(), a=1, **{'b': 2})\n"
+    "print(dict(DK(), z=0), dict(DM(), m=1), DS(DK(), q=3), d)\n",
+
     "class PS:\n"
     "    def __str__(self): return 'ps'\n"
     "class PF:\n"

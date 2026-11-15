@@ -128,6 +128,8 @@ Unreleased (0.10.0):
 - property.__get__() of an object calls a Python getter without nesting on the C stack
 - a generator's throw() of a class, a value and a None traceback calls its Python __init__ without nesting
   on the C stack
+- dict() and dict.update() with keywords take a Python __iter__'s pairs or keys() and __getitem__'s
+  items without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a

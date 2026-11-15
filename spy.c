@@ -14418,6 +14418,7 @@ struct Sorter {
 typedef struct {
     int id, compensating, method, keyed, descending, calls, phase, swapped, stage, fed, hints;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched, *wrap;
+    SPYValue *keywords; /* dict()'s or dict.update()'s, merged after the source's items. */
     int updating, subset;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -14513,6 +14514,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->sent) visit(b->consumer->sent, data);
         if (b->consumer && b->consumer->made) visit(b->consumer->made, data);
         if (b->consumer && b->consumer->pending) visit(b->consumer->pending, data);
+        if (b->consumer && b->consumer->keywords) visit(b->consumer->keywords, data);
         if (b->consumer && b->consumer->empty) visit(b->consumer->empty, data);
         if (b->consumer && b->consumer->mapping) visit(b->consumer->mapping, data);
         if (b->consumer && b->consumer->listed) visit(b->consumer->listed, data);
@@ -22986,7 +22988,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     if (b.consumer) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee); spy_release(b.consumer->wrap);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
-        spy_release(b.consumer->pending); spy_release(b.consumer->empty);
+        spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
@@ -23648,6 +23650,23 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                       builtin_value(c, argv[1], SPY_BYTEARRAY))) return -1;
     return id;
 }
+static ALWAYS_INLINE int consumer_of(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+/* dict(), a class built on it (built_type), or a dict's update of one
+ * source that the machine takes (consumer_of) with keywords, a dict of
+ * str keys it takes: the consumer begun on m, merging the keywords after
+ * the source's items (consumer_end), 1; else 0, or -1 on an error. */
+static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *);
+static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *source, SPYValue *keywords) {
+    int updating = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_UPDATE &&
+                   callee->as.bound.self->type == SPY_DICT;
+    int dict = updating || callee == c->types[SPY_DICT] || (callee->type == SPY_CLASS && built_type(c, callee) == c->types[SPY_DICT]);
+    int id = dict ? consumer_of(c, callee, -1, 1, &source) : -1;
+    size_t blocks = m->block_len;
+    if (id == B_DICT || id == B_EXTEND) consume(c, m, id, callee, -1, NULL, spy_retain(source), NULL);
+    if (m->block_len == blocks) { spy_release(keywords); return c->error_type[0] ? -1 : 0; }
+    m->blocks[m->block_len - 1].consumer->keywords = keywords;
+    return 1;
+}
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
@@ -23915,6 +23934,7 @@ static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, S
  * its end or on an error), takes another; when it does not, its result is
  * on the stack, or the error pending. */
 static NO_INLINE int key_consumer(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, const Entry *, size_t);
+static int dict_consumer(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *);
 /* Whether consumer s calls a key or comparison next (key_call), not
  * taking an item: a keyed one, but a fed min or max with no item. */
 static ALWAYS_INLINE int key_working(const Consumer *s) {
@@ -26088,6 +26108,19 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         spy_release(keywords); spy_release(callee);
         return result;
     }
+    if (calls && positional == 1 && kwc && (callee->type == SPY_CLASS || callee->type == SPY_BOUND_METHOD) && consumer_of(c, callee, -1, 1, argv) >= 0) {
+        /* dict(x, **kw) and d.update(x, **kw) as a consumer (dict_consumer). */
+        SPYValue *keywords = entries_dict(c, kw, kwc);
+        int began = keywords ? dict_consumer(c, m, callee, argv[0], keywords) : -1;
+        if (began < 0) goto done;
+        if (began) {
+            /* The consumer's block goes above the call's operands. */
+            Block block = m->blocks[--m->block_len];
+            for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+            block.depth = m->len; m->blocks[m->block_len++] = block;
+            return NULL;
+        }
+    }
     if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD)) {
         int began = key_consumer(c, m, callee, positional, argv, kw, kwc);
         if (began < 0) goto done;
@@ -26173,7 +26206,10 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         SPYValue *argv[3];
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = indexed_call(c, m, callee, -1, NULL, args->as.seq.len, argv);
-    } else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
+    } else if (calls && keywords->as.map.len && args->as.seq.len == 1 && (callee->type == SPY_CLASS || callee->type == SPY_BOUND_METHOD) &&
+               string_keys(c, keywords) && consumer_of(c, callee, -1, 1, args->as.seq.items) >= 0 &&
+               dict_consumer(c, m, callee, args->as.seq.items[0], spy_retain(keywords))) ;
+    else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
         /* As a stack call's consumer, a starred call's (stack_call). */
         consume(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
                 args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL);
@@ -35439,6 +35475,7 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         spy_release(returned);
         return NULL;
     }
+    if (s->keywords && !c->error_type[0]) extend_display(c, s->result, s->keywords);
     if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
     /* intersection_update swaps its result into the set; issubset is
      * whether the intersection has all the set's entries. */

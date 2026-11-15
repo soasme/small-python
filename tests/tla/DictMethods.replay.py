@@ -54,6 +54,10 @@ SOURCES = {
                        "result = [dict(P([('a', 1), ['b', 2], ('a', 3)])), d]",
     "ctor_iter_bad_pair": "class P:\n    def __iter__(s):\n        for _ in (): pass\n        return iter([('a', 1), (1, 2, 3)])\n"
                           "result = dict(P())",
+    "ctor_iter_keywords": "class P:\n    def __iter__(s):\n        for _ in (): pass\n        return iter([('a', 1), ('b', 2)])\n"
+                          "d = {}\nd.update(P(), b=3, **{'c': 4})\nresult = [dict(P(), a=0), d]",
+    "ctor_iter_keywords_fails": "class G:\n    def __iter__(s):\n        for _ in (): pass\n        yield 'a', 1\n        raise LookupError('g')\n"
+                                "d = {}\ntry: d.update(G(), z=1)\nexcept LookupError: pass\nresult = d",
     "ctor_two_positional": 'result = dict({}, {})',
     "fromkeys": "result = (dict.fromkeys('ab'), dict.fromkeys([1, 2], 0), type(Missing.fromkeys('a')).__name__)",
     "fromkeys_shared": "d = dict.fromkeys('ab', [])\nd['a'].append(1)\nresult = d",
