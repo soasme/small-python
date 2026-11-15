@@ -14505,6 +14505,7 @@ typedef struct {
     int id, compensating, method, keyed, descending, calls, phase, swapped, stage, fed, hints;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched, *wrap;
     SPYValue *keywords; /* dict()'s or dict.update()'s, merged after the source's items. */
+    SPYValue *call; /* A call's ** merge: the callee a duplicate keyword's error names (merge_keyword). */
     int updating, subset;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -14594,6 +14595,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->result) visit(b->consumer->result, data);
         if (b->consumer && b->consumer->callee) visit(b->consumer->callee, data);
         if (b->consumer && b->consumer->wrap) visit(b->consumer->wrap, data);
+        if (b->consumer && b->consumer->call) visit(b->consumer->call, data);
         if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
         if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
         if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
@@ -15380,7 +15382,9 @@ static SPYValue *function_str(SPYContext *c, SPYValue *f) {
     mem_free(text.data); spy_release(qualname); spy_release(module);
     return result;
 }
-static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
+/* Whether a call's keywords result already has key, the duplicate
+ * keyword's error raised then for callable; -1 on an error. */
+static int keyword_taken(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *callable) {
     if (map_find(result, key) >= 0) {
         /* As %V in _PyEval_FormatKwargsError: "function" when naming it fails. */
         SPYValue *name = function_str(c, callable);
@@ -15388,9 +15392,12 @@ static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValu
         SPYValue *text = stringify(c, key, 0);
         if (text) errorf(c, "TypeError", "%s got multiple values for keyword argument '%s'", name ? name->as.string.data : "function", text->as.string.data);
         spy_release(name); spy_release(text);
-        return -1;
+        return 1;
     }
-    return map_set(c, result, key, value);
+    return c->error_type[0] ? -1 : 0;
+}
+static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
+    return keyword_taken(c, result, key, callable) ? -1 : map_set(c, result, key, value);
 }
 /* The iterator of keys, what mapping source's keys() returned; a
  * TypeError when keys is not iterable names the method. */
@@ -15440,8 +15447,8 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
                 if (pass(c)) break;
                 SPYValue *key = iterator_next(c, iterator);
                 if (!key) break;
-                SPYValue *value = get_index(c, source, key);
-                int status = value ? (callable ? merge_keyword(c, result, key, value, callable) : map_set(c, result, key, value)) : -1;
+                SPYValue *value = callable && keyword_taken(c, result, key, callable) ? NULL : get_index(c, source, key);
+                int status = value ? map_set(c, result, key, value) : -1;
                 spy_release(key); spy_release(value);
                 if (status) break;
             }
@@ -23541,7 +23548,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     if (b.consumer) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee); spy_release(b.consumer->wrap);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
-        spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords);
+        spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords); spy_release(b.consumer->call);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
@@ -24525,6 +24532,21 @@ static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, S
     else if (source) length_hint(c, m, source);
     return 1;
 }
+/* A call's ** of a, which it takes, into its keywords for callee fn: a
+ * mapping whose keys or __getitem__ is Python merges on m as a display's
+ * ** does (extend_step), 1 when its consumer began; else here
+ * (extend_container), 0. */
+static NO_INLINE int keywords_merge(SPYContext *c, Machine *m, SPYValue *keywords, SPYValue *a, SPYValue *fn) {
+    SPYValue *keys = a->type == SPY_INSTANCE ? keys_function(c, a, &(int){0}) : NULL;
+    if (keys && (machine_function(c, keys) || getitem_function(c, a))) {
+        if (!extend_step(c, m, keywords, a, 0, 0)) return 0;
+        m->blocks[m->block_len - 1].consumer->call = spy_retain(fn);
+        return 1;
+    }
+    extend_container(c, keywords, a, fn, 0);
+    spy_release(a);
+    return 0;
+}
 /* list += source, both taken, when the machine takes source's items
  * (extend_step), but for an instance with __radd__, which comes first:
  * the list on m's stack, which they extend as list.extend does, 1 when
@@ -24970,7 +24992,9 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
     }
     if (s->keyed == KEY_ITEMS) {
         /* The merged mapping's value of the key it was fed: its Python
-         * __getitem__'s call, or found natively. */
+         * __getitem__'s call, or found natively; a call's duplicate
+         * keyword raises first. */
+        if (s->call && keyword_taken(c, s->result, s->item, s->call)) return NULL;
         SPYValue *function = getitem_function(c, s->mapping);
         if (function) {
             SPYValue *args[] = {spy_retain(s->mapping), spy_retain(s->item)};
@@ -31152,7 +31176,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_ARG) {
             a = machine_pop(m);
             SPYValue *keywords = m->stack[m->len - 1], *args = m->stack[m->len - 2], *fn = m->stack[m->len - 3];
-            if (ins->arg == N_MAPPING) extend_container(c, keywords, a, fn, 0);
+            if (ins->arg == N_MAPPING) {
+                int began = keywords_merge(c, m, keywords, a, fn);
+                a = NULL;
+                if (began) goto consume_generator;
+            }
             else if (ins->arg == N_KEYWORD) {
                 b = spy_string(c, n->text, strlen(n->text));
                 if (b) merge_keyword(c, keywords, b, a, fn);

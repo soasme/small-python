@@ -1107,6 +1107,18 @@ static const char *const programs[] = {
     "    return od2(**d), {**d, 'r': 3}, od2(**OI(q=2)), {**frozendict(s=1)}\n"
     "print(odd())\n",
 
+    "class OK:\n"
+    "    def keys(self): return ['a', 'b']\n"
+    "    def __getitem__(self, k): return [k]\n"
+    "def okw(*a, **kw): return a, kw\n"
+    "def ok():\n"
+    "    out = [okw(1, **OK(), c=2), okw(**OK(), **{'c': 3})]\n"
+    "    for bad in ({'a': 1}, {1: 2}):\n"
+    "        try: okw(**OK(), **bad)\n"
+    "        except TypeError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(ok())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

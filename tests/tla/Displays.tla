@@ -24,7 +24,7 @@ EXTENDS Naturals, Sequences, TLC
 SeqItems == {"plain", "true", "star", "empty", "bad"}
 DictItems == {"pair", "true_pair", "merge", "bad"}
 Cases == {"paren_same", "paren_yield", "empty", "tuple_needs_comma", "trailing_comma", "nested", "dict_unhashable",
-          "set_unhashable", "dict_late_unhashable", "dstar_keys_protocol", "dstar_keys_listed", "dstar_nested", "dstar_bad_keys", "dstar_subclass_entries", "star_generator_error",
+          "set_unhashable", "dict_late_unhashable", "dstar_keys_protocol", "dstar_keys_listed", "dstar_nested", "dstar_bad_keys", "dstar_subclass_entries", "call_dstar_twice", "call_dstar_nonstr", "star_generator_error",
           "star_bare", "dstar_in_list", "dstar_in_set", "list_identity"}
 Programs == [kind : {"list", "tuple", "set"}, items : UNION {[1..n -> SeqItems] : n \in 0..3}]
             \cup [kind : {"dict"}, items : UNION {[1..n -> DictItems] : n \in 0..3}]
@@ -99,6 +99,10 @@ Case(c) ==
       \* a merge inside a list and a tuple leaves each display in its place
       [] c = "dstar_nested" -> <<"ok", "[{'a': 'A'}, ({'a': 'A'}, 1)]", <<"'a'", "'A'", "'a'", "'A'", "1">>>>
       [] c = "dstar_subclass_entries" -> <<"ok", "({'q': 2}, {'k': 'K'})", <<>>>> \* own entries unless __iter__ is overridden
+      \* a call's merge reports a repeated keyword before reading its value,
+      \* and a key that is not a str once every ** has been merged (Calls)
+      [] c = "call_dstar_twice" -> <<"TypeError: f() got multiple values for keyword argument 'a'", <<>>, <<"'a'">>>>
+      [] c = "call_dstar_nonstr" -> <<"TypeError: keywords must be strings", <<>>, <<"2", "'a'", "'A'">>>>
       [] c = "dstar_bad_keys" -> <<"TypeError: M.keys() must return an iterable, not int", <<>>, <<>>>>
       [] c = "star_generator_error" -> <<"ValueError: mid", <<>>, <<"1">>>>
       [] c = "star_bare" -> <<"SyntaxError: can't use starred expression here", <<>>, <<>>>>

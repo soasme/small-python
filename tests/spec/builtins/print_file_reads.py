@@ -1,4 +1,4 @@
-# spec: PLS-315 19.3.31, 10.3.2
+# spec: PLS-315 19.3.31, 7.3.4
 # description: print reads its file's write before each write, and its
 # flush once, as any attribute read does: through a Python __getattr__
 # when the read fails, a property's getter, a Python __getattribute__,

@@ -190,6 +190,8 @@ Unreleased (0.10.0):
 - zip() and map() resume a generator after a str, bytes or dict iterable without nesting on the C stack
 - ** of a dict or frozendict subclass that keeps dict iteration merges its own entries, as dict() does,
   without calling its keys or __getitem__
+- a call's ** of a mapping with Python keys and __getitem__ runs without nesting on the C stack
+- a call's ** reports a repeated keyword before reading its value, and a non-str key after every ** merges
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.13, 27.1.10
+# spec: PLS-315 27.1.8, 27.1.6
 # description: zip() and map() of builtin iterables, a str, bytes, a dict,
 # a range or a list, before a generator take an item from each iterable
 # in order, then resume the generator for its item; the zip or map ends

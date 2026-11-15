@@ -1969,6 +1969,13 @@ int main(int argc, char **argv) {
                "def zipped_text():\n    return len(list(zip('abc', slow_items(3)))) + len(dict(zip(b'xy', slow_items(2))))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "zipped_text()", "zipped_text.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
+    /* So does a call's ** of a mapping's Python keys and __getitem__. */
+    execute(c, "class Spread:\n    def keys(self):\n        for i in range(3000): pass\n        return ['a', 'b']\n"
+               "    def __getitem__(self, k):\n        for i in range(3000): pass\n        return len(k) * 10\n"
+               "def spread(**kw): return kw['a'] + kw['b'] + len(kw)\n"
+               "def spreading():\n    return spread(**Spread())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "spreading()", "spreading.py"), SPY_STOP_STEPS, &pauses)) == 22 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
