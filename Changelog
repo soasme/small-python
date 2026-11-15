@@ -142,6 +142,7 @@ Unreleased (0.10.0):
 - a multi-dimensional memoryview's item at a tuple key calls its items' Python __index__ without nesting on
   the C stack
 - bytearray % calls an instance's Python methods without nesting on the C stack, the format exported meanwhile
+- str.format of a container field with a nested spec calls its items' Python __repr__ without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a

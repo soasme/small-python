@@ -1762,6 +1762,10 @@ int main(int argc, char **argv) {
                "    b.append(1)\n    return len(t) + len(b)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "arrayed()", "arrayed.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
+    /* And a container field's items' Python __repr__ before a nested spec. */
+    execute(c, "def spanned():\n    return len('{!r:>{}}{:{}}'.format([Shown()], 6, (Shown(),), ''))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "spanned()", "spanned.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

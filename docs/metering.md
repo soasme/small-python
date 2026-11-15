@@ -465,7 +465,8 @@ These run as machines on the heap, in one native activation of
   `str.format_map` of a dict call on each field's object, a nested
   spec's fields first, and the `__str__` and `__repr__` of a field's
   `!s`, `!r` or `!a` conversion, before its spec, nested or not, and its
-  items' `__repr__` for a list, tuple, dict, set or frozenset field;
+  items' `__repr__` for a list, tuple, dict, set or frozenset field,
+  also before a nested spec;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, also of a generic class, when
   the builtin `__build_class__` makes the class.

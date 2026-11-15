@@ -13111,7 +13111,7 @@ static int format_replacement(SPYContext *c, Buffer *out, const char *text, size
     if (object && args->suspend && (!expanding || depth == 2) && (converting == 's' || converting == 'r' || converting == 'a') &&
         (object->type == SPY_INSTANCE ? conversion_method(c, converting == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &object, found) &&
                                         (spy_release(found[0]), 1) :
-         !expanding && repr_container(object) && repr_items(c, converting == 's' ? c->types[SPY_STRING] : c->field_calls[0], object))) {
+         repr_container(object) && repr_items(c, converting == 's' ? c->types[SPY_STRING] : c->field_calls[0], object))) {
         args->pending = object; args->conversion = converting; args->resume = at;
         /* A nested spec follows the conversion, from resume to spec_end. */
         if (expanding) { args->resume = spec; args->spec_end = spec_end; args->pending_spec = NULL; return 3; }
@@ -36892,7 +36892,10 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
             spy_release(items[6]); items[6] = spy_none(c);
             spy_release(items[8]); items[8] = spy_string(c, "", 0);
             if (!spec || !items[8]) { spy_release(object); spy_release(spec); return NULL; }
-            if (!format_function(c, object)) {
+            if (!spec->as.string.len && repr_container(object) && repr_items(c, c->types[SPY_STRING], object)) {
+                /* A container by an empty spec converts as by !s. */
+                status = 3; format.conversion = 's'; format.spec_end = pos;
+            } else if (!format_function(c, object)) {
                 Buffer joined = {.ctx = c};
                 status = append(&joined, items[5]->as.string.data, items[5]->as.string.len) || format_append(c, &joined, object, spec);
                 spy_release(object); spy_release(spec);
@@ -36946,6 +36949,13 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
             spy_release(machine_pop(m)); spy_release(machine_pop(m));
             SPYValue *pending = items[10], *converted = convert_field(c, object, (int)format.conversion);
             items[10] = spy_none(c);
+            if (converted && pending->as.seq.items[0] == c->none) {
+                /* Its text is the object of the nested spec that follows. */
+                spy_release(items[6]); items[6] = converted;
+                spy_release(items[7]); items[7] = spy_retain(pending->as.seq.items[2]);
+                spy_release(object); spy_release(pending);
+                continue;
+            }
             SPYValue *formatted = converted ? format_call(c, converted, pending->as.seq.items[0]) : NULL;
             Buffer joined = {.ctx = c};
             SPYValue *done = format_finish(c, &joined, !formatted || append(&joined, items[5]->as.string.data, items[5]->as.string.len) ||

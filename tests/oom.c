@@ -505,6 +505,14 @@ static const char *const programs[] = {
     "    return t, b\n"
     "print(by())\n",
 
+    "class FV:\n"
+    "    def __repr__(self): return 'c\\xe9'\n"
+    "def fv():\n"
+    "    for _ in (): pass\n"
+    "    l = [FV()]; l.append(l)\n"
+    "    return '{!r:>{}}|{:{}}|{k!a:^{w}}'.format(l, 12, (FV(),), '', k={FV()}, w=9)\n"
+    "print(fv())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"
