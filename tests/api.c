@@ -2000,6 +2000,11 @@ int main(int argc, char **argv) {
                "    try: next(g.__anext__())\n    except StopIteration as e: return a + b + e.value + 5\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "asends()", "asends.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
+    /* So does the Python __eq__ of an item that bytes or a range is searched for. */
+    execute(c, "class Wants:\n    def __eq__(self, other):\n        for i in range(3000): pass\n        return other == b'k'\n"
+               "def wanted():\n    return (b'k' in [Wants(), Wants()]) + (range(1) in (Wants(),)) + 3\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "wanted()", "wanted.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

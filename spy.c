@@ -504,11 +504,10 @@ static void materialize_error(SPYContext *);
 static int subclass(SPYValue *, SPYValue *);
 static SPYValue *class_lookup(SPYValue *, const char *);
 static SPYValue *value_class(SPYContext *, SPYValue *);
+/* A class with a metaclass, whose special methods the metaclass supplies. */
 static ALWAYS_INLINE int metaclassed(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static int special_dispatch(SPYValue *);
-/* A class with a metaclass, whose special methods the metaclass supplies. */
-static int meta_class(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
 static int mapping_type(SPYContext *, SPYValue *);
 static SPYValue *super_new(SPYContext *, SPYValue *, SPYValue *);
 enum { R_LT, R_LE, R_EQ, R_NE, R_GT, R_GE };
@@ -9739,7 +9738,7 @@ static int set_index(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) 
     }
     SPYValue *base = builtin_base(c, v, "__setitem__", NULL);
     if (base) return set_index(c, base, key, item);
-    if (v->type == SPY_INSTANCE || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || meta_class(v)) {
+    if (v->type == SPY_INSTANCE || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || metaclassed(v)) {
         SPYValue *result = call_pair(c, v, "__setitem__", key, item);
         int status = result ? 0 : -1;
         spy_release(result); return status;
@@ -10605,9 +10604,12 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
 }
 static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
 static int pair_python(SPYContext *, SPYValue *, SPYValue *);
-/* A builtin scalar, or a class of no metaclass, whose == with another
- * calls no Python. */
-static int pure_operand(SPYValue *v) { return v->type <= SPY_STRING || (v->type == SPY_CLASS && !v->as.map.meta); }
+/* A builtin scalar, bytes, bytearray or range, or a class of no
+ * metaclass, whose == with another calls no Python. */
+static int pure_operand(SPYValue *v) {
+    return v->type <= SPY_STRING || v->type == SPY_COMPLEX || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY ||
+           v->type == SPY_RANGE || (v->type == SPY_CLASS && !v->as.map.meta);
+}
 /* Whether seq, a list or tuple, holds x, searched in place as list_contains
  * does: each item is held across a comparison that may change seq; -1 on
  * an error. For the machine, 2 instead at an item whose comparison with
@@ -12505,7 +12507,7 @@ static ALWAYS_INLINE int node_set_own(SPYContext *c, SPYValue *v, Node *n, SPYVa
 }
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     /* An instance's class, or a class's metaclass, may customize lookup. */
-    SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : meta_class(v) ? v->as.map.meta : NULL;
+    SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : metaclassed(v) ? v->as.map.meta : NULL;
     SPYValue *definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
     /* slot_tp_getattr_hook finds __getattr__ before the lookup runs and binds
      * it only after an AttributeError, so the lookup cannot change it. */
@@ -13007,7 +13009,7 @@ static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
     /* A user __format__ receives a str subclass spec itself; builtin formatting, its text. */
     SPYValue *text = builtin_value(c, spec, SPY_STRING);
     if (base) return text && !text->as.string.len ? conversion(c, value, 0) : format_builtin(c, base, value, text ? text : spec);
-    if (value->type == SPY_INSTANCE || meta_class(value)) {
+    if (value->type == SPY_INSTANCE || metaclassed(value)) {
         SPYValue *method = special_method(c, value, "__format__");
         if (method) {
             SPYValue *result = call(c, method, 1, &spec);
@@ -14410,7 +14412,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
 static int attribute_write_hook(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     const char *hook = value ? "__setattr__" : "__delattr__";
     /* An instance's class, or a class's metaclass, may customize assignment. */
-    SPYValue *owner = object->type == SPY_INSTANCE ? object->as.map.parent : meta_class(object) ? object->as.map.meta : NULL;
+    SPYValue *owner = object->type == SPY_INSTANCE ? object->as.map.parent : metaclassed(object) ? object->as.map.meta : NULL;
     SPYValue *definition = owner ? class_lookup(owner, hook) : NULL;
     if (!definition || (value ? default_hook(definition, B_OBJECT_SETATTR, B_TYPE_SETATTR) :
                         default_hook(definition, B_OBJECT_DELATTR, B_TYPE_DELATTR))) return 0;
@@ -16044,7 +16046,7 @@ static SPYValue *unary(SPYContext *c, int op, SPYValue *a) {
     if (base) return unary(c, op, base);
     if (a->type == SPY_INSTANCE) return call_special(c, a, special, 0, NULL);
     /* A class's operator comes from its metaclass. */
-    if (meta_class(a)) {
+    if (metaclassed(a)) {
         SPYValue *method = special_method(c, a, special);
         if (method) { SPYValue *result = call(c, method, 0, NULL); spy_release(method); return result; }
         if (c->error_type[0]) return NULL;
@@ -20618,7 +20620,7 @@ static SPYValue *raise_fixed(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *bound_function(SPYContext *, SPYValue *);
 /* The Python __call__ of exception class cls's metaclass, borrowed, or NULL. */
 static SPYValue *meta_called(SPYContext *c, SPYValue *cls) {
-    return cls->type == SPY_CLASS && meta_class(cls) && subclass(cls, c->exceptions[X_BASE_EXCEPTION]) ? bound_function(c, cls) : NULL;
+    return cls->type == SPY_CLASS && metaclassed(cls) && subclass(cls, c->exceptions[X_BASE_EXCEPTION]) ? bound_function(c, cls) : NULL;
 }
 /* raise_exception on m: the call of raised with an exception not of it
  * runs its metaclass's Python __call__, or its Python __new__ and then
@@ -21633,7 +21635,7 @@ static void deletion_error(SPYContext *c, SPYValue *object, SPYValue *key) {
     int sequence = 0;
     switch (object->type) {
     case SPY_INSTANCE: sequence = 1; break;
-    case SPY_CLASS: sequence = meta_class(object); break; /* its metaclass is a heap type */
+    case SPY_CLASS: sequence = metaclassed(object); break; /* its metaclass is a heap type */
     case SPY_STRING: case SPY_BYTES: case SPY_TUPLE: case SPY_RANGE: case SPY_SET: case SPY_FROZENSET: case SPY_FROZENDICT:
     case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: case SPY_MAPPINGPROXY: case SPY_MEMORYVIEW: sequence = 1; break;
     default: break;
@@ -21653,7 +21655,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
     if (object->type == SPY_BYTEARRAY) return bytearray_set(c, object, key, NULL);
     {
         {
-            if (object->type == SPY_INSTANCE || object->type == SPY_FRAME_LOCALS || object->type == SPY_MEMORYVIEW || meta_class(object)) {
+            if (object->type == SPY_INSTANCE || object->type == SPY_FRAME_LOCALS || object->type == SPY_MEMORYVIEW || metaclassed(object)) {
                 SPYValue *method = special_method(c, object, "__delitem__");
                 if (method) spy_release(call(c, method, 1, &key));
                 else if (!c->error_type[0]) deletion_error(c, object, key);
@@ -24179,7 +24181,7 @@ static int is_builtin(SPYValue *, int);
  * own: calling cls is calling that builtin, then cls of its result
  * (consume), the instance no earlier seen. */
 static SPYValue *built_type(SPYContext *c, SPYValue *cls) {
-    if (cls->type != SPY_CLASS || builtin_class(c, cls) || meta_class(cls) || !cls->as.map.mro) return NULL;
+    if (cls->type != SPY_CLASS || builtin_class(c, cls) || metaclassed(cls) || !cls->as.map.mro) return NULL;
     SPYValue *mro = cls->as.map.mro;
     for (size_t i = 0; i < mro->as.seq.len; i++) {
         SPYValue *base = mro->as.seq.items[i];
@@ -25435,7 +25437,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
 static SPYValue *bound_function(SPYContext *c, SPYValue *v) {
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function :
                          v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__call__") :
-                         meta_class(v) ? class_lookup(v->as.map.meta, "__call__") : NULL;
+                         metaclassed(v) ? class_lookup(v->as.map.meta, "__call__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether callee calls a function on the machine with its self
@@ -37344,7 +37346,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *b = argv[1], *modulus = argc == 3 && argv[2]->type != SPY_NONE ? argv[2] : NULL;
         if (!modulus) return binary(c, T_POW, a, b);
         SPYValue *operands[] = {a, b, modulus};
-        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
+        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) {
             SPYValue *result = binary_special(c, operator_of(T_POW), a, b, modulus);
             if (result || c->error_type[0]) return result;
             if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
@@ -37366,7 +37368,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     case B_DIVMOD: {
         if (argc != 2) goto arity;
         SPYValue *b = argv[1];
-        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
+        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) {
             SPYValue *result = binary_special(c, &divmod_operator, a, b, NULL);
             if (result || c->error_type[0]) return result;
         }
@@ -37502,8 +37504,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         /* An iterator subclass's instance without its own __next__. */
         SPYValue *carried = a->type == SPY_INSTANCE ? builtin_base(c, a, "__next__", NULL) : NULL;
         if (carried && carried->type == SPY_ITERATOR) a = carried;
-        if (a->type == SPY_INSTANCE || meta_class(a) || a->type == SPY_GENERATOR || a->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(a)) {
-            SPYValue *value = a->type == SPY_INSTANCE || meta_class(a) || awaitable_iterator(a) ? call_special(c, a, "__next__", 0, NULL) :
+        if (a->type == SPY_INSTANCE || metaclassed(a) || a->type == SPY_GENERATOR || a->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(a)) {
+            SPYValue *value = a->type == SPY_INSTANCE || metaclassed(a) || awaitable_iterator(a) ? call_special(c, a, "__next__", 0, NULL) :
                 generator_send(c, a->type == SPY_COROUTINE_ITERATOR ? a->as.iterator.source : a, NULL, NULL);
             if (!value && argc == 2 && error_is(c, "StopIteration")) { spy_clear_error(c); return spy_retain(argv[1]); }
             return value;
@@ -37726,7 +37728,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (is_int(a)) return a->type == SPY_BOOL ? spy_int(c, a->as.integer_data.small) : spy_retain(a);
             return integer_from_double(c, a->as.real);
         }
-        if (a->type == SPY_INSTANCE || meta_class(a)) {
+        if (a->type == SPY_INSTANCE || metaclassed(a)) {
             /* A subclass result stands for its value (the DeprecationWarning
              * goes to HostWarn, which spy does not provide). */
             const char *name = id == B_INT ? "__int__" : "__float__";
@@ -37765,7 +37767,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     if (argc != 1) goto arity;
     if (id == B_REPR) return conversion(c, a, 1);
-    if (id == B_ABS && argc == 1 && (a->type == SPY_INSTANCE || meta_class(a))) {
+    if (id == B_ABS && argc == 1 && (a->type == SPY_INSTANCE || metaclassed(a))) {
         SPYValue *base = builtin_base(c, a, "__abs__", NULL);
         if (!base) return call_special(c, a, "__abs__", 0, NULL);
         a = base;

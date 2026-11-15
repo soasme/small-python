@@ -1166,6 +1166,14 @@ static const char *const programs[] = {
     "    return d[1], 1 in d, 3 in s, 4 not in s, {OE(5): 0, 5: 1}, {OE(6), 6}, frozenset(s) >= {3}\n"
     "print(oe())\n",
 
+    "class BE:\n"
+    "    def __eq__(self, o):\n"
+    "        for _ in (): pass\n"
+    "        return o == b'k'\n"
+    "def be():\n"
+    "    return b'k' in [1, BE()], bytearray(b'k') in (BE(),), range(1) not in [BE()], 1j in [BE()]\n"
+    "print(be())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
