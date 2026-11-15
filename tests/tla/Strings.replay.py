@@ -76,6 +76,8 @@ SOURCES = {
     "count_range": "result = ('aaaa'.count('a', 1, 3), 'aaaa'.count('', 1, 3), 'abab'.count('ab', -2), 'a'.count('', 5))",
     "find_range": "result = ('abcabc'.find('c', 3), 'abcabc'.find('c', 3, 5), 'abc'.find('', 4), 'abc'.find('', 3), 'abc'.rfind('', 1, 2))",
     "find_in_operator": "result = ('Py' in 'Python', '' in 'abc')",
+    "find_bound_index": "log = []\nclass I:\n    def __init__(s, v): s.v = v\n    def __index__(s):\n        log.append(s.v)\n        return s.v\nresult = ('abcabc'.find('c', I(3), I(6)), 'abcabc'.startswith('b', I(1), None), b'abc'.count(b'b', None, I(2)), log)",
+    "find_needle_first": "log = []\nclass I:\n    def __init__(s, v): s.v = v\n    def __index__(s):\n        log.append(s.v)\n        return s.v\ntry: 'abc'.find(1, I(7))\nexcept TypeError as e: result = (str(e), log)",
     "index_error": "result = 'abc'.index('d')",
     "rindex_error": "result = 'abc'.rindex('d')",
     "startswith_tuple": "result = ('abc'.startswith(('x', 'ab')), 'abc'.endswith(('c',), 0, 2), 'abc'.startswith('', 3), 'abc'.startswith('', 4))",

@@ -13468,6 +13468,9 @@ static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t
         spy_release(needle); return result;
     }
 search:;
+    /* A str's needle is refused before its bounds are converted. */
+    if (self->type == SPY_STRING && !tail && !builtin_value(c, argv[0], SPY_STRING))
+        return errorf(c, "TypeError", "%s() argument 1 must be str, not %s", name, argv[0]->type == SPY_NONE ? "None" : type_name(argv[0]));
     int64_t start = 0, end = INT64_MAX;
     if (argc > 1 && argv[1]->type != SPY_NONE && search_bound(c, argv[1], &start)) return NULL;
     if (argc > 2 && argv[2]->type != SPY_NONE && search_bound(c, argv[2], &end)) return NULL;
@@ -13502,8 +13505,6 @@ search:;
                     return errorf(c, "TypeError", "tuple for %s must only contain str, not %s", name, type_name(part));
                 if (choices) return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(part));
                 if (tail) return errorf(c, "TypeError", "%s first arg must be %s or a tuple of %s, not %s", name, what, what, type_name(part));
-                if (self->type == SPY_STRING)
-                    return errorf(c, "TypeError", "%s() argument 1 must be str, not %s", name, part->type == SPY_NONE ? "None" : type_name(part));
                 return errorf(c, "TypeError", "argument should be integer or bytes-like object, not '%s'", type_name(part));
             }
             needle = text->as.string.data; size = text->as.string.len;
@@ -26473,15 +26474,28 @@ static SPYValue *abstract_from(SPYContext *c, Machine *m, int sub, SPYValue *a, 
 }
 static SPYValue *index_bytes(SPYContext *, SPYValue *, SPYValue *, const char *);
 static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The bounds, as a mask (index_arguments), of search method number method
+ * of seq with argc arguments argv: a str's or bytes' start and end, a str's
+ * needle a str unless it is startswith() or endswith(), or a list's or
+ * tuple's index(); else 0. */
+static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t argc, SPYValue *const *argv) {
+    if (argc < 2 || argc > 3) return 0;
+    int text = method >= M_STARTSWITH && method <= M_STRING_COUNT && (seq->type == SPY_BYTES ||
+        (seq->type == SPY_STRING && (method <= M_ENDSWITH || builtin_value(c, argv[0], SPY_STRING))));
+    int items = method == M_INDEX && (seq->type == SPY_LIST || seq->type == SPY_TUPLE);
+    return text || items ? 6u & ((1u << argc) - 1) : 0;
+}
 /* The arguments that a call of callee, method number method of it or -1,
  * or of a bound method's, with argc arguments argv, converts first by
  * __index__, in turn, as a
  * mask, when one of them is an instance (indexed_call): all of range()'s,
- * a list's pop() and insert() index, and the size of bytes() of a plain
+ * a list's pop() and insert() index, a search's bounds (search_bounds),
+ * and the size of bytes() of a plain
  * instance with __index__ and without __bytes__ or of bytearray(); else 0. */
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
-    unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) :
+    unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
+                                  1 : search_bounds(c, callee, method, argc, argv) :
                     callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
                     argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
@@ -26503,7 +26517,9 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
             release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
             return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(item)}, index_argued, state) : NULL;
         }
-        if (mask >> i & 1 && !builtin_value(c, item, SPY_INT)) break;
+        /* A str's or bytes' search bound may be None. */
+        if (mask >> i & 1 && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE ||
+            (callee->type != SPY_STRING && callee->type != SPY_BYTES))) break;
     }
     return method >= 0 ? call_native_method(c, callee, method, name, args->as.seq.len, args->as.seq.items) :
            call(c, callee, args->as.seq.len, args->as.seq.items);

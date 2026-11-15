@@ -20,6 +20,9 @@
 (* keeping a leading sign first; and the case mappings, character-class    *)
 (* predicates, expandtabs, splitlines, join, maketrans, translate, and     *)
 (* encode behave as the chapter describes, with CPython's argument errors. *)
+(* A search's start and end may be None or an instance whose Python        *)
+(* __index__ gives them, converted in turn, start first, after find's,     *)
+(* index's and count's needle is checked.                                  *)
 (*                                                                         *)
 (* A program calls a search, split, replace, affix, or strip method on     *)
 (* every string s of up to three characters from a, b, and space, with     *)
@@ -135,7 +138,7 @@ Cases == {"capitalize", "casefold", "lower_upper", "final_sigma", "swapcase", "t
           "maketrans_three", "maketrans_unequal", "maketrans_bad_key", "translate",
           "translate_lookup_error", "translate_bad_value", "translate_ord_value", "encode", "encode_error",
           "encode_unknown", "encode_unicode_escape", "count_range", "find_range", "find_in_operator",
-          "index_error", "rindex_error",
+          "index_error", "rindex_error", "find_bound_index", "find_needle_first",
           "startswith_tuple", "startswith_bad", "startswith_tuple_bad", "strip_examples",
           "lstrip_vs_removeprefix", "strip_none", "strip_bad", "replace_count_keyword", "zfill_examples",
           "center_bad_fill", "ljust_bad_fill", "center_index_width", "center_float_width",
@@ -201,6 +204,8 @@ Case(c) ==
       [] c = "count_range" -> "(2, 3, 1, 0)"
       [] c = "find_range" -> "(5, -1, -1, 3, 2)"
       [] c = "find_in_operator" -> "(True, True)"
+      [] c = "find_bound_index" -> "(5, True, 1, [3, 6, 1, 2])"
+      [] c = "find_needle_first" -> "('find() argument 1 must be str, not int', [])"
       [] c = "index_error" -> "ValueError: substring not found"
       [] c = "rindex_error" -> "ValueError: substring not found"
       [] c = "startswith_tuple" -> "(True, False, True, False)"
