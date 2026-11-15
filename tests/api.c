@@ -2155,6 +2155,11 @@ int main(int argc, char **argv) {
                "def chained():\n    class K(metaclass=Slotted):\n        a = b = c = 1\n        del a, b\n    return K.c + len([k for k in vars(K) if len(k) == 1])\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "chained()", "chained.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 4);
+    /* And a handler's name, stored, then None, then deleted. */
+    execute(c, "def handled():\n    class K(metaclass=Slotted):\n        try: 1/0\n        except ZeroDivisionError as e: x = 3\n"
+               "    return K.x + ('e' in vars(K))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "handled()", "handled.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

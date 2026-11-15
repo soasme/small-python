@@ -1384,6 +1384,16 @@ static const char *const programs[] = {
     "    return sorted(k for k in vars(K) if not k.startswith('__'))\n"
     "print(cn())\n",
 
+    "class HN(dict):\n"
+    "    def __setitem__(s, k, v):\n"
+    "        dict.__setitem__(s, k, (k, v is None))\n"
+    "def hn():\n"
+    "    ns = HN()\n"
+    "    exec('for i in range(2):\\n    try: 1/0\\n    except ZeroDivisionError as e: continue\\n'\n"
+    "         'try: raise ExceptionGroup(\"g\", [KeyError(1)])\\nexcept* KeyError as k: del k\\n', {}, ns)\n"
+    "    return sorted(ns)\n"
+    "print(hn())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

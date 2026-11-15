@@ -14525,7 +14525,9 @@ typedef struct { const void *step; int op, arg; uint32_t target, other; Node *no
 /* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
 /* namespace: a class body's, whose loops store their names by BC_STORE,
  * which may call its namespace's __setitem__. */
-struct Program { Instruction *items; size_t len, cap; int calls, display, namespace; };
+/* unbinds: a class or module body's, whose handlers unbind their names by
+ * instructions, through a namespace mapping (15.4.1). */
+struct Program { Instruction *items; size_t len, cap; int calls, display, namespace, unbinds; };
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -15244,9 +15246,13 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_STAR_BEGIN, n, 0);
             for (Node *h = n->args; h; h = h->next) {
                 compile_expr(c, p, h->a);
-                size_t match = emit(c, p, BC_STAR_MATCH, h, 0);
+                /* As a namespace's except handler (BC_MATCH 2). */
+                int unbinds = p->unbinds && h->c;
+                size_t match = emit(c, p, BC_STAR_MATCH, h, unbinds);
+                if (unbinds) emit(c, p, BC_STORE, h->c, 1);
                 compile_body(c, p, h->b);
-                size_t done = emit(c, p, BC_STAR_DONE, h, 0);
+                if (unbinds) { emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_STORE, h->c, 1); emit(c, p, BC_DELETE, h->c, 3); emit(c, p, BC_POP, NULL, 0); }
+                size_t done = emit(c, p, BC_STAR_DONE, h, unbinds);
                 if (match != SIZE_MAX) p->items[match].other = p->len;
                 emit(c, p, BC_STAR_CAUGHT, h, 0);
                 patch(p, match, p->len); patch(p, done, p->len);
@@ -15269,8 +15275,15 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         size_t first = p->len;
         for (Node *h = n->args; h; h = h->next) {
             if (h->a) compile_expr(c, p, h->a);
-            branch = emit(c, p, BC_MATCH, h, h->a != NULL);
-            compile_body(c, p, h->b); emit(c, p, BC_POP_BLOCK, NULL, 0);
+            /* A namespace's handler stores its name, and ends by name =
+             * None and del name, by instructions (BC_MATCH 2 leaves the
+             * exception; name_delete). */
+            int unbinds = p->unbinds && h->c;
+            branch = emit(c, p, BC_MATCH, h, (h->a != NULL) | unbinds << 1);
+            if (unbinds) emit(c, p, BC_STORE, h->c, 1);
+            compile_body(c, p, h->b);
+            if (unbinds) { emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_STORE, h->c, 1); emit(c, p, BC_DELETE, h->c, 3); emit(c, p, BC_POP, NULL, 0); }
+            emit(c, p, BC_POP_BLOCK, NULL, 0);
             emit(c, p, BC_JUMP, NULL, 1); patch(p, branch, p->len);
         }
         if (n->args) emit(c, p, BC_RERAISE, NULL, 0);
@@ -15362,7 +15375,7 @@ static int compile_generator(SPYContext *c, Node *n) {
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = mode; p->namespace = n->kind == N_CLASS;
+    p->calls = mode; p->namespace = p->unbinds = n->kind == N_CLASS;
     if (generator) n->code = p;
     else n->flat = p;
     c->code_work++;
@@ -22453,7 +22466,7 @@ static int module_program(SPYContext *c, SPYValue *unit) {
     if (unit->as.unit.flat) return 0;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = c->pausing ? PAUSING : BODY; p->display = unit->as.unit.expression == 2;
+    p->calls = c->pausing ? PAUSING : BODY; p->display = unit->as.unit.expression == 2; p->unbinds = 1;
     /* The body's value is its last statement's, when that is an expression. */
     Node *body = unit->as.unit.body, *last = body;
     while (last->next) last = last->next;
@@ -23654,6 +23667,9 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     if (b.kind == BLOCK_HANDLER || b.kind == BLOCK_CLEANUP) {
         spy_release(c->handled); c->handled = b.handled; b.handled = NULL;
         if (b.name) {
+            /* A namespace's handler left early by break, continue or
+             * return also stores None first (15.4.1). */
+            if (!c->error_type[0] && f->env->type == V_ENV && f->env->as.map.namespace) store_target(c, f, b.name, c->none);
             clear_binding(c, f->env, b.name->text);
         }
     }
@@ -29615,10 +29631,13 @@ static SPYValue *name_deleted(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(result);
     return spy_none(c);
 }
-/* BC_DELETE 3: del of name n in a class body, whose namespace's Python
+/* BC_DELETE 3: del of name n in a class or module body, whose namespace's Python
  * __delitem__ is m's call (callk, name_deleted); else delete_target's.
  * None, or NULL. */
 static NO_INLINE SPYValue *name_delete(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    /* A handler's own del of its name leaves nothing for its block's end (pop_block). */
+    Block *top = m->block_len ? &m->blocks[m->block_len - 1] : NULL;
+    if (top && top->name == n) top->name = NULL;
     SPYValue *owner = binding_env(c, f->env, name_of(n->text)), *namespace = owner->as.map.namespace;
     SPYValue *function = namespace && namespace->type != SPY_DICT && owner->as.map.flags != 3 ? store_function(c, namespace, "__delitem__") : NULL;
     if (!function) return delete_target(c, f, n) ? NULL : spy_none(c);
@@ -31934,11 +31953,13 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_FINALLY) push_block(c, m, BLOCK_FINALLY, ins); break;
         CASE(BC_MATCH) {
             Block *block = &m->blocks[m->block_len - 1];
-            a = ins->arg ? machine_pop(m) : NULL;
+            a = ins->arg & 1 ? machine_pop(m) : NULL;
             int match = a ? exception_matches(c, block->error->value, a) : 1;
             if (!match) pc = ins->target;
             else if (match > 0 && n->c) {
-                block->name = n->c; store_target(c, &f, n->c, block->error->value);
+                block->name = n->c;
+                if (ins->arg & 2) machine_push(c, m, spy_retain(block->error->value));
+                else store_target(c, &f, n->c, block->error->value);
             }
             break;
         }
@@ -31961,7 +31982,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             Block *inner = push_block(c, m, BLOCK_EXCEPT, ins);
             if (!inner) { spy_release(match); break; }
             inner->target = ins->other;
-            if (n->c) store_target(c, &f, n->c, match);
+            if (ins->arg) machine_push(c, m, spy_retain(match));
+            else if (n->c) store_target(c, &f, n->c, match);
             spy_release(c->handled); c->handled = match;
             break;
         }
@@ -31969,7 +31991,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             Block *inner = &m->blocks[m->block_len - 1];
             SPYValue *raised = ins->op == BC_STAR_CAUGHT && inner->error ? spy_retain(inner->error->value) : NULL;
             pop_block(c, m, &f);
-            if (n->c) clear_binding(c, f.env, n->c->text);
+            /* A namespace's handler unbound its name itself. */
+            if (n->c && !(ins->op == BC_STAR_DONE && ins->arg)) clear_binding(c, f.env, n->c->text);
             Block *outer = &m->blocks[m->block_len - 1];
             if (raised) sequence_append(c, outer->value->as.seq.items[1], raised);
             spy_release(raised);
