@@ -499,6 +499,19 @@ static const char *const programs[] = {
     "    return r\n"
     "print(ar())\n",
 
+    "class MV:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __index__(self): return self.n\n"
+    "def mv():\n"
+    "    b = bytearray(b'abc'); m = memoryview(b); g = m.cast('B', (1, 3))\n"
+    "    m[MV(0)] = 65; b[MV(1)] = 66\n"
+    "    r = [m[MV(2)], bytes(b), m[MV(0):MV(2)].tobytes()]\n"
+    "    for f in (lambda: g[MV(0)], lambda: m[MV(10 ** 30)], lambda: m[MV('x')]):\n"
+    "        try: f()\n"
+    "        except (NotImplementedError, IndexError, TypeError) as e: r.append(e)\n"
+    "    return r\n"
+    "print(mv())\n",
+
     "class DX:\n"
     "    def __dir__(self): return iter(('q', 'p'))\n"
     "    def __index__(self): return True\n"

@@ -72,6 +72,27 @@ def reenter(p):
     return m.hex(Sep(b":"))
 
 
+class Key:
+    def __init__(self, log): self.log = log
+    def __index__(self):
+        for _ in (): pass
+        self.log.append("index")
+        return 1
+
+
+def index(p, log):
+    m = memoryview(bytearray(b"ab"))
+    view = p["view"]
+    if view == "released": m.release()
+    elif view == "readonly": m = m.toreadonly()
+    elif view == "zero": m = memoryview(bytearray(b"a")).cast("B", ())
+    elif view == "grid": m = m.cast("B", (1, 2))
+    if not p["store"]:
+        return repr(m[Key(log)])
+    m[Key(log)] = 66
+    return repr(bytes(m.obj))
+
+
 def outcome(p):
     log = []
     try:
@@ -81,9 +102,11 @@ def outcome(p):
             result = resize(p)
         elif p["part"] == "reenter":
             result = reenter(p)
+        elif p["part"] == "index":
+            result = index(p, log)
         else:
             result = repr(memoryview(object()))
-    except (TypeError, BufferError, ValueError) as error:
+    except (TypeError, BufferError, ValueError, NotImplementedError) as error:
         result = type(error).__name__
     return " ".join(log + [result])
 

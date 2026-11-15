@@ -13243,6 +13243,7 @@ static size_t find_bytes(SPYContext *c, const char *text, size_t length, const c
     return found;
 }
 static int memory_check(SPYContext *, SPYValue *);
+static SPYValue *memory_slice(SPYContext *, SPYValue *, SPYValue *);
 static int memory_release(SPYContext *, SPYValue *);
 static SPYValue *memory_bytes(SPYContext *, SPYValue *);
 static SPYValue *method_arity(SPYContext *, const char *, const char *, size_t, size_t, size_t);
@@ -27203,11 +27204,15 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     spy_release(x); spy_release(y);
     return m;
 }
-/* The Python __index__ of key as the index of list object's method name,
- * object's own or its base's (builtin_base); else NULL. */
+/* The Python __index__ of key as the index of method name of list or
+ * bytearray object, object's own or its base's (builtin_base), or of a
+ * store into a one-dimensional writable memoryview, which checks those
+ * first; else NULL. */
 static SPYValue *list_index(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
     SPYValue *base = object->type == SPY_INSTANCE ? builtin_base(c, object, name, NULL) : object;
-    return base && base->type == SPY_LIST ? index_function(c, key) : NULL;
+    if (base && base->type == SPY_MEMORYVIEW)
+        return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ? index_function(c, key) : NULL;
+    return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_function(c, key) : NULL;
 }
 /* The Python __index__ of key, the index of a store to or a deletion
  * from list operands[0], owned, with its env, to enter on m (CALL_INDEX)
@@ -27374,10 +27379,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     }
     /* A builtin sequence's item: an instance key's Python __index__ first,
      * or a slice's part's (slice_part), the item then of its int
-     * (operator_returned). */
+     * (operator_returned); a memoryview's, released or of no dimension,
+     * fails first. */
     SPYValue *part;
     if (kind == OPERATE_INDEX && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_STRING ||
-        x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE) &&
+        x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE ||
+        (x->type == SPY_MEMORYVIEW && !x->as.memory.released && x->as.memory.ndim)) &&
         (function = index_function(c, part = y->type == SPY_SLICE ? slice_part(c, y) : y)) && !operator_push(c, m, x, y, OPERATOR_INDEX)) {
         *env = function_env(c, function, 1, &part, NULL, 0);
         return *env ? spy_retain(function) : NULL;
@@ -27703,6 +27710,9 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             /* An item's index, or a repetition's count, fits a Py_ssize_t
              * as the operand's. */
             result = errorf(c, kind == OPERATE_INDEX ? "IndexError" : "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(y));
+        } else if (key && x->type == SPY_MEMORYVIEW && key->type == SPY_SLICE) {
+            /* The view was checked before the parts' calls (memory_slice). */
+            result = c->error_type[0] ? NULL : memory_slice(c, x, key);
         } else result = key && !c->error_type[0] ? operation(c, ins, x, key) : NULL;
         spy_release(key);
     } else if (op == O_IN || op == O_NOTIN) {
@@ -34202,6 +34212,19 @@ static int memory_multi_key(SPYValue *key, int slices) {
     for (size_t i = 0; i < key->as.seq.len; i++) if ((key->as.seq.items[i]->type == SPY_SLICE) != slices && (slices || !is_int(key->as.seq.items[i]))) return 0;
     return 1;
 }
+/* The view of slice key of view m, of a dimension or more, checked as
+ * unreleased before key's parts converted. */
+static SPYValue *memory_slice(SPYContext *c, SPYValue *m, SPYValue *key) {
+    Slice slice;
+    SliceBounds bounds;
+    if (slice_bounds(c, key, &bounds) || slice_adjust(c, &bounds, (size_t)memory_shape(m)[0], &slice)) return NULL;
+    SPYValue *view = memory_copy(c, m, m->as.memory.ndim);
+    if (!view) return NULL;
+    view->as.memory.offset += (ptrdiff_t)slice.start * memory_strides(m)[0];
+    memory_shape(view)[0] = (ptrdiff_t)slice.count;
+    memory_strides(view)[0] *= (ptrdiff_t)slice.step;
+    return view;
+}
 static SPYValue *memory_subscript(SPYContext *c, SPYValue *m, SPYValue *key) {
     if (memory_check(c, m)) return NULL;
     if (m->as.memory.ndim == 0) {
@@ -34209,19 +34232,16 @@ static SPYValue *memory_subscript(SPYContext *c, SPYValue *m, SPYValue *key) {
         if (key->type == SPY_ELLIPSIS) return spy_retain(m);
         return spy_error(c, "TypeError", "invalid indexing of 0-dim memory");
     }
-    if (key->type == SPY_SLICE) {
-        Slice slice;
-        SliceBounds bounds;
-        if (slice_bounds(c, key, &bounds) || slice_adjust(c, &bounds, (size_t)memory_shape(m)[0], &slice)) return NULL;
-        SPYValue *view = memory_copy(c, m, m->as.memory.ndim);
-        if (!view) return NULL;
-        view->as.memory.offset += (ptrdiff_t)slice.start * memory_strides(m)[0];
-        memory_shape(view)[0] = (ptrdiff_t)slice.count;
-        memory_strides(view)[0] *= (ptrdiff_t)slice.step;
-        return view;
-    }
+    if (key->type == SPY_SLICE) return memory_slice(c, m, key);
     if (is_int(key) || (key->type != SPY_TUPLE && special_dispatch(key) && class_lookup(value_class(c, key), "__index__"))) {
-        if (m->as.memory.ndim > 1) return spy_error(c, "NotImplementedError", "multi-dimensional sub-views are not implemented");
+        if (m->as.memory.ndim > 1) {
+            /* The index converts first, its bounds unchecked. */
+            SPYValue *index = index_object(c, key);
+            int fits = index && !index->as.integer_data.big;
+            spy_release(index);
+            if (index && !fits) return errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key));
+            return !index || memory_check(c, m) ? NULL : spy_error(c, "NotImplementedError", "multi-dimensional sub-views are not implemented");
+        }
         ptrdiff_t at;
         return memory_full_index(c, m, key, &at) ? NULL : memory_unpack(c, memory_code(m), memory_data(m) + at);
     }
