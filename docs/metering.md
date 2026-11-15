@@ -471,9 +471,9 @@ These run as machines on the heap, in one native activation of
   `__getitem__` and a dictionary
   subclass's `__missing__` for an absent `None`, `bool`, `int`, `float`
   or `str` key, or a tuple key that holds no instance, and the `__eq__` that `in` a list or tuple, or an
-  iterator over one, calls on its items, of an instance or of a `None`,
-  `bool`, `int`, `float`, `str`, `complex`, `bytes`, `bytearray` or `range`
-  after such items, unless it is inside a
+  iterator over one, calls on its items, of an instance, or of a builtin
+  value after `None`, `bool`, `int`, `float`, `str`, `complex`, `bytes`,
+  `bytearray` or `range` items, unless it is inside a
   comparison chain, the `__eq__` that `==` or `!=` of two lists or two
   tuples, also in a comparison chain, calls on their items, of an instance
   after identical items, equal `None`, `bool`, `int`, `float` or `str`

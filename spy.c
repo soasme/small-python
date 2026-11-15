@@ -10605,7 +10605,8 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
 static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
 static int pair_python(SPYContext *, SPYValue *, SPYValue *);
 /* A builtin scalar, bytes, bytearray or range, or a class of no
- * metaclass, whose == with another calls no Python. */
+ * metaclass, whose == with a builtin value or such a class calls no
+ * Python. */
 static int pure_operand(SPYValue *v) {
     return v->type <= SPY_STRING || v->type == SPY_COMPLEX || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY ||
            v->type == SPY_RANGE || (v->type == SPY_CLASS && !v->as.map.meta);
@@ -10613,12 +10614,12 @@ static int pure_operand(SPYValue *v) {
 /* Whether seq, a list or tuple, holds x, searched in place as list_contains
  * does: each item is held across a comparison that may change seq; -1 on
  * an error. For the machine, 2 instead at an item whose comparison with
- * x, a pure operand, calls a Python __eq__ (python_item) after items that
- * are pure too, or with x, a list, tuple or dict, one of their items' or
- * an instance item's (pair_python); the machine compares those before it
- * again (contains_call). */
+ * x, neither an instance nor a class with a metaclass, calls a Python
+ * __eq__ (python_item) after pure items, or with x, a list, tuple or
+ * dict, one of their items' or an instance item's (pair_python); the
+ * machine compares those before it again (contains_call). */
 static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue *seq, int machine) {
-    int scalars = machine && pure_operand(x), pairs = machine && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_DICT);
+    int scalars = machine && x->type != SPY_INSTANCE && !metaclassed(x), pairs = machine && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_DICT);
     for (size_t i = 0; i < seq->as.seq.len; i++) {
         SPYValue *item = seq->as.seq.items[i];
         if (item == x) return 1;

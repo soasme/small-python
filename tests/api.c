@@ -2005,6 +2005,10 @@ int main(int argc, char **argv) {
                "def wanted():\n    return (b'k' in [Wants(), Wants()]) + (range(1) in (Wants(),)) + 3\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "wanted()", "wanted.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So does a set's, a slice's or a builtin function's. */
+    execute(c, "def valued():\n    return ({1} in [Wants()]) + (slice(1) in (Wants(),)) + (len not in [Wants()]) + 6\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "valued()", "valued.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

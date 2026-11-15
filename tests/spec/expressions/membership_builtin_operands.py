@@ -1,6 +1,7 @@
 # spec: PLS-315 7.8.3, 13.10
-# description: x in a list or tuple, x bytes, a bytearray, a complex or a
-# range, compares each item v with x as v == x in order: an instance item's
+# description: x in a list or tuple, x bytes, a bytearray, a complex, a
+# range, a set, a slice, a builtin function or another builtin value,
+# compares each item v with x as v == x in order: an instance item's
 # __eq__, which may loop, sees x itself, the first true result stops the
 # search, and items before it compare natively. Inside functions as at
 # module level, and in an if or while test.
@@ -26,10 +27,14 @@ def searches():
     if range(3) not in (Key(range(4)),): tests.append("not in")
     n = 0
     while complex(n) not in [Key(2j), Key(3)]: n += 1
-    return out + [tests, n, list(log)]
+    out += [tests, n, list(log)]
+    del log[:]
+    return out + [{1} in [1, "a", Key({1})], frozenset() not in (Key(frozenset()),), slice(1) in [Key(0)],
+                  len in [Key(len)], list(log)]
 
 expected = [True, True, False, True, False, ["bytes", "bytearray", "bytearray", "complex", "range", "bytes"],
-            ["in", "not in"], 3, ["bytes", "range"] + ["complex"] * 8]
+            ["in", "not in"], 3, ["bytes", "range"] + ["complex"] * 8,
+            True, False, False, True, ["set", "frozenset", "slice", "builtin_function_or_method"]]
 assert_eq(searches(), expected)
 
 def nested():
