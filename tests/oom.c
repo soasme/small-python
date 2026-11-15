@@ -702,6 +702,20 @@ static const char *const programs[] = {
     "    return s, max(s, key=repr), min(KB(3), KB(1), key=len)\n"
     "print(kb())\n",
 
+    "class FB:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __len__(self):\n"
+    "        if self.n < 0: raise KeyError('f')\n"
+    "        return self.n\n"
+    "    def __str__(self): return 's' * self.n\n"
+    "def fb():\n"
+    "    r = [x.n if isinstance(x, FB) else x for x in filter(len, [FB(1), '', FB(0), 'a'])]\n"
+    "    it = filter(len, [FB(-1), FB(2)])\n"
+    "    try: next(it)\n"
+    "    except KeyError: pass\n"
+    "    return r, next(it).n, [x.n for x in filter(str, [FB(0), FB(3)])]\n"
+    "print(fb())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

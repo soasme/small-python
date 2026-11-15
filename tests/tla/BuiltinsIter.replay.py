@@ -127,6 +127,9 @@ SOURCES = {
     "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"
                           "class W:\n    def m(s, v): return v % 2\n    def __call__(s, v): return -v\n"
                           "result = (sorted([1, 3, 2], key=R), sorted([1, 2, 3, 4], key=W().m), max([1, 3, 2], key=W()))",
+    "filter_builtin": "class F:\n    def __init__(s, n): s.n = n\n    def __len__(s):\n        for _ in (): pass\n"
+                      "        log.append(('len', s.n))\n        return s.n\nlog = []\n"
+                      "result = ([x if x == 'a' else x.n for x in filter(len, [F(1), '', F(0), 'a', F(2)])], log)",
     "sort_builtin_keys": "class K:\n    def __init__(s, n): s.n = n\n    def __len__(s):\n        for _ in (): pass\n"
                          "        log.append(s.n)\n        return s.n\n    def __repr__(s):\n        for _ in (): pass\n"
                          "        return 'k%d' % s.n\nlog = []\nks = [K(3), K(1), K(2)]\nks.sort(key=len)\n"

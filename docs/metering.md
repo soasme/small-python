@@ -374,7 +374,8 @@ These run as machines on the heap, in one native activation of
   `map` of one of those functions takes, a tuple item's items'
   `__hash__` too, the `__bool__` or `__len__`
   that `filter` of `None` or `bool`, `any` and `all` test their items
-  by, the `__str__` and `__repr__` that `str` `%` calls on the arguments
+  by, the Python method by which `filter` of another builtin such as
+  `len` or `str` converts an instance it takes, the `__str__` and `__repr__` that `str` `%` calls on the arguments
   of `%s`, `%r` and `%a`, the `__int__`, `__index__` and `__float__` that
   `str`, `bytes` and `bytearray` `%` call for their numbers and `%c`, the `__repr__`
   and `__bytes__` that `bytes` and `bytearray` `%` call, and the items' `__repr__` of a list, tuple,

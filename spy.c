@@ -29891,11 +29891,37 @@ static NO_INLINE int filter_truth(SPYContext *c, Machine *m, SPYValue *v, SPYVal
  * raised; 0 for iterator_next when the function is not on the machine or
  * an item already waits. A filter of None or bool tests truth
  * (filter_truth). */
+static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **, SPYValue **);
+/* For filter v of a builtin function or class: an instance item's
+ * conversion by its Python method (convert_call), the item waiting in v's
+ * counter for filter_returned, 1; the next item it keeps, tested in C,
+ * in *fn, 3; -1 when the iterator ended or raised; 0 for another
+ * function. */
+static NO_INLINE int filter_builtin(SPYContext *c, Machine *m, SPYValue *v, SPYValue *function, SPYValue **fn, SPYValue **env) {
+    if (!((function->type == SPY_NATIVE && function->as.native.call == builtin) || (function->type == SPY_CLASS && builtin_class(c, function))))
+        return 0;
+    SPYValue *source = v->as.iterator.source->as.seq.items[1], *item, *found[2], *method;
+    while ((item = iterator_next(c, source))) {
+        if (item->type == SPY_INSTANCE && (method = conversion_method(c, function, 1, &item, found))) {
+            v->as.iterator.counter = item;
+            if (convert_call(c, m, method, item, found[0], found[1], fn, env) > 0) return 1;
+            v->as.iterator.counter = NULL; spy_release(item);
+            return -1;
+        }
+        SPYValue *test = c->error_type[0] ? NULL : call(c, function, 1, &item);
+        int keep = test && truthy(test);
+        spy_release(test);
+        if (keep && !c->error_type[0]) { *fn = item; return 3; }
+        spy_release(item);
+        if (c->error_type[0]) break;
+    }
+    return -1;
+}
 static NO_INLINE int filter_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function = v->as.iterator.source->as.seq.items[0], *item;
     if (v->as.iterator.counter) return 0;
     if (function->type == SPY_NONE || function == c->types[SPY_BOOL]) return filter_truth(c, m, v, fn, env);
-    if (!machine_function(c, function)) return 0;
+    if (!machine_function(c, function)) return filter_builtin(c, m, v, function, fn, env);
     if (!(item = iterator_next(c, v->as.iterator.source->as.seq.items[1]))) return -1;
     v->as.iterator.counter = item;
     if (!(*env = function_env(c, function, 1, &item, NULL, 0))) {
