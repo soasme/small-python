@@ -131,7 +131,7 @@ Padded(p) ==
           [] OTHER -> Wrap(Fill("0", pad) \o Cat(s))
 
 
-Cases == {"literal_forms", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_iter_calls", "ctor_index_big",
+Cases == {"literal_forms", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_iter_calls", "extend_iter_calls", "ctor_index_big",
           "ctor_negative", "ctor_range_error", "ctor_float", "bytearray_ctor", "fromhex", "fromhex_bad",
           "fromhex_space_middle", "fromhex_non_hex", "hex", "hex_bad_sep", "index_is_int", "iterate_ints",
           "repr_escapes", "immutable", "concat_repeat", "concat_str", "contains", "contains_str", "compare",
@@ -166,6 +166,7 @@ Case(c) ==
       [] c = "ctor_str_encoding" -> "(b'\\xc3\\xa9', b'\\xe9', b'a')"
       [] c = "ctor_index_calls" -> "(b'\\x00\\x00', bytearray(b'\\x00'), [2, 1])"
       [] c = "ctor_iter_calls" -> "(b'ab', bytearray(b'\\x01'), ['iter', 'len', 'iter'], \"TypeError: cannot convert 'N' object to bytes\")"
+      [] c = "extend_iter_calls" -> "(None, bytearray(b'xab'), ['iter', 'len'], \"TypeError: can't extend bytearray with N\", bytearray(b'xab'))"
       [] c = "ctor_index_big" -> "OverflowError: cannot fit 'J' into an index-sized integer"
       [] c = "ctor_negative" -> "ValueError: negative count"
       [] c = "ctor_range_error" -> "ValueError: bytes must be in range(0, 256)"

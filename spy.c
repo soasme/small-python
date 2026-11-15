@@ -23535,12 +23535,13 @@ static Block *push_block(SPYContext *c, Machine *m, int kind, Instruction *ins) 
     return b;
 }
 static void sort_restore(SPYContext *, SPYValue *, SPYValue *);
-/* bytes() or bytearray(), id, of v replaces a TypeError getting its
- * iterator. */
-static void bytes_refused(SPYContext *c, int id, SPYValue *v) {
+/* bytes() or bytearray(), id, or bytearray.extend(), extending, of v
+ * replaces a TypeError getting its iterator. */
+static void bytes_refused(SPYContext *c, int id, int extending, SPYValue *v) {
     if (!error_is(c, "TypeError")) return;
     spy_clear_error(c);
-    errorf(c, "TypeError", "cannot convert '%s' object to %s", type_name(v), id == B_BYTES ? "bytes" : "bytearray");
+    if (extending) errorf(c, "TypeError", "can't extend bytearray with %s", type_name(v));
+    else errorf(c, "TypeError", "cannot convert '%s' object to %s", type_name(v), id == B_BYTES ? "bytes" : "bytearray");
 }
 /* in over y replaces a TypeError getting y's iterator, as
  * _PySequence_IterSearch does. */
@@ -23555,7 +23556,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     /* An in whose search an __iter__ began (KEY_ITER) ends with its error. */
     if (b.consumer && b.consumer->id == CONTAINS_ITEMS && b.consumer->keyed == KEY_ITER) contains_refused(c, b.value);
     if (b.consumer && (b.consumer->id == B_BYTES || b.consumer->id == B_BYTEARRAY) && b.consumer->keyed == KEY_ITER)
-        bytes_refused(c, b.consumer->id, b.value);
+        bytes_refused(c, b.consumer->id, b.consumer->callee != NULL, b.value);
     while (m->len > b.depth) spy_release(machine_pop(m));
     if (b.kind == BLOCK_HANDLER || b.kind == BLOCK_CLEANUP) {
         spy_release(c->handled); c->handled = b.handled; b.handled = NULL;
@@ -24185,7 +24186,15 @@ static int machine_source(SPYContext *c, SPYValue *v) {
 }
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *bytearray_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+enum { BA_APPEND, BA_EXTEND, BA_POP, BA_INSERT, BA_REMOVE, BA_CLEAR, BA_COPY, BA_REVERSE };
 static int is_builtin(SPYValue *, int);
+/* Whether callee is a bytearray's extend. */
+static int bytes_extend(SPYValue *callee) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
+    return function && function->type == SPY_NATIVE && function->as.native.kwcall == bytearray_method &&
+           ((intptr_t)function->as.native.data & 255) == BA_EXTEND;
+}
 /* The set, frozenset, list, tuple or dict that Python class cls, of no
  * metaclass, derives from with no __new__, __init__ or __del__ of its
  * own: calling cls is calling that builtin, then cls of its result
@@ -24269,10 +24278,11 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
              callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS : updates != -1 ? updates :
-             callee == c->types[SPY_BYTES] ? B_BYTES : callee == c->types[SPY_BYTEARRAY] ? B_BYTEARRAY :
+             callee == c->types[SPY_BYTES] ? B_BYTES : callee == c->types[SPY_BYTEARRAY] || bytes_extend(callee) ? B_BYTEARRAY :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
-    /* bytes() and bytearray() of an iterable, an instance neither a bytes
-     * source (__bytes__, __buffer__) nor a size (__index__). */
+    /* bytes(), bytearray() and bytearray.extend() of an iterable, an
+     * instance neither a bytes source (__bytes__, __buffer__) nor a size
+     * (__index__). */
     if ((id == B_BYTES || id == B_BYTEARRAY) && argv[0]->type == SPY_INSTANCE &&
         (argv[0]->as.map.base || class_lookup(argv[0]->as.map.parent, "__index__") || buffer_exporter(c, argv[0]) ||
          (id == B_BYTES && class_lookup(argv[0]->as.map.parent, "__bytes__")))) return -1;
@@ -24506,7 +24516,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     }
     if ((id == B_NEXT || id == B_CLOSE || id == B_THROW) && method >= 0) generator = spy_retain(callee);
     if (id == B_CLOSE) sent = close_exception(c);
-    int collects = id == B_SORTED || id == B_JOIN;
+    int collects = id == B_SORTED || id == B_JOIN || (id == B_BYTEARRAY && callee->type == SPY_METHOD);
     Consumer *consumer = allocate(c, sizeof(*consumer));
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) :
                        id == B_BYTES || id == B_BYTEARRAY ? bytearray_new(c, "", 0) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || id == B_FROMKEYS || collects ?
@@ -24524,12 +24534,12 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     /* dict() and dict.update() of an instance with keys merge it as a mapping (consumer_id). */
     int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE &&
                   !keyless(generator);
-    /* bytes(), not bytearray(), asks the length hint too (7.7.7). */
-    int hints = id == B_LIST || id == B_SORTED || id == B_BYTES || (id == B_EXTEND && callee->type == SPY_LIST);
+    /* bytes() and bytearray.extend(), not bytearray(), ask the length hint too (7.7.7). */
+    int hints = id == B_LIST || id == B_SORTED || id == B_BYTES || (id == B_EXTEND && callee->type == SPY_LIST) || (id == B_BYTEARRAY && collects);
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
     SPYValue *given = id == B_BYTES || id == B_BYTEARRAY ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
-    if (given) { bytes_refused(c, id, given); spy_release(given); }
+    if (given) { bytes_refused(c, id, collects, given); spy_release(given); }
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); release_all(8, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
@@ -36500,7 +36510,6 @@ static int collect_bytes(SPYContext *c, SPYValue *source, Buffer *out, const cha
     spy_release(iterator);
     return c->error_type[0] ? -1 : 0;
 }
-enum { BA_APPEND, BA_EXTEND, BA_POP, BA_INSERT, BA_REMOVE, BA_CLEAR, BA_COPY, BA_REVERSE };
 static const char *const bytearray_names[] = {"append", "extend", "pop", "insert", "remove", "clear", "copy", "reverse"};
 static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int which = (int)(intptr_t)data;

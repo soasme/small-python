@@ -2016,6 +2016,10 @@ int main(int argc, char **argv) {
                "def byted():\n    return len(bytes(Byted()) + bytearray(Byted()) + bytes(byte_items())) + 3\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "byted()", "byted.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 3);
+    /* So does bytearray.extend()'s. */
+    execute(c, "def extended():\n    b = bytearray()\n    b.extend(Byted())\n    b.extend(byte_items())\n    return len(b) + 6\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "extended()", "extended.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

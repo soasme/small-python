@@ -197,7 +197,7 @@ Unreleased (0.10.0):
 - str() and an empty-spec format() of a builtin subclass call its Python __repr__ or __str__ without nesting on the C stack
 - send() and next() of an async generator's asend or __anext__ awaitable resume it without nesting on the C stack
 - in of a builtin value in a list or tuple calls its items' Python __eq__ without nesting on the C stack
-- bytes() and bytearray() of an iterable instance or a generator take its items without nesting on the C stack
+- bytes(), bytearray() and bytearray.extend() of an iterable instance or a generator take its items without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

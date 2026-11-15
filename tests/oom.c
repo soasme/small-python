@@ -1189,6 +1189,13 @@ static const char *const programs[] = {
     "    return bytes(BI()), bytearray(BI()), bytes(i for i in range(2))\n"
     "print(bi())\n",
 
+    "def be2():\n"
+    "    b = bytearray(b'x')\n"
+    "    b.extend(BI())\n"
+    "    b.extend(i for i in range(2))\n"
+    "    return b\n"
+    "print(be2())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
