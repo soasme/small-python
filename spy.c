@@ -23993,6 +23993,15 @@ static Machine *innermost(Machine *m) {
 static NO_INLINE int raises_at(Machine *m) {
     return m->awaiting == AWAIT_YIELD || (m->awaiting == AWAIT_DELEGATE && m->delegate->type == SPY_ITERATOR);
 }
+/* Whether a close, or a throw of k with argc arguments, into generator
+ * machine m raises on the machine: a value at its innermost yield
+ * (raises_at), a yield from of a generator passing it on as given. A
+ * GeneratorExit class is made only after a yield from's delegates
+ * close, in C. */
+static NO_INLINE int thrown_at(SPYContext *c, Machine *m, size_t argc, SPYValue *k) {
+    if (k && k->type == SPY_CLASS && m->awaiting == AWAIT_DELEGATE && subclass(k, c->exceptions[X_GENERATOR_EXIT])) return 0;
+    return argc < 2 || raises_at(innermost(m));
+}
 /* Whether a close of, or a throw of exception into, a generator or
  * coroutine raises at its yield on the machine (consume): one suspended
  * there, or delegating to a yield (delegating). */
@@ -24378,7 +24387,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
          * yield, or a yield from of a builtin iterator, too. */
         return (argc == (method == M_THROW) || (argc >= 2 && method == M_THROW && argv[0]->type == SPY_CLASS &&
                                                 (argc == 2 || argv[2]->type == SPY_NONE || argv[2]->type == SPY_TRACEBACK))) &&
-               throws_in(c, callee, argc ? argv[0] : NULL) && (argc < 2 || raises_at(callee->as.generator.machine)) ?
+               throws_in(c, callee, argc ? argv[0] : NULL) && thrown_at(c, callee->as.generator.machine, argc, argc ? argv[0] : NULL) ?
                method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&

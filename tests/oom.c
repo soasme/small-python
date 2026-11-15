@@ -1406,6 +1406,26 @@ static const char *const programs[] = {
     "    return sorted(ns.items())\n"
     "print(mn())\n",
 
+    "class TV(Exception):\n"
+    "    def __init__(self, *a):\n"
+    "        for _ in (): pass\n"
+    "        super().__init__(*a)\n"
+    "class TX(GeneratorExit):\n"
+    "    def __init__(self, *a): super().__init__(*a)\n"
+    "def tv_in():\n"
+    "    try: yield 1\n"
+    "    except TV as e: yield e.args\n"
+    "def tv():\n"
+    "    yield from tv_in()\n"
+    "def tvs():\n"
+    "    g = tv(); next(g)\n"
+    "    out = [g.throw(TV, (1, 2))]\n"
+    "    g = tv(); next(g)\n"
+    "    try: g.throw(TX)\n"
+    "    except TX as e: out.append(type(e).__name__)\n"
+    "    return out\n"
+    "print(tvs())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

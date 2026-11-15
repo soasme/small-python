@@ -2167,6 +2167,13 @@ int main(int argc, char **argv) {
     execute(c, "def looped():\n    ns = Slots()\n    exec('for i in (1, 2): pass\\nk = 1\\ndel k', {}, ns)\n    return ns['i'] + len(ns)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "looped()", "looped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* So does a throw of a class and its value into a yield from of a generator. */
+    execute(c, "class Slowed(Exception):\n    def __init__(self, *a):\n        for i in range(3000): pass\n        super().__init__(*a)\n"
+               "def slowed():\n    try: yield 0\n    except Slowed as e: yield e.args[0]\n"
+               "def delegating():\n    yield from slowed()\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "(g := delegating(), next(g), g.throw(Slowed, 5))[2]", "delegated.py"), SPY_STOP_STEPS, &pauses)) == 5 &&
+           pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

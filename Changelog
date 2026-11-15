@@ -224,6 +224,8 @@ Unreleased (0.10.0):
   Python __index__ without nesting on the C stack; a str's find() refuses a non-str needle before its bounds
 - an exec()'d module's for loop names and del names through a locals mapping's Python __setitem__ and
   __delitem__ without nesting on the C stack
+- throw() of a class and a value into a yield from of a generator calls the class's Python __init__ without nesting on
+  the C stack; a GeneratorExit class thrown into a yield from is made after its delegates close
 - min() and max(), with or without a key, call the best's reflected Python method, after an item's declined or
   when it has only object's, and the Python __bool__ of a result without nesting on the C stack
 - sorted() and list.sort() call the Python __bool__ or __len__ of a comparison's result without nesting on the C stack
