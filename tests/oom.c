@@ -489,6 +489,22 @@ static const char *const programs[] = {
     "    return b'%d %x %c %.1f %r %a %s %b' % (BQ(), BQ(), BQ(), BQ(), BQ(), BQ(), BQ(), BO(b'o')), b'%(k)c' % {b'k': BQ()}, r\n"
     "print(bq())\n",
 
+    "class BY:\n"
+    "    def __init__(self, t): self.t = t\n"
+    "    def __index__(self):\n"
+    "        try: self.t.append(0)\n"
+    "        except BufferError: return 67\n"
+    "        return 68\n"
+    "    def __bytes__(self): return b'yb'\n"
+    "    def __repr__(self): return 'y'\n"
+    "def by():\n"
+    "    for _ in (): pass\n"
+    "    b = bytearray(b'%c %x %s %r')\n"
+    "    t = b % (BY(b), BY(b), BY(b), BY(b))\n"
+    "    b.append(1)\n"
+    "    return t, b\n"
+    "print(by())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

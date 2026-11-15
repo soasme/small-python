@@ -28,6 +28,14 @@ class Y(Q):
     def __bytes__(self): spin(); Q.log.append('bytes'); return b'by'
 class OwnB(bytes):
     def __bytes__(self): spin(); return b'no'
+class Grow:
+    log = []
+    def __init__(self, target): self.target = target
+    def __index__(self):
+        spin()
+        try: self.target.append(0)
+        except BufferError as e: Grow.log.append(str(e))
+        return 69
 class NotIndex:
     def __index__(self): spin(); return 'x'
 class Bad:
@@ -94,6 +102,8 @@ SOURCES = {
     "bytes_own": "result = b'%s' % OwnB(b'yes')",
     "c_index_type": "result = '%c' % NotIndex()",
     "bytes_c_index_type": "result = b'%c' % NotIndex()",
+    "bytearray_methods": "Q.log.clear(); result = (bytearray(b'%d-%x-%c|%s') % (Q(), Q(), Q(), Y()), Q.log)",
+    "bytearray_exported": "Grow.log.clear(); b = bytearray(b'%c'); t = b % Grow(b); b.append(1); result = (t, b, Grow.log)",
     "method_items": "L.log.clear(); result = ('%s|%r|%a' % ([L('a'), 1], (L('b'),), [L('c')]), L.log)"
 }
 

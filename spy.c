@@ -10339,7 +10339,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || (is_set(a) && set_walks(op, a, b)) ||
            class_union(op, a, b) ||
-           (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES) && percent_reaches(c, b)) ? NULL : binary(c, op, a, b);
+           (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && percent_reaches(c, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
@@ -22338,8 +22338,11 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
  * a repr job (repr_job), the job, its name None, and c->replacing are on
  * m's stack under the repr job, whose first call is left in c->k_fn with
  * no continuation (CALL_CHECKED); the job goes on from that spec, given
- * its state and the argument's text converted (percent_converted). */
+ * its state and the argument's text converted (percent_converted). A
+ * bytearray format is held by a view of it, its export (percent_call). */
 static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYValue *args, SPYValue *state, SPYValue *converted) {
+    SPYValue *held = format;
+    if (format->type == SPY_MEMORYVIEW) format = format->as.memory.source;
     int bytes = format->type != SPY_STRING, deferred = 0;
     const char *s = format->as.string.data;
     size_t n = format->as.string.len;
@@ -22456,14 +22459,14 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             if (bytes && (ch == 's' || ch == 'b')) {
                 if (converted) { piece = converted; converted = NULL; }
                 else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) &&
-                         (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
+                         (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
                     deferred = 1;
                 else piece = percent_bytes(c, &p, key, v);
             } else if (ch == 'b') goto unsupported;
             else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
             else if (converted) { piece = ch == 'a' || bytes ? ascii_text(c, converted, converted) : converted; converted = NULL; }
             else if (m && (v->type == SPY_INSTANCE || repr_container(v)) &&
-                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
+                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
                 deferred = defer == 1;
             else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));
             break;
@@ -22476,7 +22479,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
                 piece = percent_type(c, &p, key, real || !(ch == 'o' || ch == 'x' || ch == 'X') ? "%%%c requires a real number" : "%%%c requires an integer", (int)ch, v);
             else if (converted) v = converted;
             else if (m && v->type == SPY_INSTANCE &&
-                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
+                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
                 deferred = 1;
                 break;
             }
@@ -22489,7 +22492,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             if (converted == c->unbound) piece = percent_type(c, &p, key, "%%c requires an integer or a unicode character", 0, v);
             else if (converted) piece = percent_char(c, &p, key, converted, bytes);
             else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, bytes ? SPY_BYTES : SPY_STRING) &&
-                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
+                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
                 deferred = 1;
                 break;
             } else piece = percent_char(c, &p, key, v, bytes);
@@ -22547,11 +22550,16 @@ static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, S
     spy_release(result); spy_release(state);
     return value;
 }
-/* str or bytes x % y on machine m, y reaching an instance (percent_reaches): its
- * job's first call (percent_build), c->unbound; else NULL, the text in
- * c->looked or an error. */
+static SPYValue *memory_from(SPYContext *, SPYValue *);
+/* str, bytes or bytearray x % y on machine m, y reaching an instance
+ * (percent_reaches): its job's first call (percent_build), c->unbound;
+ * else NULL, the text in c->looked or an error. A bytearray stays
+ * exported, by a view of it, until the job ends. */
 static NO_INLINE SPYValue *percent_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y) {
-    SPYValue *text = percent_build(c, m, x, y, NULL, NULL);
+    SPYValue *view = x->type == SPY_BYTEARRAY ? memory_from(c, x) : NULL;
+    if (x->type == SPY_BYTEARRAY && !view) return NULL;
+    SPYValue *text = percent_build(c, m, view ? view : x, y, NULL, NULL);
+    spy_release(view);
     if (text) c->looked = text;
     return c->k_fn ? c->unbound : NULL;
 }
@@ -27874,7 +27882,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     }
     if (kind == OPERATE_BINARY && class_union(op, x, y)) return union_call(c, m, x, y, env);
     if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' &&
-        (x->type == SPY_STRING || x->type == SPY_BYTES) &&
+        (x->type == SPY_STRING || x->type == SPY_BYTES || x->type == SPY_BYTEARRAY) &&
         percent_reaches(c, y)) return percent_call(c, m, x, y);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];

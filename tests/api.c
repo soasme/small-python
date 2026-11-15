@@ -1756,6 +1756,12 @@ int main(int argc, char **argv) {
     execute(c, "def contained():\n    return len('{}{!r:>5}{k}'.format([Shown()], (Shown(),), k={Shown()}))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "contained()", "contained.py"), SPY_STOP_STEPS, &pauses)) == 13 && pauses > 2);
+    /* And bytearray % of a Python __index__ and __bytes__, the format
+     * exported until the job ends. */
+    execute(c, "def arrayed():\n    b = bytearray(b'%x%c%s')\n    t = b % (Listed(), Listed(), Byted())\n"
+               "    b.append(1)\n    return len(t) + len(b)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "arrayed()", "arrayed.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"
