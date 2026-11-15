@@ -1,7 +1,8 @@
 # Replays AsyncGenerators.tla: each case starts an async generator running
 # the spec's body and performs the spec's steps on it, running each
 # awaitable to completion, an asend() through an await or, in every other
-# walk, sent to directly, and comparing its result with the model's.
+# walk, sent to directly, a throw() into an asend() awaitable directly, and
+# comparing its result with the model's.
 FIELDS = ("variant", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -37,12 +38,17 @@ def perform(target, op, direct):
         awaitable = target.asend(None if op[1] == "None" else op[1])
         if not direct:
             awaitable = awaiting(awaitable)
-    elif op[0] == "athrow":
-        awaitable = target.athrow({"ValueError": ValueError, "KeyError": KeyError}[op[1]])
+    elif op[0] in ("athrow", "thrown"):
+        error = {"ValueError": ValueError, "KeyError": KeyError}[op[1]]
+        awaitable = target.athrow(error) if op[0] == "athrow" else target.asend(None)
     else:
         awaitable = target.aclose()
     try:
-        awaitable.send(None)
+        if op[0] == "thrown":
+            # Thrown into the asend() awaitable, which throws it into the body.
+            awaitable.throw(error)
+        else:
+            awaitable.send(None)
         return ("suspended",)
     except StopIteration as stop:
         value = stop.value

@@ -1,13 +1,16 @@
 -------------------------- MODULE AsyncGenerators --------------------------
 (***************************************************************************)
 (* The life cycle of an asynchronous generator driven through asend(),     *)
-(* athrow(), and aclose(), each awaitable run to completion, as The Python *)
-(* Language Reference specifies it (reference/expressions.html#           *)
+(* athrow(), and aclose(), each awaitable run to completion, and through   *)
+(* throw() into an asend() awaitable, as The Python Language Reference     *)
+(* specifies it (reference/expressions.html#                               *)
 (* asynchronous-generator-iterator-methods), with CPython's behavior where *)
 (* the reference is silent: athrow() on a finished generator returns None, *)
 (* and once aclose() has been called, athrow() and aclose() raise          *)
-(* StopAsyncIteration without running the body, while asend() still       *)
-(* resumes it. The body:                                                   *)
+(* StopAsyncIteration without running the body, while asend() still        *)
+(* resumes it; an asend()'s throw() raises at the yield either way, or out *)
+(* of a finished generator.                                                *)
+(* The body:                                                               *)
 (*                                                                         *)
 (*     last, i = None, 0                                                   *)
 (*     while i < K:                                                        *)
@@ -32,7 +35,7 @@ CONSTANT K
 Variants == {"plain", "stubborn"}
 Sent == {"None", "go", "stop"}
 Thrown == {"ValueError", "KeyError"}
-Ops == {<<"asend", v>> : v \in Sent} \cup {<<"athrow", e>> : e \in Thrown} \cup {<<"aclose">>}
+Ops == {<<"asend", v>> : v \in Sent} \cup {<<o, e>> : o \in {"athrow", "thrown"}, e \in Thrown} \cup {<<"aclose">>}
 Pcs == {"start", "loop", "ignored", "done"}
 
 VARIABLES variant, pc, i, last, closed, op, result
@@ -77,6 +80,15 @@ AThrow(e) ==
          [] OTHER -> Finish(<<"raise", e>>)
     /\ UNCHANGED closed
 
+\* throw(e) into an asend(None) awaitable raises e at the yield the body
+\* waits at, as a generator's throw() does, aclose() or not, and out of a
+\* generator not started or finished.
+AsendThrow(e) ==
+    /\ op' = <<"thrown", e>>
+    /\ CASE pc = "loop" /\ e = "ValueError" -> Continue("caught")
+         [] OTHER -> Finish(<<"raise", e>>)
+    /\ UNCHANGED closed
+
 AClose ==
     /\ op' = <<"aclose">>
     /\ closed' = TRUE
@@ -86,7 +98,7 @@ AClose ==
             pc' = "ignored" /\ result' = <<"raise", "RuntimeError">> /\ UNCHANGED <<i, last>>
          [] OTHER -> Finish(<<"return", "None">>)
 
-Next == UNCHANGED variant /\ (AClose \/ \E v \in Sent : ASend(v) \/ \E e \in Thrown : AThrow(e))
+Next == UNCHANGED variant /\ (AClose \/ \E v \in Sent : ASend(v) \/ \E e \in Thrown : AThrow(e) \/ AsendThrow(e))
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------

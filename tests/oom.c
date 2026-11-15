@@ -1446,6 +1446,21 @@ static const char *const programs[] = {
     "    return out\n"
     "print(st())\n",
 
+    "async def at():\n"
+    "    while True:\n"
+    "        try: yield 'r'\n"
+    "        except ValueError as e: yield ['c', e.args]\n"
+    "        except KeyError: return\n"
+    "def ao(f):\n"
+    "    try: return f()\n"
+    "    except BaseException as e: return [type(e).__name__, e.args]\n"
+    "def aw():\n"
+    "    g = at()\n"
+    "    out = [ao(lambda: next(g.__anext__())), ao(lambda: g.__anext__().throw(ValueError('v')))]\n"
+    "    out += [ao(lambda: g.asend(None).throw(ValueError, 1)), ao(lambda: g.__anext__().throw(KeyError)), g.ag_running]\n"
+    "    return out\n"
+    "print(aw())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
