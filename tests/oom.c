@@ -688,6 +688,20 @@ static const char *const programs[] = {
     "    return a, b\n"
     "print(sl())\n",
 
+    "class KB:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __len__(self):\n"
+    "        if self.n < 0: raise KeyError('k')\n"
+    "        return self.n\n"
+    "    def __repr__(self): return 'b%d' % self.n\n"
+    "def kb():\n"
+    "    s = [KB(2), KB(0), 'a']\n"
+    "    s.sort(key=len)\n"
+    "    try: sorted([KB(1), KB(-1)], key=len)\n"
+    "    except KeyError: pass\n"
+    "    return s, max(s, key=repr), min(KB(3), KB(1), key=len)\n"
+    "print(kb())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

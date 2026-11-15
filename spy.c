@@ -24492,6 +24492,15 @@ static SPYValue *key_comparison(SPYContext *c, Consumer *s, SPYValue *key) {
                      best->type == SPY_INSTANCE && !best->as.map.base ? class_lookup(best->as.map.parent, rich_names[rich_reflected[rich]]) : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
+/* Whether key, a builtin function or class, converts one of the n values
+ * items, or of the items of a list or tuple there alone, an instance, by a
+ * Python method (key_enter). */
+static int key_converts(SPYContext *c, SPYValue *key, size_t n, SPYValue *const *items) {
+    if (!((key->type == SPY_NATIVE && key->as.native.call == builtin) || (key->type == SPY_CLASS && builtin_class(c, key)))) return 0;
+    if (n == 1 && (items[0]->type == SPY_LIST || items[0]->type == SPY_TUPLE)) { n = items[0]->as.seq.len; items = items[0]->as.seq.items; }
+    for (size_t i = 0; i < n; i++) if (items[i]->type == SPY_INSTANCE) return 1;
+    return 0;
+}
 /* The function on the machine a call of key, a key function, runs: its
  * own, a bound method's or a Python __call__ (bound_function), or a
  * class's Python __init__ (plain_init); borrowed, or NULL. */
@@ -24503,8 +24512,18 @@ static SPYValue *key_function(SPYContext *c, SPYValue *key) {
  * function, owned, with *env, a class's new instance first, kept in
  * s->made for key_took, or a bound method's or instance's self; else
  * NULL, with the key computed in C and taken (key_took) or an error. */
+static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **, SPYValue **);
 static NO_INLINE SPYValue *key_enter(SPYContext *c, Machine *m, Consumer *s, SPYValue *item, SPYValue **env) {
-    SPYValue *key = s->callee, *function = key_function(c, key), *args[] = {NULL, item};
+    SPYValue *key = s->callee, *function = key_function(c, key), *args[] = {NULL, item}, *found[2];
+    if (!function && item->type == SPY_INSTANCE && (function = conversion_method(c, key, 1, &item, found))) {
+        /* A builtin's conversion by the item's Python method (key_converts),
+         * returning into key_took through item_converted. */
+        SPYValue *fn = NULL;
+        int status = convert_call(c, m, function, item, found[0], found[1], &fn, env);
+        spy_release(item);
+        return status > 0 ? fn : NULL;
+    }
+    if (!function && c->error_type[0]) { spy_release(item); return NULL; }
     if (!function) {
         /* A key no longer on the machine, its class changed, runs in C. */
         SPYValue *result = call(c, key, 1, &item);
@@ -24564,7 +24583,8 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
     }
     /* With no key, a sort of instances (instance_sort) takes the items as
      * its keys. */
-    if (key ? !key_function(c, key) : keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0])) return 0;
+    if (key ? !key_function(c, key) && !key_converts(c, key, method ? 1 : positional, method ? &callee : argv) :
+              keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0])) return 0;
     /* sorted() takes its items before list.sort reads reverse, which reads
      * it before it empties the list. */
     SPYValue *items = NULL, *keys = NULL;
@@ -30390,6 +30410,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_KEY, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
+                        /* A builtin key's conversion (key_enter). */
+                        if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_KEY)) && c->k_fn)
+                            goto enter_k;
                         if (!key_took(c, m, result)) goto consume_generator;
                     } else if (kind >= CALL_EXEC) {
                         /* An import's statement runs again, finding the module. */
