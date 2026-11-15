@@ -1,7 +1,7 @@
 # Replays AsyncGenerators.tla: each case starts an async generator running
 # the spec's body and performs the spec's steps on it, running each
-# awaitable to completion, an asend() through an await, and comparing its
-# result with the model's.
+# awaitable to completion, an asend() through an await or, in every other
+# walk, sent to directly, and comparing its result with the model's.
 FIELDS = ("variant", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -31,10 +31,12 @@ async def awaiting(awaitable):
     return await awaitable
 
 
-def perform(target, op):
+def perform(target, op, direct):
     if op[0] == "asend":
         # Awaited, as an async for or await runs it, resuming the body there.
-        awaitable = awaiting(target.asend(None if op[1] == "None" else op[1]))
+        awaitable = target.asend(None if op[1] == "None" else op[1])
+        if not direct:
+            awaitable = awaiting(awaitable)
     elif op[0] == "athrow":
         awaitable = target.athrow({"ValueError": ValueError, "KeyError": KeyError}[op[1]])
     else:
@@ -60,7 +62,7 @@ for walk in walks():
     target = make(start["variant"])
     recent = []
     for state in steps:
-        actual = perform(target, state["op"])
+        actual = perform(target, state["op"], count % 2)
         recent = (recent + [state["op"]])[-8:]
         if actual != state["result"]:
             failures += 1

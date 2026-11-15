@@ -1993,6 +1993,13 @@ int main(int argc, char **argv) {
                "def shown():\n    return len(str(Shown(1)) + f'{Shown(2)}' + format(Shown(3), '') + '%s' % Shown(4))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "shown()", "shown.py"), SPY_STOP_STEPS, &pauses)) == 20 && pauses > 3);
+    /* So does an async generator that its asend's send or next() resumes. */
+    execute(c, "async def counting():\n    for i in range(3):\n        for j in range(3000): pass\n        yield i\n"
+               "def stepped(op):\n    try: op.send(None)\n    except StopIteration as e: return e.value\n"
+               "def asends():\n    g = counting()\n    a = stepped(g.__anext__())\n    b = stepped(g.asend(None))\n"
+               "    try: next(g.__anext__())\n    except StopIteration as e: return a + b + e.value + 5\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "asends()", "asends.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

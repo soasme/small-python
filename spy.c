@@ -14518,6 +14518,7 @@ typedef struct {
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched, *wrap;
     SPYValue *keywords; /* dict()'s or dict.update()'s, merged after the source's items. */
     SPYValue *call; /* A call's ** merge: the callee a duplicate keyword's error names (merge_keyword). */
+    SPYValue *awaited; /* An asend or __anext__ awaitable's send or __next__ (asend_resumes): the operation. */
     int updating, subset;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -14608,6 +14609,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->callee) visit(b->consumer->callee, data);
         if (b->consumer && b->consumer->wrap) visit(b->consumer->wrap, data);
         if (b->consumer && b->consumer->call) visit(b->consumer->call, data);
+        if (b->consumer && b->consumer->awaited) visit(b->consumer->awaited, data);
         if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
         if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
         if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
@@ -23554,6 +23556,11 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         sort_restore(c, b.consumer->target, b.value);
         spy_release(b.consumer->target); b.value = NULL;
     }
+    if (b.consumer && b.consumer->awaited && c->error_type[0]) {
+        /* An operation's send that raised, a StopIteration for its yield included, ends it (awaitable_method). */
+        b.consumer->awaited->as.async_operation.state = 2;
+        b.consumer->awaited->as.async_operation.generator->as.generator.async_running = 0;
+    }
     if (b.consumer && (b.consumer->id == B_CLOSE || b.consumer->id == B_THROW) && b.consumer->count)
         innermost(b.value->as.generator.machine)->drop = (int)b.consumer->count - 1;
     spy_release(b.value); spy_release(b.handled);
@@ -23562,6 +23569,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee); spy_release(b.consumer->wrap);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords); spy_release(b.consumer->call);
+        spy_release(b.consumer->awaited);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
@@ -24182,6 +24190,18 @@ static SPYValue *built_type(SPYContext *c, SPYValue *cls) {
     }
     return NULL;
 }
+/* Whether asend or __anext__ awaitable op's send of argv, or __next__, by
+ * method, resumes its async generator on the machine (consume) as
+ * awaitable_method would: the operation has not ended, nor begun while the
+ * generator runs, and sends None or to a started generator. */
+static int asend_resumes(SPYValue *op, int method, size_t argc, SPYValue *const *argv) {
+    SPYValue *g = op->as.async_operation.generator, *sent = method == M_SEND ? argv[0] : NULL;
+    int state = op->as.async_operation.state;
+    if ((method != M_NEXT && method != M_SEND) || argc != (method == M_SEND) || state == 2 || (!state && g->as.generator.async_running) ||
+        !suspended(g)) return 0;
+    if (!state && op->as.async_operation.method == M_ASEND && (!sent || sent->type == SPY_NONE)) sent = op->as.async_operation.args->as.seq.items[0];
+    return g->as.generator.started || !sent || sent->type == SPY_NONE;
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
     if (built) callee = built;
@@ -24192,6 +24212,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (wrapped) callee = callee->as.iterator.source;
     if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_COROUTINE_ITERATOR && is_builtin(callee, B_NEXT))
         return suspended(argv[0]->as.iterator.source) ? B_NEXT : -1;
+    if (method >= 0 && callee->type == SPY_ASYNC_GENERATOR_ASEND) return asend_resumes(callee, method, argc, argv) ? B_NEXT : -1;
+    if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ASEND && is_builtin(callee, B_NEXT))
+        return asend_resumes(argv[0], M_NEXT, 0, NULL) ? B_NEXT : -1;
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
@@ -24263,11 +24286,12 @@ static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
+                     argv[0]->type == SPY_ASYNC_GENERATOR_ASEND ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
                        callee->type == SPY_METHOD || callee->type == SPY_CLASS)))) ||
-           callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR || callee->type == SPY_BOUND_METHOD ?
-           consumer_id(c, callee, method, argc, argv) : -1;
+           callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR || callee->type == SPY_BOUND_METHOD ||
+           callee->type == SPY_ASYNC_GENERATOR_ASEND ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* A consumer's source *v, owned (iter_function): an instance whose
  * __iter__ is on the machine stays, its call the consumer's first
@@ -24446,8 +24470,18 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     /* A set's update extends its set; its other methods start from it (set_items). */
     int which = set_items(id) ? (int)((intptr_t)callee->as.method.function->as.native.data & 255) : -1;
     if ((id == B_EXTEND || which >= 0) && callee->type == SPY_METHOD) callee = callee->as.method.self;
+    /* An asend or __anext__ awaitable's send or __next__, or next() of it,
+     * resumes its async generator (asend_resumes). */
+    SPYValue *awaited = id != B_NEXT ? NULL : method >= 0 ? (callee->type == SPY_ASYNC_GENERATOR_ASEND ? spy_retain(callee) : NULL) :
+                        generator && generator->type == SPY_ASYNC_GENERATOR_ASEND ? generator : NULL;
+    if (awaited && method >= 0) callee = awaited->as.async_operation.generator;
+    else if (awaited) generator = spy_retain(awaited->as.async_operation.generator);
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
+    /* An asend begins by sending its value. */
+    if (awaited && !awaited->as.async_operation.state && awaited->as.async_operation.method == M_ASEND && (!sent || sent->type == SPY_NONE)) {
+        spy_release(sent); sent = spy_retain(awaited->as.async_operation.args->as.seq.items[0]);
+    }
     if (id == B_THROW) {
         sent = raw ? spy_retain(generator) : thrown_exception(c, traceback ? 3 : start ? 2 : 1, (SPYValue *[]){generator, start ? start : c->none, traceback});
         spy_release(generator); spy_release(start); start = NULL;
@@ -24475,12 +24509,14 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(consumer); release_all(7, (SPYValue *[]){result, generator, sent, source, value, searched, wrap}); return; }
+    if (!block) { mem_free(consumer); release_all(8, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
                            .searched = searched, .wrap = wrap, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
-                           .phase = id == B_SET_TOGGLE};
+                           .phase = id == B_SET_TOGGLE, .awaited = awaited};
     block->value = generator; block->consumer = consumer;
+    /* The operation runs its generator until the send ends (pop_block). */
+    if (awaited) { awaited->as.async_operation.state = 1; generator->as.generator.async_running = 1; }
     /* An __iter__ the machine calls asks the hint as it returns (key_took). */
     if (source && keyed == KEY_ITER) spy_release(source);
     else if (source) length_hint(c, m, source);
@@ -26358,8 +26394,9 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
     if ((method < 0 ? UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_METHOD | UINT64_C(1) << SPY_CLASS |
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
-                      (argc && argv[0]->type == SPY_INSTANCE)) ||
-        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR)) ||
+                      callee->type == SPY_ASYNC_GENERATOR_ASEND || (argc && argv[0]->type == SPY_INSTANCE)) ||
+        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR ||
+                  argv[0]->type == SPY_ASYNC_GENERATOR_ASEND)) ||
         /* type.__call__ of a class (unbound_called) */
         (callee->type == SPY_NATIVE && ((argc && argv[0]->type == SPY_CLASS && (argv[0]->as.map.meta || callee->as.native.kwcall == type_method)) ||
                                         (argc == 1 && (argv[0]->type == SPY_INSTANCE ||
@@ -36929,6 +36966,17 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
          * what the generator returned. */
         SPYValue *item = s->best ? s->best : s->result, *returned = s->sent;
         s->best = s->result = s->sent = NULL;
+        /* An async generator's yield, not an await's, ends an operation's
+         * send with StopIteration, as its return with StopAsyncIteration. */
+        Machine *g = s->awaited ? s->awaited->as.async_operation.generator->as.generator.machine : NULL;
+        if (s->awaited && (!item || (g && g->awaiting == AWAIT_YIELD))) {
+            spy_release(returned);
+            if (!item) return spy_error(c, "StopAsyncIteration", "");
+            SPYValue *exception = exception_create(c, c->exceptions[X_STOP_ITERATION], 1, &item);
+            if (exception) { raise_value(c, exception); spy_release(exception); }
+            spy_release(item);
+            return NULL;
+        }
         if (item) { spy_release(returned); return item; }
         SPYValue *exception = exception_create(c, c->exceptions[X_STOP_ITERATION], returned && returned->type != SPY_NONE, &returned);
         if (exception) { raise_value(c, exception); spy_release(exception); }

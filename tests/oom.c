@@ -1119,6 +1119,22 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ok())\n",
 
+    "async def oa():\n"
+    "    got = yield 1\n"
+    "    yield got\n"
+    "def oas(op, v=None):\n"
+    "    try: return op.send(v)\n"
+    "    except StopIteration as e: return e.value\n"
+    "    except StopAsyncIteration: return 'end'\n"
+    "def oao():\n"
+    "    g = oa()\n"
+    "    op = g.__anext__()\n"
+    "    out = [oas(op), oas(g.asend('x')), oas(g.__anext__())]\n"
+    "    try: op.send(None)\n"
+    "    except RuntimeError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(oao())\n",
+
     "class OR(int):\n"
     "    def __repr__(self): return 'r%d' % int(self)\n"
     "class OS(float):\n"
