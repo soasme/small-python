@@ -311,7 +311,8 @@ These run as machines on the heap, in one native activation of
   class, that a `raise` statement's call of the class runs, or a
   generator's `throw` of the class, and the Python `__new__` either
   call runs, also when a raise calls the class again with the exception
-  another class's `__new__` made;
+  another class's `__new__` made, and the Python `__call__` of the
+  class's metaclass that a `raise` statement calls in their place;
 - the generator a `yield from` delegates to, or the coroutine an `await`
   awaits, and those it delegates to in turn, when a step above resumes
   the delegating generator, and the async generator whose `asend` or

@@ -61,11 +61,30 @@ class NewOther(TypeError):
         log.append("never")
 
 
+class Meta(type):
+    def __call__(cls, *args):
+        for _ in (): pass
+        log.append(cls.tag)
+        return KeyError() if cls.swap and not args else super().__call__(*args)
+
+
+class PyMeta(ValueError, metaclass=Meta):
+    tag, swap = "k", False
+
+
+class MetaSwap(ValueError, metaclass=Meta):
+    tag, swap = "s", True
+
+
+class MetaCause(TypeError, metaclass=Meta):
+    tag, swap = "q", False
+
+
 WHATS = {"class": "ValueError", "instance": "ValueError()", "int": "5", "other": "NotAnException", "python": "PyError",
          "returns": "Returns", "new": "PyNew", "new_int": "NewInt",
-         "renew": "Renew", "reinit": "Reinit"}
+         "renew": "Renew", "reinit": "Reinit", "meta": "PyMeta", "meta_swap": "MetaSwap"}
 CAUSES = {"class": "TypeError", "instance": "TypeError()", "None": "None", "int": "5", "python": "PyCause",
-          "new_other": "NewOther"}
+          "new_other": "NewOther", "meta": "MetaCause"}
 
 
 def statement(p):
@@ -94,7 +113,7 @@ def outcome(p):
         try:
             exec(code, {"NotAnException": NotAnException, "PyError": PyError, "PyCause": PyCause, "Returns": Returns,
                          "PyNew": PyNew, "NewInt": NewInt, "NewOther": NewOther,
-                         "Renew": Renew, "Reinit": Reinit})
+                         "Renew": Renew, "Reinit": Reinit, "PyMeta": PyMeta, "MetaSwap": MetaSwap, "MetaCause": MetaCause})
         except BaseException as error:
             results.append("%s cause=%s context=%s suppress=%s log=%s" % (
                 type(error).__name__, name(error.__cause__), name(error.__context__), error.__suppress_context__, "".join(log)))

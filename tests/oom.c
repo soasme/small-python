@@ -513,6 +513,21 @@ static const char *const programs[] = {
     "    return '{!r:>{}}|{:{}}|{k!a:^{w}}'.format(l, 12, (FV(),), '', k={FV()}, w=9)\n"
     "print(fv())\n",
 
+    "class RX(type):\n"
+    "    def __call__(cls, *a):\n"
+    "        if cls.__name__ == 'RS' and not a: return KeyError('k')\n"
+    "        return super().__call__(*a)\n"
+    "class RE(Exception, metaclass=RX): pass\n"
+    "class RS(Exception, metaclass=RX): pass\n"
+    "def rx():\n"
+    "    for _ in (): pass\n"
+    "    out = []\n"
+    "    for f in (lambda: RE, lambda: RS):\n"
+    "        try: raise f() from RE\n"
+    "        except Exception as e: out.append((type(e).__name__, type(e.__cause__).__name__))\n"
+    "    return out\n"
+    "print(rx())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

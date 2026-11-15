@@ -1766,6 +1766,13 @@ int main(int argc, char **argv) {
     execute(c, "def spanned():\n    return len('{!r:>{}}{:{}}'.format([Shown()], 6, (Shown(),), ''))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "spanned()", "spanned.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
+    /* And raise of a class, and its cause, whose metaclass has a Python __call__. */
+    execute(c, "class Called(type):\n    def __call__(cls, *a):\n        for i in range(3000): pass\n        return super().__call__(*a)\n"
+               "class Metaraised(Exception, metaclass=Called): pass\n"
+               "def metaraised():\n    try: raise Metaraised from Metaraised\n"
+               "    except Metaraised as e: return 7 if type(e.__cause__) is Metaraised else 0\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "metaraised()", "metaraised.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"
