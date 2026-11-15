@@ -107,7 +107,51 @@ def replace(p):
     return "kept"
 
 
-PARTS = {"function": function, "class": klass, "local": local, "lazy": lazy, "scope": scope, "replace": replace}
+class Names(dict):
+    def __init__(self):
+        super().__init__()
+        self.log = []
+
+    def __setitem__(self, key, value):
+        if key not in ("__module__", "__qualname__", "__firstlineno__"):
+            self.log.append(key)
+        super().__setitem__(key, value)
+
+
+class Logged(type):
+    @classmethod
+    def __prepare__(mcls, name, bases):
+        return Names()
+
+    def __new__(mcls, name, bases, ns):
+        cls = super().__new__(mcls, name, bases, dict(ns))
+        cls.log = ns.log
+        return cls
+
+
+def order(p):
+    if p["where"] == "class":
+        class C(metaclass=Logged):
+            a = 1
+            x: int = 2
+            b = 3
+        return ",".join(C.log)
+    ns = Names()
+    exec("a = 1\nx: int = 2\nb = 3\n", {}, ns)
+    return ",".join(ns.log)
+
+
+def partial(p):
+    ns = {"stop": p["stop"]}
+    try:
+        exec("x: int = 1\nif stop: raise KeyError\ny: str = 2\n", ns)
+    except KeyError:
+        pass
+    return render(ns["__annotate__"](1))
+
+
+PARTS = {"function": function, "class": klass, "local": local, "lazy": lazy, "scope": scope, "replace": replace,
+         "order": order, "partial": partial}
 
 
 def outcome(p):

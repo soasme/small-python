@@ -539,6 +539,19 @@ static const char *const programs[] = {
     "    return r\n"
     "print(nz())\n",
 
+    "class AO(dict):\n"
+    "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
+    "class AM(type):\n"
+    "    @classmethod\n"
+    "    def __prepare__(m, n, b): return AO()\n"
+    "class AC(metaclass=AM):\n"
+    "    a = 1\n"
+    "    if a: x: int = 2\n"
+    "ns = {}\n"
+    "try: exec('x: int = 1\\nraise KeyError\\ny: str = 2\\n', ns)\n"
+    "except KeyError: pass\n"
+    "print(AC.__annotations__, ns['__annotate__'](1), ns['__conditional_annotations__'])\n",
+
     "class TN(Exception):\n"
     "    def __new__(cls, *a):\n"
     "        return super().__new__(cls, *a) if a else KeyError('k')\n"

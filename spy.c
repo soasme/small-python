@@ -196,7 +196,7 @@ struct SPYValue {
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; size_t statements; int expression, setup_annotations, future_flags; } unit;
+        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
@@ -4181,6 +4181,7 @@ typedef struct {
     /* Future statements: nesting of statement(), top-level statements seen,
      * whether one may still appear, and barry_as_FLUFL. */
     int statement_level, future_closed, barry, future_annotations;
+    int conditional_annotations; /* A body's annotated assignment in a conditional block, or a module's. */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
@@ -6564,6 +6565,7 @@ static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
 /* Collect simple annotated names of a module or class body in order. */
 static int collect_annotations(Parser *p, Node *body, int conditional, Node ***tail, int *index) {
     for (Node *n = body; n; n = n->next) {
+        if (n->kind == N_ANNASSIGN && conditional) p->conditional_annotations = 1;
         if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE) && p->future_annotations) {
             /* PEP 563 stores each string in __annotations__ as it runs. */
             n->flags |= F_FUTURE; (*index)++;
@@ -6596,7 +6598,11 @@ static int body_annotations(Parser *p, Node *owner, Node *body, Node **out) {
     Node *entries = NULL, **tail = &entries;
     int index = 0;
     *out = NULL;
-    if (collect_annotations(p, body, 0, &tail, &index)) return -1;
+    /* Every annotation of a module, which may run in part, is conditional. */
+    p->conditional_annotations = 0;
+    if (collect_annotations(p, body, !owner, &tail, &index)) return -1;
+    if (p->conditional_annotations && owner) owner->flags |= F_CONDITIONAL;
+    else if (p->conditional_annotations) p->unit->as.unit.conditional_annotations = 1;
     if (p->future_annotations && index) {
         if (owner) owner->flags |= F_SETUP_ANNOTATIONS;
         else p->unit->as.unit.setup_annotations = 1;
@@ -15171,6 +15177,8 @@ static int condition(SPYContext *, Frame *, Node *);
 static Result execute(SPYContext *, Frame *, Node *);
 static Result execute_module(SPYContext *, Frame *);
 static int start_annotations(SPYContext *, Frame *, Node *, const char *);
+static int start_conditional(SPYContext *, Frame *, int);
+static int store_annotate(SPYContext *, Frame *, Node *, const char *);
 static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, SPYValue *);
 static SPYValue *sentinel_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -19680,10 +19688,12 @@ static int class_body_begin(SPYContext *c, SPYValue *unit, Node *n, SPYValue *en
     declare_locals(c, env);
     return c->error_type[0] ? -1 : 0;
 }
-/* After the body (16.4.1 step 10): __static_attributes__,
- * __classdictcell__ and __classcell__. *classcell receives the __class__
- * cell when a method needs one. */
-static int class_body_end(SPYContext *c, Node *n, SPYValue *env, SPYValue **classcell) {
+/* After the body in frame f (16.4.1 step 10): __annotate_func__,
+ * __static_attributes__, __classdictcell__ and __classcell__.
+ * *classcell receives the __class__ cell when a method needs one. */
+static int class_body_end(SPYContext *c, Node *n, Frame *f, SPYValue **classcell) {
+    SPYValue *env = f->env;
+    if (store_annotate(c, f, n->annotate, "__annotate_func__")) return -1;
     SPYValue *attributes = static_attributes(c, n->scope);
     if (attributes) name_set(c, env, "__static_attributes__", attributes);
     spy_release(attributes);
@@ -19713,12 +19723,12 @@ static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPY
     if (class_body_begin(c, unit, n, env, type_params)) return -1;
     Frame frame = {env, unit, 0};
     if (enter_frame(c, env, unit)) return -1;
-    Result r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
+    Result r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_conditional(c, &frame, n->flags & F_CONDITIONAL) ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
     if (r.flow == FLOW_NORMAL && n->annotate && (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_class_line(c, n)) r.flow = FLOW_ERROR;
     leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
     spy_release(r.value);
     if (r.flow != FLOW_NORMAL || c->error_type[0]) return -1;
-    return class_body_end(c, n, env, classcell);
+    return class_body_end(c, n, &frame, classcell);
 }
 /* A class statement's state between its body and its creation: the
  * metaclass, the bases (tuple), the namespace, the body's env, the
@@ -21802,22 +21812,28 @@ static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result;
 }
-/* Module and class bodies start by defining their annotation function and
- * the set recording which conditional annotations have executed. */
-static int start_annotations(SPYContext *c, Frame *f, Node *annotate, const char *name) {
+/* A body with annotations annotate binds its annotation function to
+ * name: a module first, a class after its statements. */
+static int store_annotate(SPYContext *c, Frame *f, Node *annotate, const char *name) {
     if (!annotate) return 0;
-    for (Node *entry = annotate->b->args; entry; entry = entry->next) {
-        if (!(entry->flags & F_CONDITIONAL)) continue;
-        SPYValue *executed = value_new(c, SPY_SET);
-        int status = executed ? name_set(c, conditional_env(f), "__conditional_annotations__", executed) : -1;
-        spy_release(executed);
-        if (status) return -1;
-        break;
-    }
     SPYValue *fn = function_new(c, f, annotate);
     int status = fn ? name_set(c, f->env, name, fn) : -1;
     spy_release(fn);
     return status;
+}
+/* A body with a conditional annotation (conditional) starts with the
+ * set recording which of them have executed. */
+static int start_conditional(SPYContext *c, Frame *f, int conditional) {
+    if (!conditional) return 0;
+    SPYValue *executed = value_new(c, SPY_SET);
+    int status = executed ? name_set(c, conditional_env(f), "__conditional_annotations__", executed) : -1;
+    spy_release(executed);
+    return status;
+}
+/* A module's body starts by binding its annotation function, then the
+ * set of executed conditional annotations. */
+static int start_annotations(SPYContext *c, Frame *f, Node *annotate, const char *name) {
+    return store_annotate(c, f, annotate, name) || start_conditional(c, f, f->unit->as.unit.conditional_annotations);
 }
 /* A module's body: on the machine, compiled at its first run, so that its
  * loops are steps and its calls run there; an expression or interactive
@@ -28469,14 +28485,14 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     Node *n = ins->node;
     SPYValue *bases = NULL, *arguments = NULL, *name, *body = NULL;
     if (ins->arg == 8)
-        return setup_annotations(c, f, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, f, n->annotate, "__annotate_func__") ? NULL : spy_none(c);
+        return setup_annotations(c, f, n->flags & F_SETUP_ANNOTATIONS) || start_conditional(c, f, n->flags & F_CONDITIONAL) ? NULL : spy_none(c);
     if (ins->arg == 6) {
         /* The body's end, in its env, whose scope's owner is the class
          * statement, traced as class_body traces it. */
         SPYValue *classcell = NULL;
         n = f->env->as.map.scope->owner;
         if (n->annotate && (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_class_line(c, n)) return NULL;
-        if (class_body_end(c, n, f->env, &classcell)) { spy_release(classcell); return NULL; }
+        if (class_body_end(c, n, f, &classcell)) { spy_release(classcell); return NULL; }
         return classcell ? classcell : spy_none(c);
     }
     if (ins->arg == 1) {

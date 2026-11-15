@@ -25,7 +25,13 @@
 (* program annotates with a class-body name or an enclosing function's     *)
 (* local. A replacement program assigns a function's or class's            *)
 (* __annotations__ or __annotate__ (a function, or 5) or deletes           *)
-(* __annotate__. The outcome is the annotations, value, or exception.      *)
+(* __annotate__. An order program lists the names a class body, or a      *)
+(* module body run with a mapping, stores: a class's __annotate_func__     *)
+(* after its statements, a module's __annotate__ and then the set of its   *)
+(* executed annotations before them. A partial program runs a module that  *)
+(* stops, or not, between two annotations: every module annotation is     *)
+(* conditional, so only executed ones are reported. The outcome is the     *)
+(* annotations, value, names, or exception.                                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -36,6 +42,8 @@ Programs == [part : {"function"}, ann : Anns, op : {"annotations", "format1", "f
             \cup [part : {"lazy"}, reads : 0..2]
             \cup [part : {"scope"}, where : {"class", "closure"}]
             \cup [part : {"replace"}, target : {"function", "class"}, op : {"annotations", "annotate", "bad", "delete"}]
+            \cup [part : {"order"}, where : {"class", "module"}]
+            \cup [part : {"partial"}, stop : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -54,6 +62,9 @@ Run(p) ==
       [] p.part = "replace" -> CASE p.op = "annotations" -> "None"          \* __annotate__ is dropped
                                  [] p.op = "annotate" -> "w=2"              \* the new function answers
                                  [] OTHER -> "TypeError"
+      [] p.part = "order" -> IF p.where = "class" THEN "a,x,b,__annotate_func__,__static_attributes__,__classdictcell__"
+                             ELSE "__annotate__,__conditional_annotations__,a,x,b"
+      [] p.part = "partial" -> IF p.stop THEN "x=int" ELSE "x=int,y=str"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -65,6 +76,9 @@ Done == outcome # Pending
 \* Defining never evaluates an annotation, so it never fails for one.
 DefinitionNeverFails == Done /\ program.part \in {"local", "class"} /\ (program.part = "local" \/ program.op = "attr") =>
     outcome # "NameError"
+
+\* A module that stops reports only the annotations it executed.
+PartialExecuted == Done /\ program.part = "partial" /\ program.stop => outcome = "x=int"
 
 \* Annotations are evaluated at most once.
 AtMostOnce == Done /\ program.part = "lazy" => outcome \in {"0", "1"}
