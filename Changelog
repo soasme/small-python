@@ -180,6 +180,7 @@ Unreleased (0.10.0):
 - a dict or set key of a builtin type's subclass calls its Python __hash__ without nesting on the C stack
 - a module's Python __getattr__ runs without nesting on the C stack, after the module type's attributes,
   such as object's __repr__, __eq__ and __init__, which a module now has
+- reading __annotations__ calls the compiler's or a Python __annotate__ without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

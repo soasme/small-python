@@ -405,6 +405,8 @@ These run as machines on the heap, in one native activation of
   `__setattr__`, property setter or `__set__` that `setattr` calls;
 - a module's `__getattr__`, for an attribute read, `getattr` and
   `hasattr`;
+- the `__annotate__` that the first read of a function's, class's or
+  module's `__annotations__` calls, and the calls in its annotations;
 - a key's `__hash__`, also of a builtin's subclass defining it, in dict
   and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`

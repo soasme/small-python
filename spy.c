@@ -478,6 +478,8 @@ struct SPYContext {
     int consuming;
     /* The replay of the pattern a step matches, while it runs (pattern_step). */
     struct Replay *replay;
+    /* Whether a read of __annotations__ calls its Python __annotate__ (annotate_pending). */
+    int annotating;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -11441,6 +11443,36 @@ static SPYValue *annotation_dict(SPYContext *c, SPYValue *annotate) {
     }
     return value;
 }
+static int machine_function(SPYContext *, SPYValue *);
+/* The Python __annotate__, a machine function, that a read of the
+ * __annotations__ of v, a function, plain class or module, calls first,
+ * none being kept yet (annotation_dict); borrowed, else NULL. */
+static NO_INLINE SPYValue *annotate_pending(SPYContext *c, SPYValue *v) {
+    SPYValue *own = v->type == SPY_FUNCTION ? v->as.function.metadata : v, *kept, *annotate;
+    if (v->type == SPY_CLASS && v->as.map.meta) return NULL;
+    kept = name_local(own, "__annotations__");
+    if (v->type == SPY_CLASS && !kept) kept = name_local(own, "__annotations_cache__");
+    if (kept && (v->type != SPY_FUNCTION || kept->type != SPY_NONE)) return NULL;
+    annotate = name_local(own, "__annotate__");
+    if (v->type == SPY_CLASS && !annotate) annotate = name_local(own, "__annotate_func__");
+    return annotate && machine_function(c, annotate) ? annotate : NULL;
+}
+/* What the __annotate__ of owner, which it takes, returned in result for
+ * a read of its __annotations__ (annotate_pending): the dict, kept as
+ * annotation_dict's caller keeps it. */
+static SPYValue *annotations_made(SPYContext *c, Machine *m, SPYValue *owner, SPYValue *result) {
+    (void)m;
+    if (result && !builtin_value(c, result, SPY_DICT)) {
+        errorf(c, "TypeError", "__annotate__() must return a dict, not %s", type_name(result));
+        spy_release(result); result = NULL;
+    }
+    SPYValue *own = owner->type == SPY_FUNCTION ? owner->as.function.metadata : owner;
+    if (result && name_set(c, own, owner->type == SPY_CLASS ? "__annotations_cache__" : "__annotations__", result)) {
+        spy_release(result); result = NULL;
+    }
+    spy_release(owner);
+    return result;
+}
 static SPYValue *class_annotations(SPYContext *c, SPYValue *cls, const char *name) {
     SPYValue *annotate = name_local(cls, "__annotate__");
     if (!annotate) annotate = name_local(cls, "__annotate_func__");
@@ -12412,6 +12444,12 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
     if (calls && kind == ATTR_PROPERTY && machine_function(c, n->attr_method->as.property.get)) return NULL;
+    /* A function's, class's or module's __annotations__ its Python __annotate__ makes (getter_call). */
+    if (calls && UNLIKELY(v->type == SPY_FUNCTION || v->type == SPY_CLASS || v->type == SPY_MODULE) &&
+        !strcmp(n->b->text, "__annotations__") && annotate_pending(c, v)) {
+        c->annotating = 1;
+        return NULL;
+    }
     if (calls && v->type == SPY_CLASS) {
         /* A class with no Python getter or hook for the name is remembered
          * until any class changes, under the epoch's complement, which no
@@ -14970,9 +15008,15 @@ static int increment(Node *n) {
     return n->kind == N_ASSIGN && (n->op == T_ADDEQ || n->op == T_SUBEQ) && n->a->kind == N_NAME &&
         (n->b->constant || n->b->kind == N_NAME);
 }
+/* Whether n is an annotation function's body with a starred annotation. */
+static int unpacks_annotation(Node *n) {
+    if (n->kind == N_ANNOTATIONS) for (Node *entry = n->args; entry; entry = entry->next) if (entry->a->kind == N_STAR) return 1;
+    return 0;
+}
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end, start, loop;
-    if (!expands(n, p->calls) && !(p->display && n->kind == N_EXPR)) {
+    /* A starred annotation unpacks on the machine (annotation_step). */
+    if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR)) {
         emit(c, p, increment(n) && !p->namespace ? BC_INCREMENT : BC_EXEC, n, 0);
         return;
     }
@@ -15052,6 +15096,18 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         }
         break;
     }
+    case N_ANNOTATIONS:
+        /* An annotation function's dict, then each entry that ran stored
+         * in it (annotation_step); a lazy value's returns its value. */
+        emit(c, p, BC_CLASS, n, 12);
+        for (Node *entry = n->args; entry; entry = entry->next) {
+            branch = entry->flags & F_CONDITIONAL ? (emit(c, p, BC_CLASS, entry, 13), emit(c, p, BC_FALSE, entry, 0)) : SIZE_MAX;
+            compile_expr(c, p, entry->a->kind == N_STAR ? entry->a->a : entry->a);
+            if (entry->a->kind == N_STAR) emit(c, p, BC_CLASS, entry, 16);
+            emit(c, p, BC_CLASS, entry, n->op == 1 ? 15 : 14);
+            patch(p, branch, p->len);
+        }
+        emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     case N_RETURN:
         /* A return of a name or literal loads it in its own step. */
         if (n->a && (n->a->kind == N_NAME || n->a->constant)) { emit(c, p, BC_RETURN, n, 0); break; }
@@ -15210,10 +15266,10 @@ static void namespace_bindings(Node *n) {
  * the machine: a body of neither always ends, so it may run on the walker. */
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
-    /* An annotation or lazy value function's body is one walker statement;
-     * while calls can pause, every other body runs on the machine. */
-    if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS ||
-                       (n->kind != N_CLASS && mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b))))) return 0;
+    /* While calls can pause, every body runs on the machine; so does an
+     * annotation function's that unpacks a starred annotation. */
+    if (!generator && (!n->b || (n->kind != N_CLASS && mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b) ||
+                                                                        unpacks_annotation(n->b))))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
@@ -22151,43 +22207,85 @@ static NO_INLINE void record_annotation(SPYContext *c, Frame *f, Node *n) {
         spy_release(index); spy_release(executed);
     }
 }
-static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n) {
+/* An annotation function n's dict, or NULL with an error: a format above
+ * 2 is NotImplementedError. */
+static SPYValue *annotations_begin(SPYContext *c, Frame *f, Node *n) {
     SPYValue *format = name_get(c, f->env, n->op == 1 ? ".format" : "format"), two = {.type = SPY_INT, .as.integer_data.small = 2};
     SPYValue *unsupported = format ? comparison(c, '>', format, &two) : NULL;
     int raise = unsupported && truthy(unsupported);
     spy_release(format); spy_release(unsupported);
     if (c->error_type[0]) return NULL;
-    if (raise) return spy_error(c, "NotImplementedError", "");
-    SPYValue *result = value_new(c, SPY_DICT), *executed = NULL;
+    return raise ? spy_error(c, "NotImplementedError", "") : value_new(c, SPY_DICT);
+}
+/* Whether conditional annotation entry ran, its index in executed (or,
+ * NULL, the set conditional_set finds): 1, 0, or -1 with an error. */
+static int annotation_ran(SPYContext *c, Frame *f, Node *entry, SPYValue *executed) {
+    SPYValue *set = executed ? spy_retain(executed) : conditional_set(c, f), *index = set ? spy_int(c, entry->op) : NULL;
+    int64_t hash;
+    int found = !index || set->type != SPY_SET || hash_value(c, index, &hash) ? -1 : set_contains(c, set, index, hash);
+    spy_release(index); spy_release(set);
+    if (found < 0 && !c->error_type[0]) spy_error(c, "TypeError", "__conditional_annotations__ must be a set");
+    return found;
+}
+/* The target list of one name that PEP 646's `*args: *Ts` unpacks its
+ * annotation to; never changed. */
+static Node one_name = {.kind = N_NAME}, one_target = {.kind = N_TUPLE, .args = &one_name};
+/* Entry's value, which it takes: a starred one annotates with the single
+ * item it unpacks to. */
+static SPYValue *annotation_value(SPYContext *c, Frame *f, Node *entry, SPYValue *value) {
+    if (!value || entry->a->kind != N_STAR) return value;
+    SPYValue *items = unpack_target(c, f, &one_target, value);
+    spy_release(value);
+    value = items ? spy_retain(items->as.seq.items[0]) : NULL;
+    spy_release(items);
+    return value;
+}
+static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n) {
+    SPYValue *result = annotations_begin(c, f, n), *executed = NULL;
     for (Node *entry = n->args; result && entry && !c->error_type[0]; entry = entry->next) {
         if (entry->flags & F_CONDITIONAL) {
             if (!executed && !(executed = conditional_set(c, f))) break;
-            SPYValue *index = spy_int(c, entry->op);
-            int64_t hash;
-            int found = !index || executed->type != SPY_SET || hash_value(c, index, &hash) ? -1 : set_contains(c, executed, index, hash);
-            spy_release(index);
-            if (found < 0 && !c->error_type[0]) spy_error(c, "TypeError", "__conditional_annotations__ must be a set");
+            int found = annotation_ran(c, f, entry, executed);
             if (found <= 0) { if (found < 0) break; continue; }
         }
-        SPYValue *key = spy_string(c, entry->text, strlen(entry->text));
-        SPYValue *value = !key ? NULL : entry->a->kind == N_STAR ? eval(c, f, entry->a->a) : eval(c, f, entry->a);
-        if (n->op == 1 && value && entry->a->kind != N_STAR) {
-            /* A lazy type-parameter value returns its single expression. */
-            spy_release(key); spy_release(result); spy_release(executed); return value;
-        }
-        if (value && entry->a->kind == N_STAR) {
-            /* PEP 646: `*args: *Ts` annotates with the single unpacked item. */
-            SPYValue *items = unpack_target(c, f, &(Node){.kind = N_TUPLE, .args = &(Node){.kind = N_NAME}}, value);
-            spy_release(value);
-            value = items ? spy_retain(items->as.seq.items[0]) : NULL;
-            spy_release(items);
-            if (n->op == 1) { spy_release(key); spy_release(result); spy_release(executed); return value; }
-        }
-        if (value) map_set(c, result, key, value);
+        SPYValue *value = annotation_value(c, f, entry, eval(c, f, entry->a->kind == N_STAR ? entry->a->a : entry->a));
+        /* A lazy type-parameter value returns its single expression. */
+        if (n->op == 1 && value) { spy_release(result); spy_release(executed); return value; }
+        SPYValue *key = value ? spy_string(c, entry->text, strlen(entry->text)) : NULL;
+        if (key) map_set(c, result, key, value);
         spy_release(key); spy_release(value);
     }
     spy_release(executed);
     if (c->error_type[0]) { spy_release(result); return NULL; }
+    return result;
+}
+static SPYValue *unpack_step(SPYContext *, Machine *, Frame *, Node *);
+/* BC_CLASS 12 to 16, an annotation function's body on m (compile_statement):
+ * 12 its dict (annotations_begin); 13 whether a conditional entry ran
+ * (annotation_ran); 16 a starred entry's single item, above its value, as
+ * BC_UNPACK takes it (unpack_step), or NULL, taken on the machine; 14
+ * stores an entry's value, above the dict, in it; 15 a lazy value's
+ * function returns its value instead. */
+static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
+    Node *entry = ins->node;
+    if (ins->arg == 12) return annotations_begin(c, f, entry);
+    if (ins->arg == 13) {
+        int found = annotation_ran(c, f, entry, NULL);
+        return found < 0 ? NULL : spy_bool(c, found);
+    }
+    if (ins->arg == 16) {
+        SPYValue *items = unpack_step(c, m, f, &one_target), *item = items ? spy_retain(items->as.seq.items[0]) : NULL;
+        spy_release(items);
+        return item;
+    }
+    SPYValue *value = machine_pop(m);
+    if (entry->a->kind == N_STAR) spy_release(machine_pop(m));
+    SPYValue *result = machine_pop(m);
+    if (ins->arg == 15) { spy_release(result); return value; }
+    SPYValue *key = spy_string(c, entry->text, strlen(entry->text));
+    int status = key ? map_set(c, result, key, value) : -1;
+    spy_release(key); spy_release(value);
+    if (status) { spy_release(result); return NULL; }
     return result;
 }
 /* A body with annotations annotate binds its annotation function to
@@ -29303,6 +29401,14 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
  * gives (getter_function). The function to enter, its kind
  * c->entering_kind, else NULL. */
 static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYValue *v, SPYValue **env) {
+    if (UNLIKELY(c->annotating)) {
+        /* __annotate__(1), its dict kept (annotations_made), m's call (callk). */
+        SPYValue *format = spy_int(c, 1), *result;
+        c->annotating = 0;
+        if (!format) { spy_release(v); return NULL; }
+        if ((result = callk(c, m, annotate_pending(c, v), 1, &format, annotations_made, v))) machine_push(c, m, result);
+        return NULL;
+    }
     SPYValue *function = c->fallback, *argv[3] = {v, NULL, NULL}, *fallback;
     size_t argc = 1;
     c->fallback = NULL;
@@ -29451,6 +29557,7 @@ static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     if (ins->arg == 10) return name_load(c, m, f, ins->node);
     if (ins->arg == 11) return alias_step(c, m, f, ins->node);
+    if (ins->arg >= 12) return annotation_step(c, m, f, ins);
     if (ins->arg == 7) {
         SPYValue *state = m->stack[m->len - 3], *cls, *classcell;
         int list = state->type == SPY_LIST;
@@ -31341,6 +31448,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 value = class_step(c, m, &f, ins, &callee_env);
                 if (callee_env) goto enter_init;
                 if (!value && c->k_fn) goto enter_k;
+                if (UNLIKELY(!value && !c->error_type[0])) goto consume_generator;
                 machine_push(c, m, value);
             }
             break;
@@ -31599,8 +31707,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         spy_release(a);
         continue;
     enter_getter:
-        /* A property's Python getter or a __getattr__ is a call (BC_ATTR). */
-        if (!(value = getter_call(c, m, n, a, &callee_env))) continue;
+        /* A property's Python getter or a __getattr__ is a call (BC_ATTR),
+         * or an __annotate__ m's call (callk). */
+        if (!(value = getter_call(c, m, n, a, &callee_env))) {
+            if (UNLIKELY(c->k_fn)) goto enter_k;
+            continue;
+        }
         special = c->entering_kind;
         goto enter_special;
     enter_init:

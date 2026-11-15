@@ -1021,6 +1021,26 @@ static const char *const programs[] = {
     "    return out\n"
     "print(mr())\n",
 
+    "def an(x):\n"
+    "    for _ in (): pass\n"
+    "    return x\n"
+    "def af(a: an(1), *b: an(list[int])) -> an('r'): pass\n"
+    "class AC:\n"
+    "    x: an(str)\n"
+    "    if af is None:\n"
+    "        y: an(int)\n"
+    "class AO:\n"
+    "    def __iter__(self): yield an(4)\n"
+    "def ao(*a: *AO()): pass\n"
+    "def ab(): pass\n"
+    "ab.__annotate__ = lambda f: [an(f)]\n"
+    "def ar():\n"
+    "    out = [af.__annotations__, AC.__annotations__, ao.__annotations__]\n"
+    "    try: ab.__annotations__\n"
+    "    except TypeError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(ar())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

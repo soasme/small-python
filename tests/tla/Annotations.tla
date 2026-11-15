@@ -30,8 +30,11 @@
 (* after its statements, a module's __annotate__ and then the set of its   *)
 (* executed annotations before them. A partial program runs a module that  *)
 (* stops, or not, between two annotations: every module annotation is     *)
-(* conditional, so only executed ones are reported. The outcome is the     *)
-(* annotations, value, names, or exception.                                *)
+(* conditional, so only executed ones are reported. A calls program reads *)
+(* the __annotations__ of a function or class twice, its __annotate__ the  *)
+(* compiler's, whose annotation calls a Python function, or one assigned   *)
+(* that returns a dict or a list. The outcome is the annotations, value,   *)
+(* names, or exception, and for a calls program the calls made.           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -44,6 +47,7 @@ Programs == [part : {"function"}, ann : Anns, op : {"annotations", "format1", "f
             \cup [part : {"replace"}, target : {"function", "class"}, op : {"annotations", "annotate", "bad", "delete"}]
             \cup [part : {"order"}, where : {"class", "module"}]
             \cup [part : {"partial"}, stop : BOOLEAN]
+            \cup [part : {"calls"}, owner : {"function", "class"}, annotate : {"compiled", "dict", "list"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -65,6 +69,11 @@ Run(p) ==
       [] p.part = "order" -> IF p.where = "class" THEN "a,x,b,__annotate_func__,__static_attributes__,__classdictcell__"
                              ELSE "__annotate__,__conditional_annotations__,a,x,b"
       [] p.part = "partial" -> IF p.stop THEN "x=int" ELSE "x=int,y=str"
+      \* The first read calls __annotate__ and keeps a dict; a list is
+      \* TypeError at each read, so it is called twice.
+      [] p.part = "calls" -> CASE p.annotate = "compiled" -> "x=str;1"
+                               [] p.annotate = "dict" -> "w=1;1"
+                               [] OTHER -> "TypeError;2"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -79,6 +88,9 @@ DefinitionNeverFails == Done /\ program.part \in {"local", "class"} /\ (program.
 
 \* A module that stops reports only the annotations it executed.
 PartialExecuted == Done /\ program.part = "partial" /\ program.stop => outcome = "x=int"
+
+\* A kept dict's annotations are evaluated once; a non-dict is never kept.
+CalledOnceKept == Done /\ program.part = "calls" => (outcome = "TypeError;2" <=> program.annotate = "list")
 
 \* Annotations are evaluated at most once.
 AtMostOnce == Done /\ program.part = "lazy" => outcome \in {"0", "1"}

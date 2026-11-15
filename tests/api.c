@@ -1941,6 +1941,11 @@ int main(int argc, char **argv) {
                "def hashed():\n    return {Hashed('k'): 12}[Hashed('k')]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hashed()", "hashed.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 2);
+    /* So does a compiled __annotate__'s Python annotation call. */
+    execute(c, "def slow(x):\n    for i in range(3000): pass\n    return x\n"
+               "def annotated():\n    def f(a: slow(15)): pass\n    return f.__annotations__['a']\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "annotated()", "annotated.py"), SPY_STOP_STEPS, &pauses)) == 15 && pauses > 2);
     /* So does a module's Python __getattr__. */
     execute(c, "def fallback(name):\n    for i in range(3000): pass\n    return len(name)\n"
                "def dynamic():\n    m = type(__build_class__.__self__)('m')\n    m.__getattr__ = fallback\n"

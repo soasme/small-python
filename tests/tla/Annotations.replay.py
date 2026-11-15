@@ -150,7 +150,31 @@ def partial(p):
     return render(ns["__annotate__"](1))
 
 
-PARTS = {"function": function, "class": klass, "local": local, "lazy": lazy, "scope": scope, "replace": replace,
+def calls(p):
+    log = []
+    def note(x):
+        for _ in (): pass
+        log.append(x)
+        return x
+    if p["owner"] == "function":
+        def target(x: note(str)): pass
+    else:
+        class target:
+            x: note(str)
+    if p["annotate"] == "dict":
+        target.__annotate__ = lambda format: {"w": note(format)}
+    elif p["annotate"] == "list":
+        target.__annotate__ = lambda format: [note(format)]
+    out = None
+    for _ in range(2):
+        try:
+            out = render(target.__annotations__)
+        except TypeError as error:
+            out = type(error).__name__
+    return "%s;%d" % (out, len(log))
+
+
+PARTS = {"calls": calls, "function": function, "class": klass, "local": local, "lazy": lazy, "scope": scope, "replace": replace,
          "order": order, "partial": partial}
 
 
