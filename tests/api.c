@@ -2225,6 +2225,11 @@ int main(int argc, char **argv) {
                "    return out\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "athrows()", "athrows.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 2);
+    /* So does memoryview() of an object with a Python __buffer__. */
+    execute(c, "class Exporting:\n    def __buffer__(self, flags):\n        for i in range(3000): pass\n"
+               "        return memoryview(bytes(i % 256 for i in range(flags)))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "memoryview(Exporting()).nbytes", "exporting.py"), SPY_STOP_STEPS, &pauses)) == 284 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

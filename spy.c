@@ -1463,6 +1463,9 @@ static void release_edge(SPYValue *v, void *data) {
     if (--v->refs == 0) { v->pending = *pending; *pending = v; }
 }
 static void memory_unexport(SPYValue *);
+static SPYValue *memory_exported(SPYContext *, SPYValue *, SPYValue *);
+/* The flags memoryview() asks a __buffer__ for: PyBUF_FULL_RO. */
+enum { BUFFER_FLAGS = 284 };
 /* The finalize queue needs no storage of its own: a value on it has a
  * reference, the queue's, so it is on no pending stack (release_dead). */
 static void finalize_push(SPYContext *c, SPYValue *v) {
@@ -25867,6 +25870,16 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         return argc <= 2 && callee->type == SPY_NATIVE && callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_NEXT ?
                sequence_next(c, argv[0], found) : NULL;
     if (argc > 2 || (argv[0]->type == SPY_CLASS && !argv[0]->as.map.meta)) return NULL;
+    /* memoryview() of an instance with no bytes or bytearray base asks its
+     * __buffer__ for a view (memory_exported). */
+    if (callee == c->types[SPY_MEMORYVIEW] && argc == 1 && argv[0]->type == SPY_INSTANCE && !builtin_value(c, argv[0], SPY_BYTES) &&
+        !builtin_value(c, argv[0], SPY_BYTEARRAY)) {
+        SPYValue *function = class_lookup(argv[0]->as.map.parent, "__buffer__");
+        if (!function || !machine_function(c, function) || !(*spec = spy_int(c, BUFFER_FLAGS))) return NULL;
+        if (!(*name = spy_string(c, "__buffer__", 10))) { spy_release(*spec); return NULL; }
+        c->entering_kind = CALL_CHECKED;
+        return function;
+    }
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
@@ -30573,6 +30586,7 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
         return listed;
     }
     if (!strcmp(method, "__hash__")) return hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
+    if (!strcmp(method, "__buffer__")) return memory_exported(c, v, spy_retain(result));
     if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));
     if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);
     if (!strcmp(method, "__bool__"))
@@ -36480,26 +36494,32 @@ static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
     if (v->type != SPY_MEMORYVIEW || memory_check(c, v)) return NULL;
     return *owned = memory_bytes(c, v);
 }
+/* The memoryview of object whose __buffer__ returned view, which it
+ * takes: a view of view's buffer that holds both; else NULL. */
+static SPYValue *memory_exported(SPYContext *c, SPYValue *object, SPYValue *view) {
+    if (view && view->type != SPY_MEMORYVIEW) {
+        char fq[256];
+        errorf(c, "TypeError", "%s.__buffer__() must return a memoryview, not %s", type_fqname(object, fq, sizeof(fq)), type_name(view));
+        spy_release(view); return NULL;
+    }
+    if (!view || memory_check(c, view)) { spy_release(view); return NULL; }
+    SPYValue *m = memory_copy(c, view, view->as.memory.ndim);
+    if (!m) { spy_release(view); return NULL; }
+    spy_release(m->as.memory.obj);
+    m->as.memory.obj = spy_retain(object); m->as.memory.view = view;
+    return m;
+}
 /* memoryview(object): bytes and bytearray export their buffers, a view
- * shares its own, and an object may provide one through __buffer__. */
+ * shares its own, and an object may provide one through __buffer__
+ * (memory_exported). */
 static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
     if (object->type == SPY_MEMORYVIEW) return memory_check(c, object) ? NULL : memory_copy(c, object, object->as.memory.ndim);
     SPYValue *source = builtin_value(c, object, SPY_BYTES);
     if (!source) source = builtin_value(c, object, SPY_BYTEARRAY);
     if (!source && object->type == SPY_INSTANCE && class_lookup(object->as.map.parent, "__buffer__")) {
-        SPYValue *flags = spy_int(c, 284), *view = flags ? call_special(c, object, "__buffer__", 1, &flags) : NULL;
+        SPYValue *flags = spy_int(c, BUFFER_FLAGS), *view = flags ? call_special(c, object, "__buffer__", 1, &flags) : NULL;
         spy_release(flags);
-        if (view && view->type != SPY_MEMORYVIEW) {
-            char fq[256];
-            errorf(c, "TypeError", "%s.__buffer__() must return a memoryview, not %s", type_fqname(object, fq, sizeof(fq)), type_name(view));
-            spy_release(view); return NULL;
-        }
-        if (!view || memory_check(c, view)) { spy_release(view); return NULL; }
-        SPYValue *m = memory_copy(c, view, view->as.memory.ndim);
-        if (!m) { spy_release(view); return NULL; }
-        spy_release(m->as.memory.obj);
-        m->as.memory.obj = spy_retain(object); m->as.memory.view = view;
-        return m;
+        return memory_exported(c, object, view);
     }
     if (!source) return errorf(c, "TypeError", "memoryview: a bytes-like object is required, not '%s'", type_name(object));
     SPYValue *m = memory_new(c, object, source, "B", 1, 1, source->type == SPY_BYTES);

@@ -1482,6 +1482,21 @@ static const char *const programs[] = {
     "    return out + [ao(lambda: op.send(None)), ao(lambda: op.send(None)), ao(lambda: g.aclose().send(None))]\n"
     "print(ax())\n",
 
+    "class MB:\n"
+    "    def __init__(s, d): s.d = bytearray(d)\n"
+    "    def __buffer__(s, f):\n"
+    "        if s.d == b'x': raise KeyError(f)\n"
+    "        return memoryview(s.d) if s.d else 'no'\n"
+    "def mb():\n"
+    "    out, e = [], MB(b'ab')\n"
+    "    m = memoryview(e); m[1] = 67\n"
+    "    out += [bytes(m), bytes(e.d), m.nbytes]\n"
+    "    for d in (b'x', b''):\n"
+    "        try: memoryview(MB(d))\n"
+    "        except (KeyError, TypeError) as x: out.append(type(x).__name__)\n"
+    "    return out\n"
+    "print(mb())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

@@ -7,7 +7,9 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 def export(p, log):
     def __buffer__(self, flags):
-        log.append("buffer")
+        log.extend(["buffer", str(flags)])
+        if p["ret"] == "raise":
+            raise ValueError
         return memoryview(b"abc") if p["ret"] == "view" else b"abc"
     body = {"__buffer__": __buffer__}
     if p["release"]:

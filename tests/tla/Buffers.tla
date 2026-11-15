@@ -14,27 +14,28 @@
 (* converts sep, keep m exported, so its release fails with BufferError.   *)
 (*                                                                         *)
 (* An export program defines class B whose __buffer__ logs "buffer" and    *)
-(* returns memoryview(b"abc") or b"abc", with or without a                 *)
-(* __release_buffer__ that logs "release"; then takes bytes(B()), or makes *)
-(* m = memoryview(B()) and reads bytes(m) inside `with m:`, before         *)
-(* m.release(), or before del m. A resize program appends to a bytearray   *)
-(* with a view that is unreleased or released; a plain program takes       *)
-(* memoryview(object()). A reenter program releases a view of a bytearray, *)
-(* and empties the bytearray, from the __index__ of the key of m[k] or of  *)
-(* the item of m[0] = v, from the exporter's __hash__ during hash(m), or   *)
-(* from the __len__ of sep during m.hex(sep). An index program reads m[k] *)
-(* or stores m[k] = 66, k's __index__ logging "index" and returning 1, of  *)
-(* a view of bytearray(b"ab") that is plain, released, read-only, of no    *)
-(* dimension, or of shape (1, 2): a released view, one of no dimension, a  *)
-(* store into a read-only or two-dimensional view fail before the index;   *)
-(* a two-dimensional item fails after it. A grid program reads or stores  *)
-(* m[a, b] of a (2, 2) view of bytearray(b"abcd"), a's and b's __index__   *)
-(* logging their names, b returning 1 and a 0, or 5, out of bounds. The    *)
-(* outcome is the log and the result or the exception.                     *)
+(* its flags, 284, and returns memoryview(b"abc") or b"abc", or raises     *)
+(* ValueError, with or without a __release_buffer__ that logs "release";   *)
+(* then takes bytes(B()), or makes m = memoryview(B()) and reads bytes(m)  *)
+(* inside `with m:`, before m.release(), or before del m. A resize program *)
+(* appends to a bytearray with a view that is unreleased or released; a    *)
+(* plain program takes memoryview(object()). A reenter program releases a  *)
+(* view of a bytearray, and empties the bytearray, from the __index__ of   *)
+(* the key of m[k] or of the item of m[0] = v, from the exporter's         *)
+(* __hash__ during hash(m), or from the __len__ of sep during m.hex(sep).  *)
+(* An index program reads m[k] or stores m[k] = 66, k's __index__ logging  *)
+(* "index" and returning 1, of a view of bytearray(b"ab") that is plain,   *)
+(* released, read-only, of no dimension, or of shape (1, 2): a released    *)
+(* view, one of no dimension, a store into a read-only or two-dimensional  *)
+(* view fail before the index; a two-dimensional item fails after it. A    *)
+(* grid program reads or stores m[a, b] of a (2, 2) view of                *)
+(* bytearray(b"abcd"), a's and b's __index__ logging their names, b        *)
+(* returning 1 and a 0, or 5, out of bounds. The outcome is the log and    *)
+(* the result or the exception.                                            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"export"}, ret : {"view", "bytes"}, release : BOOLEAN, how : {"bytes", "with", "release", "del"}]
+Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : BOOLEAN, how : {"bytes", "with", "release", "del"}]
             \cup [part : {"resize"}, released : BOOLEAN]
             \cup [part : {"plain"}]
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
@@ -47,8 +48,9 @@ vars == <<program, outcome>>
 Pending == "pending"
 
 Export(p) ==
-    IF p.ret = "bytes" THEN "buffer TypeError"                \* __buffer__ must return a memoryview
-    ELSE "buffer " \o (IF p.release THEN "release " ELSE "") \o "b'abc'"
+    CASE p.ret = "bytes" -> "buffer 284 TypeError"             \* __buffer__ must return a memoryview
+      [] p.ret = "raise" -> "buffer 284 ValueError"            \* its exception propagates, nothing exported
+      [] OTHER -> "buffer 284 " \o (IF p.release THEN "release " ELSE "") \o "b'abc'"
 
 \* Whether an item of view v, or a store into it, converts its index.
 Indexes(v, store) == v \in IF store THEN {"plain"} ELSE {"plain", "readonly", "grid"}
@@ -81,7 +83,11 @@ Done == outcome # Pending
 
 \* A buffer obtained is released exactly once, however it is let go.
 ReleasedOnce == Done /\ program.part = "export" /\ program.ret = "view" /\ program.release =>
-    outcome = "buffer release b'abc'"
+    outcome = "buffer 284 release b'abc'"
+
+\* A buffer never obtained is never released.
+UnexportedUnreleased == Done /\ program.part = "export" /\ program.ret # "view" =>
+    outcome \in {"buffer 284 TypeError", "buffer 284 ValueError"}
 
 \* A view released by the code it runs is neither read nor written after.
 ReleasedUntouched == Done /\ program.part = "reenter" => outcome \in {"ValueError", "BufferError"}

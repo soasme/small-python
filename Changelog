@@ -224,6 +224,7 @@ Unreleased (0.10.0):
   nesting on the C stack
 - the first send() or next() of an async generator's athrow() or aclose() awaitable at a yield runs the generator
   without nesting on the C stack
+- memoryview() of an object with a Python __buffer__ calls it without nesting on the C stack
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack
 - a dict subclass's subscript, store and deletion call the key's Python __hash__, and an absent key's __missing__,
