@@ -30709,10 +30709,13 @@ static SPYValue *delegate_thrown(Machine *m) {
     return thrown;
 }
 /* Loop item item, which the loop step next took: stored to a name the
- * step stores (compile_next), or pushed. */
-static ALWAYS_INLINE void loop_item(SPYContext *c, Machine *m, Frame *f, Instruction *next, SPYValue *item) {
-    if (next->other) { store_target(c, f, next->node->args, item); spy_release(item); }
-    else machine_push(c, m, item);
+ * step stores (compile_next), or pushed. One bound through a namespace's
+ * Python __setitem__ is pushed for that call (loop_stored): 1. */
+static ALWAYS_INLINE int loop_item(SPYContext *c, Machine *m, Frame *f, Instruction *next, SPYValue *item) {
+    int stores = next->other && store_into(c, f, next->node->args, item, 1) > 0;
+    if (!next->other || stores) machine_push(c, m, item);
+    else spy_release(item);
+    return stores;
 }
 /* The generator the machine resumes for iterator v's next item, borrowed:
  * the source of an enumerate, or of a filter with no item waiting in its
@@ -31496,7 +31499,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (filtering(iterator)) result = filter_returned(c, m, iterator, result, &again, CALL_NEXT);
                         if (again) pc--;
                         else if (!result && c->k_fn) ;
-                        else if (result) loop_item(c, m, &f, &code[pc - 1], result);
+                        else if (result) { if (loop_item(c, m, &f, &code[pc - 1], result)) goto loop_stored; }
                         else if (next_ended(c, iterator)) pc = code[pc - 1].target;
                     }
                     /* A step's finish left a truth call (truth_call). */
@@ -31953,7 +31956,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (!a) pc = ins->target;
                 else if (ins->other) {
                     /* A name bound through a namespace's Python __setitem__ is BC_STORE's (store_call). */
-                    if (UNLIKELY(store_into(c, &f, n->args, a, 1) > 0)) { machine_push(c, m, a); a = NULL; goto store_step; }
+                    if (UNLIKELY(store_into(c, &f, n->args, a, 1) > 0)) { machine_push(c, m, a); a = NULL; goto loop_stored; }
                     /* The body and the jump back, while no pass is counted or
                      * watched and the iterator steps itself without raising. */
                     if (ins->other >= 2 && !watched(c)) {
@@ -32227,8 +32230,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             goto consume_item;
         }
         /* The loop's BC_NEXT, which resumed it. */
-        if (flow.value) loop_item(c, m, &f, &code[pc - 1], flow.value);
-        else if (flow.flow == FLOW_YIELD) pc--;
+        if (flow.value) {
+            int stores = loop_item(c, m, &f, &code[pc - 1], flow.value);
+            flow = (Result){FLOW_NORMAL, NULL};
+            if (stores) goto loop_stored;
+        } else if (flow.flow == FLOW_YIELD) pc--;
         else if (!c->error_type[0]) pc = code[pc - 1].target;
         flow = (Result){FLOW_NORMAL, NULL};
         continue;
@@ -32287,6 +32293,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
          * __setitem__, or of __delitem__ for a deletion (store_call). */
         callee_env = NULL;
         if ((value = store_call(c, m, &f, ins, &callee_env))) { special = c->entering_kind; goto enter_special; }
+        continue;
+    loop_stored:
+        /* A loop step's item bound through a namespace's Python __setitem__
+         * (loop_item), the item atop m's stack, is BC_STORE's (store_call). */
+        callee_env = NULL;
+        if ((value = store_call(c, m, &f, &code[pc - 1], &callee_env))) { special = c->entering_kind; goto enter_special; }
         continue;
     bool_step:
         /* BC_FALSE or BC_SHORT on instance a: a Python __bool__ is a call

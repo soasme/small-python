@@ -22,9 +22,9 @@
 (* eval("q", {"q": 2}, {"q": 3}); the class body's eval("a + 1"); or      *)
 (* exec("r = q", {"q": 2}, m) then m["r"] for m a mapping whose Python     *)
 (* __getitem__ has q = 3, has no q, or raises LookupError; or exec("for i  *)
-(* in (1, 2): pass\nk = j = 0\ndel k, j", {}, m) for m a mapping whose     *)
-(* Python __setitem__ and __delitem__ log each binding, in order. The      *)
-(* outcome is the result or the exception.                                 *)
+(* in (1, 2): pass\nfor i in (x for x in (3,)): pass\nk = j = 0\ndel k,    *)
+(* j", {}, m) for m a mapping whose Python __setitem__ and __delitem__ log *)
+(* each binding, in order. The outcome is the result or the exception.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -53,7 +53,7 @@ Run(p) == CASE p.case = "exec_rebind" -> "1"                   \* the snapshot c
             [] p.case = "exec_custom_miss" -> "2"            \* the KeyError falls back to the globals
             [] p.case = "exec_custom_error" -> "LookupError"
             [] p.case = "exec_custom_loop" ->
-                 "[('set', 'i', 1), ('set', 'i', 2), ('set', 'k', 0), ('set', 'j', 0), ('del', 'k'), ('del', 'j')]"
+                 "[('set', 'i', 1), ('set', 'i', 2), ('set', 'i', 3), ('set', 'k', 0), ('set', 'j', 0), ('del', 'k'), ('del', 'j')]"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

@@ -1403,6 +1403,7 @@ static const char *const programs[] = {
     "def mn():\n"
     "    ns = MN()\n"
     "    exec('for i in range(3): pass\\na = b = z = 0\\ndel a, b\\ntry: del z\\nexcept NameError as e: m = str(e)\\n', {}, ns)\n"
+    "    exec('for g in (x for x in (4, 5)): pass\\n', {}, ns)\n"
     "    return sorted(ns.items())\n"
     "print(mn())\n",
 

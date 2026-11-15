@@ -123,7 +123,7 @@ class Logging(dict):
 def exec_custom_loop():
     m = Logging()
     m.log = []
-    exec("for i in (1, 2): pass\nk = j = 0\ndel k, j", {}, m)
+    exec("for i in (1, 2): pass\nfor i in (x for x in (3,)): pass\nk = j = 0\ndel k, j", {}, m)
     return m.log
 
 

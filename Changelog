@@ -222,8 +222,8 @@ Unreleased (0.10.0):
   namespace's Python __setitem__ and __delitem__, and stores the caught exception without nesting on the C stack
 - a str's or bytes' find(), count(), startswith() and the rest, and index() of a list or tuple, call their bounds'
   Python __index__ without nesting on the C stack; a str's find() refuses a non-str needle before its bounds
-- an exec()'d module's for loop names and del names through a locals mapping's Python __setitem__ and
-  __delitem__ without nesting on the C stack
+- an exec()'d module's for loop names, also of a generator's items, and del names through a locals mapping's
+  Python __setitem__ and __delitem__ without nesting on the C stack
 - throw() of a class and a value into a yield from of a generator calls the class's Python __init__ without nesting on
   the C stack; a GeneratorExit class thrown into a yield from is made after its delegates close
 - min() and max(), with or without a key, call the best's reflected Python method, after an item's declined or

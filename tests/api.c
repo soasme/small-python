@@ -2174,6 +2174,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "(g := delegating(), next(g), g.throw(Slowed, 5))[2]", "delegated.py"), SPY_STOP_STEPS, &pauses)) == 5 &&
            pauses > 1);
+    /* So does such a loop's name of a generator's items. */
+    execute(c, "def generated():\n    ns = Slots()\n    exec('for i in (x for x in (1, 2)): pass', {}, ns)\n    return ns['i']\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "generated()", "generated.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
