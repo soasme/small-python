@@ -1461,6 +1461,27 @@ static const char *const programs[] = {
     "    return out\n"
     "print(aw())\n",
 
+    "def ao(f):\n"
+    "    try: return f()\n"
+    "    except BaseException as e: return [type(e).__name__, e.args]\n"
+    "class AM(Exception):\n"
+    "    def __init__(s, *a): super().__init__('m', *a)\n"
+    "async def ac(m):\n"
+    "    try: yield 1\n"
+    "    except AM as e: yield e.args\n"
+    "    except GeneratorExit:\n"
+    "        if m: yield 2\n"
+    "def an(m):\n"
+    "    g = ac(m)\n"
+    "    try: next(g.__anext__())\n"
+    "    except StopIteration: pass\n"
+    "    return g\n"
+    "def ax():\n"
+    "    out = [ao(lambda: next(an(0).athrow(AM, 3))), ao(lambda: an(0).aclose().send(None)), ao(lambda: an(1).aclose().send(None))]\n"
+    "    g = an(0); op = g.athrow(AM)\n"
+    "    return out + [ao(lambda: op.send(None)), ao(lambda: op.send(None)), ao(lambda: g.aclose().send(None))]\n"
+    "print(ax())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

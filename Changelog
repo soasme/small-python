@@ -222,6 +222,8 @@ Unreleased (0.10.0):
   C stack
 - throw() into the awaitable of an async generator's __anext__() or asend() at a yield runs the generator without
   nesting on the C stack
+- the first send() or next() of an async generator's athrow() or aclose() awaitable at a yield runs the generator
+  without nesting on the C stack
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack
 - a dict subclass's subscript, store and deletion call the key's Python __hash__, and an absent key's __missing__,

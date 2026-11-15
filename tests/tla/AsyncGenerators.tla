@@ -20,6 +20,7 @@
 (*             got = 'caught'                                              *)
 (*         except GeneratorExit:                                           *)
 (*             if variant == 'plain': raise                                *)
+(*             if variant == 'quiet': return                               *)
 (*             got = 'exit'                                                *)
 (*             yield ('ignored', i)                                        *)
 (*         if got == 'stop': return                                        *)
@@ -32,7 +33,7 @@ EXTENDS Naturals, Sequences
 
 CONSTANT K
 
-Variants == {"plain", "stubborn"}
+Variants == {"plain", "stubborn", "quiet"}
 Sent == {"None", "go", "stop"}
 Thrown == {"ValueError", "KeyError"}
 Ops == {<<"asend", v>> : v \in Sent} \cup {<<o, e>> : o \in {"athrow", "thrown"}, e \in Thrown} \cup {<<"aclose">>}
@@ -96,6 +97,8 @@ AClose ==
          [] closed -> Stay(Exhausted)
          [] pc = "loop" /\ variant = "stubborn" ->
             pc' = "ignored" /\ result' = <<"raise", "RuntimeError">> /\ UNCHANGED <<i, last>>
+         \* GeneratorExit raised through the body, or the body returning
+         \* from its handler, ends it.
          [] OTHER -> Finish(<<"return", "None">>)
 
 Next == UNCHANGED variant /\ (AClose \/ \E v \in Sent : ASend(v) \/ \E e \in Thrown : AThrow(e) \/ AsendThrow(e))

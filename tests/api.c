@@ -2216,6 +2216,15 @@ int main(int argc, char **argv) {
                "    try: g.__anext__().throw(KeyError)\n    except StopIteration as e: return e.value\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "asend_thrown()", "asend_thrown.py"), SPY_STOP_STEPS, &pauses)) == 2999 && pauses > 1);
+    /* So do an athrow's and an aclose's first send, throwing into it at a yield. */
+    execute(c, "async def athrowing():\n    try: yield 1\n    except BaseException:\n        for i in range(3000): pass\n"
+               "        if i: raise\n"
+               "def athrows():\n    out = 0\n    for e in (KeyError, None):\n        g = athrowing()\n"
+               "        try: next(g.__anext__())\n        except StopIteration: pass\n"
+               "        try: (g.athrow(e) if e else g.aclose()).send(None)\n        except (KeyError, StopIteration): out += 1\n"
+               "    return out\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "athrows()", "athrows.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

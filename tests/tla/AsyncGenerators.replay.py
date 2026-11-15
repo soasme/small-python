@@ -1,8 +1,9 @@
 # Replays AsyncGenerators.tla: each case starts an async generator running
 # the spec's body and performs the spec's steps on it, running each
 # awaitable to completion, an asend() through an await or, in every other
-# walk, sent to directly, a throw() into an asend() awaitable directly, and
-# comparing its result with the model's.
+# walk, sent to directly, a throw() into an asend() awaitable directly, an
+# athrow() or aclose() sent to or, in every other walk, stepped by next(),
+# and comparing its result with the model's.
 FIELDS = ("variant", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -20,6 +21,8 @@ def make(variant):
             except GeneratorExit:
                 if variant == "plain":
                     raise
+                if variant == "quiet":
+                    return
                 got = "exit"
                 yield ("ignored", i)
             if got == "stop":
@@ -47,8 +50,10 @@ def perform(target, op, direct):
         if op[0] == "thrown":
             # Thrown into the asend() awaitable, which throws it into the body.
             awaitable.throw(error)
-        else:
+        elif op[0] == "asend" or direct:
             awaitable.send(None)
+        else:
+            next(awaitable)
         return ("suspended",)
     except StopIteration as stop:
         value = stop.value
