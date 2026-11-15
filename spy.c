@@ -24269,6 +24269,17 @@ static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, S
     else if (source) length_hint(c, m, source);
     return 1;
 }
+/* list += source, both taken, when the machine takes source's items
+ * (extend_step), but for an instance with __radd__, which comes first:
+ * the list on m's stack, which they extend as list.extend does, 1 when
+ * its consumer began, else -1, the list extended or an error pending; 0
+ * for any other source, both kept. */
+static NO_INLINE int list_augments(SPYContext *c, Machine *m, SPYValue *list, SPYValue *source) {
+    if ((source->type == SPY_INSTANCE && (source->as.map.base || class_lookup(source->as.map.parent, "__radd__"))) ||
+        !machine_source(c, source) || (called_iterator(source) && !sequence_iterator(source) && !next_calls(c, source))) return 0;
+    if (machine_push(c, m, list)) { spy_release(source); return -1; }
+    return extend_step(c, m, list, source, 0, 1) ? 1 : -1;
+}
 /* Whether the consumer atop m, given its generator's next item (NULL at
  * its end or on an error), takes another; when it does not, its result is
  * on the stack, or the error pending. */
@@ -30801,6 +30812,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(value); break;
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m);
+            /* A list's += of a generator takes its items on the machine. */
+            if (UNLIKELY(a->type == SPY_LIST && ins->arg == T_ADDEQ)) {
+                int began = list_augments(c, m, a, b);
+                if (began > 0) goto consume_generator;
+                if (began) break;
+            }
             if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || a->type == SPY_SET) {
                 x = a; y = b; goto operator_step;
             }

@@ -779,6 +779,26 @@ static const char *const programs[] = {
     "    return a\n"
     "print(sx())\n",
 
+    "class AI:\n"
+    "    def __init__(self): self.n = 0\n"
+    "    def __iter__(self): return self\n"
+    "    def __next__(self):\n"
+    "        self.n += 1\n"
+    "        if self.n > 2: raise StopIteration\n"
+    "        return self.n\n"
+    "def ag(n):\n"
+    "    for i in range(n):\n"
+    "        if i == 3: raise KeyError('a')\n"
+    "        yield i\n"
+    "def ai():\n"
+    "    a = [9]\n"
+    "    a += ag(2)\n"
+    "    a += AI()\n"
+    "    try: a += ag(5)\n"
+    "    except KeyError: pass\n"
+    "    return a\n"
+    "print(ai())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

@@ -50,6 +50,8 @@ def outcome(p):
             del s[arg(p["start"]):arg(p["stop"]):arg(p["step"])]
         elif op == "iadd":
             s += t
+        elif op == "iaddgen":
+            s += (x for x in t)
         elif op == "extend":
             s.extend(t)
         elif op == "imul":
@@ -71,7 +73,7 @@ def outcome(p):
             return ("item", s.pop() if p["i"] == 99 else s.pop(index(p)), tuple(s))
         else:
             s.remove(p["x"])
-    except (IndexError, ValueError) as error:
+    except (IndexError, ValueError, TypeError) as error:
         return (type(error).__name__, 0, ())
     return ("None", 0, tuple(s))
 

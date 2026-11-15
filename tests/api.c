@@ -1876,6 +1876,10 @@ int main(int argc, char **argv) {
                "def spliced():\n    a = [0, 1, 2, 3]\n    a[Part():3] = [7]\n    del a[:Part()]\n    return len(a) + a[0]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "spliced()", "spliced.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
+    /* So does a list's += of a generator. */
+    execute(c, "def augmented():\n    a = [1]\n    a += slowly()\n    return len(a)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "augmented()", "augmented.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

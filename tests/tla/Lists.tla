@@ -42,7 +42,7 @@ Op == {[op |-> o, i |-> i, by |-> b] : o \in {"set", "del", "insert"}, i \in -4.
       \cup {[op |-> "idxslice", start |-> a, stop |-> b, step |-> c, t |-> t] :
               a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}, t \in Values}
       \cup {[op |-> "idxdel", start |-> a, stop |-> b, step |-> c] : a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}}
-      \cup {[op |-> o, t |-> t] : o \in {"iadd", "extend"}, t \in Values}
+      \cup {[op |-> o, t |-> t] : o \in {"iadd", "extend", "iaddgen"}, t \in Values}
       \cup {[op |-> "imul", n |-> n] : n \in -1..2}
       \cup {[op |-> "remove", x |-> x] : x \in {1, 3}}
       \cup {[op |-> o] : o \in {"append", "clear", "copy", "reverse"}}
@@ -97,6 +97,8 @@ Run(p) ==
           [] p.op = "idxdel" -> Run([p EXCEPT !.op = "delslice"])
           [] p.op = "delslice" /\ Step(p) = 1 -> Done(Splice(s, Start(n, p), Stop(n, p), <<>>))
           [] p.op = "delslice" -> Done(Without(s, Walk(Start(n, p), Stop(n, p), Step(p))))
+          [] p.op = "iaddgen" /\ p.type = "bytearray" -> Error("TypeError")
+          [] p.op = "iaddgen" -> Run([p EXCEPT !.op = "iadd"])
           [] p.op \in {"iadd", "extend"} -> Done(s \o p.t)
           [] p.op = "imul" -> Done(Repeat(s, p.n))
           [] p.op = "append" -> Done(Append(s, 7))
@@ -129,6 +131,10 @@ AppendIsSlice == Finished /\ program.op = "append" =>
 
 \* A generator's items replace a slice as the same items in a sequence do.
 GeneratorIsSequence == Finished /\ program.op = "genslice" => outcome = Run([program EXCEPT !.op = "setslice"])
+
+\* A list's += of a generator extends it by the generator's items.
+GeneratorAugmentIsSequence == Finished /\ program.op = "iaddgen" /\ program.type = "list" =>
+    outcome = Run([program EXCEPT !.op = "iadd"])
 
 \* A slice's parts' __index__ give the ints they return.
 IndexSliceIsInt == Finished /\ program.op \in {"idxslice", "idxdel"} =>

@@ -332,9 +332,10 @@ These run as machines on the heap, in one native activation of
   or a Python `__getitem__` and no `__iter__`, and no `__len__` or
   `__length_hint__`, and `reversed` iterators over an instance,
   consumed by `sum`, `any`, `all`, `min`, `max`, `list`, `tuple`,
-  `set`, `frozenset`, `sorted`, `str.join`, `list.extend`, or `dict`
+  `set`, `frozenset`, `sorted`, `str.join`, `list.extend` or a list's
+  `+=`, or `dict`
   and `dict.update` (but an instance), the Python `__len__` of the
-  instance that `list`, `sorted` and `list.extend` ask for the length
+  instance that `list`, `sorted`, `list.extend` and `+=` ask for the length
   hint of an iterator or `reversed` iterator over it, and an instance's Python `keys`
   and `__getitem__`, and the generator its `keys` returns, that `dict`
   and `dict.update` merge it by as a mapping, the generators and such
