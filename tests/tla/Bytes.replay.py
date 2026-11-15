@@ -59,6 +59,11 @@ SOURCES = {
                          "log = []\nb = bytearray(b'x')\ndone = b.extend(It([97, 98], log))\n"
                          "try: b.extend(N())\nexcept TypeError as e: refused = f'TypeError: {e}'\n"
                          "result = (done, bytearray(b), log, refused, b)",
+    "join_iter_calls": "class It:\n    def __init__(s, log): s.log = log\n"
+                       "    def __iter__(s):\n        for _ in (): pass\n        s.log.append('iter')\n        return iter([b'a', b'b'])\n"
+                       "class N:\n    def __iter__(s):\n        for _ in (): pass\n        return 5\n"
+                       "log = []\ntry: b''.join(N())\nexcept TypeError as e: refused = str(e)\n"
+                       "result = (b'-'.join(It(log)), bytearray(b'+').join(It(log)), bytes.join(b'-', (x for x in [b'a', b'b'])), log, refused)",
     "ctor_index_calls": "log = []\nresult = (bytes(J(2, log)), bytearray(J(1, log)), log)",
     "ctor_index_big": "result = bytes(J(1 << 70, []))",
     "ctor_negative": 'result = bytes(-1)',

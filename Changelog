@@ -199,6 +199,9 @@ Unreleased (0.10.0):
 - in of a builtin value in a list or tuple calls its items' Python __eq__ without nesting on the C stack
 - bytes(), bytearray() and bytearray.extend() of an iterable instance or a generator take its items without nesting on the C stack
 - list.__init__ empties the list before it takes the iterable's items, and takes them without nesting on the C stack
+- bytes.join and bytearray.join of an iterable instance or a generator take its items without nesting on the C stack,
+  as do bytearray.extend and list.__init__ called unbound or again in a loop
+- str.join of an object whose __iter__ fails with a TypeError reports "can only join an iterable"
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

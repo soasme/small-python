@@ -337,7 +337,7 @@ These run as machines on the heap, in one native activation of
   or a Python `__getitem__` and no `__iter__`, and no `__len__` or
   `__length_hint__`, and `reversed` iterators over an instance,
   consumed by `sum`, `any`, `all`, `min`, `max`, `list`, `tuple`,
-  `set`, `frozenset`, `sorted`, `str.join`, `list.extend`, `list.__init__` or a list's
+  `set`, `frozenset`, `sorted`, `str.join`, `bytes.join`, `bytearray.join`, `list.extend`, `list.__init__` or a list's
   `+=`, `bytes`, `bytearray` or `bytearray.extend` (but an instance
   with `__index__`, `__buffer__` or, for `bytes`, `__bytes__`), or `dict`
   and `dict.update` (but an instance), the Python `__len__` of the

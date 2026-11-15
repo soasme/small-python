@@ -1204,6 +1204,19 @@ static const char *const programs[] = {
     "    return l, k\n"
     "print(li())\n",
 
+    "class BJ:\n"
+    "    def __iter__(self):\n"
+    "        for _ in (): pass\n"
+    "        return iter([b'a', b'b'])\n"
+    "def bj():\n"
+    "    out = [b'-'.join(BJ()), bytes.join(b'+', (b for b in [b'x', b'y']))]\n"
+    "    for i in range(2):\n"
+    "        b = bytearray()\n"
+    "        b.extend(BI())\n"
+    "        out.append(b)\n"
+    "    return out\n"
+    "print(bj())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

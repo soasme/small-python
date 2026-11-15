@@ -2025,6 +2025,13 @@ int main(int argc, char **argv) {
                "    return len(l) + len(k) + 7\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "inited()", "inited.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
+    /* So does bytes.join's, and a loop's bytearray.extend and list.__init__ on a builtin receiver. */
+    execute(c, "class Joined:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([b'a', b'b'])\n"
+               "def joined():\n    n = len(b'-'.join(Joined())) + len(bytes.join(b'', Joined()))\n"
+               "    for i in range(2):\n        b = bytearray()\n        b.extend(Byted())\n        [].__init__(Byted())\n        n += len(b)\n"
+               "    return n\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "joined()", "joined.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 5);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
