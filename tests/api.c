@@ -2068,6 +2068,12 @@ int main(int argc, char **argv) {
                "def results():\n    return (Odd() != 1) + (1 in Holds()) + (1 not in Holds()) + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "results()", "results.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 2);
+    /* So do min()'s reflected __gt__ and the truth of its result. */
+    execute(c, "class Least:\n    def __init__(self, n): self.n = n\n    def __lt__(self, o): return NotImplemented\n"
+               "    def __gt__(self, o):\n        for i in range(3000): pass\n        return Truth()\n"
+               "def least():\n    return min([Least(2), Least(1), Least(3)]).n + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "least()", "least.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 1);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

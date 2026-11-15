@@ -206,6 +206,8 @@ Unreleased (0.10.0):
   Python __eq__, and the Python __bool__ or __len__ of its result, without nesting on the C stack
 - != by a Python __eq__, and in of a Python __contains__, call their result's Python __bool__ or __len__ without nesting
   on the C stack
+- min() and max() call the best item's reflected Python method, after an item's declined, and the Python __bool__ of
+  a result without nesting on the C stack
 - == of lists, tuples and dicts, and in, index(), count() and remove() of lists and tuples, call an item's reflected
   Python __eq__ after the other's declines, and its result's Python __bool__ or __len__, without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,

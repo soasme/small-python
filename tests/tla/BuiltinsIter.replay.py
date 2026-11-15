@@ -187,6 +187,12 @@ SOURCES = {
                         "        if self.v == 9: raise KeyError\n        return self.v > o.v\n"
                         "try: sorted([D(9), D(1)])\nexcept KeyError as e: err = type(e).__name__\n"
                         "result = ([x.v for x in sorted([D(2), D(3), D(1)])], [t[1] for t in sorted([(D(1), 0), (D(0), 1)], reverse=True)], err)",
+    "min_reflected_truth": "log = []\nclass T:\n    def __init__(self, v): self.v = v\n"
+                           "    def __bool__(self):\n        for _ in (): pass\n        log.append('bool'); return self.v\n"
+                           "class O:\n    def __init__(self, v): self.v = v\n"
+                           "    def __lt__(self, o): log.append('lt'); return NotImplemented\n"
+                           "    def __gt__(self, o):\n        for _ in (): pass\n        log.append('gt'); return T(self.v > o.v)\n"
+                           "result = (min([O(2), O(1)]).v, max(O(1), O(3)).v, log)",
     "sort_gt_reflected": 'class G:\n    def __init__(self, v): self.v = v\n    def __gt__(self, o): return self.v > o.v\nresult = [x.v for x in sorted([G(2), G(1)])]',
     "len_negative": 'result = len(NegLen())',
     "len_big": 'result = len(BigLen())',

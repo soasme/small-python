@@ -27420,17 +27420,24 @@ static NO_INLINE SPYValue *fold_call(SPYContext *c, Machine *m, int op, SPYValue
     *value = best;
     return NULL;
 }
+static int compare_found(SPYContext *, Machine *, SPYValue *, int, SPYValue *, Call **, SPYValue **);
 /* An item's comparison for min or max (fold_call) returned result: the
  * better item kept, the next item's comparison or the value. */
 static NO_INLINE Machine *fold_returned(SPYContext *c, Machine *m, SPYValue *result) {
     spy_release(machine_pop(m));
-    SPYValue *right = machine_pop(m), *left = machine_pop(m), *index = machine_pop(m), *called = machine_pop(m);
+    /* The call's operator, under its operands and their phase (compare_found). */
+    size_t phase = 0;
+    while (m->stack[m->len - 1 - phase] == c->unbound) phase++;
+    int call = (int)m->stack[m->len - phase - (phase == 2 ? 6 : 4)]->as.integer_data.small;
+    Call *next = NULL;
+    SPYValue *operands[2];
+    int better = compare_found(c, m, c->replacing, call, result, &next, operands);
+    if (next) return &next->m;
+    SPYValue *left = operands[0], *right = operands[1], *index = machine_pop(m), *called = machine_pop(m);
     SPYValue *op = machine_pop(m), *seq = machine_pop(m), *best = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
-    int base = (int)op->as.integer_data.small, call = (int)called->as.integer_data.small;
-    SPYValue *test = compared(c, call, left, right, result);
-    int better = test && truthy(test);
+    int base = (int)op->as.integer_data.small;
     if (better && !c->error_type[0]) { spy_release(best); best = spy_retain(call == base ? left : right); }
-    spy_release(test); spy_release(left); spy_release(right); spy_release(called); spy_release(op);
+    spy_release(left); spy_release(right); spy_release(called); spy_release(op);
     if (c->error_type[0]) spy_release(best);
     else function = fold_call(c, m, base, seq, best, (size_t)index->as.integer_data.small + 1, &env, &value);
     Call *entered = function ? call_enter(c, spy_retain(function), env, m) : NULL;
@@ -29034,40 +29041,49 @@ static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instructi
     spy_release(x); spy_release(iterator);
     return m;
 }
-/* An item comparison's __eq__, entered under marker on m's stack (popped),
- * returned result, which it takes: whether the items are equal, the
- * operands popped too; or *call set, the comparison's next call entered
- * (operator_enter): b's reflected __eq__ when a's declined, one c->unbound
- * over them, or the __bool__ or __len__ of a result, two. */
+/* The comparison a op b, whose method was entered with a and b under
+ * marker on m's stack (popped), returned result, which it takes: the
+ * comparison's truth, a and b popped too, into operands when set, owned;
+ * or *call set, the comparison's next call entered over a and b
+ * (operator_enter): b's reflected method when a's declined, one c->unbound
+ * over them, or a result's __bool__ or __len__, the result and a bool
+ * marking which over them, two. */
 static Call *operator_enter(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, size_t, SPYValue *const *);
-static NO_INLINE int equal_found(SPYContext *c, Machine *m, SPYValue *marker, SPYValue *result, Call **call) {
-    int phase = 0, found, length = 0, negated;
+static NO_INLINE int compare_found(SPYContext *c, Machine *m, SPYValue *marker, int op, SPYValue *result, Call **call, SPYValue **operands) {
+    int phase = 0, found = 0, length = 0, negated;
     while (m->stack[m->len - 1] == c->unbound) { spy_release(machine_pop(m)); phase++; }
-    SPYValue *b = machine_pop(m), *a = machine_pop(m), *test = result, *function;
-    if (phase == 2) found = truth_result(c, a, b == c->booleans[1], result);
-    else {
-        /* a's __eq__ declined: b's reflected one, then identity. */
+    SPYValue *test = result, *function;
+    if (phase == 2) {
+        SPYValue *boolean = machine_pop(m), *v = machine_pop(m);
+        found = truth_result(c, v, boolean == c->booleans[1], result);
+        spy_release(boolean); spy_release(v);
+    }
+    SPYValue *b = machine_pop(m), *a = machine_pop(m);
+    if (phase < 2) {
+        /* a's method declined: b's reflected one, then the default. */
         if (result == c->not_implemented && phase) {
             spy_release(result);
-            test = comparison_declined(c, T_EQ, a, b);
-        } else if (result == c->not_implemented && (function = rich_entry(c, b, R_EQ, &negated))) {
+            test = comparison_declined(c, op, a, b);
+        } else if (result == c->not_implemented && (function = rich_entry(c, b, rich_reflected[rich_kind(op)], &negated))) {
             SPYValue *args[] = {spy_retain(b), spy_retain(a)};
             spy_release(result); test = NULL;
             *call = operator_enter(c, m, function, 2, args, 4, (SPYValue *[]){a, b, c->unbound, marker});
-        } else test = compared(c, T_EQ, a, b, result);
+        } else test = compared(c, op, a, b, result);
         if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) &&
             (function = truth_function(c, test, &length))) {
             SPYValue *self = spy_retain(test);
-            *call = operator_enter(c, m, function, 1, &self, 5, (SPYValue *[]){test, c->booleans[!length], c->unbound, c->unbound, marker});
+            *call = operator_enter(c, m, function, 1, &self, 7,
+                                   (SPYValue *[]){a, b, test, c->booleans[!length], c->unbound, c->unbound, marker});
             spy_release(test); test = NULL;
         }
         found = test ? truthy(test) : 0;
         spy_release(test);
     }
-    spy_release(a); spy_release(b);
+    if (operands && !*call) { operands[0] = a; operands[1] = b; }
+    else { spy_release(a); spy_release(b); }
     return found;
 }
-/* An operator's next call after a method returned (equal_found,
+/* An operator's next call after a method returned (compare_found,
  * operator_truth): function entered with argc args, which it takes, the
  * count values pushed on m's stack for its return; else NULL with an
  * error. */
@@ -29104,7 +29120,7 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
     step_operation(ins, &op);
     spy_release(machine_pop(m));
     Call *call = NULL;
-    int found = equal_found(c, m, c->pairing, result, &call);
+    int found = compare_found(c, m, c->pairing, T_EQ, result, &call, NULL);
     if (call) return &call->m;
     for (;;) {
         SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
@@ -29195,7 +29211,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         step_operation(ins, &op);
         spy_release(machine_pop(m));
         Call *call = NULL;
-        int found = equal_found(c, m, c->unbound, result, &call);
+        int found = compare_found(c, m, c->unbound, T_EQ, result, &call, NULL);
         if (call) return &call->m;
         if (ins->op == BC_CALLN) {
             /* An item's comparison for index, count or remove (search_call):

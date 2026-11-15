@@ -1271,6 +1271,14 @@ static const char *const programs[] = {
     "    return RO(True) != 1, RO(False) != 1, True in RC(), False not in RC()\n"
     "print(rn())\n",
 
+    "class RM:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __lt__(self, o): return NotImplemented\n"
+    "    def __gt__(self, o): return RT(self.n > o.n)\n"
+    "def rm():\n"
+    "    return min([RM(2), RM(1)]).n, max(RM(1), RM(3)).n\n"
+    "print(rm())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
