@@ -361,7 +361,9 @@ These run as machines on the heap, in one native activation of
   `__hash__` too, the `__bool__` or `__len__`
   that `filter` of `None` or `bool`, `any` and `all` test their items
   by, the `__str__` and `__repr__` that `str` `%` calls on the arguments
-  of `%s`, `%r` and `%a`, and the items' `__repr__` of a list, tuple,
+  of `%s`, `%r` and `%a`, the `__int__`, `__index__` and `__float__` that
+  `str` and `bytes` `%` call for their numbers and `%c`, the `__repr__`
+  and `__bytes__` that `bytes` `%` calls, and the items' `__repr__` of a list, tuple,
   dict or set argument and of those inside it, each after the conversions before it, the
   `__bool__` or `__len__` that `not`, `if`, `and` and `or` test, also of a
   builtin subclass's instance and of a class by its metaclass, and, in code compiled while pausing, the

@@ -1731,6 +1731,11 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "listed()", "listed.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "percented()", "percented.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* And bytes % of a Python __index__ and __bytes__. */
+    execute(c, "class Byted:\n    def __bytes__(self):\n        for i in range(3000): pass\n        return b'ab'\n"
+               "def byted():\n    return len(b'%x%c%s' % (Listed(), Listed(), Byted()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "byted()", "byted.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So does str.format of a conversion's Python __repr__ or __str__. */
     execute(c, "class Shown:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    __str__ = __repr__\n"

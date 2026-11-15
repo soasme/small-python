@@ -88,7 +88,8 @@ Cases == {"s_r_a", "s_object", "percent_literal", "mapping", "mapping_missing", 
           "bytes_basic", "bytes_b_alias", "bytes_dunder", "bytes_str_rejected", "bytes_r_is_a", "bytes_c",
           "bytes_c_bad", "bytes_mapping", "bytes_percent", "bytearray_result", "bytes_not_all",
           "bytes_unsupported", "bytes_float", "method_order", "method_mapping", "method_raises", "method_not_str",
-          "method_too_few", "method_items", "method_numbers", "method_number_bad"}
+          "method_too_few", "method_items", "method_numbers", "method_number_bad", "bytes_methods", "bytes_own",
+          "c_index_type", "bytes_c_index_type"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 255}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
              type : {"d", "i", "o", "x", "X", "u"}, target : {"str", "bytes"}]
             \cup [kind : {"float"}, num : {0, 20, -1, 9875}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
@@ -160,6 +161,12 @@ Case(c) ==
       \* %d, %x and %f of instances call __int__, __index__ and __float__ in order
       [] c = "method_numbers" -> "('9-1f-2.50|1F', ['int', 'index', 'float', 'index'])"
       [] c = "method_number_bad" -> "TypeError: format argument: %x requires an integer, not NotIndex"
+      \* bytes' %d, %x, %c, %s and %r of instances call __int__, __index__, __bytes__ and __repr__ in order
+      [] c = "bytes_methods" -> "(b'9-1f-\\x1f|by|A\\\\xe9', ['int', 'index', 'index', 'bytes'], ['ra'])"
+      [] c = "bytes_own" -> "b'yes'"
+      \* A str's %c takes __index__'s TypeError as its own; a bytes's raises it.
+      [] c = "c_index_type" -> "TypeError: format argument: %c requires an integer or a unicode character, not NotIndex"
+      [] c = "bytes_c_index_type" -> "TypeError: NotIndex.__index__() must return an int, not str"
       [] c = "method_items" -> "('[A\\xe9, 1]|(B\\xe9,)|[C\\\\xe9]', ['ra', 'rb', 'rc'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)

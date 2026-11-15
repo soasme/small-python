@@ -435,6 +435,23 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class BQ:\n"
+    "    def __index__(self): return 66\n"
+    "    def __int__(self): return 7\n"
+    "    def __float__(self): return 0.5\n"
+    "    def __repr__(self): return 'q\\xe9'\n"
+    "    def __bytes__(self): return b'qb'\n"
+    "class BO(bytes):\n"
+    "    def __bytes__(self): return b'no'\n"
+    "class BI:\n"
+    "    def __index__(self): return 'x'\n"
+    "def bq():\n"
+    "    for _ in (): pass\n"
+    "    try: '%c' % BI()\n"
+    "    except TypeError as e: r = str(e)\n"
+    "    return b'%d %x %c %.1f %r %a %s %b' % (BQ(), BQ(), BQ(), BQ(), BQ(), BQ(), BQ(), BO(b'o')), b'%(k)c' % {b'k': BQ()}, r\n"
+    "print(bq())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

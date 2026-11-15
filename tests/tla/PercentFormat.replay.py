@@ -24,6 +24,10 @@ class Q:
     def __int__(self): spin(); Q.log.append('int'); return 9
     def __index__(self): spin(); Q.log.append('index'); return 31
     def __float__(self): spin(); Q.log.append('float'); return 2.5
+class Y(Q):
+    def __bytes__(self): spin(); Q.log.append('bytes'); return b'by'
+class OwnB(bytes):
+    def __bytes__(self): spin(); return b'no'
 class NotIndex:
     def __index__(self): spin(); return 'x'
 class Bad:
@@ -86,6 +90,10 @@ SOURCES = {
     "method_too_few": "L.log.clear()\ntry: '%s %s' % (L('a'),)\nexcept TypeError as e: result = (str(e), L.log)",
     "method_numbers": "Q.log.clear(); result = ('%d-%x-%.2f|%X' % (Q(), Q(), Q(), Q()), Q.log)",
     "method_number_bad": "result = '%x' % NotIndex()",
+    "bytes_methods": "Q.log.clear(); L.log.clear(); result = (b'%d-%x-%c|%s|%r' % (Q(), Q(), Q(), Y(), L('a')), Q.log, L.log)",
+    "bytes_own": "result = b'%s' % OwnB(b'yes')",
+    "c_index_type": "result = '%c' % NotIndex()",
+    "bytes_c_index_type": "result = b'%c' % NotIndex()",
     "method_items": "L.log.clear(); result = ('%s|%r|%a' % ([L('a'), 1], (L('b'),), [L('c')]), L.log)"
 }
 

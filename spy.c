@@ -10307,7 +10307,7 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
 }
 static int class_union(int, SPYValue *, SPYValue *);
 static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
-/* Whether str % y may convert an argument by a Python method on the
+/* Whether str or bytes % y may convert an argument by a Python method on the
  * machine (percent_call): an instance, not a str's, or a container of a
  * repr job (repr_items), y or an item of a tuple or value of a dict y. */
 static NO_INLINE int percent_items(SPYContext *c, SPYValue *v) {
@@ -10339,7 +10339,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || (is_set(a) && set_walks(op, a, b)) ||
            class_union(op, a, b) ||
-           (op == '%' && a->type == SPY_STRING && percent_reaches(c, b)) ? NULL : binary(c, op, a, b);
+           (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES) && percent_reaches(c, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
@@ -22195,6 +22195,11 @@ static SPYValue *percent_char(SPYContext *c, PercentArgs *p, SPYValue *key, SPYV
         return percent_type(c, p, key, bytes ? "%%c requires an integer in range(256) or a single byte" : "%%c requires an integer or a unicode character", 0, v);
     }
     SPYValue *number = index_object(c, v);
+    /* A str's %c takes a TypeError of __index__ as its own. */
+    if (!number && !bytes && error_is(c, "TypeError")) {
+        spy_clear_error(c);
+        return percent_type(c, p, key, "%%c requires an integer or a unicode character", 0, v);
+    }
     if (!number) return NULL;
     int64_t code = 0;
     int in_range = !number->as.integer_data.big && !spy_as_int(c, number, &code) && code >= 0 && code <= (bytes ? 255 : 0x10FFFF);
@@ -22207,6 +22212,8 @@ static SPYValue *percent_char(SPYContext *c, PercentArgs *p, SPYValue *key, SPYV
 }
 /* format_obj from bytesobject.c: bytes, bytearray, or __bytes__. */
 static SPYValue *percent_bytes(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v) {
+    SPYValue *base = v->type == SPY_INSTANCE ? builtin_value(c, v, SPY_BYTES) : NULL;
+    if (base) v = base;
     if (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY) return spy_bytes(c, v->as.string.data, v->as.string.len);
     SPYValue *method = special_dispatch(v) ? special_method(c, v, "__bytes__") : NULL;
     if (!method && !c->error_type[0] && buffer_exporter(c, v)) {
@@ -22282,14 +22289,16 @@ static SPYValue *index_function(SPYContext *, SPYValue *);
  * position and count of characters and the arguments' length and index
  * in at; 2, the text in *piece, when a repr job ended at once; else 0.
  * A number's spec converts by int() or float(), or %o, %x and %X by the
- * __index__ int() takes ("int"). */
+ * __index__ int() takes ("int"), as %c does, a bytes format's by
+ * __index__ alone ("index"); a bytes format's %s and %b by bytes(), and
+ * its %r as %a. */
 static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYValue *v, SPYValue *const *held, Buffer *out, const int64_t *at, SPYValue **piece) {
-    int index = ch == 'o' || ch == 'x' || ch == 'X', number = ch != 's' && ch != 'r' && ch != 'a';
-    SPYValue *callee = ch == 's' ? c->types[SPY_STRING] : !number ? c->field_calls[0] :
+    int index = ch == 'o' || ch == 'x' || ch == 'X' || ch == 'c', bytes = held[0]->type != SPY_STRING, number = ch != 's' && ch != 'r' && ch != 'a' && ch != 'b';
+    SPYValue *callee = bytes && (ch == 's' || ch == 'b') ? c->types[SPY_BYTES] : ch == 's' ? c->types[SPY_STRING] : !number ? c->field_calls[0] :
                        c->types[ch == 'd' || ch == 'i' || ch == 'u' ? SPY_INT : SPY_FLOAT];
     SPYValue *found[2], *function = NULL, *job = NULL, *env = NULL;
     if (index) {
-        if (!(function = index_function(c, v)) || !(found[0] = spy_string(c, "int", 3))) return 0;
+        if (!(function = index_function(c, v)) || !(found[0] = bytes && ch == 'c' ? spy_string(c, "index", 5) : spy_string(c, "int", 3))) return 0;
     } else if (v->type == SPY_INSTANCE ? !(function = conversion_method(c, callee, 1, &v, found)) : number || !repr_job(c, callee, v)) return 0;
     SPYValue *parts[] = {spy_retain(held[0]), spy_retain(held[1]), spy_string(c, out->data ? out->data : "", out->len),
                          int_value(c, at[0]), int_value(c, at[1]), int_value(c, at[2]), int_value(c, at[3]),
@@ -22304,7 +22313,7 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
         if (!env) {
             /* The job ended at once. */
             spy_release(machine_pop(m)); spy_release(machine_pop(m));
-            if (ch == 'a') *piece = ascii_text(c, *piece, *piece);
+            if (ch == 'a' || bytes) *piece = ascii_text(c, *piece, *piece);
             return 2;
         }
         spy_release(*piece); *piece = NULL;
@@ -22312,8 +22321,9 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
     }
     return 1;
 }
-/* format % args. On machine m, a str's %s, %r or %a of an instance whose
- * class's Python method converts it (conversion_method) is m's call
+/* format % args. On machine m, a str's %s, %r or %a, or a bytes's %s,
+ * %b, %r or %a, of an instance whose class's Python method converts it
+ * (conversion_method) is m's call
  * (callk), the job's state a tuple of format, args, the text so far, the
  * spec's position and count of characters, the arguments' length and
  * index there, the instance and the method's name; of a list or tuple of
@@ -22435,10 +22445,15 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
         int sign = 0, defer;
         if (v) switch (ch) {
         case 's': case 'r': case 'a': case 'b':
-            if (bytes && (ch == 's' || ch == 'b')) piece = percent_bytes(c, &p, key, v);
-            else if (ch == 'b') goto unsupported;
+            if (bytes && (ch == 's' || ch == 'b')) {
+                if (converted) { piece = converted; converted = NULL; }
+                else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) &&
+                         (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
+                    deferred = 1;
+                else piece = percent_bytes(c, &p, key, v);
+            } else if (ch == 'b') goto unsupported;
             else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
-            else if (converted) { piece = ch == 'a' ? ascii_text(c, converted, converted) : converted; converted = NULL; }
+            else if (converted) { piece = ch == 'a' || bytes ? ascii_text(c, converted, converted) : converted; converted = NULL; }
             else if (m && (v->type == SPY_INSTANCE || repr_container(v)) &&
                      (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
                 deferred = defer == 1;
@@ -22462,7 +22477,15 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             break;
         }
         case 'c':
-            piece = percent_char(c, &p, key, v, bytes);
+            /* An instance's __index__ is deferred as a number's is. */
+            if (converted == c->unbound) piece = percent_type(c, &p, key, "%%c requires an integer or a unicode character", 0, v);
+            else if (converted) piece = percent_char(c, &p, key, converted, bytes);
+            else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, bytes ? SPY_BYTES : SPY_STRING) &&
+                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
+                deferred = 1;
+                break;
+            } else piece = percent_char(c, &p, key, v, bytes);
+            spy_release(converted); converted = NULL;
             if (bytes) prec = -1;
             break;
         default:
@@ -22516,7 +22539,7 @@ static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, S
     spy_release(result); spy_release(state);
     return value;
 }
-/* str x % y on machine m, y reaching an instance (percent_reaches): its
+/* str or bytes x % y on machine m, y reaching an instance (percent_reaches): its
  * job's first call (percent_build), c->unbound; else NULL, the text in
  * c->looked or an error. */
 static NO_INLINE SPYValue *percent_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y) {
@@ -27754,7 +27777,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         return bool_call(c, m, x, env);
     }
     if (kind == OPERATE_BINARY && class_union(op, x, y)) return union_call(c, m, x, y, env);
-    if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' && x->type == SPY_STRING &&
+    if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' &&
+        (x->type == SPY_STRING || x->type == SPY_BYTES) &&
         percent_reaches(c, y)) return percent_call(c, m, x, y);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
@@ -28886,7 +28910,8 @@ static SPYValue *reversed_iterator(SPYContext *c, SPYValue *v, int64_t n) {
  * natively, bool() takes a truth (False names its __len__), abs(), round()
  * and reversed() return theirs, or reversed() a sequence's ("reversed" its
  * __len__), hex(), oct(), bin() and chr() ("hex" and so on their
- * __index__) the int's, as int() and float() ("int", "float") do,
+ * __index__) the int's, as int() and float() ("int", "float") do, and
+ * a bytes %c's ("index") the int,
  * dir() lists and sorts it, print's write and flush return theirs,
  * isinstance() and issubclass() take the
  * result's truth, ascii() ("ascii" its __repr__) escapes the text,
@@ -28906,7 +28931,7 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
         spy_release(index);
         return value;
     }
-    if (!strcmp(method, "int") || !strcmp(method, "float")) {
+    if (!strcmp(method, "int") || !strcmp(method, "float") || !strcmp(method, "index")) {
         SPYValue *index = index_result(c, v, spy_retain(result)), *value = index;
         double real;
         if (index && *method == 'f') { value = spy_as_float(c, index, &real) ? NULL : spy_float(c, real); spy_release(index); }
