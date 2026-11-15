@@ -1845,6 +1845,11 @@ int main(int argc, char **argv) {
                "def mapped():\n    m = Mapped(a=1)\n    exec('b = a + a', {}, m)\n    return eval('a + b', {}, m)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "mapped()", "mapped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* So does a slice's store of a generator's items. */
+    execute(c, "def slowly():\n    for k in range(2):\n        for i in range(3000): pass\n        yield k\n"
+               "def sliced():\n    a = [0, 1, 2, 3]\n    a[1:3] = slowly()\n    a[::2] = slowly()\n    return len(a) + a[2]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "sliced()", "sliced.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

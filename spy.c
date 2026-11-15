@@ -24389,6 +24389,16 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
         return 0;
     }
     int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;
+    if (status > 0 && top->consumer->id == B_LIST && top->consumer->searched) {
+        /* A slice's store takes the list of its value's items (slice_listing). */
+        Consumer *s = top->consumer;
+        SPYValue *items = consumer_end(c, s), *state = s->searched;
+        s->searched = NULL;
+        pop_block(c, m, f);
+        if (items) set_index(c, state->as.seq.items[0], state->as.seq.items[1], items);
+        release_all(2, (SPYValue *[]){items, state});
+        return 0;
+    }
     if (status > 0 && top->consumer->id == B_LIST && top->consumer->pending) {
         /* A keyed sort goes on over the items collected (key_consumer);
          * one key_consumer cannot take sorts natively. */
@@ -29451,6 +29461,28 @@ static NO_INLINE int dir_list(SPYContext *c, Machine *m, SPYValue *result) {
     s->callee = spy_retain(c->sorter); s->pending = keywords;
     return 1;
 }
+/* Whether a store of value to slice key of object, a list, takes its
+ * items from a generator or another the machine iterates (machine_source),
+ * the slice's parts ints or None, which call no Python __index__ first. */
+static NO_INLINE int slice_source(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
+    if (object->type != SPY_LIST || key->type != SPY_SLICE) return 0;
+    SPYValue *parts[] = {key->as.slice.start, key->as.slice.stop, key->as.slice.step};
+    for (int i = 0; i < 3; i++) if (parts[i]->type != SPY_NONE && parts[i]->type != SPY_INT && parts[i]->type != SPY_BOOL) return 0;
+    return machine_source(c, value);
+}
+/* BC_SET_TARGET's store to a slice of a list, of a value whose items
+ * slice_source takes: the object and key above the value leave m's
+ * stack for a list of the value's items, collected on m, then stored
+ * (consumer_took); whether the consumer began, else an error is pending. */
+static NO_INLINE int slice_listing(SPYContext *c, Machine *m) {
+    SPYValue *key = machine_pop(m), *object = machine_pop(m), *state = spy_tuple(c, 2, (SPYValue *[]){object, key});
+    size_t blocks = m->block_len;
+    release_all(2, (SPYValue *[]){object, key});
+    if (state) consume(c, m, B_LIST, c->types[SPY_LIST], -1, NULL, spy_retain(m->stack[m->len - 1]), NULL);
+    if (m->block_len == blocks) { spy_release(state); return 0; }
+    m->blocks[blocks].consumer->searched = state;
+    return 1;
+}
 /* What a Python __dir__, name, returned in result: a generator or another
  * the machine iterates (machine_source), listed and sorted on m
  * (dir_list), the machine going on with it, 1; else 0, result kept. */
@@ -30582,6 +30614,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             goto enter_k;
         CASE(BC_SET_TARGET)
             if (ins->arg || (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 2], m->stack[m->len - 1]))) goto store_step;
+            if (n->kind == N_INDEX && UNLIKELY(slice_source(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) {
+                if (slice_listing(c, m)) goto consume_generator;
+                break;
+            }
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, m->stack[m->len - 1]);

@@ -335,7 +335,8 @@ These run as machines on the heap, in one native activation of
   instance that `list`, `sorted` and `list.extend` ask for the length
   hint of an iterator or `reversed` iterator over it, and an instance's Python `keys`
   and `__getitem__`, and the generator its `keys` returns, that `dict`
-  and `dict.update` merge it by as a mapping, and, in
+  and `dict.update` merge it by as a mapping, the generators and such
+  instances whose items a store to a slice of a list takes, and, in
   code compiled while pausing, the generators and such instances a target
   list unpacks, the generators, such instances and iterators over them,
   and the maps, filters, zips and enumerates above, that a list, tuple

@@ -4,7 +4,8 @@
 (* (reference/datamodel.html#mutable-sequences, library/stdtypes.html#     *)
 (* mutable-sequence-types and #lists): item and slice assignment and del,  *)
 (* where a slice with a step other than 1 must be replaced by as many      *)
-(* items as it selects (a bytearray's takes none as del); += and *= (a    *)
+(* items as it selects (a bytearray's takes none as del), the items of a  *)
+(* generator as those of a sequence; += and *= (a                          *)
 (* count below one clears); and the                                        *)
 (* methods append, clear, copy, extend, insert (its index clamped to the   *)
 (* sequence), pop, remove, and reverse.                                    *)
@@ -16,6 +17,7 @@
 (*         i, as insert's and pop's, an int, or an instance whose Python   *)
 (*         __index__ returns it                                            *)
 (*     s[start:stop:step] = t, del s[...]    t: up to two of 7, 8          *)
+(*     s[start:stop:step] = (x for x in t)                                 *)
 (*     s += t   s *= n   s.append(7)   s.clear()   s.copy()   s.extend(t)  *)
 (*     s.insert(i, 7)   s.pop()   s.pop(i)   s.remove(x)   s.reverse()     *)
 (*                                                                         *)
@@ -35,6 +37,8 @@ Op == {[op |-> o, i |-> i, by |-> b] : o \in {"set", "del", "insert"}, i \in -4.
       \cup {[op |-> "setslice", start |-> a, stop |-> b, step |-> c, t |-> t] :
               a \in Bounds, b \in Bounds, c \in {None, 1, 2, -1}, t \in Values}
       \cup {[op |-> "delslice", start |-> a, stop |-> b, step |-> c] : a \in Bounds, b \in Bounds, c \in {None, 1, 2, -1}}
+      \cup {[op |-> "genslice", start |-> a, stop |-> b, step |-> c, t |-> t] :
+              a \in {None, 0, 2}, b \in {None, 2, 4}, c \in {None, 2}, t \in Values}
       \cup {[op |-> o, t |-> t] : o \in {"iadd", "extend"}, t \in Values}
       \cup {[op |-> "imul", n |-> n] : n \in -1..2}
       \cup {[op |-> "remove", x |-> x] : x \in {1, 3}}
@@ -72,6 +76,7 @@ RECURSIVE Repeat(_, _)
 Repeat(s, n) == IF n <= 0 THEN <<>> ELSE s \o Repeat(s, n - 1)
 First(s, x) == CHOOSE k \in DOMAIN s : s[k] = x /\ \A j \in 1..(k - 1) : s[j] # x
 
+RECURSIVE Run(_)
 Run(p) ==
     LET s == p.items  n == Len(s)
         Index(i) == IF i < 0 THEN i + n ELSE i
@@ -84,6 +89,7 @@ Run(p) ==
                 IN  IF Len(ks) # Len(p.t) THEN Error("ValueError")
                     ELSE Done([k \in DOMAIN s |-> IF \E j \in DOMAIN ks : ks[j] = k - 1
                                                    THEN p.t[CHOOSE j \in DOMAIN ks : ks[j] = k - 1] ELSE s[k]])
+          [] p.op = "genslice" -> Run([p EXCEPT !.op = "setslice"])
           [] p.op = "delslice" /\ Step(p) = 1 -> Done(Splice(s, Start(n, p), Stop(n, p), <<>>))
           [] p.op = "delslice" -> Done(Without(s, Walk(Start(n, p), Stop(n, p), Step(p))))
           [] p.op \in {"iadd", "extend"} -> Done(s \o p.t)
@@ -115,6 +121,9 @@ DelIsEmptyAssignment == Finished /\ program.op = "delslice" /\ program.step \in 
 AppendIsSlice == Finished /\ program.op = "append" =>
     outcome = Run([type |-> program.type, items |-> program.items, op |-> "setslice", start |-> Len(program.items),
                    stop |-> Len(program.items), step |-> None, t |-> <<7>>])
+
+\* A generator's items replace a slice as the same items in a sequence do.
+GeneratorIsSequence == Finished /\ program.op = "genslice" => outcome = Run([program EXCEPT !.op = "setslice"])
 
 \* An index's __index__ gives the int it returns.
 IndexIsInt == Finished /\ program.op \in {"set", "del", "insert", "pop"} => outcome = Run([program EXCEPT !.by = "int"])

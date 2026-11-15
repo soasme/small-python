@@ -36,6 +36,8 @@ def outcome(p):
             del s[index(p)]
         elif op == "setslice":
             s[arg(p["start"]):arg(p["stop"]):arg(p["step"])] = t
+        elif op == "genslice":
+            s[arg(p["start"]):arg(p["stop"]):arg(p["step"])] = (x for x in t)
         elif op == "delslice":
             del s[arg(p["start"]):arg(p["stop"]):arg(p["step"])]
         elif op == "iadd":

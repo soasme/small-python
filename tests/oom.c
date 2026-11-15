@@ -670,6 +670,24 @@ static const char *const programs[] = {
     "    return dict(m), eval('a + b', {}, m)\n"
     "print(xl())\n",
 
+    "def sg(*v):\n"
+    "    for x in v: yield x\n"
+    "def sr():\n"
+    "    yield 1\n"
+    "    raise KeyError('k')\n"
+    "def sl():\n"
+    "    a = [0, 1, 2, 3, 4]\n"
+    "    a[1:3] = sg(7, 8, 9)\n"
+    "    a[::3] = sg(5, 6)\n"
+    "    b = c = [1]\n"
+    "    b[:] = c[:0] = sg(2)\n"
+    "    try: a[1:] = sr()\n"
+    "    except KeyError: pass\n"
+    "    try: a[::2] = sg(1)\n"
+    "    except ValueError: pass\n"
+    "    return a, b\n"
+    "print(sl())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"
