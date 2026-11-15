@@ -1538,6 +1538,23 @@ static const char *const programs[] = {
     "    return out + [len(d)]\n"
     "print(dk())\n",
 
+    "class AW:\n"
+    "    def __await__(s):\n"
+    "        try: got = yield 'w'\n"
+    "        except KeyError: got = 'k'\n"
+    "        return got\n"
+    "async def aw():\n"
+    "    try: yield await AW()\n"
+    "    except ValueError: yield 'v'\n"
+    "def awr():\n"
+    "    out = []\n"
+    "    for how in ('send', 'key', 'value'):\n"
+    "        a = aw().asend(None); out.append(a.send(None))\n"
+    "        try: a.send('s') if how == 'send' else a.throw(KeyError if how == 'key' else ValueError)\n"
+    "        except StopIteration as e: out.append(e.value)\n"
+    "    return out\n"
+    "print(awr())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

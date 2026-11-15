@@ -24035,16 +24035,17 @@ static NO_INLINE int thrown_at(SPYContext *c, Machine *m, size_t argc, SPYValue 
 }
 /* Whether a close of, or a throw of exception into, a generator or
  * coroutine raises at its yield on the machine (consume): one suspended
- * there, or delegating to a yield (delegating); a throw into an async
- * generator, an asend's, only at its own yield. */
+ * there, or delegating to a yield (delegating); into an async
+ * generator, an asend's throw of an exception. */
 static SPYValue *method_function(SPYContext *, SPYValue *, const char *);
 static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     if ((g->type != SPY_GENERATOR && g->type != SPY_COROUTINE && g->type != SPY_ASYNC_GENERATOR) || !suspended(g)) return 0;
     Machine *m = innermost(g->as.generator.machine);
     SPYValue *k = !exception ? c->exceptions[X_GENERATOR_EXIT] : exception->type == SPY_INSTANCE ? exception->as.map.parent :
                   exception->type == SPY_CLASS ? exception : NULL;
-    if (g->type == SPY_ASYNC_GENERATOR)
-        return exception && k && subclass(k, c->exceptions[X_BASE_EXCEPTION]) && g->as.generator.machine->awaiting == AWAIT_YIELD;
+    /* An asend's throw into an async generator, at its yield or at an
+     * await as at a yield from. */
+    if (g->type == SPY_ASYNC_GENERATOR && (!exception || !k || !subclass(k, c->exceptions[X_BASE_EXCEPTION]))) return 0;
     /* A yield from passes on a throw of what is no exception, which
      * raises there (generator_throw). */
     if (g->as.generator.machine->awaiting == AWAIT_DELEGATE && !(k && subclass(k, c->exceptions[X_BASE_EXCEPTION]))) return 0;
@@ -24070,7 +24071,6 @@ static NO_INLINE int next_method(SPYContext *c, SPYValue *v) { return next_funct
  * or on an iterator whose __next__ the machine calls, or a builtin
  * iterator a generator's step takes from (delegate_next). */
 static NO_INLINE int delegating(Machine *m) {
-    if (m->generator->type == SPY_ASYNC_GENERATOR) return 0;
     while (m->awaiting == AWAIT_DELEGATE) {
         SPYValue *d = m->delegate;
         /* An iterator's Python __next__ is a call (delegate_next). */

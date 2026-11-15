@@ -2249,6 +2249,15 @@ int main(int argc, char **argv) {
                "def compares():\n    k = Same()\n    d = Sub({Same(): 1, k: 2})\n    return d[k] + (k in d) + d.get(k)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "compares()", "compares.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
+    /* So do an asend's later send and throw while its async generator awaits a generator. */
+    execute(c, "class Waits:\n    def __await__(self):\n        try: yield 1\n        except KeyError: pass\n"
+               "        for i in range(3000): pass\n        return i\n"
+               "async def awaiting():\n    yield await Waits()\n"
+               "def awaits_resumed():\n    out = 0\n    for throw in (0, 1):\n        a = awaiting().asend(None)\n        a.send(None)\n"
+               "        try: a.throw(KeyError) if throw else a.send(None)\n        except StopIteration as e: out += e.value\n"
+               "    return out\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "awaits_resumed()", "awaits_resumed.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

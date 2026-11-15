@@ -136,7 +136,26 @@ def wrapper_program(op):
     return "no StopIteration"
 
 
+async def agen():
+    try:
+        yield await Gen()
+    except ValueError:
+        yield "caught"
+
+
+def agen_program(op):
+    a = agen().asend(None)
+    out = [a.send(None)]
+    try:
+        a.send(None) if op == "send" else a.throw(ValueError)
+    except StopIteration as stop:
+        return "%r %r" % (out, stop.value)
+    return "no StopIteration"
+
+
 def outcome(p):
+    if p["part"] == "agen":
+        return agen_program(p["op"])
     if p["part"] == "wrapper":
         return wrapper_program(p["op"])
     return await_program(p["x"]) if p["part"] == "await" else object_program(p["op"])
