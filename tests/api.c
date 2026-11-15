@@ -2079,6 +2079,12 @@ int main(int argc, char **argv) {
                "def sorts():\n    return sorted([Sorts(2), Sorts(1)])[0].n + 9\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "sorts()", "sorts.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 0);
+    /* And max()'s by a key, the best key's __lt__ reflected. */
+    execute(c, "class Keyed:\n    def __init__(self, n): self.n = n\n"
+               "    def __lt__(self, o):\n        for i in range(3000): pass\n        return Truth()\n"
+               "def keyed():\n    return max([1, 2], key=Keyed) + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 0);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

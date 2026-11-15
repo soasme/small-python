@@ -14497,7 +14497,10 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * once the keys are taken, a sort whose comparisons call Python sorts in
  * sorter (key_call). A min or max by key keeps its best item and, in
  * result, that item's key, the item whose key its callee is computing,
- * and in empty its default for no items; one fed takes its items as other
+ * and in empty its default for no items; a key in pending waits for its
+ * comparison with the best key, phase 1 the best key's reflected method,
+ * and then for the Python __bool__, or __len__, of the comparison's result
+ * in sent, phase 2, or 3 for __len__; one fed takes its items as other
  * consumers do, each then its item for the key. A list collecting the
  * items of a keyed sort keeps its keywords in pending (key_consumer). next(), __next__ and
  * send (B_NEXT) keep their default in result, the value to send and then
@@ -25181,6 +25184,12 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         if (s->sorter) sorter_end(items, s->sorter, s->descending);
         result = s->target ? spy_none(c) : spy_retain(items);
     } else {
+        if (s->pending && s->phase >= 2) {
+            /* The comparison's result's truth, returning into key_took. */
+            int length = 0;
+            SPYValue *self = spy_retain(s->sent), *function = truth_function(c, self, &length);
+            return (*env = function_env(c, function, 1, &self, NULL, 1)) ? spy_retain(function) : NULL;
+        }
         if (s->pending) {
             /* An item's key compared with the best one's by a Python method
              * (key_comparison), returning into key_took. */
@@ -25552,27 +25561,43 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         s->result->as.seq.items[s->result->as.seq.len++] = key;
         return 0;
     }
-    int op = s->keyed == KEY_MAX ? '>' : '<', better = !s->best;
-    /* A key's Python comparison with the best key, and after its
-     * NotImplemented the best key's reflected one, are calls (key_call). */
-    if (s->pending && !s->phase && key == c->not_implemented) {
-        s->phase = 1;
-        if (key_comparison(c, s, s->pending)) { spy_release(key); return 0; }
-        s->phase = 0;
-    }
-    if (!s->pending && s->best && key_comparison(c, s, key)) { s->pending = key; return 0; }
-    SPYValue *item = s->item;
-    s->item = NULL;
-    if (s->best) {
+    int op = s->keyed == KEY_MAX ? '>' : '<', better = !s->best, length = 0;
+    if (s->pending && s->phase >= 2) {
+        /* The truth of the comparison's result decides (key_call). */
+        better = truth_result(c, s->sent, s->phase == 2, key);
+        spy_release(s->sent); s->sent = NULL;
+        key = s->pending; s->pending = NULL; s->phase = 0;
+    } else if (s->best) {
+        /* A key's Python comparison with the best key, and after its
+         * NotImplemented the best key's reflected one, are calls
+         * (key_call); a key with no method but object's calls the
+         * reflected one first. */
+        if (s->pending && !s->phase && key == c->not_implemented) {
+            s->phase = 1;
+            if (key_comparison(c, s, s->pending)) { spy_release(key); return 0; }
+            s->phase = 0;
+        }
+        if (!s->pending) {
+            s->phase = !key_comparison(c, s, key) && rich_default(c, key, op == '>' ? R_GT : R_LT);
+            if (key_comparison(c, s, key)) { s->pending = key; return 0; }
+            s->phase = 0;
+        }
         SPYValue *test = !s->pending ? comparison(c, op, key, s->result) : !s->phase ? compared(c, op, s->pending, s->result, key) :
                          key != c->not_implemented ? key : comparison_declined(c, op, s->pending, s->result);
         if (s->pending) {
             if (test != key) spy_release(key);
             key = s->pending; s->pending = NULL; s->phase = 0;
         }
+        /* Its truth by a Python __bool__ or __len__ is a call too. */
+        if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) && truth_function(c, test, &length)) {
+            s->pending = key; s->sent = test; s->phase = 2 + length;
+            return 0;
+        }
         better = test && truthy(test);
         spy_release(test);
     }
+    SPYValue *item = s->item;
+    s->item = NULL;
     if (better && !c->error_type[0]) {
         spy_release(s->best); spy_release(s->result);
         s->best = item; s->result = key;

@@ -1289,6 +1289,10 @@ static const char *const programs[] = {
     "    return [o.n for o in sorted([RL(3), RL(1)])], [o.n for o in x], [b for a, b in sorted([(RL(1), 2), (RL(1), 1)])]\n"
     "print(rl())\n",
 
+    "def rk():\n"
+    "    return max([1, 3, 2], key=RL), min([3, 1], key=RL), max(1, 2, key=RM)\n"
+    "print(rk())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

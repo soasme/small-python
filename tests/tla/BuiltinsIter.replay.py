@@ -199,6 +199,11 @@ SOURCES = {
                   "    def __lt__(self, o): log.append('lt'); return T(self.v < o.v)\n"
                   "    def __eq__(self, o): log.append('eq'); return T(self.v == o.v)\n"
                   "result = ([o.v for o in sorted([O(2), O(1)])], [(a.v, b) for a, b in sorted([(O(1), 2), (O(1), 1)])], log)",
+    "max_key_truth": "log = []\nclass T:\n    def __init__(self, v): self.v = v\n"
+                     "    def __bool__(self):\n        for _ in (): pass\n        log.append('bool'); return self.v\n"
+                     "class L:\n    def __init__(self, n): self.n = n\n"
+                     "    def __lt__(self, o):\n        for _ in (): pass\n        log.append('lt'); return T(self.n < o.n)\n"
+                     "result = (max([1, 3, 2], key=L), log)",
     "sort_gt_reflected": 'class G:\n    def __init__(self, v): self.v = v\n    def __gt__(self, o): return self.v > o.v\nresult = [x.v for x in sorted([G(2), G(1)])]',
     "len_negative": 'result = len(NegLen())',
     "len_big": 'result = len(BigLen())',
