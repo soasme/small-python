@@ -10331,9 +10331,24 @@ static NO_INLINE int iterated_python(SPYContext *c, SPYValue *x, SPYValue *y) {
     SPYValue *seq = y->as.iterator.source;
     return (seq->type == SPY_LIST || seq->type == SPY_TUPLE) && python_item(c, x, seq, y->as.iterator.index) < seq->as.seq.len;
 }
+static SPYValue *rich_function(SPYContext *, SPYValue *, SPYValue *, int);
+/* Whether y, a dict's values, holds before any value that is x one whose
+ * comparison with x calls a Python __eq__ (rich_function), which an in
+ * compares on the machine (contains_step). */
+static NO_INLINE int values_python(SPYContext *c, SPYValue *x, SPYValue *y) {
+    SPYValue *map = view_map(y);
+    Entry *e = map_items(map);
+    for (size_t i = 0; i < map->as.map.len; i++) {
+        SPYValue *v = e[i].value;
+        if (v == x) return 0;
+        if ((v->type == SPY_INSTANCE || x->type == SPY_INSTANCE) && (rich_function(c, v, x, R_EQ) || rich_function(c, x, v, R_EQ))) return 1;
+    }
+    return 0;
+}
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
-    if ((op == O_IN || op == O_NOTIN) && b->type == SPY_ITERATOR && iterated_python(c, a, b)) return NULL;
+    if ((op == O_IN || op == O_NOTIN) && ((b->type == SPY_ITERATOR && iterated_python(c, a, b)) ||
+                                          (b->type == SPY_DICT_VALUES && values_python(c, a, b)))) return NULL;
     /* in of a map holding a key whose comparison may call Python (eq_keyed). */
     if ((op == O_IN || op == O_NOTIN) && hashes_key(b, 1) && eq_keyed(b)) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
@@ -10384,7 +10399,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
      * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(b) || b->type == SPY_GENERATOR ||
-               (b->type == SPY_ITERATOR && iterated_python(c, a, b)) ||
+               (b->type == SPY_ITERATOR && iterated_python(c, a, b)) || (b->type == SPY_DICT_VALUES && values_python(c, a, b)) ||
                (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
@@ -24376,7 +24391,7 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
  * generator, and one of __getitem__ alone its iterator, as a set's list
  * or tuple (hashed_items). The consumer's keyed. */
 static int consumer_source(SPYContext *c, SPYValue **v) {
-    if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && !is_dict(*v)) return 0;
+    if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && (*v)->type != SPY_DICT_VALUES && !is_dict(*v)) return 0;
     SPYValue *iter = iter_function(c, *v);
     if (iter && machine_function(c, iter)) return KEY_ITER;
     SPYValue *iterator = get_iterator(c, *v);
@@ -27726,7 +27741,8 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
  * their end; else 0, with an error pending when __iter__ failed, a
  * TypeError replaced as the native search replaces it. */
 static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y) {
-    if (!resumable(y) && (!(iter_function(c, y) || getitem_iterated(c, y)) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
+    if (y->type != SPY_DICT_VALUES && !resumable(y) &&
+        (!(iter_function(c, y) || getitem_iterated(c, y)) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
     /* An __iter__ on the machine is the search's first call (KEY_ITER). */
     SPYValue *items = spy_retain(y);
     int keyed = consumer_source(c, &items);

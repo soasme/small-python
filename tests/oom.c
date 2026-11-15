@@ -1293,6 +1293,11 @@ static const char *const programs[] = {
     "    return max([1, 3, 2], key=RL), min([3, 1], key=RL), max(1, 2, key=RM)\n"
     "print(rk())\n",
 
+    "def rv():\n"
+    "    d = {1: RO(False), 2: RO(True)}\n"
+    "    return 1 in d.values(), RE() in {1: 2}.values(), 3 not in {1: 3}.values()\n"
+    "print(rv())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"
