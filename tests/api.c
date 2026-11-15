@@ -1798,6 +1798,14 @@ int main(int argc, char **argv) {
                "def unbound():\n    return Made(4).v + type.__call__(Made, 5).v\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "unbound()", "unbound.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
+    /* So does a generator's throw of a class, a value and a traceback. */
+    execute(c, "class Traced(Exception):\n    def __init__(self, *a):\n        for i in range(3000): pass\n        super().__init__(*a)\n"
+               "def traced_gen():\n    try: yield 0\n    except Traced as e:\n        for i in range(3000): pass\n"
+               "        yield e.args[0] + (e.__traceback__.tb_next is tb)\n"
+               "try: raise ValueError\nexcept ValueError as e: tb = e.__traceback__\n"
+               "def traced():\n    g = traced_gen(); next(g)\n    return g.throw(Traced, 6, tb)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "traced()", "traced.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

@@ -33,7 +33,8 @@
 (* subclass whose Python __init__ throw() calls to make the exception, or  *)
 (* of NewValueError, one whose Python __new__ and __init__ it calls.       *)
 (* A throw passes the class alone or, in its three-argument form, with a  *)
-(* None value and traceback, which changes nothing.                       *)
+(* None value and a None traceback or a traceback object, the thrown      *)
+(* exception's; neither changes an outcome.                                *)
 (* A throw is made while its caller handles `handled` (an IndexError) or   *)
 (* nothing. With variant 'bare' the loop's yield stands outside the try,   *)
 (* so a throw there propagates and close() ends the object without a      *)
@@ -49,7 +50,7 @@ Variants == {"plain", "stubborn", "bare"}
 Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
 Thrown == {"ValueError", "KeyError", "PyValueError", "NewValueError"}
 Handled == {"None", "IndexError"}               \* what the caller of a throw handles
-Forms == {"one", "three"}                        \* throw(e) or throw(e, None, None)
+Forms == {"one", "three", "traced"}              \* throw(e), throw(e, None, None) or throw(e, None, tb)
 Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h, f>> : e \in Thrown, h \in Handled, f \in Forms} \cup {<<"close">>, <<"drop">>}
 
 \* Where the body is suspended: before its first line, at the loop's yield,

@@ -343,7 +343,8 @@ These run as machines on the heap, in one native activation of
   searches, after calling their `__iter__`, comparing the items natively;
   generators resumed by
   `next` or by their `__next__` and `send` methods, or thrown into or
-  closed at a `yield` by `throw` (with one argument) or `close`, and
+  closed at a `yield` by `throw` (with one argument, or a class, a value
+  and a traceback or `None`) or `close`, and
   coroutines resumed by `send`, also through their `__await__` wrapper,
   whose `__next__` and `next` of it send `None`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`, also

@@ -23879,8 +23879,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
-        /* A throw of a class and its value, and a None traceback, into a yield, too. */
-        return (argc == (method == M_THROW) || (argc >= 2 && method == M_THROW && argv[0]->type == SPY_CLASS && (argc == 2 || argv[2]->type == SPY_NONE))) &&
+        /* A throw of a class and its value, and a traceback or None, into a yield, too. */
+        return (argc == (method == M_THROW) || (argc >= 2 && method == M_THROW && argv[0]->type == SPY_CLASS &&
+                                                (argc == 2 || argv[2]->type == SPY_NONE || argv[2]->type == SPY_TRACEBACK))) &&
                throws_in(c, callee, argc ? argv[0] : NULL) && (argc < 2 || callee->as.generator.machine->awaiting == AWAIT_YIELD) ?
                method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
@@ -23984,19 +23985,24 @@ static SPYValue *join_listed(SPYContext *c, Machine *m, SPYValue *it) {
     spy_release(method);
     return result;
 }
-static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *);
+static void consume_traced(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *, SPYValue *);
+static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
+    consume_traced(c, m, id, callee, method, name, generator, start, NULL);
+}
 static SPYValue *throw_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *throw_newed(SPYContext *, Machine *, SPYValue *, SPYValue *);
-/* A throw, for the consumer's callee, method and name, of exception class
- * cls with argc arguments argv, all borrowed, calls its Python __new__
+/* A throw, for the consumer's callee, method, name and traceback (else
+ * None), of exception class cls with argc arguments argv, all borrowed,
+ * calls its Python __new__
  * allocator on m (callk, throw_newed), to call cls again with what it
  * made when that is not exactly an instance of again, the class or None. */
 static void throw_new(SPYContext *c, Machine *m, SPYValue *const *consumer, SPYValue *cls, SPYValue *again, SPYValue *allocator,
                       size_t argc, SPYValue *const *argv) {
-    SPYValue *parts[13] = {spy_retain(consumer[0]), spy_retain(consumer[1]), spy_retain(consumer[2]), spy_retain(cls), spy_retain(again)}, *args[8];
-    for (size_t i = 0; i < argc; i++) parts[i + 5] = spy_retain(argv[i]);
-    SPYValue *state = spy_tuple(c, argc + 5, parts);
-    release_all(argc + 5, parts);
+    SPYValue *parts[14] = {spy_retain(consumer[0]), spy_retain(consumer[1]), spy_retain(consumer[2]), spy_retain(consumer[3]),
+                           spy_retain(cls), spy_retain(again)}, *args[8];
+    for (size_t i = 0; i < argc; i++) parts[i + 6] = spy_retain(argv[i]);
+    SPYValue *state = spy_tuple(c, argc + 6, parts);
+    release_all(argc + 6, parts);
     args[0] = spy_retain(cls);
     for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(argv[i]);
     if (state) callk(c, m, allocator, argc + 1, args, throw_newed, state);
@@ -24008,23 +24014,24 @@ static void throw_new(SPYContext *c, Machine *m, SPYValue *const *consumer, SPYV
  * class call does; the throw goes on with what the call made
  * (throw_inited). */
 static SPYValue *throw_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    SPYValue **items = state->as.seq.items, *cls = items[3], *args[8];
-    size_t argc = state->as.seq.len - 5;
+    SPYValue **items = state->as.seq.items, *cls = items[4], *args[8];
+    size_t argc = state->as.seq.len - 6;
     SPYValue *init = result && result->type == SPY_INSTANCE && subclass(result->as.map.parent, cls) ? special_method(c, result, "__init__") : NULL;
     SPYValue *made = exception_made(c, cls, result, 0), *function = NULL;
     if (made && init && init->type == SPY_METHOD && machine_function(c, init->as.method.function)) function = init->as.method.function;
     else if (made && init) {
-        SPYValue *value = call(c, init, argc, items + 5);
+        SPYValue *value = call(c, init, argc, items + 6);
         if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
         spy_release(value);
     }
     if (made && c->error_type[0]) { spy_release(made); made = NULL; }
-    SPYValue *parts[] = {spy_retain(items[0]), spy_retain(items[1]), spy_retain(items[2]), made ? made : spy_none(c), spy_retain(items[4])};
-    SPYValue *next = spy_tuple(c, 5, parts);
-    release_all(5, parts);
+    SPYValue *parts[] = {spy_retain(items[0]), spy_retain(items[1]), spy_retain(items[2]), spy_retain(items[3]), made ? made : spy_none(c),
+                         spy_retain(items[5])};
+    SPYValue *next = spy_tuple(c, 6, parts);
+    release_all(6, parts);
     if (next && function) {
-        args[0] = spy_retain(next->as.seq.items[3]);
-        for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(items[i + 5]);
+        args[0] = spy_retain(next->as.seq.items[4]);
+        for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(items[i + 6]);
         callk(c, m, function, argc + 1, args, throw_inited, next);
     } else if (next) throw_inited(c, m, next, made && !c->error_type[0] ? spy_none(c) : NULL);
     spy_release(init); spy_release(state);
@@ -24038,9 +24045,9 @@ static SPYValue *throw_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValu
 static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **items = state->as.seq.items, *exception = NULL;
     if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
-    else if (result) exception = spy_retain(items[3]);
+    else if (result) exception = spy_retain(items[4]);
     spy_release(result);
-    SPYValue *again = exception && state->as.seq.len > 4 && items[4] != c->none && exception->as.map.parent != items[4] ? items[4] : NULL;
+    SPYValue *again = exception && state->as.seq.len > 5 && items[5] != c->none && exception->as.map.parent != items[5] ? items[5] : NULL;
     SPYValue *allocator = again ? new_method(c, again) : NULL;
     if (allocator) {
         throw_new(c, m, items, again, c->none, allocator, 1, &exception);
@@ -24053,7 +24060,9 @@ static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
         ErrorState error = take_error(c);
         if (!(exception = error.value)) restore_error(c, &error);
     }
-    if (exception) consume(c, m, B_THROW, items[0], (int)items[1]->as.integer_data.small, items[2] == c->none ? NULL : items[2], exception, NULL);
+    if (exception)
+        consume_traced(c, m, B_THROW, items[0], (int)items[1]->as.integer_data.small, items[2] == c->none ? NULL : items[2], exception, NULL,
+                       items[3] == c->none ? NULL : items[3]);
     spy_release(state);
     return NULL;
 }
@@ -24061,8 +24070,10 @@ static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
  * owned. A throw of an exception class, with start its value if given,
  * whose call runs a Python __new__ or __init__ calls it first, on m
- * (callk), and goes on with the instance (throw_newed, throw_inited). */
-static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
+ * (callk), and goes on with the instance (throw_newed, throw_inited); a
+ * throw's traceback, borrowed, becomes its exception's (thrown_exception). */
+static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start,
+                           SPYValue *traceback) {
     SPYValue *init = NULL, *made = NULL, *built = method < 0 ? built_type(c, callee) : NULL, *wrap = built ? spy_retain(callee) : NULL;
     if (built) callee = built;
     if (id == B_THROW && generator->type == SPY_CLASS) {
@@ -24073,16 +24084,17 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
         int given = start && start->type == SPY_INSTANCE && subclass(start->as.map.parent, generator);
         SPYValue *allocator = given || argc > 6 || !subclass(generator, c->exceptions[X_BASE_EXCEPTION]) ? NULL : new_method(c, generator);
         if (allocator) {
-            SPYValue *consumer[] = {callee, int_value(c, method), name ? name : c->none};
+            SPYValue *consumer[] = {callee, int_value(c, method), name ? name : c->none, traceback ? traceback : c->none};
             if (consumer[1]) throw_new(c, m, consumer, generator, generator, allocator, argc, argv);
             spy_release(consumer[1]); spy_release(generator); spy_release(start);
             return;
         }
         made = given || argc > 6 ? NULL : raised_instance(c, generator, argc, argv, &init);
         if (made) {
-            SPYValue *parts[] = {spy_retain(callee), int_value(c, method), spy_retain(name ? name : c->none), made}, *args[8];
-            SPYValue *state = spy_tuple(c, 4, parts);
-            release_all(4, parts);
+            SPYValue *parts[] = {spy_retain(callee), int_value(c, method), spy_retain(name ? name : c->none),
+                                 spy_retain(traceback ? traceback : c->none), made}, *args[8];
+            SPYValue *state = spy_tuple(c, 5, parts);
+            release_all(5, parts);
             args[0] = spy_retain(made);
             for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(argv[i]);
             if (state) callk(c, m, init, argc + 1, args, throw_inited, state);
@@ -24111,7 +24123,7 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
     if (id == B_THROW) {
-        sent = thrown_exception(c, start ? 2 : 1, (SPYValue *[]){generator, start});
+        sent = thrown_exception(c, traceback ? 3 : start ? 2 : 1, (SPYValue *[]){generator, start ? start : c->none, traceback});
         spy_release(generator); spy_release(start); start = NULL;
     }
     if ((id == B_NEXT || id == B_CLOSE || id == B_THROW) && method >= 0) generator = spy_retain(callee);
@@ -25420,7 +25432,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     int id = consumer_of(c, callee, method, argc, argv);
-    if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL, argc > 1 ? spy_retain(argv[1]) : NULL);
+    if (id >= 0)
+        consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
+                       argc > 1 ? spy_retain(argv[1]) : NULL, argc > 2 ? argv[2] : NULL);
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) :
              c->error_type[0] ? NULL : step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
@@ -26216,6 +26230,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
+    SPYValue *traceback = id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
     SPYValue *getter = id < 0 && calls ? property_entered(c, callee, argc, argv, env) : NULL;
     int plain = 0;
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
@@ -26223,7 +26238,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
              init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-    if (id >= 0) { consume(c, m, id, callee, -1, NULL, generator, start); spy_release(callee); }
+    if (id >= 0) { consume_traced(c, m, id, callee, -1, NULL, generator, start, traceback); spy_release(callee); spy_release(traceback); }
     return result;
 }
 /* BC_CALLN of method call node n: its object, then its arguments, on the
@@ -26322,6 +26337,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     size_t from = skip + (method >= 0 && !skip), given = argc + 1 - from;
     id = callee ? consumer_of(c, callee, method, given, argv + from) : -1;
     SPYValue *generator = id >= 0 && given ? spy_retain(argv[from]) : NULL, *start = id >= 0 && given > 1 ? spy_retain(argv[from + 1]) : NULL;
+    SPYValue *traceback = id >= 0 && given > 2 ? spy_retain(argv[from + 2]) : NULL;
     SPYValue *key;
     if (callee && id < 0 && calls && may_hash(callee, method, argc + !skip, argv + skip) && hashing_call(c, callee, method, argc + !skip, argv + skip, &key)) {
         /* The object and arguments leave the stack for the key's __hash__ (hash_call_step). */
@@ -26337,8 +26353,8 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-    if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start);
-    spy_release(callee);
+    if (id >= 0) consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start, traceback);
+    spy_release(callee); spy_release(traceback);
     return result;
 }
 /* BC_CALLK: call node n of argc arguments, positional and then keyword
@@ -26539,8 +26555,8 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
                dict_consumer(c, m, callee, args->as.seq.items[0], spy_retain(keywords))) ;
     else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
         /* As a stack call's consumer, a starred call's (stack_call). */
-        consume(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
-                args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL);
+        consume_traced(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
+                       args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL, args->as.seq.len > 2 ? args->as.seq.items[2] : NULL);
     else if (calls && print_instances(c, callee, args->as.seq.len, args->as.seq.items, entries_file(map_items(keywords), keywords->as.map.len)) &&
              string_keys(c, keywords)) {
         /* print takes its objects atop m's stack, as a plain call's (stack_call). */

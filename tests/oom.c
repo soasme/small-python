@@ -587,6 +587,23 @@ static const char *const programs[] = {
     "    return r\n"
     "print(tu())\n",
 
+    "class TX(Exception):\n"
+    "    def __init__(self, *a): super().__init__(*a)\n"
+    "class TY(Exception):\n"
+    "    def __new__(cls, *a): return super().__new__(cls, *a)\n"
+    "def tx_gen():\n"
+    "    try: yield 0\n"
+    "    except Exception as e: yield e.args, e.__traceback__.tb_next is tb\n"
+    "try: raise ValueError\n"
+    "except ValueError as e: tb = e.__traceback__\n"
+    "def tx():\n"
+    "    r = []\n"
+    "    for a in ((TX, 1, tb), (TY, (2, 3), tb), (TX, TX(4), tb)):\n"
+    "        g = tx_gen(); next(g); r.append(g.throw(*a))\n"
+    "    g = tx_gen(); next(g); r.append(g.throw(TX, 5, tb))\n"
+    "    return r\n"
+    "print(tx())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

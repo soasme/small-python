@@ -108,8 +108,14 @@ def text(value):
     return "None" if value is None else value
 
 
+try:
+    raise LookupError
+except LookupError as error:
+    TRACEBACK = error.__traceback__
+
+
 def thrown(op):
-    return (THROWN[op[1]],) if op[3] == "one" else (THROWN[op[1]], None, None)
+    return (THROWN[op[1]],) if op[3] == "one" else (THROWN[op[1]], None, TRACEBACK if op[3] == "traced" else None)
 
 
 def perform(kind, target, op):
