@@ -43,7 +43,7 @@ Hash(m, e, negative) ==
 Cases == {"hash_info", "inf", "nan_identity", "modulus", "minus_one", "bool", "complex_real", "complex_formula",
           "complex_imag_only", "complex_inf", "equal_implies_hash", "negative_zero",
           "dict_key_equal_numbers", "set_mixed", "int_subclass", "float_subclass", "hash_returns_int",
-          "big_negative", "large_float_integral"}
+          "big_negative", "large_float_integral", "subclass_hash_method"}
 Programs == [type : {"int"}, m : Ms, e : {e \in Es : e >= 0}, negative : BOOLEAN]
             \cup [type : {"float"}, m : Ms, e : Es, negative : BOOLEAN]
             \cup [case : Cases]
@@ -75,6 +75,9 @@ Case(c) ==
       [] c = "hash_returns_int" -> "'int'"
       [] c = "big_negative" -> "True"
       [] c = "large_float_integral" -> "True"
+      \* an int or str subclass's own __hash__ hashes its instance as a key,
+      \* once per lookup; its -1 becomes -2
+      [] c = "subclass_hash_method" -> "(1, True, ['i', 'i', 's', 'i'], -2)"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

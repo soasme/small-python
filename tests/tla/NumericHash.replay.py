@@ -9,6 +9,11 @@ SOURCES = {
     "inf": "result = (hash(float('inf')), hash(float('-inf')))",
     "nan_identity": "x = float('nan')\ny = float('nan')\nresult = (hash(x) == hash(x), hash(x) == object.__hash__(x), hash(x) == hash(y))",
     "modulus": "P = 2 ** 61 - 1\nresult = (hash(P), hash(P + 1), hash(-P), hash(2 * P + 5), hash(P - 1) == P - 1)",
+    "subclass_hash_method": "log = []\n"
+                            "class I(int):\n    def __hash__(s):\n        for _ in (): pass\n        log.append('i'); return -1\n"
+                            "class S(str):\n    def __hash__(s): log.append('s'); return str.__hash__(s)\n"
+                            "d = {I(1): 1}\n"
+                            "result = (d[I(1)], S('x') in {'y': 0, 'x': 1}, log, hash(I(1)))",
     "minus_one": "result = (hash(-1), hash(-1.0), hash(complex(-1, 0)), hash(-1) == hash(-2))",
     "bool": "result = (hash(True), hash(False), hash(True) == hash(1.0))",
     "complex_real": "result = all(hash(complex(x, 0)) == hash(x) for x in (0.5, -3.0, 7, 1e300))",

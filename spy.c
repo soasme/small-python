@@ -27336,9 +27336,12 @@ static int rich_declines(SPYContext *c, SPYValue *x, int rich) {
  * method of instance y for a number x; or, for in, instance y's
  * __contains__; c->unbound when in takes y's items on the machine
  * (contains_step); else NULL. */
-/* The Python __hash__ of key, a machine function, or NULL. */
+static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
+/* The Python __hash__ of key, a machine function, also of a builtin's
+ * subclass defining it before the builtin, or NULL. */
 static SPYValue *hash_function(SPYContext *c, SPYValue *key) {
-    SPYValue *function = key->type == SPY_INSTANCE && key != c->hashed && !key->as.map.base ? class_lookup(key->as.map.parent, "__hash__") : NULL;
+    SPYValue *function = key->type == SPY_INSTANCE && key != c->hashed && (!key->as.map.base || !builtin_base(c, key, "__hash__", NULL)) ?
+                         class_lookup(key->as.map.parent, "__hash__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
 /* The Python __hash__, a machine function, that hashing key calls first

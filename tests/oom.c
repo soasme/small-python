@@ -990,6 +990,24 @@ static const char *const programs[] = {
     "    return out\n"
     "print(rc())\n",
 
+    "class HK(str):\n"
+    "    def __hash__(self):\n"
+    "        for _ in (): pass\n"
+    "        return str.__hash__(self)\n"
+    "class HT(tuple):\n"
+    "    def __hash__(self): return 5\n"
+    "class HI(int):\n"
+    "    def __hash__(self):\n"
+    "        for _ in (): pass\n"
+    "        raise KeyError(int(self))\n"
+    "def hc():\n"
+    "    d = {HK('a'): 1, HT((2,)): [2]}\n"
+    "    out = [d[HK('a')], HT((2,)) in d, HK('a') in {HK('a')}, 'a' in d]\n"
+    "    try: {HI(3): 1}\n"
+    "    except KeyError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(hc())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

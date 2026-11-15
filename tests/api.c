@@ -1936,6 +1936,11 @@ int main(int argc, char **argv) {
                "def reflected():\n    return {0} == Reflected({1})\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "reflected()", "reflected.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 2);
+    /* So does the Python __hash__ of a builtin's subclass. */
+    execute(c, "class Hashed(str):\n    def __hash__(self):\n        for i in range(3000): pass\n        return 3\n"
+               "def hashed():\n    return {Hashed('k'): 12}[Hashed('k')]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "hashed()", "hashed.py"), SPY_STOP_STEPS, &pauses)) == 12 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

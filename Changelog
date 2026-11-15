@@ -177,6 +177,7 @@ Unreleased (0.10.0):
   on the C stack
 - a comparison with an instance of a builtin type's subclass calls its reflected Python method without nesting
   on the C stack
+- a dict or set key of a builtin type's subclass calls its Python __hash__ without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
