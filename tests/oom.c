@@ -573,6 +573,20 @@ static const char *const programs[] = {
     "    except LookupError as e: return K.a, K.b, e\n"
     "print(ln())\n",
 
+    "class TU(type):\n"
+    "    def __call__(cls, *a, **k): return type.__call__(cls, *a, **k)\n"
+    "class TV(metaclass=TU):\n"
+    "    def __init__(self, *a, **k): self.a = a, k\n"
+    "class TW(metaclass=TU):\n"
+    "    def __new__(cls, *a): return super().__new__(cls) if a else 'w'\n"
+    "def tu():\n"
+    "    for _ in (): pass\n"
+    "    r = [TV(1).a, TV(2, k=3).a, type.__call__(TV, 4).a, TW(), type(TW(5)).__name__]\n"
+    "    try: type.__call__(1)\n"
+    "    except TypeError as e: r.append(e)\n"
+    "    return r\n"
+    "print(tu())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

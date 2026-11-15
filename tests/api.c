@@ -1792,6 +1792,12 @@ int main(int argc, char **argv) {
                "def loaded():\n    class K(metaclass=LoadMeta):\n        a = 4\n        b = a + a\n    return K.b\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "loaded()", "loaded.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
+    /* So does type.__call__ called unbound with a class. */
+    execute(c, "class Unbound(type):\n    def __call__(cls, *a): return type.__call__(cls, *a)\n"
+               "class Made(metaclass=Unbound):\n    def __init__(self, v):\n        for i in range(3000): pass\n        self.v = v\n"
+               "def unbound():\n    return Made(4).v + type.__call__(Made, 5).v\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "unbound()", "unbound.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

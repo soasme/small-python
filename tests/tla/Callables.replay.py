@@ -10,9 +10,10 @@ NEW = {"none": "", "self": "    def __new__(cls, *args, **kw):\n" + LOOP + "    
        "other": "    def __new__(cls, *args, **kw):\n" + LOOP + "        return 5\n"}
 INIT = {"none": "", "records": "    def __init__(self, *args, **kw):\n" + LOOP + "        self.args = args + tuple(kw.items())\n",
         "returns": "    def __init__(self, *args, **kw):\n" + LOOP + "        return 1\n"}
-CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": "", "super": ""}
+CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": "", "super": "", "unbound": ""}
 META = {"meta": "class M(type):\n    def __call__(cls, *a):\n        return a\n",
-        "super": "class M(type):\n    def __call__(cls, *a, **k):\n" + LOOP + "        return super().__call__(*a, **k)\n"}
+        "super": "class M(type):\n    def __call__(cls, *a, **k):\n" + LOOP + "        return super().__call__(*a, **k)\n",
+        "unbound": "class M(type):\n    def __call__(cls, *a, **k):\n" + LOOP + "        return type.__call__(cls, *a, **k)\n"}
 
 
 def describe(r):

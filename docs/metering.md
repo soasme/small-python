@@ -286,7 +286,8 @@ These run as machines on the heap, in one native activation of
   by `map` or as a method a Python getter reads;
   the Python `__init__` of a
   subclass of a builtin type or of an exception, after its builtin
-  `__new__`; those calls also as `type.__call__` bound to the class, the
+  `__new__`; those calls also as `type.__call__` bound to the class or
+  given it first, the
   `super().__call__` of a metaclass's `__call__`; instances with a
   Python `__call__`; Python
   decorators; a class statement's bases' `__mro_entries__`, its

@@ -17687,6 +17687,11 @@ static SPYValue *type_called(SPYContext *c, SPYValue *callee) {
     return callee->type == SPY_METHOD && callee->as.method.function == name_local(c->types[SPY_CLASS], "__call__") &&
            callee->as.method.self->type == SPY_CLASS ? callee->as.method.self : NULL;
 }
+/* The class an unbound type.__call__, callee, calls when first is a
+ * class, its first argument; else NULL. Borrowed. */
+static SPYValue *unbound_called(SPYContext *c, SPYValue *callee, SPYValue *first) {
+    return callee == name_local(c->types[SPY_CLASS], "__call__") && first->type == SPY_CLASS ? first : NULL;
+}
 static SPYValue *new_called(SPYContext *, SPYValue *, int);
 static int called_machine(SPYContext *, SPYValue *);
 /* class_init of a call of type.__call__ on cls (type_called), uncached. */
@@ -25317,6 +25322,7 @@ static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, si
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
 static unsigned index_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
+static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, int, SPYValue **);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -25326,6 +25332,14 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return result;
     }
     if (c->error_type[0]) { release_all(argc, argv); spy_release(callee); return NULL; }
+    if (method < 0 && argc && unbound_called(c, callee, argv[0]) && called_machine(c, argv[0])) {
+        /* An unbound type.__call__ calls the class first as a stack call does (class_stack_call). */
+        if (grow_array(c, (void **)&m->stack, &m->cap, m->len + argc, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
+        memcpy(&m->stack[m->len], argv, argc * sizeof(*argv));
+        m->len += argc;
+        spy_release(callee);
+        return class_stack_call(c, m, m->stack[m->len - argc], argc - 1, 1, env);
+    }
     if (method < 0 && class_maker(c, callee, argc, argv)) {
         /* type() or type.__new__ runs its class's callbacks on m. */
         result = class_make(c, argc, argv, NULL);
@@ -25818,7 +25832,9 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
                       (argc && argv[0]->type == SPY_INSTANCE)) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR)) ||
-        (callee->type == SPY_NATIVE && ((argc == 1 && (argv[0]->type == SPY_INSTANCE || metaclassed(argv[0]) ||
+        /* type.__call__ of a class (unbound_called) */
+        (callee->type == SPY_NATIVE && ((argc && argv[0]->type == SPY_CLASS && (argv[0]->as.map.meta || callee->as.native.kwcall == type_method)) ||
+                                        (argc == 1 && (argv[0]->type == SPY_INSTANCE ||
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
                                                        (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
@@ -26050,6 +26066,13 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     /* type.__call__ of a class calls the class, its metaclass's __call__ aside. */
     if (calls && callee->type == SPY_METHOD && called_class(c, callee, &argv[-1]))
         return class_stack_call(c, m, argv[-1], argc, 1, env);
+    if (calls && argc && unbound_called(c, callee, argv[0]) && called_machine(c, argv[0])) {
+        /* So does an unbound one of the class first, in the callee's place. */
+        memmove(argv - 1, argv, argc * sizeof(*argv));
+        m->len--;
+        spy_release(callee);
+        return class_stack_call(c, m, argv[-1], argc - 1, 1, env);
+    }
     SPYValue *function = bound_function(c, callee);
     if (function) {
         /* A bound method's self takes its place; an instance stays as self. */
@@ -26239,6 +26262,13 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         SPYValue *cls = argv[0];
         spy_release(object);
         return class_stack_call(c, m, cls, argc, 1, env);
+    }
+    if (callee && method < 0 && calls && skip && argc && unbound_called(c, callee, argv[1]) && called_machine(c, argv[1])) {
+        /* So does type.__call__ of the class first, in the object's place. */
+        spy_release(object); spy_release(callee);
+        memmove(argv, argv + 1, argc * sizeof(*argv));
+        m->len--;
+        return class_stack_call(c, m, argv[0], argc - 1, 1, env);
     }
     if (callee && method < 0 && calls && machine_function(c, callee)) {
         m->len -= argc + 1;
@@ -26461,6 +26491,14 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
     if (direct && string_keys(c, keywords) && called_machine(c, direct)) {
         spy_retain(direct); spy_release(callee);
         callee = direct; called = 1;
+    }
+    SPYValue *first = calls && !called && args->as.seq.len ? unbound_called(c, callee, args->as.seq.items[0]) : NULL;
+    if (first && string_keys(c, keywords) && called_machine(c, first)) {
+        /* So does an unbound one of the class first, of the other arguments. */
+        SPYValue *rest = spy_tuple(c, args->as.seq.len - 1, args->as.seq.items + 1);
+        spy_retain(first); spy_release(callee); spy_release(args);
+        callee = first; args = rest; called = 1;
+        if (!rest) { spy_release(keywords); spy_release(callee); return NULL; }
     }
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
