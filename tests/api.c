@@ -2345,6 +2345,12 @@ int main(int argc, char **argv) {
                "def aitered():\n    g = (x async for x in Aiters())\n    h = (x async for x in Aiters())\n    return 5\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "aitered()", "aitered.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
+    /* So does a builtin sequence's operand's Python reflected method, and its __index__ after it declines. */
+    execute(c, "class Rmul:\n    def __init__(self, n): self.n = n\n    def __index__(self): return slower(self.n)\n"
+               "    def __rmul__(self, o):\n        for i in range(3000): pass\n        return NotImplemented if self.n else 4\n"
+               "def reflected():\n    return ([1] * Rmul(0)) + len((2,) * Rmul(3))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "reflected()", "reflected.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

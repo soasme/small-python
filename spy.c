@@ -29484,6 +29484,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
                 self = y; other = x; phase = OPERATOR_REFLECTED;
                 goto found;
             }
+            if (kind == OPERATE_BINARY && repeats(x) && (token != '%' || x->type == SPY_LIST || x->type == SPY_TUPLE) && !subclass(right, left)) {
+                /* A sequence has no number method: an unrelated y's reflected one comes first. */
+                if (!(function = item_function(c, y, reflected))) return NULL;
+                self = y; other = x; phase = OPERATOR_REFLECTED;
+                goto found;
+            }
             if (right == left || !subclass(right, left) || class_lookup(right, reflected) == class_lookup(left, reflected) ||
                 (kind == OPERATE_INPLACE && ((x->type == SPY_SET && (token == '|' || token == '&' || token == '-' || token == '^')) ||
                                              (x->type == SPY_DICT && token == '|'))) ||
@@ -29491,7 +29497,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             self = y; other = x; phase = OPERATOR_REFLECTED;
             goto found;
         }
-        SPYValue *cls = value_class(c, x), *right = value_class(c, y);
+        SPYValue *cls = value_class(c, x), *right = value_class(c, y), *base;
         /* y's reflected method comes first when y's class is a subclass
          * of x's that overrides it; a comparison's whenever it is one. */
         int first = reflected && right != cls && subclass(right, cls) && (!o || class_lookup(right, reflected) != class_lookup(cls, reflected));
@@ -29507,6 +29513,10 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             } else if (o || !rich_default(c, y, rich_reflected[rich]) || !(function = rich_entry(c, x, rich, &negated))) return NULL;
             /* object's reflected method declines: x's own is the last. */
             else phase = OPERATOR_LAST;
+        } else if (kind == OPERATE_BINARY && (base = builtin_base(c, x, o->direct, o->reflected)) && repeats(base) &&
+                   (o->token != '%' || base->type == SPY_LIST || base->type == SPY_TUPLE) && (function = item_function(c, y, reflected))) {
+            /* A builtin sequence's operator is no number method: y's reflected one comes first. */
+            self = y; other = x; phase = OPERATOR_REFLECTED;
         } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_entry(c, x, rich, &negated);
     }
 found:
@@ -29888,6 +29898,19 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             if (function) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
             if (m->len && m->stack[m->len - 1] == c->augmenting) spy_release(machine_pop(m));
             result = function || c->error_type[0] ? NULL : binary(c, o->token, x, y);
+        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_BINARY && op == '*' && repeats(x) && y->type == SPY_INSTANCE &&
+                   index_function(c, y)) {
+            /* The repetition then takes y's Python __index__ (operator_call). */
+            int pushed = !operator_push(c, m, x, y, OPERATOR_INDEX);
+            SPYValue *function = index_function(c, y), *env = pushed ? function_env(c, function, 1, &y, NULL, 0) : NULL;
+            Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
+            if (call) {
+                spy_release(x); spy_release(y);
+                call->m.outermost = CALL_OPERATOR;
+                return &call->m;
+            }
+            for (int i = 0; pushed && i < 3; i++) spy_release(machine_pop(m));
+            result = NULL;
         } else {
             int negated = 0;
             SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result, &negated);

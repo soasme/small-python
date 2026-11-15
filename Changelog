@@ -250,6 +250,8 @@ Unreleased (0.10.0):
   C stack
 - an async with's plain Python __aenter__ and __aexit__ run without nesting on the C stack
 - an asynchronous comprehension's or generator expression's Python __aiter__ runs without nesting on the C stack
+- an operand's Python reflected method for a builtin sequence, and the repetition's __index__ after it declines,
+  run without nesting on the C stack
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

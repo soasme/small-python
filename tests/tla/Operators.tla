@@ -7,20 +7,24 @@
 (*                                                                         *)
 (*     x + y    x += y    x == y    x != y    x < y                        *)
 (*                                                                         *)
-(* R is L itself, a subclass of L, or an unrelated class. Each class may   *)
-(* define each special method the operator consults, as one returning a   *)
-(* value or one returning NotImplemented; a method R does not define it    *)
-(* inherits from L when R is L's subclass. A method returning a value      *)
-(* returns "<class>.<name>:<self>", like "L.add:x". The outcome is the     *)
-(* result, as a string, or the exception. L and R are classes of x and y,  *)
-(* or metaclasses of the classes x and y (holder "class"), whose type     *)
-(* defines none of the methods; the outcome is the same for both. For x +  *)
-(* y, L and R may also subclass int or str (holders "int" and "str"), y    *)
-(* may be an exact int or str (relation "exact"), and a method a class     *)
-(* does not define is the builtin's, int's __add__ and __radd__ giving 3   *)
-(* for 1 and 2. str's __add__, "ab" for "a" and "b", answers x's turn     *)
-(* only when L defines __radd__; otherwise its concatenation, a sequence's,*)
-(* comes after both operands' methods, unless L defines __add__.           *)
+(* R is L itself, a subclass of L, or an unrelated class. Each class       *)
+(* may define each special method the operator consults, as one            *)
+(* returning a value or one returning NotImplemented; a method R does      *)
+(* not define it inherits from L when R is L's subclass. A method          *)
+(* returning a value returns "<class>.<name>:<self>", like "L.add:x".      *)
+(* The outcome is the result, as a string, or the exception. L and R       *)
+(* are classes of x and y, or metaclasses of the classes x and y           *)
+(* (holder "class"), whose type defines none of the methods; the           *)
+(* outcome is the same for both. For x + y, L and R may also subclass      *)
+(* int or str (holders "int" and "str"), y may be an exact int or str      *)
+(* (relation "exact"), and a method a class does not define is the         *)
+(* builtin's, int's __add__ and __radd__ giving 3 for 1 and 2. str's       *)
+(* __add__, "ab" for "a" and "b", answers x's turn only when L defines     *)
+(* __radd__; otherwise its concatenation, a sequence's, comes after        *)
+(* both operands' methods, unless L defines __add__. x may instead be      *)
+(* the exact str "a" with y of an unrelated plain class R (relation        *)
+(* "left"): a sequence has no method of +, so only y's __radd__            *)
+(* answers before its concatenation raises TypeError.                      *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -43,10 +47,12 @@ Programs == (UNION {
     {[op |-> op, rel |-> rel, holder |-> h, L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
         l \in [UsesL(op) -> Kinds], r \in [IF rel = "same" THEN {} ELSE UsesR(op) -> Kinds], h \in Holders}
     : op \in Ops, rel \in Rels})
-    \cup UNION {
+    \cup (UNION {
     {[op |-> "+", rel |-> rel, holder |-> h, L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
         l \in [UsesL("+") -> Kinds], r \in [IF rel \in {"same", "exact"} THEN {} ELSE UsesR("+") -> Kinds], h \in Builtins}
-    : rel \in Rels \cup {"exact"}}
+    : rel \in Rels \cup {"exact"}})
+    \cup {[op |-> "+", rel |-> "left", holder |-> "str", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
+           l \in [{} -> Kinds], r \in [UsesR("+") -> Kinds]}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -92,7 +98,7 @@ Add(p) ==
     LET first == p.rel = "sub" /\ p.R.radd # "none"
         calls == IF first THEN <<Call(p, "y", "radd"), Call(p, "x", "add")>>
                  ELSE <<Call(p, "x", "add")>> \o (IF p.rel = "same" THEN <<>> ELSE <<Call(p, "y", "radd")>>)
-    IN  First(calls, IF p.holder = "str" /\ p.L.add = "none" THEN "ab" ELSE "TypeError")
+    IN  First(calls, IF p.holder = "str" /\ p.L.add = "none" /\ p.rel # "left" THEN "ab" ELSE "TypeError")
 
 \* A comparison tries the reflected method of y first when R is a proper
 \* subclass of L, otherwise after x's; then falls back to identity.

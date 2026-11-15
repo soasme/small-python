@@ -1786,6 +1786,21 @@ static const char *const programs[] = {
     "    except StopIteration as e: return out + e.value\n"
     "print(ac())\n",
 
+    "class SRR:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __index__(self): return self.n\n"
+    "    def __radd__(self, o):\n"
+    "        if self.n < 0: raise LookupError(self.n)\n"
+    "        return [o, self.n]\n"
+    "    def __rmul__(self, o): return NotImplemented\n"
+    "class SRS(str): pass\n"
+    "def sr():\n"
+    "    out = [(1,) + SRR(2), SRS('a') + SRR(3), [0] * SRR(2), 'x' * SRR(3)]\n"
+    "    try: [] + SRR(-1)\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(sr())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

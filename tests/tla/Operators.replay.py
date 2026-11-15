@@ -19,6 +19,14 @@ def outcome(p):
     meta = p["holder"] == "class"
     base = p["holder"] if p["holder"] in ("int", "str") else None
     source = ("class L(type):\n" if meta else f"class L({base}):\n" if base else "class L:\n") + body("L", p["L"]) + "\n"
+    if p["rel"] == "left":
+        source = "class R:\n" + body("R", p["R"]) + "\nx = 'a'\ny = R(); y.name = 'y'\nresult = x + y\n"
+        namespace = {}
+        try:
+            exec(source, namespace)
+        except TypeError:
+            return "TypeError"
+        return str(namespace["result"])
     if p["rel"] in ("same", "exact"):
         source += "R = L\n"
     else:
