@@ -116,6 +116,10 @@ SOURCES = {
                             "        log.append((s.n, o))\n        return o == s.n\n"
                             "def counter(xs):\n    it = iter(xs)\n    return lambda: next(it)\n"
                             "result = (list(iter(counter([1, 2, 3, 4]), S(3))), [x for x in iter(counter([0, 1]), S(1))], log)",
+    "zip_sentinel_eq": "log = []\nclass S:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n"
+                       "        log.append((s.n, o))\n        return o == s.n\n"
+                       "def counter(xs):\n    it = iter(xs)\n    return lambda: next(it)\n"
+                       "result = (list(zip(iter(counter([1, 2, 3]), S(3)), 'abc')), [x for x in enumerate(iter(counter([4, 5]), S(5)))], log)",
     "callable_calls": "log = []\nn = [0]\ndef f():\n    for _ in (): pass\n    n[0] += 1\n    log.append(n[0])\n    return n[0] % 3\n"
                       "a = [x for x in iter(f, 0)]\nn[0] = 0\nb = sum(iter(f, 0))\nn[0] = 0\nc = list(iter(f, 0))\nn[0] = 0\n"
                       "result = (a, b, c, next(iter(f, 0)), log)",

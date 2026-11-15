@@ -1867,6 +1867,10 @@ int main(int argc, char **argv) {
                "def sentinels():\n    it = iter([1, 2, 3, 4])\n    return sum(iter(lambda: next(it), Stop()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "sentinels()", "sentinels.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So does a zip of a callable iterator. */
+    execute(c, "def zipped():\n    it = iter([1, 2, 3, 4])\n    return sum(a for a, b in zip(iter(lambda: next(it), Stop()), 'abcd'))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

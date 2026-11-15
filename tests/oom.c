@@ -749,6 +749,21 @@ static const char *const programs[] = {
     "    return list(iter(counter([1, 2, 3]), SE(3))), [type(x).__name__ for x in it], next(iter(counter([4]), SE(5)))\n"
     "print(se())\n",
 
+    "class ZE:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __eq__(self, other):\n"
+    "        if other is -1: raise KeyError('z')\n"
+    "        return other == self.n\n"
+    "def ze():\n"
+    "    def counter(xs):\n"
+    "        it = iter(xs)\n"
+    "        return lambda: next(it)\n"
+    "    try: list(zip(iter(counter([0, -1]), ZE(5))))\n"
+    "    except KeyError: pass\n"
+    "    z = map(str, iter(counter([1, 2, 3]), ZE(3)))\n"
+    "    return list(zip(iter(counter([1, 2, 3]), ZE(3)), 'ab')), next(z), list(enumerate(iter(counter([4, 5]), ZE(5))))\n"
+    "print(ze())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

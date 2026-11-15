@@ -30300,18 +30300,20 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         if (c->error_type[0]) return -1;
     }
 }
-/* What the call of a map's next item that adapted_call made returned in
- * result, which it takes: the item of v, under c->adapting on m's stack,
- * made of it (adapted_item), a callable iterator's once it is no
- * sentinel (sentinel_returned); or NULL, with *again set when v goes on
- * to take more, else its pending items dropped. */
-static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue *result, int *again) {
-    spy_release(machine_pop(m));
-    SPYValue *v = machine_pop(m), *source = v->as.iterator.source, *inner = source;
+/* What the call of kind of a map's next item that adapted_call made
+ * returned in result, which it takes: the item of v, under c->adapting on
+ * m's stack, made of it (adapted_item), a callable iterator's once it is
+ * no sentinel (sentinel_returned) unless tested; or NULL, with *again set
+ * when v goes on to take more, else its pending items dropped; or NULL
+ * with the sentinel's Python __eq__ in c->k_fn, v left on m's stack. */
+static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue *result, int *again, int tested, int kind) {
+    SPYValue *v = m->stack[m->len - 2], *source = v->as.iterator.source, *inner = source;
     /* The iterable called is the first a zip or map has no item of. */
     if (v->as.iterator.kind != I_ENUMERATE)
         inner = source->as.seq.items[(v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0)];
-    if (inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE) result = sentinel_returned(c, NULL, inner, result, 0);
+    if (!tested && inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE &&
+        !(result = sentinel_returned(c, m, inner, result, kind)) && c->k_fn) return NULL;
+    spy_release(machine_pop(m)); machine_pop(m);
     SPYValue *item = result ? adapted_item(c, v, result) : NULL;
     if (!item && !c->error_type[0]) *again = 1;
     else if (!item && v->as.iterator.kind != I_ENUMERATE) { spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL; }
@@ -30497,14 +30499,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_ITEM, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
-                        if (sentineling(c, m)) {
+                        int tested = sentineling(c, m);
+                        if (tested) {
                             if (!(result = sentinel_compared(c, m, result, CALL_ITEM)) && c->k_fn) goto enter_k;
                         } else if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_ITEM)) && c->k_fn)
                             goto enter_k;
-                        else if (m->len && m->stack[m->len - 1] == c->adapting) {
+                        if (m->len && m->stack[m->len - 1] == c->adapting) {
                             int again = 0;
-                            result = adapted_returned(c, m, result, &again);
+                            result = adapted_returned(c, m, result, &again, tested, CALL_ITEM);
                             if (again) goto consume_generator;
+                            if (!result && c->k_fn) goto enter_k;
                         }
                         if (filtering(source)) {
                             int again = 0;
@@ -30537,11 +30541,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_NEXT, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
-                        if (sentineling(c, m)) {
+                        int tested = sentineling(c, m);
+                        if (tested) {
                             if (!(result = sentinel_compared(c, m, result, CALL_NEXT)) && c->k_fn) goto enter_k;
                         } else if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_NEXT)) && c->k_fn)
                             goto enter_k;
-                        else if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_returned(c, m, result, &again);
+                        if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_returned(c, m, result, &again, tested, CALL_NEXT);
                         if (filtering(iterator)) result = filter_returned(c, m, iterator, result, &again, CALL_NEXT);
                         if (again) pc--;
                         else if (!result && c->k_fn) ;
