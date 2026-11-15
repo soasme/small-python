@@ -27991,13 +27991,16 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     return m;
 }
 /* The Python __index__ of key as the index of method name of list or
- * bytearray object, object's own or its base's (builtin_base), or of a
- * store into a one-dimensional writable memoryview, which checks those
- * first; else NULL. */
+ * bytearray object, object's own or its base's (builtin_base), also of
+ * the part of a list's slice key it calls first (slice_part), or of a store
+ * into a one-dimensional writable memoryview, which checks those first;
+ * else NULL. */
+static SPYValue *slice_part(SPYContext *, SPYValue *);
 static SPYValue *list_index(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
     SPYValue *base = object->type == SPY_INSTANCE ? builtin_base(c, object, name, NULL) : object;
     if (base && base->type == SPY_MEMORYVIEW)
         return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ? index_function(c, key) : NULL;
+    if (key->type == SPY_SLICE) return base && base->type == SPY_LIST ? index_function(c, slice_part(c, key)) : NULL;
     return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_function(c, key) : NULL;
 }
 static int memory_index(SPYContext *, SPYValue *, SPYValue *, int, ptrdiff_t *);
@@ -28080,7 +28083,7 @@ static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, 
     for (size_t i = 0; i < count; i++) if (machine_push(c, m, spy_retain(operands[i]))) return NULL;
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_INDEX;
-    SPYValue *argument = key->type == SPY_TUPLE ? key->as.seq.items[d] : key;
+    SPYValue *argument = key->type == SPY_TUPLE ? key->as.seq.items[d] : key->type == SPY_SLICE ? slice_part(c, key) : key;
     if ((*env = function_env(c, function, 1, &argument, NULL, 0))) return spy_retain(function);
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
@@ -28088,12 +28091,26 @@ static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, 
 /* The __index__ index_call entered for store ins returned result: the
  * store or deletion runs on the operands it kept under the key, at the
  * index, which must fit a Py_ssize_t as the key's; a view's tuple key
- * takes the int for its first instance, the next one's call then left
- * in c->k_fn (CALL_INDEX). */
+ * takes the int for its first instance, and a slice for its part
+ * (slice_part), the next one's call then left in c->k_fn (CALL_INDEX). */
 static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
     int deletion = ins->op == BC_SET_TARGET && ins->arg;
     SPYValue *key = machine_pop(m), *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m), *index;
-    if (key->type == SPY_TUPLE) {
+    if (key->type == SPY_SLICE) {
+        SPYValue *part = slice_part(c, key), *converted = index_result(c, part, result);
+        index = converted ? slice_new(c, part == key->as.slice.start ? converted : key->as.slice.start,
+                                      part == key->as.slice.stop ? converted : key->as.slice.stop,
+                                      part == key->as.slice.step ? converted : key->as.slice.step) : NULL;
+        spy_release(converted);
+        SPYValue *operands[] = {object, item, value}, *env = NULL;
+        SPYValue *function = index && slice_part(c, index) ? index_call(c, m, index, deletion ? 2 : 3, operands, &env) : NULL;
+        if (function) {
+            c->k_fn = function; c->k_env = env; c->k = NULL; c->k_kind = CALL_INDEX;
+            release_all(5, (SPYValue *[]){index, object, item, value, key});
+            return;
+        }
+        if (c->error_type[0]) { spy_release(index); index = NULL; }
+    } else if (key->type == SPY_TUPLE) {
         size_t d = 0;
         memory_key_next(c, object, key, &d);
         index = memory_key_converted(c, object, key, d, result);

@@ -39,6 +39,9 @@ Op == {[op |-> o, i |-> i, by |-> b] : o \in {"set", "del", "insert"}, i \in -4.
       \cup {[op |-> "delslice", start |-> a, stop |-> b, step |-> c] : a \in Bounds, b \in Bounds, c \in {None, 1, 2, -1}}
       \cup {[op |-> "genslice", start |-> a, stop |-> b, step |-> c, t |-> t] :
               a \in {None, 0, 2}, b \in {None, 2, 4}, c \in {None, 2}, t \in Values}
+      \cup {[op |-> "idxslice", start |-> a, stop |-> b, step |-> c, t |-> t] :
+              a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}, t \in Values}
+      \cup {[op |-> "idxdel", start |-> a, stop |-> b, step |-> c] : a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}}
       \cup {[op |-> o, t |-> t] : o \in {"iadd", "extend"}, t \in Values}
       \cup {[op |-> "imul", n |-> n] : n \in -1..2}
       \cup {[op |-> "remove", x |-> x] : x \in {1, 3}}
@@ -90,6 +93,8 @@ Run(p) ==
                     ELSE Done([k \in DOMAIN s |-> IF \E j \in DOMAIN ks : ks[j] = k - 1
                                                    THEN p.t[CHOOSE j \in DOMAIN ks : ks[j] = k - 1] ELSE s[k]])
           [] p.op = "genslice" -> Run([p EXCEPT !.op = "setslice"])
+          [] p.op = "idxslice" -> Run([p EXCEPT !.op = "setslice"])
+          [] p.op = "idxdel" -> Run([p EXCEPT !.op = "delslice"])
           [] p.op = "delslice" /\ Step(p) = 1 -> Done(Splice(s, Start(n, p), Stop(n, p), <<>>))
           [] p.op = "delslice" -> Done(Without(s, Walk(Start(n, p), Stop(n, p), Step(p))))
           [] p.op \in {"iadd", "extend"} -> Done(s \o p.t)
@@ -124,6 +129,10 @@ AppendIsSlice == Finished /\ program.op = "append" =>
 
 \* A generator's items replace a slice as the same items in a sequence do.
 GeneratorIsSequence == Finished /\ program.op = "genslice" => outcome = Run([program EXCEPT !.op = "setslice"])
+
+\* A slice's parts' __index__ give the ints they return.
+IndexSliceIsInt == Finished /\ program.op \in {"idxslice", "idxdel"} =>
+    outcome = Run([program EXCEPT !.op = IF program.op = "idxslice" THEN "setslice" ELSE "delslice"])
 
 \* An index's __index__ gives the int it returns.
 IndexIsInt == Finished /\ program.op \in {"set", "del", "insert", "pop"} => outcome = Run([program EXCEPT !.by = "int"])

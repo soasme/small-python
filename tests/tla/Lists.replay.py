@@ -15,6 +15,10 @@ class Index:
         return self.i
 
 
+def parts(p, name):
+    return None if p[name] == 99 else Index(p[name])
+
+
 def index(p):
     return Index(p["i"]) if p["by"] == "index" else p["i"]
 
@@ -38,6 +42,10 @@ def outcome(p):
             s[arg(p["start"]):arg(p["stop"]):arg(p["step"])] = t
         elif op == "genslice":
             s[arg(p["start"]):arg(p["stop"]):arg(p["step"])] = (x for x in t)
+        elif op == "idxslice":
+            s[parts(p, "start"):parts(p, "stop"):parts(p, "step")] = t
+        elif op == "idxdel":
+            del s[parts(p, "start"):parts(p, "stop"):parts(p, "step")]
         elif op == "delslice":
             del s[arg(p["start"]):arg(p["stop"]):arg(p["step"])]
         elif op == "iadd":

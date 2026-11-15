@@ -412,7 +412,8 @@ These run as machines on the heap, in one native activation of
   or on the items of a tuple element and a present tuple, in order;
   the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or
-  `range`, or of a slice's parts slicing one, in turn, or indexing a store to or a deletion from a `list`, or repeating a `list`, `tuple`, `str`, `bytes` or `bytearray`, or converted by `hex`, `oct`, `bin`, `chr`, `bytes`, `bytearray`, `range` or a `list`'s `pop` and `insert`; a metaclass's `__instancecheck__` and `__subclasscheck__` in
+  `range`, or of a slice's parts slicing one, in turn, or indexing a store to or a deletion from a `list`, also of a slice's
+  parts, or repeating a `list`, `tuple`, `str`, `bytes` or `bytearray`, or converted by `hex`, `oct`, `bin`, `chr`, `bytes`, `bytearray`, `range` or a `list`'s `pop` and `insert`; a metaclass's `__instancecheck__` and `__subclasscheck__` in
   `isinstance` and `issubclass`, also of the classes of a tuple, of a nested one first, in turn, and
   the `__bool__` or `__len__` of their results; the metaclass `__getitem__` or
   `__class_getitem__` that subscripting a class calls;

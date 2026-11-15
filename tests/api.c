@@ -1871,6 +1871,11 @@ int main(int argc, char **argv) {
     execute(c, "def zipped():\n    it = iter([1, 2, 3, 4])\n    return sum(a for a, b in zip(iter(lambda: next(it), Stop()), 'abcd'))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So do a list's slice store and deletion by a Python __index__. */
+    execute(c, "class Part:\n    def __index__(self):\n        for i in range(3000): pass\n        return 1\n"
+               "def spliced():\n    a = [0, 1, 2, 3]\n    a[Part():3] = [7]\n    del a[:Part()]\n    return len(a) + a[0]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "spliced()", "spliced.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

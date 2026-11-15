@@ -764,6 +764,21 @@ static const char *const programs[] = {
     "    return list(zip(iter(counter([1, 2, 3]), ZE(3)), 'ab')), next(z), list(enumerate(iter(counter([4, 5]), ZE(5))))\n"
     "print(ze())\n",
 
+    "class SX:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __index__(self):\n"
+    "        if self.n < 0: raise KeyError('x')\n"
+    "        return self.n\n"
+    "def sx():\n"
+    "    a = list(range(6))\n"
+    "    a[SX(1):SX(3)] = 'ab'\n"
+    "    del a[SX(4):]\n"
+    "    a[::SX(2)] = [8, 9]\n"
+    "    try: del a[SX(-1):]\n"
+    "    except KeyError: pass\n"
+    "    return a\n"
+    "print(sx())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"
