@@ -435,6 +435,18 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class FK:\n"
+    "    def __hash__(self): return 1\n"
+    "    def __repr__(self):\n"
+    "        for _ in (): pass\n"
+    "        return 'c\\xe9' + '{}'.format(fl)\n"
+    "fl = []\n"
+    "def fc():\n"
+    "    for _ in (): pass\n"
+    "    fl.append(FK())\n"
+    "    return '{0}|{1!r:>9}|{0!a}|{k}'.format([FK()], (FK(), 1), k={FK()}), '{x}'.format_map({'x': fl})\n"
+    "print(fc())\n",
+
     "class FN:\n"
     "    def __repr__(self):\n"
     "        for _ in (): pass\n"

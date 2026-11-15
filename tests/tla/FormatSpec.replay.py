@@ -97,7 +97,9 @@ SOURCES = {
     "str_format_conversion_str_raises": "result = '{!s}'.format(U())",
     "str_format_conversion_bad_repr": "result = '{k!r}'.format_map({'k': BadRepr()})",
     "str_format_conversion_nested": "result = '{0!r:{1}}|{0!s:{w}}|{2!a:{1}}|{3!r:{1}}'.format(P(), '>5', U(), Spin(), w='*^3')",
-    "str_format_conversion_nested_raises": "result = '{!s:{}}'.format(U(), 3)"
+    "str_format_conversion_nested_raises": "result = '{!s:{}}'.format(U(), 3)",
+    "str_format_containers": "result = '{}|{!r:>8}|{!a}|{k}'.format([Spin()], (Spin(),), {1: U()}, k={Spin()})",
+    "str_format_container_raises": "result = '{}'.format([Spin(), BadRepr()])"
 }
 
 

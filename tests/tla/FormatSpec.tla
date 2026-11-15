@@ -138,7 +138,8 @@ Cases == {"str_align", "str_precision", "str_equal_align", "str_sign", "str_type
           "str_format_example_comma", "str_format_example_nesting", "str_format_example_items",
           "str_format_extra_args", "format_map_missing", "fstring_format_spec", "format_builtin_default",
           "str_format_conversion_spec", "str_format_conversion_str_raises", "str_format_conversion_bad_repr",
-          "str_format_conversion_nested", "str_format_conversion_nested_raises"}
+          "str_format_conversion_nested", "str_format_conversion_nested_raises", "str_format_containers",
+          "str_format_container_raises"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 1234567}, align : {"", "<", ">", "^", "=", "*^"}, sign : Signs,
              alt : {"", "#"}, zero : {"", "0"}, width : {0, 9}, group : Groups, type : {"", "d", "b", "x", "X", "o"}]
             \cup [kind : {"float"}, num : {0, 20, -1, 9875, 4}, align : {"", "<", "^", "="}, sign : Signs,
@@ -231,6 +232,9 @@ Case(c) ==
       \* A conversion comes before its nested spec's fields.
       [] c = "str_format_conversion_nested" -> "'  P()|*p*|\\\\xe9u|   sp'"
       [] c = "str_format_conversion_nested_raises" -> "LookupError: u"
+      \* A container's field is its repr, of its items' __repr__.
+      [] c = "str_format_containers" -> "'[sp]|   (sp,)|{1: \\\\xe9u}|{sp}'"
+      [] c = "str_format_container_raises" -> "TypeError: BadRepr.__repr__() must return a str, not int"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

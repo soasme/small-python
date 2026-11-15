@@ -12979,10 +12979,12 @@ static SPYValue *join_strings(SPYContext *c, size_t len, SPYValue *const *items)
  * scanners walk UTF-8 bytes; field indexes accept Unicode decimal digits. */
 typedef struct { int state; int64_t number; } AutoNumber; /* state: 0 init, 1 automatic, 2 manual */
 static SPYValue *conversion_method(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
 /* A format on the machine (suspend) stops at a field whose object's class
  * has a Python __format__, the object and spec pending, the markup to
  * resume at resume; at a field converting an instance by its Python
- * __str__ or __repr__ the same, with the conversion, or with a top-level
+ * __str__ or __repr__, or a container of a repr job (repr_items), also
+ * by an empty spec, the same, with the conversion, or with a top-level
  * field's nested spec none pending, the spec from resume to spec_end; and
  * at a top-level field with a nested spec, its object pending, the spec
  * from resume to spec_end. */
@@ -13104,10 +13106,13 @@ static int format_replacement(SPYContext *c, Buffer *out, const char *text, size
     } else if (ch != '}') { spy_error(c, "ValueError", "expected '}' before end of string"); return -1; }
     *pos = at;
     SPYValue *object = format_field_object(c, text, name, name_end, args), *format = NULL, *found[2];
-    if (object && args->suspend && (!expanding || depth == 2) && object->type == SPY_INSTANCE && (conversion == 's' || conversion == 'r' || conversion == 'a') &&
-        conversion_method(c, conversion == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &object, found)) {
-        spy_release(found[0]);
-        args->pending = object; args->conversion = conversion; args->resume = at;
+    /* A container formats by an empty spec as by !s. */
+    unsigned converting = conversion ? conversion : object && repr_container(object) && !expanding && spec == spec_end ? 's' : 0;
+    if (object && args->suspend && (!expanding || depth == 2) && (converting == 's' || converting == 'r' || converting == 'a') &&
+        (object->type == SPY_INSTANCE ? conversion_method(c, converting == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &object, found) &&
+                                        (spy_release(found[0]), 1) :
+         !expanding && repr_container(object) && repr_items(c, converting == 's' ? c->types[SPY_STRING] : c->field_calls[0], object))) {
+        args->pending = object; args->conversion = converting; args->resume = at;
         /* A nested spec follows the conversion, from resume to spec_end. */
         if (expanding) { args->resume = spec; args->spec_end = spec_end; args->pending_spec = NULL; return 3; }
         if ((args->pending_spec = spy_string(c, text + spec, spec_end - spec))) return 3;
@@ -24976,9 +24981,10 @@ static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, 
 /* Whether a field may reach an instance with a Python __format__
  * (format_job) through one of the argc values argv, of str.format, or
  * the values of the dict argv[0], of str.format_map (kind 2): an
- * instance or a container. */
+ * instance or a container (repr_container). */
 static NO_INLINE int format_instances(int kind, size_t argc, SPYValue *const *argv) {
-    const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT;
+    const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
+                              UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET;
     if (kind == 2) {
         for (size_t i = 0; i < map_used(argv[0]); i++)
             if (map_items(argv[0])[i].key && UINT64_C(1) << map_items(argv[0])[i].value->type & reaching) return 1;
@@ -36808,14 +36814,14 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         if (status == 3) {
             /* The conversion's text takes the spec, or for None the nested
              * spec to its end, on its return (text_returned). */
-            SPYValue *found[2], *pending[] = {spec ? spec : c->none, int_value(c, format.conversion), int_value(c, (int64_t)format.spec_end)};
-            method = conversion_method(c, format.conversion == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &object, found);
+            SPYValue *found[2] = {NULL, NULL}, *pending[] = {spec ? spec : c->none, int_value(c, format.conversion), int_value(c, (int64_t)format.spec_end)};
+            if (object->type == SPY_INSTANCE) method = conversion_method(c, format.conversion == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &object, found);
             name = found[0];
             spy_release(items[10]);
             items[10] = pending[1] && pending[2] ? spy_tuple(c, 3, pending) : NULL;
             spy_release(pending[1]); spy_release(pending[2]);
-            /* The conversion's method may fail to name itself (conversion_method). */
-            if (!method || !items[10]) {
+            /* An instance's method may fail to name itself (conversion_method). */
+            if ((object->type == SPY_INSTANCE && !method) || !items[10]) {
                 if (!items[10]) items[10] = spy_none(c);
                 spy_release(object); spy_release(spec); spy_release(name);
                 return NULL;
@@ -36825,6 +36831,33 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         }
         SPYValue *parts[] = {int_value(c, format.numbering.state), int_value(c, format.numbering.number), int_value(c, (int64_t)pos)};
         for (int i = 0; i < 3; i++) { spy_release(items[2 + i]); items[2 + i] = parts[i]; }
+        if (status == 3 && object->type != SPY_INSTANCE) {
+            /* A container's repr job, under the state and c->replacing,
+             * returns its text to the job (repr_call, text_returned). */
+            SPYValue *callee = format.conversion == 's' ? c->types[SPY_STRING] : c->field_calls[0];
+            SPYValue *text = !parts[0] || !parts[1] || !parts[2] || machine_push(c, m, spy_retain(state)) ||
+                             machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_retain(callee)) ||
+                             machine_push(c, m, spy_retain(object)) ? NULL : repr_call(c, m, env);
+            if (text && *env) {
+                spy_release(object);
+                *function = c->entering_init; c->entering_kind = CALL_CHECKED;
+                return text;
+            }
+            spy_release(text);
+            if (c->error_type[0]) { spy_release(object); return NULL; }
+            /* A container whose repr is being built converts in C, "[...]". */
+            spy_release(machine_pop(m)); spy_release(machine_pop(m));
+            SPYValue *pending = items[10], *converted = convert_field(c, object, (int)format.conversion);
+            items[10] = spy_none(c);
+            SPYValue *formatted = converted ? format_call(c, converted, pending->as.seq.items[0]) : NULL;
+            Buffer joined = {.ctx = c};
+            SPYValue *done = format_finish(c, &joined, !formatted || append(&joined, items[5]->as.string.data, items[5]->as.string.len) ||
+                                                       append(&joined, formatted->as.string.data, formatted->as.string.len));
+            release_all(4, (SPYValue *[]){object, pending, converted, formatted});
+            if (!done) return NULL;
+            spy_release(items[5]); items[5] = done;
+            continue;
+        }
         if (!parts[0] || !parts[1] || !parts[2] || machine_push(c, m, spy_retain(state)) ||
             machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, name ? name : spy_string(c, "__format__", 10)) ||
             machine_push(c, m, spy_retain(object)) ||

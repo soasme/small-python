@@ -137,6 +137,8 @@ Unreleased (0.10.0):
 - bytes % calls an instance's Python __int__, __index__, __float__, __repr__ and __bytes__ without nesting on
   the C stack; its %s of a bytes subclass takes its bytes, and a str's %c takes __index__'s TypeError as its own
 - str.format's conversion before a nested spec calls a Python __repr__ or __str__ without nesting on the C stack
+- str.format of a list, tuple, dict, set or frozenset field calls its items' Python __repr__ without nesting on
+  the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a
