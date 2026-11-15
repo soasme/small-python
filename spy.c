@@ -20120,8 +20120,14 @@ static void chain_exception(SPYContext *c, SPYValue *exception) {
 /* Exception class cls called with the arguments, which must make an instance
  * of BaseException; raise names another result's class by its repr, throw()
  * by its name. */
+static SPYValue *exception_made(SPYContext *, SPYValue *, SPYValue *, int);
 static SPYValue *instantiate_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv, int by_repr) {
-    SPYValue *exception = call(c, cls, argc, argv);
+    return exception_made(c, cls, call(c, cls, argc, argv), by_repr);
+}
+/* What calling exception class cls made, exception, which it takes: an
+ * instance of BaseException, else NULL with instantiate_exception's
+ * TypeError. */
+static SPYValue *exception_made(SPYContext *c, SPYValue *cls, SPYValue *exception, int by_repr) {
     if (!exception || (exception->type == SPY_INSTANCE && subclass(exception->as.map.parent, c->exceptions[X_BASE_EXCEPTION])))
         return exception;
     Buffer message = {.ctx = c};
@@ -20181,25 +20187,60 @@ static SPYValue *raised_instance(SPYContext *c, SPYValue *cls, size_t argc, SPYV
     return *init && machine_function(c, *init) ? init_instance(c, cls, plain, argc, argv, NULL) : NULL;
 }
 static SPYValue *raise_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *raise_newed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The raise of exception class cls: its Python __new__, *init, called
+ * with cls, which it returns; else raised_instance's. */
+static SPYValue *raise_made(SPYContext *c, SPYValue *cls, SPYValue **init) {
+    if (cls->type == SPY_CLASS && subclass(cls, c->exceptions[X_BASE_EXCEPTION]) && (*init = new_method(c, cls))) return spy_retain(cls);
+    return raised_instance(c, cls, 0, NULL, init);
+}
 /* raise of value, an exception class or instance, from cause, or NULL
  * without from, on m: the call of the exception's class, and then of
- * the cause's, that runs a Python __init__ is m's (callk), the raise
- * going on with the instance when it returns (raise_inited); else the
- * raise (raise_with_cause). */
+ * the cause's, that runs a Python __new__ (raise_newed) or __init__ is
+ * m's (callk), the raise going on with the instance when it returns
+ * (raise_inited); else the raise (raise_with_cause). */
 static void raise_step(SPYContext *c, Machine *m, SPYValue *value, SPYValue *cause) {
-    SPYValue *init = NULL, *made = raised_instance(c, value, 0, NULL, &init), *exception = NULL;
+    SPYValue *init = NULL, *made = raise_made(c, value, &init), *exception = NULL;
     /* The exception is made before the cause. */
-    if (!made && !c->error_type[0] && cause && (exception = normalize_exception(c, value, 0))) made = raised_instance(c, cause, 0, NULL, &init);
+    if (!made && !c->error_type[0] && cause && (exception = normalize_exception(c, value, 0))) made = raise_made(c, cause, &init);
     if (!made) {
         if (!c->error_type[0]) raise_with_cause(c, exception ? exception : value, cause);
         spy_release(exception);
         return;
     }
-    SPYValue *parts[] = {exception ? exception : spy_retain(made), spy_retain(exception ? made : cause ? cause : c->unbound)};
-    SPYValue *state = spy_tuple(c, 2, parts);
-    release_all(2, parts);
-    if (state) callk(c, m, init, 1, (SPYValue *[]){made}, raise_inited, state);
+    /* A __new__ knows the class's place, the exception's or the cause's. */
+    SPYValue *parts[] = {exception ? exception : spy_retain(made), spy_retain(exception ? made : cause ? cause : c->unbound),
+                         int_value(c, !!exception)};
+    SPYValue *state = spy_tuple(c, 2 + (made->type == SPY_CLASS), parts);
+    release_all(3, parts);
+    if (state) callk(c, m, init, 1, (SPYValue *[]){made}, made->type == SPY_CLASS ? raise_newed : raise_inited, state);
     else spy_release(made);
+}
+/* The __new__ a raise called (raise_step) returned result: an instance of
+ * the class in state's place runs its __init__, a Python one on m
+ * (callk), as a class call does (constructed); the raise then goes on
+ * with what the call made (raise_inited). */
+static SPYValue *raise_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items;
+    int cause = (int)items[2]->as.integer_data.small;
+    SPYValue *cls = items[cause];
+    SPYValue *init = result && result->type == SPY_INSTANCE && subclass(result->as.map.parent, cls) ? special_method(c, result, "__init__") : NULL;
+    SPYValue *made = exception_made(c, cls, result, 1), *function = NULL;
+    if (made && init && init->type == SPY_METHOD && machine_function(c, init->as.method.function)) function = init->as.method.function;
+    else if (made && init) {
+        SPYValue *value = call(c, init, 0, NULL);
+        if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+        spy_release(value);
+    }
+    if (!made || c->error_type[0]) { spy_release(made); spy_release(init); spy_release(state); return NULL; }
+    SPYValue *parts[] = {spy_retain(cause ? items[0] : made), spy_retain(cause ? made : items[1])};
+    SPYValue *next = spy_tuple(c, 2, parts);
+    release_all(2, parts); spy_release(state);
+    if (!next) { spy_release(made); spy_release(init); return NULL; }
+    if (function) callk(c, m, function, 1, (SPYValue *[]){made}, raise_inited, next);
+    else { spy_release(made); raise_inited(c, m, next, spy_none(c)); }
+    spy_release(init);
+    return NULL;
 }
 /* The __init__ a raise called (raise_step) returned result: None goes on
  * with the raise of state's exception and cause, c->unbound for none. */

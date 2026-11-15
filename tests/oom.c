@@ -512,6 +512,21 @@ static const char *const programs[] = {
     "    return r\n"
     "print(mv())\n",
 
+    "class RN(Exception):\n"
+    "    def __new__(cls): return super().__new__(cls)\n"
+    "    def __init__(self): super().__init__('rn')\n"
+    "class RI(Exception):\n"
+    "    def __new__(cls): return 1\n"
+    "def rn():\n"
+    "    r = []\n"
+    "    for f in (lambda: RN, lambda: RI):\n"
+    "        try: raise ValueError from f()\n"
+    "        except Exception as e: r.append((e, e.__cause__))\n"
+    "        try: raise f()\n"
+    "        except Exception as e: r.append(e)\n"
+    "    return r\n"
+    "print(rn())\n",
+
     "class DX:\n"
     "    def __dir__(self): return iter(('q', 'p'))\n"
     "    def __index__(self): return True\n"

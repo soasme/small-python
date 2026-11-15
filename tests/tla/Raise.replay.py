@@ -26,9 +26,34 @@ class Returns(ValueError):
         return 1
 
 
+class PyNew(ValueError):
+    def __new__(cls):
+        log.append("n")
+        return super().__new__(cls)
+
+    def __init__(self):
+        log.append("i")
+
+
+class NewInt(ValueError):
+    def __new__(cls):
+        log.append("n")
+        return 5
+
+
+class NewOther(TypeError):
+    def __new__(cls):
+        log.append("m")
+        return KeyError()
+
+    def __init__(self):
+        log.append("never")
+
+
 WHATS = {"class": "ValueError", "instance": "ValueError()", "int": "5", "other": "NotAnException", "python": "PyError",
-         "returns": "Returns"}
-CAUSES = {"class": "TypeError", "instance": "TypeError()", "None": "None", "int": "5", "python": "PyCause"}
+         "returns": "Returns", "new": "PyNew", "new_int": "NewInt"}
+CAUSES = {"class": "TypeError", "instance": "TypeError()", "None": "None", "int": "5", "python": "PyCause",
+          "new_other": "NewOther"}
 
 
 def statement(p):
@@ -55,7 +80,8 @@ def outcome(p):
     for code in ("def f():\n" + "".join("    " + line + "\n" for line in body.split("\n")) + "f()", body):
         del log[:]
         try:
-            exec(code, {"NotAnException": NotAnException, "PyError": PyError, "PyCause": PyCause, "Returns": Returns})
+            exec(code, {"NotAnException": NotAnException, "PyError": PyError, "PyCause": PyCause, "Returns": Returns,
+                         "PyNew": PyNew, "NewInt": NewInt, "NewOther": NewOther})
         except BaseException as error:
             results.append("%s cause=%s context=%s suppress=%s log=%s" % (
                 type(error).__name__, name(error.__cause__), name(error.__context__), error.__suppress_context__, "".join(log)))

@@ -1749,6 +1749,11 @@ int main(int argc, char **argv) {
                "    return m[Viewed()]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "viewed()", "viewed.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
+    /* So does a raise of a class whose Python __new__ makes the exception. */
+    execute(c, "class Fresh(Exception):\n    def __new__(cls):\n        for i in range(3000): pass\n        return super().__new__(cls)\n"
+               "def fresh():\n    try: raise Fresh from Fresh\n    except Fresh as e: return 7 if type(e.__cause__) is Fresh else 0\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "fresh()", "fresh.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does the Python __iter__ a comprehension's first iterable calls. */
     execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
                "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");

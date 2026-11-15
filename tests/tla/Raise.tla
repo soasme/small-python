@@ -18,17 +18,20 @@
 (* handler of `try: raise KeyError / except KeyError:`, where WHAT is      *)
 (* ValueError, ValueError(), 5, a class that is not an exception, a       *)
 (* ValueError subclass whose Python __init__ logs "e", one whose __init__  *)
-(* returns 1, or nothing (a bare raise, which takes no cause), or runs     *)
-(* 1 / 0 instead; and CAUSE is absent, TypeError, TypeError(), None, 5, or *)
-(* a TypeError subclass whose Python __init__ logs "c". The outcome is the *)
-(* type of the exception raised, of its __cause__ and __context__, its     *)
-(* __suppress_context__, and the log: the exception is made before the    *)
-(* cause.                                                                  *)
+(* returns 1, one whose Python __new__ logs "n" before its __init__ logs   *)
+(* "i", one whose __new__ logs "n" and returns 5, or nothing (a bare      *)
+(* raise, which takes no cause), or runs 1 / 0 instead; and CAUSE is      *)
+(* absent, TypeError, TypeError(), None, 5, a TypeError subclass whose     *)
+(* Python __init__ logs "c", or one whose Python __new__ logs "m" and      *)
+(* returns a KeyError, the cause without its class's __init__. The        *)
+(* outcome is the type of the exception raised, of its __cause__ and       *)
+(* __context__, its __suppress_context__, and the log: the exception is    *)
+(* made before the cause.                                                  *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Whats == {"class", "instance", "int", "other", "bare", "divide", "python", "returns"}
-Causes == {"absent", "class", "instance", "None", "int", "python"}
+Whats == {"class", "instance", "int", "other", "bare", "divide", "python", "returns", "new", "new_int"}
+Causes == {"absent", "class", "instance", "None", "int", "python", "new_other"}
 Programs == {p \in [what : Whats, cause : Causes, handling : BOOLEAN] : p.what \in {"bare", "divide"} => p.cause = "absent"}
 
 VARIABLES program, outcome
@@ -40,21 +43,24 @@ Context(p) == IF p.handling THEN "KeyError" ELSE "None"
 
 Show(kind, cause, context, suppress) == kind \o " cause=" \o cause \o " context=" \o context \o " suppress=" \o suppress
 
-\* The Python __init__ calls, the exception's and then a valid cause's.
-Inits(p) == (IF p.what = "python" THEN "e" ELSE "") \o
-            (IF p.cause = "python" /\ p.what \in {"class", "instance", "python"} THEN "c" ELSE "")
+\* The Python __new__ and __init__ calls, the exception's and then a valid cause's.
+Inits(p) == (CASE p.what = "python" -> "e" [] p.what = "new" -> "ni" [] p.what = "new_int" -> "n" [] OTHER -> "") \o
+            (IF p.what \in {"class", "instance", "python", "new"}
+             THEN CASE p.cause = "python" -> "c" [] p.cause = "new_other" -> "m" [] OTHER -> ""
+             ELSE "")
 
-Kind(p) == IF p.what = "python" THEN "PyError" ELSE "ValueError"
+Kind(p) == CASE p.what = "python" -> "PyError" [] p.what = "new" -> "PyNew" [] OTHER -> "ValueError"
 
 Raised(p) ==
     CASE p.what = "bare" /\ p.handling -> Show("KeyError", "None", "None", "False")     \* the same exception again
       [] p.what = "bare" -> Show("RuntimeError", "None", "None", "False")
       [] p.what = "divide" -> Show("ZeroDivisionError", "None", Context(p), "False")
-      [] p.what \in {"int", "other", "returns"} -> Show("TypeError", "None", Context(p), "False")
+      [] p.what \in {"int", "other", "returns", "new_int"} -> Show("TypeError", "None", Context(p), "False")
       [] p.cause = "int" -> Show("TypeError", "None", Context(p), "False")
       [] p.cause = "absent" -> Show(Kind(p), "None", Context(p), "False")
       [] p.cause = "None" -> Show(Kind(p), "None", Context(p), "True")
       [] p.cause = "python" -> Show(Kind(p), "PyCause", Context(p), "True")
+      [] p.cause = "new_other" -> Show(Kind(p), "KeyError", Context(p), "True")      \* the other exception __new__ made
       [] OTHER -> Show(Kind(p), "TypeError", Context(p), "True")
 
 Run(p) == Raised(p) \o " log=" \o Inits(p)
