@@ -13595,11 +13595,22 @@ static SPYValue *string_search_method(SPYContext *c, size_t argc, SPYValue *cons
     SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
     if (!self) return spy_error(c, "TypeError", "string method requires an instance of its type");
     if (self->type != SPY_BYTEARRAY) return string_search(c, self, method, argc - 1, argv + 1);
-    /* The export keeps the view's storage while the arguments convert. */
+    /* The bounds convert first, free to resize the array; the export
+     * then keeps the view's storage while the needle converts. */
+    SPYValue *args[3] = {NULL, NULL, NULL}, *result = NULL;
+    size_t given = argc - 1;
+    for (size_t i = 0; i < given && i < 3; i++) {
+        int64_t bound;
+        args[i] = i && given <= 3 && argv[i + 1]->type != SPY_NONE && !is_int(argv[i + 1]) ?
+                  search_bound(c, argv[i + 1], &bound) ? NULL : spy_int(c, bound) : spy_retain(argv[i + 1]);
+        if (!args[i]) goto done;
+    }
     self->as.string.exports++;
     SPYValue view = {.ctx = self->ctx, .type = SPY_BYTES, .as.string = self->as.string};
-    SPYValue *result = string_search(c, &view, method, argc - 1, argv + 1);
+    result = string_search(c, &view, method, given, given <= 3 ? args : argv + 1);
     self->as.string.exports--;
+done:
+    for (size_t i = 0; i < 3; i++) spy_release(args[i]);
     return result;
 }
 /* CPython's arity errors: METH_NOARGS and METH_O methods name their type,
@@ -26782,17 +26793,33 @@ static SPYValue *text_expandtabs(SPYContext *, size_t, SPYValue *const *, SPYVal
 static SPYValue *bytes_hex(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *bytearray_hex(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *int_to_bytes(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *bytearray_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *string_search_method(SPYContext *, size_t, SPYValue *const *, void *);
+/* Whether callee, a str or bytes of a numbered method or a native search
+ * method, bound or not, searches between bounds. */
+static int searches(SPYValue *callee) {
+    if (callee->type == SPY_METHOD) callee = callee->as.method.function;
+    return callee->type == SPY_STRING || callee->type == SPY_BYTES ||
+           (callee->type == SPY_NATIVE && callee->as.native.call == string_search_method);
+}
 /* Of a native method callee given the object and the rest, argc in all:
  * center's, ljust's and rjust's width (not their fill), zfill's,
  * expandtabs' tab size, split's and rsplit's maxsplit, hex's
- * bytes_per_sep and int.to_bytes' length, the arguments converted before
+ * bytes_per_sep, int.to_bytes' length, a bytearray's pop() and insert()
+ * index, the byte of its insert(), append() and remove() and its search's
+ * bounds, the arguments converted before
  * the method looks at the others; else 0. */
 static unsigned text_indices(SPYValue *callee, size_t argc) {
     SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = callee->as.native.kwcall;
-    int zfill = call == text_pad && ((intptr_t)callee->as.native.data & 0xff) == 3;
-    return call == text_pad ? argc == 2 || (argc == 3 && !zfill) ? 2 : 0 : call == text_expandtabs ? argc == 2 ? 2 : 0 :
-           call == int_to_bytes ? argc == 2 || argc == 3 ? 2 : 0 :
-           (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex) && argc == 3 ? 4 : 0;
+    intptr_t which = (intptr_t)callee->as.native.data;
+    if (call == text_pad) return argc == 2 || (argc == 3 && (which & 0xff) != 3) ? 2 : 0;
+    if (call == text_expandtabs) return argc == 2 ? 2 : 0;
+    if (call == int_to_bytes) return argc == 2 || argc == 3 ? 2 : 0;
+    if (callee->as.native.call == string_search_method)
+        return (which >> 16 == SPY_BYTEARRAY) && (argc == 3 || argc == 4) ? 12u & ((1u << argc) - 1) : 0;
+    if (call == bytearray_method)
+        return which == BA_INSERT ? argc == 3 ? 6 : 0 : (which == BA_POP || which == BA_APPEND || which == BA_REMOVE) && argc == 2 ? 2 : 0;
+    return (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex) && argc == 3 ? 4 : 0;
 }
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
@@ -26826,9 +26853,8 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
             release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
             return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(item)}, index_argued, state) : NULL;
         }
-        /* A str's or bytes' search bound may be None. */
-        if (mask >> i & 1 && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE ||
-            (callee->type != SPY_STRING && callee->type != SPY_BYTES))) break;
+        /* A search bound may be None. */
+        if (mask >> i & 1 && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE || !searches(callee))) break;
     }
     SPYValue *part = i == args->as.seq.len && mask & INDEX_PARTS && integer_sign(builtin_value(c, args->as.seq.items[0], SPY_INT)) >= 0 ?
                      slice_part(c, callee) : NULL;
@@ -37712,7 +37738,8 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
     size_t count = which == BA_INSERT ? 2 : which <= BA_REMOVE ? 1 : 0;
     size_t required = which == BA_POP ? 0 : count;
     SPYValue *self = method_self(c, argc, argv, SPY_BYTEARRAY, bytearray_names[which]), *args[2] = {NULL, NULL};
-    if (!self || parse_arguments(c, bytearray_names[which], argc - 1, argv + 1, keywords, NULL, count, required, count, args)) return NULL;
+    if (!self || positional_only(c, "bytearray", bytearray_names[which], required, count, argc - 1, keywords)) return NULL;
+    memcpy(args, argv + 1, (argc - 1) * sizeof(*args));
     size_t len;
     unsigned char byte;
     switch (which) {

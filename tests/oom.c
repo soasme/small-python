@@ -1047,6 +1047,20 @@ static const char *const programs[] = {
     "    except LookupError as e: out.append(type(e).__name__)\n"
     "    return out\n"
     "print(tk())\n",
+    "ba = bytearray(b'abc')\n"
+    "class BAX:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        ba[:] = b'xbxb'\n"
+    "        if self.v is None: raise LookupError('x')\n"
+    "        return self.v\n"
+    "def bx():\n"
+    "    out = [ba.find(b'b', BAX(2)), bytes(ba), ba.pop(BAX(1)), ba.insert(BAX(0), BAX(65)), bytes(ba)]\n"
+    "    for f in (lambda: ba.append(BAX(None)), lambda: ba.append(), lambda: ba.pop(1, 2)):\n"
+    "        try: f()\n"
+    "        except (LookupError, TypeError) as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(bx())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"

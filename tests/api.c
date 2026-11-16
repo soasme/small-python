@@ -2454,6 +2454,11 @@ int main(int argc, char **argv) {
     execute(c, "def keyed():\n    return len('a b c d e'.split(maxsplit=Width())) + len(b'abcdefgh'.hex(':', Width())) + int('10', base=Width())\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 26 && pauses > 6);
+    /* So does a bytearray's index, byte or search bound. */
+    execute(c, "def arrayed():\n    ba = bytearray(b'abcd')\n    ba.insert(Width(), Width())\n    ba.append(Width())\n    ba.pop(Width())\n"
+               "    return len(ba) * 10 + ba.find(b'd', Width())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "arrayed()", "arrayed.py"), SPY_STOP_STEPS, &pauses)) == 49 && pauses > 6);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

@@ -42,6 +42,12 @@ def pad(method, s, width, kind):
 
 
 SOURCES = {
+    "bytearray_arity": "ba = bytearray(b'ab')\ndef m(f):\n    try: f()\n    except TypeError as e: return str(e)\n"
+                       "result = (m(lambda: ba.append()), m(lambda: ba.pop(1, 2)), m(lambda: ba.insert(0)), m(lambda: ba.clear(1)), m(lambda: ba.remove(x=1)))",
+    "bytearray_index_calls": "ba = bytearray(b'abc')\nclass R:\n    def __index__(self):\n        ba[:] = b'xbxb'\n        return 2\n"
+                             "log = []\nclass L:\n    def __index__(self):\n        for _ in (): pass\n        log.append(1)\n        return 1\n"
+                             "f = ba.count(b'b', R())\ng = bytes(ba)\n"
+                             "result = (f, g, ba.pop(L()), ba.find(b'b', None, L()), ba.insert(L(), 97), bytes(ba), len(log))",
     "hex_group_first": "log = []\nclass G:\n    def __index__(self):\n        log.append(1)\n        return 1\n"
                        "def bad():\n    try: return b'ab'.hex('::', G())\n    except ValueError as e: return type(e).__name__\n"
                        "result = (bad(), b'ab'.hex(':', bytes_per_sep=G()), len(log))",
