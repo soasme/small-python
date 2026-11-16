@@ -255,6 +255,8 @@ Unreleased (0.10.0):
 - an async generator's async for after its own yield statement no longer crashes when the
   loop's generator suspends at an await
 - an awaited asynchronous comprehension resumes at its source's awaits without nesting on the C stack
+- slice.indices() calls its length's and parts' Python __index__, and a subscript after an int subclass's part
+  its later part's, without nesting on the C stack
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

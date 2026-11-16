@@ -26689,23 +26689,29 @@ static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t a
  * mask, when one of them is an instance (indexed_call): all of range()'s,
  * a list's pop() and insert() index, a search's bounds (search_bounds),
  * and the size of bytes() of a plain
- * instance with __index__ and without __bytes__ or of bytearray(); else 0. */
+ * instance with __index__ and without __bytes__ or of bytearray(); a
+ * slice's indices() its length, then its parts (INDEX_PARTS); else 0. */
+enum { INDEX_PARTS = 1u << 8 };
+static SPYValue *slice_part(SPYContext *, SPYValue *);
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    int indices = method == M_INDICES && callee->type == SPY_SLICE && argc == 1;
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
-                                  1 : search_bounds(c, callee, method, argc, argv) :
+                                  1 : indices ? 1 | INDEX_PARTS : search_bounds(c, callee, method, argc, argv) :
                     callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
                     argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
     for (size_t i = 0; i < argc; i++) if (mask >> i & 1 && argv[i]->type == SPY_INSTANCE) return mask;
-    return 0;
+    return indices && slice_part(c, callee) ? mask : 0;
 }
 /* The call (index_arguments) of state's callee, method number and name
  * (or -1 and None) on the arguments of its tuple, from the i-th on: the
  * next masked one's Python __index__ is m's call (callk), the call going
- * on with its int (index_argued); else the call of them, refusing there
- * an argument neither an int nor such an instance, before the later ones;
- * bytes() and bytearray() make their bytes of the size (index_bytes). */
+ * on with its int (index_argued); after them, for a length not negative,
+ * so is a slice's part's (slice_part), its i the arguments' count; else
+ * the call of them, refusing there an argument neither an int nor such an
+ * instance, before the later ones; bytes() and bytearray() make their
+ * bytes of the size (index_bytes). */
 static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args, size_t i, unsigned mask) {
     for (; i < args->as.seq.len; i++) {
         SPYValue *item = args->as.seq.items[i], *function = mask >> i & 1 ? index_function(c, item) : NULL;
@@ -26718,6 +26724,14 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         /* A str's or bytes' search bound may be None. */
         if (mask >> i & 1 && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE ||
             (callee->type != SPY_STRING && callee->type != SPY_BYTES))) break;
+    }
+    SPYValue *part = i == args->as.seq.len && mask & INDEX_PARTS && integer_sign(builtin_value(c, args->as.seq.items[0], SPY_INT)) >= 0 ?
+                     slice_part(c, callee) : NULL;
+    if (part) {
+        SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)i), int_value(c, mask)};
+        SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
+        release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
+        return state ? callk(c, m, index_function(c, part), 1, (SPYValue *[]){spy_retain(part)}, index_argued, state) : NULL;
     }
     return method >= 0 ? call_native_method(c, callee, method, name, args->as.seq.len, args->as.seq.items) :
            call(c, callee, args->as.seq.len, args->as.seq.items);
@@ -26733,6 +26747,16 @@ static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYVal
         SPYValue *bytes = index_bytes(c, items[0], index_result(c, items[0], result), array ? "bytearray" : "bytes");
         value = bytes && array ? builtin(c, 1, &bytes, (void *)(intptr_t)B_BYTEARRAY) : spy_retain(bytes);
         spy_release(bytes);
+    } else if (i == n) {
+        /* A slice's part: the call goes on with a slice of its int. */
+        SPYValue *s = parts[0], *part = slice_part(c, s), *converted = index_result(c, part, result);
+        SPYValue *next = converted ? slice_new(c, part == s->as.slice.start ? converted : s->as.slice.start,
+                                               part == s->as.slice.stop ? converted : s->as.slice.stop,
+                                               part == s->as.slice.step ? converted : s->as.slice.step) : NULL;
+        spy_release(converted);
+        value = next ? index_from(c, m, next, (int)parts[1]->as.integer_data.small, parts[2], args, n,
+                                  (unsigned)parts[5]->as.integer_data.small) : NULL;
+        spy_release(next);
     } else if ((items[i] = index_result(c, args->as.seq.items[i], result))) {
         SPYValue *converted = spy_tuple(c, n, items);
         value = converted ? index_from(c, m, parts[0], (int)parts[1]->as.integer_data.small, parts[2], converted, i + 1,
@@ -27381,8 +27405,9 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return update_call(c, m, callee, source, env);
     }
-    /* A list's pop() or insert() of an index with a Python __index__ (indexed_call). */
-    if (callee && calls && skip && method >= 0 && index_arguments(c, callee, method, argc, argv + 1)) {
+    /* A list's pop() or insert() of an index with a Python __index__, and the others
+     * of index_arguments, bound too (indexed_call). */
+    if (callee && calls && skip && (method >= 0 || callee->type == SPY_BOUND_METHOD) && index_arguments(c, callee, method, argc, argv + 1)) {
         SPYValue *args[8];
         memcpy(args, argv + 1, argc * sizeof(*argv));
         spy_release(argv[0]);
@@ -29993,14 +30018,14 @@ static SPYValue *index_function(SPYContext *c, SPYValue *v) {
 }
 /* The part of slice s whose Python __index__ a subscript calls first, as
  * slice_bounds takes them: the step, the start, then the stop, unless one
- * before it is no None or int, which slice_bounds takes in C, or the step
- * is zero; else NULL. */
+ * before it is no None or int, an int's subclass its int, which
+ * slice_bounds takes in C, or the step is zero; else NULL. */
 static SPYValue *slice_part(SPYContext *c, SPYValue *s) {
     SPYValue *parts[] = {s->as.slice.step, s->as.slice.start, s->as.slice.stop};
     for (int i = 0; i < 3; i++) {
         if (index_function(c, parts[i])) return parts[i];
-        if ((parts[i]->type != SPY_NONE && parts[i]->type != SPY_INT && parts[i]->type != SPY_BOOL) ||
-            (!i && parts[0]->type != SPY_NONE && !integer_sign(parts[0]))) return NULL;
+        SPYValue *part = parts[i]->type == SPY_NONE ? parts[i] : builtin_value(c, parts[i], SPY_INT);
+        if (!part || (!i && part->type != SPY_NONE && !integer_sign(part))) return NULL;
     }
     return NULL;
 }

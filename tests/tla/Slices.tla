@@ -10,22 +10,25 @@
 (* the stop are taken in turn, each checked and its __index__ called as it *)
 (* is reached.                                                             *)
 (*                                                                         *)
-(* A program makes s = slice(START, STOP, STEP) with bounds from None, -9, *)
-(* -2, 0, 3, 9, "x", an object whose Python __index__ returns 3, and steps *)
-(* from None, -2, -1, 1, 2, 0, then calls                                  *)
-(* s.indices(L) for L in 0, 4, or takes list(range(L))[s], or reads the    *)
-(* attributes, assigns s.start, or compares and hashes s with a copy; or   *)
-(* evaluates slice[float]. The outcome is the repr of the result or the    *)
-(* exception, followed by the bounds whose __index__ ran.                  *)
+(* A program makes s = slice(START, STOP, STEP) with bounds from None,     *)
+(* -9, -2, 0, 3, 9, "x", an object whose Python __index__ returns 3,       *)
+(* an int subclass worth 3 (its __index__ never called), and steps         *)
+(* from None, -2, -1, 1, 2, 0, then calls s.indices(L) for L in 0, 4,      *)
+(* given as an int or by an object whose Python __index__ returns it,      *)
+(* which runs first, or takes list(range(L))[s], or reads the              *)
+(* attributes, assigns s.start, or compares and hashes s with a copy;      *)
+(* or evaluates slice[float]. The outcome is the repr of the result or     *)
+(* the exception, followed by the bounds whose __index__ ran.              *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, TLC
 
-None == 99  \* sentinels: None, the str "x", and the object of __index__ 3
+None == 99  \* sentinels: None, the str "x", the object of __index__ 3, an int subclass
 X == 98
 I3 == 97
-Bounds == {None, -9, -2, 0, 3, 9, X, I3}
+J3 == 96    \* an int subclass worth 3, whose __index__ never runs
+Bounds == {None, -9, -2, 0, 3, 9, X, I3, J3}
 Steps == {None, -2, -1, 1, 2, 0}
-Programs == [start : Bounds, stop : Bounds, step : Steps, length : {0, 4}, op : {"indices", "subscript"}]
+Programs == [start : Bounds, stop : Bounds, step : Steps, length : {0, 4}, op : {"indices", "subscript", "lengthed"}]
             \cup [start : Bounds, stop : Bounds, step : Steps, length : {0}, op : {"attrs", "set", "eqhash"}]
             \cup [op : {"generic"}]
 
@@ -34,11 +37,11 @@ vars == <<program, outcome>>
 
 Pending == "pending"
 
-Repr(v) == CASE v = None -> "None" [] v = X -> "'x'" [] v = I3 -> "I3" [] OTHER -> ToString(v)
+Repr(v) == CASE v = None -> "None" [] v = X -> "'x'" [] v = I3 -> "I3" [] v = J3 -> "3" [] OTHER -> ToString(v)
 
 \* One bound clamped as PySlice_AdjustIndices does.
 Clamp(w, default, length, lower, upper) ==
-    LET v == IF w = I3 THEN 3 ELSE w IN
+    LET v == IF w \in {I3, J3} THEN 3 ELSE w IN
     IF v = None THEN default
     ELSE IF v < 0 THEN (IF v + length < lower THEN lower ELSE v + length)
     ELSE IF v > upper THEN upper ELSE v
@@ -60,9 +63,11 @@ Join(s) == CASE s = <<>> -> "" [] Len(s) = 1 -> ToString(s[1]) [] OTHER -> ToStr
 \* The step is checked first, then the start, then the stop.
 Refused(p) == CASE p.step = 0 -> "ValueError" [] p.start = X \/ p.stop = X -> "TypeError" [] OTHER -> ""
 
-\* The bounds whose __index__ runs: the start's before the stop is checked.
-Called(p) == IF p.op \notin {"indices", "subscript"} \/ p.step = 0 THEN ""
-             ELSE (IF p.start = I3 THEN " start" ELSE "") \o (IF p.start # X /\ p.stop = I3 THEN " stop" ELSE "")
+\* The bounds whose __index__ runs: the start's before the stop is checked,
+\* and a length's before them.
+Called(p) == (IF p.op = "lengthed" THEN " length" ELSE "") \o
+             (IF p.op \notin {"indices", "subscript", "lengthed"} \/ p.step = 0 THEN ""
+              ELSE (IF p.start = I3 THEN " start" ELSE "") \o (IF p.start # X /\ p.stop = I3 THEN " stop" ELSE ""))
 
 Result(p) ==
     CASE p.op = "generic" -> "slice[float]"
@@ -70,7 +75,7 @@ Result(p) ==
       [] p.op = "set" -> "AttributeError"
       [] p.op = "eqhash" -> "True"
       [] Refused(p) # "" -> Refused(p)
-      [] p.op = "indices" -> LET i == Indices(p) IN "(" \o Join(i) \o ")"
+      [] p.op \in {"indices", "lengthed"} -> LET i == Indices(p) IN "(" \o Join(i) \o ")"
       [] p.op = "subscript" -> LET i == Indices(p) IN "[" \o Join(Items(i[1], i[2], i[3])) \o "]"
 
 Run(p) == IF p.op = "generic" THEN Result(p) ELSE Result(p) \o Called(p)
@@ -83,7 +88,7 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* indices() stays within the sequence: start and stop in [-1, length].
-InBounds == Done /\ program.op = "indices" /\ Refused(program) = "" =>
+InBounds == Done /\ program.op \in {"indices", "lengthed"} /\ Refused(program) = "" =>
     LET i == Indices(program) IN i[1] \in -1..program.length /\ i[2] \in -1..program.length
 
 \* A slice of a sequence takes only its own items.

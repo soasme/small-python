@@ -2359,6 +2359,12 @@ int main(int argc, char **argv) {
                "    except StopIteration as e: return len(e.value) + n\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "run_gathered()", "gathered.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So does a slice's indices() of a part or length with a Python __index__, and a subscript after an int subclass's part. */
+    execute(c, "class Slow:\n    def __init__(self, n): self.n = n\n    def __index__(self):\n        for i in range(3000): pass\n        return self.n\n"
+               "class Sub(int): pass\n"
+               "def indexed():\n    a, b, s = slice(Slow(1), Slow(5)).indices(Slow(9))\n    return a + b + s + len([0, 1, 2][Sub(1):Slow(3)])\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "indexed()", "indexed.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

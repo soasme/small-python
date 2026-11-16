@@ -1822,6 +1822,19 @@ static const char *const programs[] = {
     "    except StopIteration as e: return n, e.value\n"
     "print(ap())\n",
 
+    "class SIX:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __index__(self):\n"
+    "        if self.n is None: raise LookupError('x')\n"
+    "        return self.n\n"
+    "class SIS(int): pass\n"
+    "def si():\n"
+    "    out = [slice(SIX(1), SIX(5), SIX(2)).indices(SIX(9)), [0, 1, 2, 3][SIS(1):SIX(3)]]\n"
+    "    try: slice(SIX(None)).indices(4)\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(si())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
