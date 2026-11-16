@@ -45,3 +45,8 @@ class Raises:
 assert_eq(message(lambda: I(1) < Raises()), "'<' not supported between instances of 'int' and 'list'")
 assert_eq(message(lambda: St("a") + Raises()), "can only concatenate mine")
 assert_eq(message(lambda: B(b"") + Raises()), "can only concatenate mine")
+
+# Any other TypeError of the built-in operation is the operation's.
+assert_eq(message(lambda: L([1]) * 1.5), "can't multiply sequence by non-int of type 'float'")
+assert_eq(message(lambda: 1.5 * L([1])), "can't multiply sequence by non-int of type 'float'")
+assert_eq(message(lambda: St("a") * "b"), "can't multiply sequence by non-int of type 'str'")

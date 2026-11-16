@@ -95,3 +95,11 @@ def bound():
             list(map(s.times, [])), narrow)
 
 assert bound() == ([30, 80], [11, 12], 6, [], 'Narrow.__call__() takes 1 positional argument but 2 were given')
+
+# A builtin function's StopIteration ends the map too, whatever takes
+# its items: a starred display, unpacking, zip(), any() and all().
+def nexts(): return map(next, [iter([1]), iter([]), iter([3])])
+def native():
+    a, = nexts()
+    return [*nexts()], a, list(zip(nexts(), nexts())), any(nexts()), all(nexts()), list(enumerate(nexts())), 2 in nexts()
+assert_eq(native(), ([1], 1, [(1, 1)], True, True, [(0, 1)], False))
