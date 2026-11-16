@@ -1584,6 +1584,19 @@ static const char *const programs[] = {
     "    return out + [len(d), d[MK(1)]]\n"
     "print(mk())\n",
 
+    "class BCI:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        if self.v == 'raise': raise LookupError(self.v)\n"
+    "        return self.v\n"
+    "def bc():\n"
+    "    out = [BCI(97) in b'ab', BCI(99) not in b'ab', [BCI(98) in b'b', 1]]\n"
+    "    for v in (300, 'raise', 's'):\n"
+    "        try: out.append(BCI(v) in b'ab')\n"
+    "        except (ValueError, TypeError) as e: out.append(type(e).__name__)\n"
+    "    return out\n"
+    "print(bc())\n",
+
     "class NM:\n"
     "    def __iter__(s): return s\n"
     "    def __next__(s): return 1\n"

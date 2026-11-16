@@ -87,6 +87,8 @@ SOURCES = {
     "compare": "result = (b'a' == bytearray(b'a'), b'a' < b'b', b'a' == 'a', bytearray(b'b') > b'a')",
     "hash": "result = hash(b'ab') == hash(b'ab')",
     "hash_bytearray": "result = hash(bytearray(b'a'))",
+    "contains_index": "log = []\nresult = (J(98, log) in b'abc', J(120, log) not in b'abc', (0, J(99, log) in b'c', 1), log)",
+    "contains_index_fails": "result = J('s', []) in b'abc'",
     "count_int": "result = (b'abcb'.count(98), b'abcb'.find(99), b'abc'.index(b'c'), bytearray(b'aa').rfind(97))",
     "count_range": "result = b'abc'.count(256)",
     "search_str": "result = b'abc'.find('a')",

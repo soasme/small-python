@@ -268,6 +268,8 @@ Unreleased (0.10.0):
   Python function without nesting on the C stack
 - ** and dict() list the keys a mapping's keys() returns by their Python __iter__ without nesting on
   the C stack
+- in of bytes calls an operand's Python __index__ without nesting on the C stack, and takes the
+  operand as bytes-like when __index__ fails
 - a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a
   function's **kw, dict() or frozendict() stores the name, and not at all for update() or a subclass
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs

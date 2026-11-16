@@ -4,14 +4,14 @@
 (* them (library/stdtypes.html#bytes-objects, #bytearray-objects, and      *)
 (* #bytes-and-bytearray-operations): immutable bytes and mutable bytearray *)
 (* sequences of integers in range(256), written as ASCII literals with     *)
-(* escapes; constructed from a length (an __index__ called once), an      *)
-(* iterable of ints, a buffer,                                             *)
-(* __bytes__, or a str with an encoding; with fromhex and hex; indexing    *)
-(* yields ints and slicing the same type; bytearray adds item and slice    *)
-(* assignment and the mutating list methods, refusing to resize while      *)
-(* exported; and both offer the str methods over ASCII bytes, accepting    *)
-(* any bytes-like argument (and an int for searches), returning results of *)
-(* the receiver's type: find, rfind, index, count, startswith, endswith,   *)
+(* escapes; constructed from a length (an __index__ called once), an       *)
+(* iterable of ints, a buffer, __bytes__, or a str with an encoding; with  *)
+(* fromhex and hex; indexing yields ints and slicing the same type;        *)
+(* bytearray adds item and slice assignment and the mutating list methods, *)
+(* refusing to resize while exported; and both offer the str methods over  *)
+(* ASCII bytes, accepting any bytes-like argument (and an int for searches *)
+(* and in, in only when its __index__ succeeds), returning results of the  *)
+(* receiver's type: find, rfind, index, count, startswith, endswith,       *)
 (* split, rsplit, partition, rpartition, replace, removeprefix,            *)
 (* removesuffix, strip, lstrip, and rstrip behave as for str, and so do    *)
 (* center, ljust, rjust, and zfill with a fill byte; case mappings and     *)
@@ -135,7 +135,7 @@ Cases == {"literal_forms", "literal_non_ascii", "ctor_forms", "ctor_str_encoding
           "ctor_negative", "ctor_range_error", "ctor_float", "bytearray_ctor", "fromhex", "fromhex_bad",
           "fromhex_space_middle", "fromhex_non_hex", "hex", "hex_bad_sep", "index_is_int", "iterate_ints",
           "repr_escapes", "immutable", "concat_repeat", "concat_str", "contains", "contains_str", "compare",
-          "hash", "hash_bytearray", "count_int", "count_range", "search_str", "case_ascii_only",
+          "hash", "hash_bytearray", "contains_index", "contains_index_fails", "count_int", "count_range", "search_str", "case_ascii_only",
           "predicates", "expandtabs", "splitlines", "split_maxsplit", "split_str_sep", "join", "join_str",
           "maketrans_translate", "maketrans_unequal", "translate_bad_table", "zfill", "replace_count",
           "decode", "decode_error", "decode_unicode_escape", "decode_unicode_escape_error",
@@ -190,6 +190,9 @@ Case(c) ==
       [] c = "compare" -> "(True, True, False, True)"
       [] c = "hash" -> "True"
       [] c = "hash_bytearray" -> "TypeError: unhashable type: 'bytearray'"
+      \* in takes an __index__ int, an error of __index__ leaving a bytes-like needle.
+      [] c = "contains_index" -> "(True, True, (0, True, 1), [98, 120, 99])"
+      [] c = "contains_index_fails" -> "TypeError: a bytes-like object is required, not 'J'"
       [] c = "count_int" -> "(2, 2, 2, 1)"
       [] c = "count_range" -> "ValueError: byte must be in range(0, 256)"
       [] c = "search_str" -> "TypeError: argument should be integer or bytes-like object, not 'str'"

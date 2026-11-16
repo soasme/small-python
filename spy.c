@@ -10704,6 +10704,25 @@ static NO_INLINE SPYValue *sequence_operand(SPYContext *c, int op, SPYValue *x, 
     int found = sequence_contains(c, x, y, 1);
     return found == 2 || found < 0 ? NULL : spy_bool(c, (op == O_IN) == found);
 }
+/* Whether bytes b holds a, of an __index__ when index, whose int is
+ * integer (taken; NULL when __index__ failed): as a byte, else, an
+ * __index__ error discarded, as a bytes-like needle. -1 on error. */
+static int byte_found(SPYContext *c, SPYValue *b, SPYValue *a, int index, SPYValue *integer) {
+    if (integer) {
+        int64_t byte = integer->as.integer_data.small;
+        int bad = integer->as.integer_data.big || byte < 0 || byte > 255;
+        spy_release(integer);
+        if (bad) { spy_error(c, "ValueError", "byte must be in range(0, 256)"); return -1; }
+        return memchr(b->as.string.data, (int)byte, b->as.string.len) != NULL;
+    }
+    if (index && c->stopped) return -1;
+    if (index) spy_clear_error(c);
+    SPYValue *copy, *needle = buffer_bytes(c, a, &copy);
+    if (!needle) { if (!c->error_type[0]) errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a)); return -1; }
+    int found = find_bytes(c, b->as.string.data, b->as.string.len, needle->as.string.data, needle->as.string.len, 0) != SIZE_MAX;
+    spy_release(copy);
+    return found;
+}
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
     /* Exact small ints and floats compare first. */
@@ -10785,15 +10804,9 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             SPYValue *found = comparison(c, op, a->type == SPY_BYTEARRAY ? &(SPYValue){.type = SPY_BYTES, .as.string = a->as.string} : a, &view);
             b->as.string.exports--;
             return found;
-        } else if (b->type == SPY_BYTES && (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__")))) {
-            unsigned char byte;
-            if (byte_value(c, a, &byte)) return NULL;
-            result = memchr(b->as.string.data, byte, b->as.string.len) != NULL;
         } else if (b->type == SPY_BYTES) {
-            SPYValue *copy, *needle = buffer_bytes(c, a, &copy);
-            if (!needle) return c->error_type[0] ? NULL : errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a));
-            result = find_bytes(c, b->as.string.data, b->as.string.len, needle->as.string.data, needle->as.string.len, 0) != SIZE_MAX;
-            spy_release(copy);
+            int index = is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"));
+            if ((result = byte_found(c, b, a, index, index ? index_object(c, a) : NULL)) < 0) return NULL;
         } else if (b->type == SPY_STRING) {
             SPYValue *needle = a->type == SPY_STRING ? a : builtin_value(c, a, SPY_STRING);
             if (!needle) return errorf(c, "TypeError", "'in <string>' requires string as left operand, not %s", type_name(a));
@@ -29414,6 +29427,16 @@ static int set_plain(const Operator *o, int rich, SPYValue *v) {
     return o ? !class_lookup(cls, o->direct) && !class_lookup(cls, o->reflected) && !class_lookup(cls, o->inplace) :
                !class_lookup(cls, rich_names[rich]) && !class_lookup(cls, rich_names[rich_reflected[rich]]);
 }
+/* What a's Python __index__ returned in result for in of bytes b, state
+ * (b, a, negated): the test's bool (byte_found), or NULL. */
+static SPYValue *byte_contained(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    SPYValue *b = state->as.seq.items[0], *a = state->as.seq.items[1];
+    int found = byte_found(c, b, a, 1, result ? index_result(c, a, result) : NULL);
+    SPYValue *value = found < 0 ? NULL : spy_bool(c, found != (int)state->as.seq.items[2]->as.integer_data.small);
+    spy_release(state);
+    return value;
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -29495,6 +29518,15 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             (function = contains_call(c, m, x, y, env))) return function;
         /* in takes the container's __contains__, given the item. */
         if ((function = item_function(c, y, "__contains__")) && (function = last_call(c, m, function, x, y, y, x, env))) return function;
+        /* A bytes object holds the int an instance's Python __index__
+         * returns, searched once it returns (byte_contained). */
+        if (last && y->type == SPY_BYTES && x->type == SPY_INSTANCE && !builtin_value(c, x, SPY_INT) && (function = index_function(c, x))) {
+            SPYValue *negated = spy_int(c, op == O_NOTIN), *state = negated ? spy_tuple(c, 3, (SPYValue *[]){y, x, negated}) : NULL;
+            spy_release(negated);
+            if (!state || !(c->k_env = function_env(c, function, 1, &x, NULL, 0))) { spy_release(state); return NULL; }
+            c->k_fn = spy_retain(function); c->k = byte_contained; c->k_ctx = state;
+            return c->unbound;
+        }
         return last && !c->error_type[0] && contains_step(c, m, op, x, y) ? c->unbound : NULL;
     }
     /* not calls a Python __bool__ (CALL_CHECKED), inverting its truth

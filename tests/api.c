@@ -2411,6 +2411,13 @@ int main(int argc, char **argv) {
                "def keyed():\n    return len({**Keyed()}) + len(dict(Keyed()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So does an __index__ that in of bytes calls, its error discarded. */
+    execute(c, "class Byte:\n    def __init__(self, v): self.v = v\n"
+               "    def __index__(self):\n        for i in range(3000): pass\n        return self.v\n"
+               "def held():\n    try: Byte('s') in b'a'\n    except TypeError: pass\n"
+               "    return (Byte(97) in b'a') + (Byte(98) not in b'a')\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "held()", "held.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
