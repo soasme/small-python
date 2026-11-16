@@ -296,6 +296,7 @@ Unreleased (0.10.0):
 - complex() falling back to a Python __float__ or __index__ calls it without nesting on the C stack
 - complex(real, imag) checks that both parts are numbers before it converts either, and never converts imag by __complex__
 - a ** keyword's str subclass name calls its Python __eq__ and __hash__, binding a function's parameters and **kwargs, without nesting on the C stack
+- a call's ** of a dict compares a str subclass name with the keywords before it by its Python __eq__ without nesting on the C stack
 - in, discard and remove in a function look a set subclass's instance up as a frozenset again, as at module level
 - an unsupported comparison or concatenation of a builtin subclass's instance names its own type, not its builtin's
 - a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a

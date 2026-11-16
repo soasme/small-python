@@ -274,7 +274,7 @@ def replay(name, all_cases, engine, oracle, directory):
     # PEP 765's warnings about return, break, and continue in finally go to
     # stderr; the programs use those on purpose.
     fixtures = TLA / f"{name}.files"
-    runs = [("oracle", [str(oracle), "-E", "-s", "-B", "-W", "ignore::SyntaxWarning", script.name])] if oracle else []
+    runs = [("oracle", [str(oracle), "-s", "-B", "-W", "ignore::SyntaxWarning", script.name])] if oracle else []
     for label, command in runs + [("engine", [str(engine), script.name])]:
         # A NAME.files directory (modules and packages to import) is copied
         # fresh next to the script for each run.
@@ -286,8 +286,11 @@ def replay(name, all_cases, engine, oracle, directory):
                 shutil.copytree(item, target)
             else:
                 shutil.copy(item, target)
+        # The environment is the whole of it. A pinned string hash: the
+        # oracle's dict probing may compare a key equal in hash again,
+        # depending on the randomized hash of a str.
         result = subprocess.run(command, cwd=directory, capture_output=True, text=True, timeout=600,
-                                env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8"})
+                                env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8", "PYTHONHASHSEED": "0"})
         output = result.stdout.strip()
         expected = f"replayed {len(all_cases)} cases"
         passed = result.returncode == 0 and output.endswith(expected)

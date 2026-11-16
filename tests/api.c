@@ -2492,6 +2492,15 @@ int main(int argc, char **argv) {
                "def kw_hashes():\n    d = {KwHashed('p'): 1, KwHashed('q'): 2}\n    return kw_stored(**d) + kw_stored(**d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "kw_hashes()", "kw_hashes.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 4);
+    /* So does the Python __eq__ of a name a call's ** merges. */
+    execute(c, "class KwMerged(str):\n    __hash__ = str.__hash__\n    def __eq__(self, other):\n        for i in range(3000): pass\n"
+               "        return str.__eq__(self, other)\n"
+               "def kw_merged(**rest):\n    return len(rest)\n"
+               "def kw_merges():\n    d = {KwMerged('p'): 1}\n"
+               "    try: kw_merged(p=0, **d)\n    except TypeError: pass\n"
+               "    try: kw_merged(**{'p': 0}, **d)\n    except TypeError: return 3\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "kw_merges()", "kw_merges.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

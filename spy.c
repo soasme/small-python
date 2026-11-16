@@ -29045,8 +29045,11 @@ static int dict_walks(SPYValue *x, SPYValue *y, size_t at) {
  * in the result, which gains it when absent (SET_ADDING); a dict's merge
  * into the dict it searches, its first slot the size of the dict it walks
  * (merge_walk). */
-enum { SET_UPDATING = 1 << 16, SET_DISJOINT = 1 << 17, SET_DISCARDS = 1 << 18, SET_ADDING = 1 << 19, SET_MERGES = 1 << 20 };
-static int walk_op(SPYValue *op) { return (int)op->as.integer_data.small & ~(SET_UPDATING | SET_DISCARDS | SET_ADDING | SET_MERGES); }
+enum { SET_UPDATING = 1 << 16, SET_DISJOINT = 1 << 17, SET_DISCARDS = 1 << 18, SET_ADDING = 1 << 19, SET_MERGES = 1 << 20, SET_REFUSES = 1 << 21,
+       SET_INSERTS = 1 << 22 };
+static int walk_op(SPYValue *op) {
+    return (int)op->as.integer_data.small & ~(SET_UPDATING | SET_DISCARDS | SET_ADDING | SET_MERGES | SET_REFUSES | SET_INSERTS);
+}
 /* Whether set operator or comparison op of x and y, exact sets or
  * frozensets, may call a Python __eq__ (set_walk): one of them holds an
  * instance with one, or a tuple holding one (eq_reaches), and their
@@ -29078,6 +29081,11 @@ static int keys_walk(int op, int inplace, SPYValue *x, SPYValue *y) {
     return 0;
 }
 static void walk_unequal(SPYContext *c, Machine *m);
+/* The walk's state takes flags. */
+static void walk_flags(SPYContext *c, SPYValue **state, int flags) {
+    SPYValue *value = int_value(c, flags);
+    if (value) { spy_release(state[4]); state[4] = value; }
+}
 /* The walk atop m (set_walk) decides an entry, key of hash, found at
  * index found of the set searched, or -1: | and ^ add one not found to
  * the result, ^ removes one found from it, & keeps one found and - one
@@ -29090,8 +29098,17 @@ static SPYValue *walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t h
     SPYValue **state = &m->stack[m->len - 7];
     int flags = (int)state[4]->as.integer_data.small, op = walk_op(state[4]);
     SPYValue *result = flags & SET_MERGES ? state[2] : state[0];
-    /* A merge stores the walked value, in the place of an equal key's. */
+    /* A merge stores the walked value, in the place of an equal key's. A
+     * call's refuses an equal key, its callee under its arguments below
+     * the walk (merge_walk), and then looks the key up again to store it
+     * (SET_INSERTS), as dict_merge's insertdict does. */
+    if ((flags & SET_REFUSES) && !(flags & SET_INSERTS)) {
+        if (found >= 0) keyword_found(c, found, key, state[-2]);
+        else walk_flags(c, state, flags | SET_INSERTS);
+        return NULL;
+    }
     if (flags & SET_MERGES) {
+        if (flags & SET_INSERTS) walk_flags(c, state, flags & ~SET_INSERTS);
         SPYValue *index = int_value(c, state[3]->as.integer_data.small + 1);
         if (index) { spy_release(state[3]); state[3] = index; }
         if (found < 0) map_append(c, result, key, state[5], hash);
@@ -29214,7 +29231,8 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
         SPYValue **state = &m->stack[m->len - 7], *walked = state[1], *map = state[2], *function;
         size_t i = (size_t)state[3]->as.integer_data.small;
         if (c->error_type[0]) break;
-        if (UNLIKELY(state[4]->as.integer_data.small & SET_MERGES) && walked->as.map.len != (size_t)state[0]->as.integer_data.small) {
+        if (UNLIKELY((state[4]->as.integer_data.small & (SET_MERGES | SET_INSERTS)) == SET_MERGES) &&
+            walked->as.map.len != (size_t)state[0]->as.integer_data.small) {
             spy_error(c, "RuntimeError", "dict mutated during update");
             break;
         }
@@ -29303,12 +29321,13 @@ static NO_INLINE int merges(SPYValue *x, SPYValue *y) {
 /* Dict source's entries merged into dict target, which it takes, as
  * dict_merge inserts them: each key, of its stored hash, looked up in
  * target on the machine (walk_next), its value replacing an equal key's
- * or added with it (walk_decide); a change of source's size is an error.
- * The walk's value is target, or None for an update. */
-static NO_INLINE SPYValue *merge_walk(SPYContext *c, Machine *m, SPYValue *target, SPYValue *source, int update, SPYValue **env) {
+ * or added with it (walk_decide), or for a call's ** (SET_REFUSES) the
+ * equal key an error; a change of source's size is an error. The walk's
+ * value is target, or None for an update (SET_UPDATING). */
+static NO_INLINE SPYValue *merge_walk(SPYContext *c, Machine *m, SPYValue *target, SPYValue *source, int flags, SPYValue **env) {
     size_t len = m->len;
     if (machine_push(c, m, int_value(c, (int64_t)source->as.map.len)) || machine_push(c, m, spy_retain(source)) || machine_push(c, m, target) ||
-        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, '|' | SET_MERGES | (update ? SET_UPDATING : 0))) ||
+        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, '|' | SET_MERGES | flags)) ||
         machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_retain(c->walking))) {
         while (m->len > len) spy_release(machine_pop(m));
         return NULL;
@@ -29326,7 +29345,7 @@ static int merge_call(SPYValue *callee, size_t argc, SPYValue *const *argv) {
  * c->entering_init with *env, the walk under it, a placeholder for its
  * value; else None. */
 static NO_INLINE SPYValue *update_call(SPYContext *c, Machine *m, SPYValue *dict, SPYValue *source, SPYValue **env) {
-    SPYValue *function = merge_walk(c, m, dict, source, 1, env);
+    SPYValue *function = merge_walk(c, m, dict, source, SET_UPDATING, env);
     spy_release(source);
     if (!function) return c->error_type[0] ? NULL : looked(c);
     c->entering_init = function; c->entering_kind = CALL_OPERATOR;
@@ -32704,6 +32723,17 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             a = machine_pop(m);
             SPYValue *keywords = m->stack[m->len - 1], *args = m->stack[m->len - 2], *fn = m->stack[m->len - 3];
             if (ins->arg == N_MAPPING) {
+                if (UNLIKELY(a->type == SPY_DICT) && merges(keywords, a)) {
+                    /* A call's ** of a dict merges on the machine as a
+                     * display's does, refusing an equal key (merge_walk);
+                     * its value the keywords. */
+                    callee_env = NULL;
+                    value = merge_walk(c, m, machine_pop(m), a, SET_REFUSES, &callee_env);
+                    spy_release(a); a = NULL;
+                    if (value) { special = CALL_OPERATOR; goto enter_special; }
+                    machine_push(c, m, c->error_type[0] ? NULL : looked(c));
+                    break;
+                }
                 int began = keywords_merge(c, m, keywords, a, fn);
                 a = NULL;
                 if (began) goto consume_generator;

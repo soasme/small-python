@@ -39,7 +39,10 @@ def metadata(path):
 
 def run(command, directory):
     # A sanitizer build keeps its options; nothing else leaks into a test.
-    env = {"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8"}
+    # The environment is the whole of it. A pinned string hash: the oracle's
+    # dict probing may compare a key equal in hash again, depending on the
+    # randomized hash of a str.
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8", "PYTHONHASHSEED": "0"}
     env.update({name: value for name, value in os.environ.items() if name.endswith("SAN_OPTIONS")})
     try:
         result = subprocess.run(command, cwd=directory, capture_output=True, text=True, timeout=TIMEOUT, env=env)
@@ -68,7 +71,7 @@ def check(path, engine, oracle):
         if fixtures.is_dir():
             shutil.copytree(fixtures, directory, dirs_exist_ok=True)
         shutil.copy(path, Path(directory) / "test_spec.py")
-        oracle_ok, oracle_output = (outcome(*run([str(oracle), "-E", "-s", "test_spec.py"], directory), negative)
+        oracle_ok, oracle_output = (outcome(*run([str(oracle), "-s", "test_spec.py"], directory), negative)
                                     if oracle else (None, ""))
         engine_ok, engine_output = outcome(*run([str(engine), "test_spec.py"], directory), negative)
     return {"test": str(path.relative_to(SPEC)), "spec": fields.get("spec", ""),

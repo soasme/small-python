@@ -11,7 +11,7 @@ log = []
 class Name(str):
     def __hash__(self):
         log.append("hash")
-        return str.__hash__(self)
+        return str.__hash__(self.lower())
 
     def __eq__(self, other):
         log.append("eq")
