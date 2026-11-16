@@ -32722,7 +32722,20 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_ARG) {
             a = machine_pop(m);
             SPYValue *keywords = m->stack[m->len - 1], *args = m->stack[m->len - 2], *fn = m->stack[m->len - 3];
-            if (ins->arg == N_MAPPING) {
+            if (ins->arg == N_KEYWORD) {
+                b = spy_string(c, n->text, strlen(n->text));
+                if (!b || !UNLIKELY(eq_keyed(keywords))) {
+                    if (b) merge_keyword(c, keywords, b, a, fn);
+                    break;
+                }
+                /* After a ** of a name that may call a Python __eq__, a
+                 * keyword merges as a ** of it does. */
+                SPYValue *one = value_new(c, SPY_DICT);
+                if (one && map_set(c, one, b, a)) { spy_release(one); one = NULL; }
+                spy_release(a); spy_release(b); b = NULL;
+                if (!(a = one)) break;
+            }
+            if (ins->arg == N_MAPPING || ins->arg == N_KEYWORD) {
                 if (UNLIKELY(a->type == SPY_DICT) && merges(keywords, a)) {
                     /* A call's ** of a dict merges on the machine as a
                      * display's does, refusing an equal key (merge_walk);
@@ -32737,10 +32750,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 int began = keywords_merge(c, m, keywords, a, fn);
                 a = NULL;
                 if (began) goto consume_generator;
-            }
-            else if (ins->arg == N_KEYWORD) {
-                b = spy_string(c, n->text, strlen(n->text));
-                if (b) merge_keyword(c, keywords, b, a, fn);
             } else if (ins->arg == N_STAR) {
                 if (extend_step(c, m, args, a, 0, 0)) { a = NULL; goto consume_generator; }
                 a = NULL;

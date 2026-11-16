@@ -2501,6 +2501,10 @@ int main(int argc, char **argv) {
                "    try: kw_merged(**{'p': 0}, **d)\n    except TypeError: return 3\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "kw_merges()", "kw_merges.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So does that of a name a keyword after the ** is merged with. */
+    execute(c, "def kw_after():\n    try: kw_merged(**{KwMerged('p'): 1}, q=0, p=0)\n    except TypeError: return kw_merged(**{KwMerged('q'): 1}, p=0)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "kw_after()", "kw_after.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 0);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

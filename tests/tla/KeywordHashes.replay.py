@@ -35,18 +35,23 @@ def g(z=None, **kw):
 
 
 def outcome(p):
-    first = {"a": 0} if p["explicit"] else {}
+    first = {"a": 0} if p["explicit"] == "first" else {}
     sources = [{Name(k): i} for i, k in enumerate(p["keys"], 1)]
+    second = sources[1] if len(sources) > 1 else {}
+    last = p["explicit"] == "last"
     del log[:]
     try:
         if p["target"] == "display":
-            result = {**first, **sources[0], **(sources[1] if len(sources) > 1 else {})}
+            result = {**first, **sources[0], **second, "a": 0} if last else {**first, **sources[0], **second}
         elif p["target"] == "update":
             result = {}
-            result.update(**first, **sources[0], **(sources[1] if len(sources) > 1 else {}))
+            if last:
+                result.update(**first, **sources[0], **second, a=0)
+            else:
+                result.update(**first, **sources[0], **second)
         else:
             callee = {"call": f, "parameter call": g, "dict": dict, "dict subclass": D, "frozendict": frozendict, "frozendict subclass": F}[p["target"]]
-            result = callee(**first, **sources[0], **(sources[1] if len(sources) > 1 else {}))
+            result = callee(**first, **sources[0], **second, a=0) if last else callee(**first, **sources[0], **second)
     except TypeError:
         return ("TypeError", (), tuple(log))
     return ("ok", tuple((str(k), v) for k, v in result.items()), tuple(log))

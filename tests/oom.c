@@ -1167,7 +1167,13 @@ static const char *const programs[] = {
     "        try: knm(**d, **{KNM(next(iter(d))): 1})\n"
     "        except (LookupError, TypeError) as e: out.append(str(e))\n"
     "    return out\n"
-    "print(km())\n",
+    "def ka():\n"
+    "    out = [knm(**{KNM('f'): 1}, f=0)]\n"
+    "    for f in (lambda: knm(**{KNM('a'): 1}, a=0), lambda: knm(**{KNM('r'): 1}, r=0)):\n"
+    "        try: f()\n"
+    "        except (LookupError, TypeError) as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(km(), ka())\n",
     "class SKS(set): pass\n"
     "class SKH(set):\n"
     "    def __hash__(self):\n"

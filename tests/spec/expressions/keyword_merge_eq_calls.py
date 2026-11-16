@@ -5,7 +5,8 @@
 # subclass's name first, and an equal one raises TypeError naming the
 # callee; NotImplemented leaves str's comparison, a false result keeps both
 # names, an exception propagates, and an __eq__ that grows the merged dict
-# raises RuntimeError. Inside functions as at module level.
+# raises RuntimeError. A keyword after the ** merges as a ** of it does.
+# Inside functions as at module level.
 from harness import *
 
 log = []
@@ -39,10 +40,25 @@ def results():
             merge({"f": 0}, {Odd("f"): 1}), merge({"r": 0}, {Odd("r"): 1}), merge({"m": 0}, {Odd("m"): 1}),
             merge({"a": 0}, {Odd("b"): 1, Odd("a"): 2}), merge({"a": 0, "b": 1}, {Odd("c"): 2})]
 
+def literal(call):
+    del log[:]
+    try:
+        r = call()
+    except Exception as e:
+        r = type(e).__name__ + ": " + str(e)
+    return r, log[:]
+
+def keywords():
+    return [literal(lambda: f(**{Odd("a"): 1}, a=0)), literal(lambda: f(**{Odd("n"): 1}, n=0)), literal(lambda: f(**{Odd("f"): 1}, f=0)),
+            literal(lambda: f(**{Odd("r"): 1}, r=0)), literal(lambda: f(**{Odd("b"): 1}, a=0, b=2)),
+            literal(lambda: f(**{Odd("c"): 1}, a=0))]
+
+expected_keywords = [("TypeError: __main__.f() got multiple values for keyword argument 'a'", [('a', 'a')]), ("TypeError: __main__.f() got multiple values for keyword argument 'n'", [('n', 'n')]), ([('Odd', 'f', 1), ('str', 'f', 0)], [('f', 'f'), ('f', 'f'), ('f', 'f')]), ('LookupError: r', [('r', 'r')]), ("TypeError: __main__.f() got multiple values for keyword argument 'b'", [('b', 'b')]), ([('Odd', 'c', 1), ('str', 'a', 0)], [])]
+
 expected = [("TypeError: __main__.f() got multiple values for keyword argument 'a'", [('a', 'a')]), ("TypeError: __main__.f() got multiple values for keyword argument 'a'", [('a', 'a')]), ("TypeError: __main__.f() got multiple values for keyword argument 'n'", [('n', 'n')]), ([('Odd', 'f', 1), ('str', 'f', 0)], [('f', 'f'), ('f', 'f'), ('f', 'f')]), ('LookupError: r', [('r', 'r')]), ('RuntimeError: dict mutated during update', [('m', 'm'), ('m', 'm')]), ("TypeError: __main__.f() got multiple values for keyword argument 'a'", [('a', 'a')]), ([('Odd', 'c', 2), ('str', 'a', 0), ('str', 'b', 1)], [])]
 
 def main():
-    return results()
+    return results(), keywords()
 
-assert_eq(main(), expected)
-assert_eq(results(), expected)
+assert_eq(main(), (expected, expected_keywords))
+assert_eq((results(), keywords()), (expected, expected_keywords))
