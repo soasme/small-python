@@ -50,3 +50,15 @@ def errors():
 
 assert_eq(errors(), ["Shown.__repr__() must return a str, not int",
                      "Digits.__index__() must return an int, not str", ("d",)])
+
+# The same through a starred call, a name bound to round, map() and a
+# keyword.
+class One:
+    def __index__(self):
+        for _ in (): pass
+        return 1
+def shapes():
+    a = (2.25, One())
+    r = round
+    return [round(*a), round(2.25, *[One()]), r(2.25, One()), list(map(round, [2.25], [One()])), round(2.25, ndigits=One())]
+assert_eq(shapes(), [2.2, 2.2, 2.2, [2.2], 2.2])
