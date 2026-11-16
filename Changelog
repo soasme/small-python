@@ -278,6 +278,8 @@ Unreleased (0.10.0):
 - the width of str's and bytes' padding methods, a tab size or maxsplit, and int()'s base call their
   Python __index__ without nesting on the C stack
 - int() given a base converts and checks the base before it refuses a value that is not a string
+- so do a maxsplit, tabsize or base given by keyword, bytes.hex()'s bytes_per_sep and int.to_bytes()' length
+- bytes.hex() converts bytes_per_sep before it checks sep
 - a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a
   function's **kw, dict() or frozendict() stores the name, and not at all for update() or a subclass
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs

@@ -2450,6 +2450,10 @@ int main(int argc, char **argv) {
                "def widened():\n    s = 'ab'\n    return len(s.ljust(Width(), '*')) + len('a b c d e'.split(None, Width())) + int('10', Width())\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "widened()", "widened.py"), SPY_STOP_STEPS, &pauses)) == 13 && pauses > 6);
+    /* So does one given by keyword, and hex's bytes_per_sep. */
+    execute(c, "def keyed():\n    return len('a b c d e'.split(maxsplit=Width())) + len(b'abcdefgh'.hex(':', Width())) + int('10', base=Width())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 26 && pauses > 6);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

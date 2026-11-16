@@ -26779,15 +26779,20 @@ static SPYValue *text_pad(SPYContext *, size_t, SPYValue *const *, SPYValue *, v
 static SPYValue *text_split(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *bytearray_split(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *text_expandtabs(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
-/* Of a native text method callee given the object and the rest, argc in
- * all: center's, ljust's and rjust's width (not their fill), zfill's,
- * expandtabs' tab size and split's and rsplit's maxsplit, the arguments
- * converted before the method looks at the others; else 0. */
+static SPYValue *bytes_hex(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *bytearray_hex(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *int_to_bytes(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Of a native method callee given the object and the rest, argc in all:
+ * center's, ljust's and rjust's width (not their fill), zfill's,
+ * expandtabs' tab size, split's and rsplit's maxsplit, hex's
+ * bytes_per_sep and int.to_bytes' length, the arguments converted before
+ * the method looks at the others; else 0. */
 static unsigned text_indices(SPYValue *callee, size_t argc) {
     SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = callee->as.native.kwcall;
     int zfill = call == text_pad && ((intptr_t)callee->as.native.data & 0xff) == 3;
     return call == text_pad ? argc == 2 || (argc == 3 && !zfill) ? 2 : 0 : call == text_expandtabs ? argc == 2 ? 2 : 0 :
-           (call == text_split || call == bytearray_split) && argc == 3 ? 4 : 0;
+           call == int_to_bytes ? argc == 2 || argc == 3 ? 2 : 0 :
+           (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex) && argc == 3 ? 4 : 0;
 }
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
@@ -26865,6 +26870,37 @@ static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     }
     spy_release(state);
     return value;
+}
+/* The position, after argc arguments, at which keyword entry kw of a call
+ * of callee converts by its Python __index__ as text_indices' arguments
+ * do: split's and rsplit's maxsplit, the sep before it None, hex's
+ * bytes_per_sep after its sep, expandtabs' tabsize, to_bytes' length and
+ * int()'s base, given a value; else -1. A bound method's object is not
+ * among the arguments. */
+static ptrdiff_t keyword_index(SPYContext *c, SPYValue *callee, size_t argc, const Entry *kw) {
+    if (kw->value->type != SPY_INSTANCE || kw->key->type != SPY_STRING) return -1;
+    const char *name = kw->key->as.string.data;
+    if (callee == c->types[SPY_INT]) return argc == 1 && !strcmp(name, "base") ? 1 : -1;
+    size_t bound = callee->type == SPY_METHOD;
+    SPYValue *fn = bound ? callee->as.method.function : callee;
+    if (fn->type != SPY_NATIVE || !(argc + bound)) return -1;
+    SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = fn->as.native.kwcall;
+    if ((call == text_split || call == bytearray_split) && argc + bound <= 2 && !strcmp(name, "maxsplit")) return 2 - (ptrdiff_t)bound;
+    if ((call == bytes_hex || call == bytearray_hex) && argc + bound == 2 && !strcmp(name, "bytes_per_sep")) return (ptrdiff_t)argc;
+    return argc + bound == 1 && ((call == text_expandtabs && !strcmp(name, "tabsize")) || (call == int_to_bytes && !strcmp(name, "length"))) ?
+           (ptrdiff_t)argc : -1;
+}
+static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
+/* The call of callee with argc arguments argv and keyword entry kw passed
+ * by position at instead (keyword_index), after None defaults: on m, as
+ * indexed_call's. */
+static SPYValue *keyword_indexed(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, const Entry *kw, ptrdiff_t at) {
+    SPYValue *args[3];
+    size_t count = 0;
+    for (; count < argc; count++) args[count] = spy_retain(argv[count]);
+    while (count < (size_t)at) args[count++] = spy_none(c);
+    args[count++] = spy_retain(kw->value);
+    return indexed_call(c, m, callee, -1, NULL, count, args);
 }
 /* The call (index_arguments) of callee, method number method of it, named
  * name, or -1 and NULL, or of a bound method's, with argc arguments argv,
@@ -27688,6 +27724,14 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
             return NULL;
         }
     }
+    ptrdiff_t at;
+    if (calls && kwc == 1 && (at = keyword_index(c, callee, positional, kw)) >= 0) {
+        spy_retain(callee);
+        result = keyword_indexed(c, m, callee, positional, argv, kw, at);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        spy_release(callee);
+        return result;
+    }
     SPYValue *convert;
     if (calls && is_builtin(callee, B_ROUND) && round_keywords(positional, argv, kw, kwc) && is_number(argv[0]) &&
         (convert = index_function(c, argv[1])))
@@ -27733,6 +27777,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
     SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result = NULL, *function = NULL, *self = NULL;
     SPYValue *allocate = NULL, *direct = calls ? type_called(c, callee) : NULL;
     int plain = 0, init = 0, id, called = 0;
+    ptrdiff_t at;
     /* type.__call__ of a class whose __init__ or __new__ runs on the
      * machine calls the class, its metaclass's __call__ aside. */
     if (direct && string_keys(c, keywords) && called_machine(c, direct)) {
@@ -27781,7 +27826,8 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         SPYValue *argv[3];
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = indexed_call(c, m, callee, -1, NULL, args->as.seq.len, argv);
-    } else if (calls && keywords->as.map.len && args->as.seq.len == 1 && (callee->type == SPY_CLASS || callee->type == SPY_BOUND_METHOD) &&
+    } else if (calls && keywords->as.map.len == 1 && (at = keyword_index(c, callee, args->as.seq.len, map_items(keywords))) >= 0)
+        result = keyword_indexed(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), at); else if (calls && keywords->as.map.len && args->as.seq.len == 1 && (callee->type == SPY_CLASS || callee->type == SPY_BOUND_METHOD) &&
                string_keys(c, keywords) && consumer_of(c, callee, -1, 1, args->as.seq.items) >= 0 &&
                dict_consumer(c, m, callee, args->as.seq.items[0], spy_retain(keywords))) ;
     else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
@@ -35877,10 +35923,12 @@ static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     static const char *const names[] = {"sep", "bytes_per_sep"};
     SPYValue *self = method_self(c, argc, argv, (int)(intptr_t)data, "hex"), *args[2];
     if (!self || parse_arguments(c, "hex", argc - 1, argv + 1, keywords, names, 2, 0, 0, args)) return NULL;
+    /* The group converts first; of the separator, the length is checked
+     * first, then the type. */
     int64_t group = 1;
     const char *sep = NULL;
+    if (args[1] && index_value(c, args[1], &group)) return NULL;
     if (args[0]) {
-        /* The length is checked first, then the type. */
         SPYValue *length = builtin(c, 1, &args[0], (void *)(intptr_t)B_LEN), *given = NULL;
         if (!length) return NULL;
         int single = !length->as.integer_data.big && length->as.integer_data.small == 1;
@@ -35891,7 +35939,6 @@ static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if ((unsigned char)given->as.string.data[0] >= 128) return spy_error(c, "ValueError", "sep must be ASCII.");
         sep = given->as.string.data;
     }
-    if (args[1] && index_value(c, args[1], &group)) return NULL;
     Buffer out = {.ctx = c};
     size_t len = self->as.string.len, every = group < 0 ? 0 - (size_t)group : (size_t)group;
     for (size_t i = 0; i < len && !c->error_type[0]; i++) {

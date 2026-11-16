@@ -131,7 +131,7 @@ Padded(p) ==
           [] OTHER -> Wrap(Fill("0", pad) \o Cat(s))
 
 
-Cases == {"literal_forms", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_iter_calls", "extend_iter_calls", "join_iter_calls", "ctor_index_big",
+Cases == {"literal_forms", "hex_group_first", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_iter_calls", "extend_iter_calls", "join_iter_calls", "ctor_index_big",
           "ctor_negative", "ctor_range_error", "ctor_float", "bytearray_ctor", "fromhex", "fromhex_bad",
           "fromhex_space_middle", "fromhex_non_hex", "hex", "hex_bad_sep", "index_is_int", "iterate_ints",
           "repr_escapes", "immutable", "concat_repeat", "concat_str", "contains", "contains_str", "compare",
@@ -161,6 +161,8 @@ Generated(p) ==
 
 Case(c) ==
     CASE c = "literal_forms" -> "(b'still allows embedded \"double\" quotes', b\"a'b\", b'3', b'\\\\d', 1)"
+      \* hex's bytes_per_sep converts by its __index__, by position or keyword, before sep is checked.
+      [] c = "hex_group_first" -> "('ValueError', '61:62', 2)"
       [] c = "literal_non_ascii" -> "SyntaxError: bytes can only contain ASCII literal characters"
       [] c = "ctor_forms" -> "(b'', b'\\x00\\x00\\x00', b'\\x00\\x01\\x02', b'ab', b'c', b'm', b'dunder', b'\\x00\\x00\\x00')"
       [] c = "ctor_str_encoding" -> "(b'\\xc3\\xa9', b'\\xe9', b'a')"

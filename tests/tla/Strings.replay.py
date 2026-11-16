@@ -37,6 +37,8 @@ def pad(method, s, width):
 
 
 SOURCES = {
+    "index_keywords": "log = []\nclass N:\n    def __init__(self, v): self.v = v\n    def __index__(self):\n        log.append(self.v)\n        return self.v\n"
+                      "result = ('a b c'.split(maxsplit=N(1)), 'a b c'.rsplit(' ', maxsplit=N(1)), 'a\\tb'.expandtabs(tabsize=N(3)), int('11', base=N(2)), log)",
     "index_arguments": "log = []\nclass N:\n    def __init__(self, v): self.v = v\n    def __index__(self):\n        log.append(self.v)\n        return self.v\n"
                        "def bad():\n    try: return 'ab'.ljust(N(3), 1)\n    except TypeError as e: return type(e).__name__\n"
                        "result = ('ab'.ljust(N(5), '*'), 'ab'.rjust(N(5)), 'a\\tb'.expandtabs(N(4)), 'a b c'.split(None, N(1)), bad(), log)",

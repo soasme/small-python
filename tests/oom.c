@@ -1035,6 +1035,18 @@ static const char *const programs[] = {
     "        except (LookupError, TypeError) as e: out.append(type(e).__name__)\n"
     "    return out\n"
     "print(ti())\n",
+    "class TKX:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        if self.v is None: raise LookupError('x')\n"
+    "        return self.v\n"
+    "def tk():\n"
+    "    s = 'a b c'\n"
+    "    out = [s.split(maxsplit=TKX(1)), 'a\\tb'.expandtabs(tabsize=TKX(2)), int('11', base=TKX(3)), b'abc'.hex(':', TKX(1)), (5).to_bytes(TKX(2))]\n"
+    "    try: b'ab'.hex('::', TKX(None))\n"
+    "    except LookupError as e: out.append(type(e).__name__)\n"
+    "    return out\n"
+    "print(tk())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"

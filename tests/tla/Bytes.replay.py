@@ -42,6 +42,9 @@ def pad(method, s, width, kind):
 
 
 SOURCES = {
+    "hex_group_first": "log = []\nclass G:\n    def __index__(self):\n        log.append(1)\n        return 1\n"
+                       "def bad():\n    try: return b'ab'.hex('::', G())\n    except ValueError as e: return type(e).__name__\n"
+                       "result = (bad(), b'ab'.hex(':', bytes_per_sep=G()), len(log))",
     "literal_forms": 'result = (b\'still allows embedded "double" quotes\', b"a\'b", b\'\'\'3\'\'\', rb\'\\d\', len(b\'\\x00\'))',
     "literal_non_ascii": 'compile("b\'\\u00e9\'", \'s\', \'eval\')',
     "ctor_forms": "result = (bytes(), bytes(3), bytes(range(3)), bytes(b'ab'), bytes(bytearray(b'c')), bytes(memoryview(b'm')), bytes(B()), bytes(I()))",
