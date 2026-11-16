@@ -1883,6 +1883,20 @@ static const char *const programs[] = {
     "    return out\n"
     "print(fz())\n",
 
+    "class ISM(map):\n"
+    "    def __next__(self):\n"
+    "        v = super().__next__()\n"
+    "        if v == 9: raise LookupError(v)\n"
+    "        return v * 2\n"
+    "class ISZ(zip):\n"
+    "    def __next__(self): return super().__next__()[::-1]\n"
+    "def isn():\n"
+    "    out = [list(ISM(abs, [-1, 2])), sorted(ISM(abs, [3, -1])), sum(ISZ([1], [2]), ()), [*ISM(abs, [4])]]\n"
+    "    try: list(ISM(abs, [1, 9]))\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(isn())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

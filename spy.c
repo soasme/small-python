@@ -24410,8 +24410,16 @@ static int compared_items(SPYContext *c, SPYValue *set, SPYValue *v, int which) 
     for (size_t i = 0; i < set->as.map.len; i++) if (eq_reaches(map_items(set)[i].key)) return 1;
     return 0;
 }
+static NO_INLINE SPYValue *next_function(SPYContext *, SPYValue *);
+/* Whether v is an instance of a builtin iterator's subclass keeping its
+ * __iter__, which gives v itself, with a Python __next__. */
+static int iterator_subclass(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_INSTANCE && v->as.map.base && v->as.map.base->type == SPY_ITERATOR && builtin_base(c, v, "__iter__", NULL) &&
+           next_function(c, v);
+}
 static int machine_source(SPYContext *c, SPYValue *v) {
-    return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(v) || iter_function(c, v) || getitem_iterated(c, v);
+    return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(v) || iter_function(c, v) || getitem_iterated(c, v) ||
+           iterator_subclass(c, v);
 }
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);

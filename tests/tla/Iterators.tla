@@ -20,9 +20,10 @@
 (* raises TypeError), its errors propagating and a hint's TypeError or     *)
 (* NotImplemented meaning none; other consumers ask none. str.join,        *)
 (* bytes.join and dict pairs take the iterator once and list it as         *)
-(* list() would: its own __iter__ again, then its length hint. A           *)
-(* list's or tuple's subclass with its own __iter__ gives that             *)
-(* method's items to every consumer, not its storage.                      *)
+(* list() would: its own __iter__ again, then its length hint. A list's or *)
+(* tuple's subclass with its own __iter__ gives that method's items to     *)
+(* every consumer, not its storage; a map's, zip's, filter's or            *)
+(* enumerate's subclass keeping its __iter__ gives its own __next__'s.     *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -71,7 +72,8 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
-          "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter"}
+          "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
+          "iterator_subclass_next"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -134,6 +136,7 @@ Case(c) ==
       [] c = "pair_iterates_once" -> "({'a': 'b'}, ['iter'])"
       \* a list's or tuple's subclass gives the items of its own __iter__
       [] c = "subclass_iter" -> "([7, 8], [7, 8], (1,), [1], ['iter', 'len', 'iter', 'len', 'titer', 'titer'])"
+      [] c = "iterator_subclass_next" -> "([('M', 1), ('M', 2)], [-2, -1], (2, 1), ['', 'b'], [1, 2, 1, 2])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

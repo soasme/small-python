@@ -171,6 +171,12 @@ SOURCES = {
                      "    def __len__(self): log.append('len'); return 1\n"
                      "class T(tuple):\n    def __iter__(self): log.append('titer'); return iter((1,))\n"
                      "result = (list(L([1, 2])), sorted(L()), tuple(T((5,))), [*T()], log)",
+    "iterator_subclass_next": "log = []\nclass M(map):\n    def __next__(self): v = super().__next__(); log.append(v); return ('M', v)\n"
+                              "class F(filter):\n    def __next__(self): return -super().__next__()\n"
+                              "class Z(zip):\n    def __next__(self): return super().__next__()[::-1]\n"
+                              "class E(enumerate):\n    def __next__(self): i, v = super().__next__(); return v * i\n"
+                              "result = (list(M(abs, [-1, -2])), sorted(F(None, [0, 1, 2])), sum(Z([1], [2]), ()), list(E('ab')),\n"
+                              "          [*M(abs, [1, 2])] and log)",
 }
 
 
