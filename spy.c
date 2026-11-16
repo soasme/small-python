@@ -20981,8 +20981,7 @@ static void raise_again(SPYContext *c, Machine *m, SPYValue *raised, SPYValue *e
         spy_release(exception);
         return;
     }
-    if (!c->error_type[0]) raise_exception(c, raised, exception, NULL);
-    else spy_release(exception);
+    raise_exception(c, raised, exception, NULL);
 }
 /* What the call raise_again began returned in result, state the class,
  * the exception, and the instance its __new__ made, or c->unbound when
@@ -24652,18 +24651,14 @@ static int self_consumer(SPYContext *c, SPYValue *callee, SPYValue *v) {
 /* The set, frozenset, list, tuple or dict that Python class cls, of no
  * metaclass, derives from with no __new__, __init__ or __del__ of its
  * own: calling cls is calling that builtin, then cls of its result
- * (consume), the instance no earlier seen. */
+ * (consume), the instance no earlier seen. Its MRO ends at object. */
 static SPYValue *built_type(SPYContext *c, SPYValue *cls) {
     if (cls->type != SPY_CLASS || builtin_class(c, cls) || metaclassed(cls) || !cls->as.map.mro) return NULL;
-    SPYValue *mro = cls->as.map.mro;
-    for (size_t i = 0; i < mro->as.seq.len; i++) {
-        SPYValue *base = mro->as.seq.items[i];
-        if (builtin_class(c, base))
-            return base == c->types[SPY_SET] || base == c->types[SPY_FROZENSET] || base == c->types[SPY_LIST] ||
-                   base == c->types[SPY_TUPLE] || base == c->types[SPY_DICT] ? base : NULL;
-        if (name_local(base, "__new__") || name_local(base, "__init__") || name_local(base, "__del__")) return NULL;
-    }
-    return NULL;
+    SPYValue **base = cls->as.map.mro->as.seq.items;
+    for (; !builtin_class(c, *base); base++)
+        if (name_local(*base, "__new__") || name_local(*base, "__init__") || name_local(*base, "__del__")) return NULL;
+    return *base == c->types[SPY_SET] || *base == c->types[SPY_FROZENSET] || *base == c->types[SPY_LIST] ||
+           *base == c->types[SPY_TUPLE] || *base == c->types[SPY_DICT] ? *base : NULL;
 }
 /* Whether asend or __anext__ awaitable op's send of argv, or __next__, by
  * method, resumes its async generator on the machine (consume) as
@@ -32528,9 +32523,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             Machine *walk = tuple_returned(c, m, CALL_KEY, &result);
                             if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
                         }
-                        /* A builtin key's conversion (key_enter). */
-                        if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_KEY)) && c->k_fn)
-                            goto enter_k;
+                        /* A builtin key's conversion (key_enter), by a method,
+                         * which leaves no further call. */
+                        if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result, CALL_KEY);
                         if (!key_took(c, m, result)) goto consume_generator;
                     } else if (kind >= CALL_EXEC) {
                         /* An import's statement runs again, finding the module. */

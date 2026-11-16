@@ -132,3 +132,17 @@ try:
     caught = None
 except ZeroDivisionError: caught = "zero"
 assert_eq(caught, "zero")
+
+# A subject's looping __eq__ that takes no operand: the call's TypeError
+# propagates from the value pattern.
+class Narrow:
+    def __eq__(self):
+        for _ in (): pass
+        return True
+def narrow():
+    try:
+        match Narrow():
+            case 1: return "one"
+            case _: return "other"
+    except TypeError as e: return str(e)
+assert_eq(narrow(), "Narrow.__eq__() takes 1 positional argument but 2 were given")

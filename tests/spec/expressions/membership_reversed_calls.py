@@ -3,7 +3,8 @@
 # its remaining items, last first, with x by RichCompareBool, an item's
 # Python __eq__ or x's, which may loop, first and an identical item
 # matching without a call; the search stops past the match, leaving the
-# iterator at the items before it. Inside functions and comprehensions as
+# iterator at the items before it. Items with no Python __eq__ compare
+# without a call. Inside functions and comprehensions as
 # at module level.
 from harness import *
 
@@ -35,6 +36,7 @@ def main():
     next(it)
     check(lambda: (1 in it, list(it)), (True, []), [(1, 1)])
     check(lambda: [3 in reversed([K(3)]) for _ in range(2)], [True, True], [(3, 3), (3, 3)])
+    check(lambda: (5 in reversed([1, "a"]), 1 in reversed((1, 2)), 0 in reversed([])), (False, True, False), [])
 main()
 
 check(lambda: 1 in reversed([K(1), K(2)]), True, [(2, 1), (1, 1)])

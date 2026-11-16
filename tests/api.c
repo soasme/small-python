@@ -1537,7 +1537,8 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "show()", "show.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
     /* repr(), str(), an f-string and print() of a list or tuple pause in
      * an item's __repr__; a native item's removal, also in ascii(), % or
-     * str.format or in a nested list, or an item's error ends the job. */
+     * str.format, in a nested list or before a nested spec, or an item's
+     * error ends the job. */
     execute(c, "class Item:\n    def __repr__(self): return str(slow(7))\n"
                "class Remover:\n    __repr__ = staticmethod(lambda: (shown.pop(), 'r')[1])\n"
                "class Raiser:\n    def __repr__(self): raise KeyError(slow(1))\n"
@@ -1552,10 +1553,13 @@ int main(int argc, char **argv) {
                "    shown = [Remover(), Item()]\n    out.append('%s' % (shown,))\n"
                "    shown = [Remover(), Item()]\n    out.append('%s' % ([shown],))\n"
                "    shown = [Remover(), Item()]\n    out.append('{}'.format([shown]))\n"
+               "    shown = [Remover(), Item()]\n    out.append(ascii((lambda: shown)()))\n"
+               "    shown = [Remover(), Item()]\n    out.append('{0!s:>{1}}'.format([shown], 9))\n"
+               "    shown = [Remover(), Item()]\n    out.append(f'{[shown]!r:>{9}}')\n"
                "    try: repr([Raiser()])\n    except KeyError: out.append('raised')\n"
                "    return len(''.join(out))");
     pauses = 0;
-    assert(integer(c, run_paused(c, spy_eval(c, "reprs()", "reprs.py"), SPY_STOP_STEPS, &pauses)) == 5 * 19 + 3 + 3 + 8 + 5 + 3 + 5 + 5 + 6 && pauses > 1);
+    assert(integer(c, run_paused(c, spy_eval(c, "reprs()", "reprs.py"), SPY_STOP_STEPS, &pauses)) == 5 * 19 + 3 + 3 + 8 + 5 + 3 + 5 + 5 + 3 + 9 + 9 + 6 && pauses > 1);
     /* getattr() pauses in a property's getter, __getattr__, __getattribute__
      * and a descriptor's __get__; their errors, and arity errors, propagate. */
     execute(c, "class Got:\n    @property\n    def p(self): return slow(3)\n"

@@ -1,7 +1,8 @@
 # spec: PLS-315 10.2.1, 20.2.5
 # description: type.__call__ called unbound, type.__call__(cls, ...), in
 # a metaclass's Python __call__ or elsewhere, with positional, starred or
-# keyword arguments, or through another name, runs the class's Python
+# keyword arguments, or through another name, or bound to the class as a
+# classmethod, runs the class's Python
 # __new__, then its __init__, each of which may loop, with the other
 # arguments, without the metaclass's __call__, and returns the instance.
 # An __init__ returning other than None raises TypeError, an error from
@@ -88,4 +89,19 @@ def through():
     return [held().make(P, 6).a, held().make(Plain, 7).v]
 assert_eq(through(), [(6,), 7])
 assert_eq(log, [("init", (6,), {}), ("plain", 7)])
+log.clear()
+
+# Bound to the class as a classmethod, with an argument that runs code.
+class Made:
+    def __init__(self, v):
+        for _ in (): pass
+        log.append(("made", v))
+        self.v = v
+    make = classmethod(type.__call__)
+def bound():
+    log.clear()
+    k = Made.make
+    return [k(int("8")).v, Made.make(len("abc")).v]
+assert_eq(bound(), [8, 3])
+assert_eq(log, [("made", 8), ("made", 3)])
 log.clear()
