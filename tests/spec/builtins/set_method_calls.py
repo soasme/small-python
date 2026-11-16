@@ -85,3 +85,14 @@ assert_eq(merged(), expected_merged)
 a = {P(1), P(4)}
 del log[:]
 assert_eq((names(set(a)), log), (("set", ["P1", "P4"]), []))
+
+# An update by the set itself: difference and symmetric difference empty
+# it, intersection keeps it.
+def by_self():
+    s = {1, 2}; s -= s
+    t = {1}; t.difference_update(t)
+    u = {1}; u.symmetric_difference_update(u)
+    w = {1}; w.intersection_update(w)
+    v = {3}; v ^= v
+    return s, t, u, w, v
+assert_eq(by_self(), (set(), set(), set(), {1}, set()))

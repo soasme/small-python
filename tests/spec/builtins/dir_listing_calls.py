@@ -59,3 +59,17 @@ assert_eq(log, ["dir", "b", "a", "iter", ("lt", "a", "b")])
 log.clear()
 assert_eq(dir(Gen()), ["a", "b", "c"])
 assert_eq(log, ["dir", "b", "a"])
+
+# dir() of a class calls its metaclass's __dir__, with or without a loop,
+# also as map()'s function.
+class PlainMeta(type):
+    def __dir__(cls): return ["b", "a"]
+class LoopMeta(type):
+    def __dir__(cls):
+        for _ in (): pass
+        return ["d", "c"]
+class Plain(metaclass=PlainMeta): pass
+class Looped(metaclass=LoopMeta): pass
+def classes():
+    return dir(Plain), list(map(dir, [Plain, Looped])), dir(Looped)
+assert_eq(classes(), (["a", "b"], [["a", "b"], ["c", "d"]], ["c", "d"]))

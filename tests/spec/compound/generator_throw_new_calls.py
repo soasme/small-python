@@ -93,3 +93,19 @@ log.clear()
 assert_eq(repr(run(outer())), repr(expected))
 log.clear()
 assert_eq(repr(run(gen())), repr(expected))
+
+# A __new__ with no call or loop that returns an exception of another
+# class: that instance is the argument of the class's call again.
+class Other(Exception): pass
+OTHER = Other("o")
+class Swaps(Exception):
+    def __new__(cls, *a): return a[0] if a else OTHER
+def swapping():
+    try: yield 1
+    except BaseException as e: yield (type(e).__name__, e is OTHER)
+def swapped():
+    it = swapping(); next(it)
+    return it.throw(Swaps)
+assert_eq(swapped(), ("Other", True))
+it = swapping(); next(it)
+assert_eq(it.throw(Swaps), ("Other", True))

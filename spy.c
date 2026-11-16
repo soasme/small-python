@@ -39801,15 +39801,12 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
             spy_release(state->as.seq.items[1]); state->as.seq.items[1] = index;
             if (machine_push(c, m, spy_retain(state)) || machine_push(c, m, spy_retain(c->replacing))) break;
             if (nested) {
-                *env = NULL;
+                /* The item's job enters the method repr_job found, as no
+                 * step runs between them. */
                 if (machine_push(c, m, spy_retain(c->field_calls[0])) || machine_push(c, m, spy_retain(item)) ||
                     !(text = repr_call(c, m, env))) break;
-                if (*env) { *function = c->entering_init; return text; }
-                /* The item's job ended at once. */
-                spy_release(machine_pop(m)); spy_release(machine_pop(m));
-                if (sequence_append(c, state, text)) break;
-                spy_release(text); text = NULL;
-                continue;
+                *function = c->entering_init;
+                return text;
             }
             if (machine_push(c, m, spy_string(c, "__repr__", 8)) || machine_push(c, m, spy_retain(item)) ||
                 !(*env = function_env(c, *function, 1, (SPYValue *[]){spy_retain(item)}, NULL, 1))) break;
@@ -39927,32 +39924,12 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
             SPYValue *text = !parts[0] || !parts[1] || !parts[2] || machine_push(c, m, spy_retain(state)) ||
                              machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_retain(callee)) ||
                              machine_push(c, m, spy_retain(object)) ? NULL : repr_call(c, m, env);
-            if (text && *env) {
-                spy_release(object);
-                *function = c->entering_init; c->entering_kind = CALL_CHECKED;
-                return text;
-            }
-            spy_release(text);
-            if (c->error_type[0]) { spy_release(object); return NULL; }
-            /* A container whose repr is being built converts in C, "[...]". */
-            spy_release(machine_pop(m)); spy_release(machine_pop(m));
-            SPYValue *pending = items[10], *converted = convert_field(c, object, (int)format.conversion);
-            items[10] = spy_none(c);
-            if (converted && pending->as.seq.items[0] == c->none) {
-                /* Its text is the object of the nested spec that follows. */
-                spy_release(items[6]); items[6] = converted;
-                spy_release(items[7]); items[7] = spy_retain(pending->as.seq.items[2]);
-                spy_release(object); spy_release(pending);
-                continue;
-            }
-            SPYValue *formatted = converted ? format_call(c, converted, pending->as.seq.items[0]) : NULL;
-            Buffer joined = {.ctx = c};
-            SPYValue *done = format_finish(c, &joined, !formatted || append(&joined, items[5]->as.string.data, items[5]->as.string.len) ||
-                                                       append(&joined, formatted->as.string.data, formatted->as.string.len));
-            release_all(4, (SPYValue *[]){object, pending, converted, formatted});
-            if (!done) return NULL;
-            spy_release(items[5]); items[5] = done;
-            continue;
+            /* The job enters the method repr_items found, as no step runs
+             * between them. */
+            spy_release(object);
+            if (!text) return NULL;
+            *function = c->entering_init; c->entering_kind = CALL_CHECKED;
+            return text;
         }
         if (!parts[0] || !parts[1] || !parts[2] || machine_push(c, m, spy_retain(state)) ||
             machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, name ? name : spy_string(c, "__format__", 10)) ||

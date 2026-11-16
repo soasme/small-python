@@ -40,3 +40,21 @@ assert_eq(error(TypeError, closed.__code__, {}, None, None, [cell]), "arg 5 (clo
 assert_eq(error(TypeError, closed.__code__, {}, None, None, (1,)), "arg 5 (closure) expected cell, found int")
 assert_eq(error(ValueError, closed.__code__, {}, None, None, ()), "inner requires closure of length 1, not 0")
 assert_eq(error(ValueError, template.__code__, {}, None, None, (cell,)), "template requires closure of length 0, not 1")
+
+# A function of a class body's code runs it with its globals as the
+# namespace and returns None, or its __class__ cell.
+class Body:
+    try: raise ValueError
+    except ValueError as e: code = e.__traceback__.tb_frame.f_code
+class Celled:
+    def m(self): return __class__
+    try: raise ValueError
+    except ValueError as e: code = e.__traceback__.tb_frame.f_code
+def bodies():
+    g, g2, g3 = {}, {}, {}
+    out = [type(bodies)(Body.code, g)(), sorted(k for k in g if not k.startswith("__"))]
+    out.append(type(type(bodies)(Celled.code, g2)()).__name__)
+    exec(Body.code, g3)
+    out.append(sorted(k for k in g3 if not k.startswith("__")))
+    return out
+assert_eq(bodies(), [None, ["code"], "cell", ["code"]])
