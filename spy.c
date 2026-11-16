@@ -22617,16 +22617,6 @@ static int annotation_ran(SPYContext *c, Frame *f, Node *entry, SPYValue *execut
 /* The target list of one name that PEP 646's `*args: *Ts` unpacks its
  * annotation to; never changed. */
 static Node one_name = {.kind = N_NAME}, one_target = {.kind = N_TUPLE, .args = &one_name};
-/* Entry's value, which it takes: a starred one annotates with the single
- * item it unpacks to. */
-static SPYValue *annotation_value(SPYContext *c, Frame *f, Node *entry, SPYValue *value) {
-    if (!value || entry->a->kind != N_STAR) return value;
-    SPYValue *items = unpack_target(c, f, &one_target, value);
-    spy_release(value);
-    value = items ? spy_retain(items->as.seq.items[0]) : NULL;
-    spy_release(items);
-    return value;
-}
 static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n) {
     SPYValue *result = annotations_begin(c, f, n), *executed = NULL;
     for (Node *entry = n->args; result && entry && !c->error_type[0]; entry = entry->next) {
@@ -22635,7 +22625,8 @@ static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n
             int found = annotation_ran(c, f, entry, executed);
             if (found <= 0) { if (found < 0) break; continue; }
         }
-        SPYValue *value = annotation_value(c, f, entry, eval(c, f, entry->a->kind == N_STAR ? entry->a->a : entry->a));
+        /* A starred annotation's function runs on the machine (unpacks_annotation). */
+        SPYValue *value = eval(c, f, entry->a);
         /* A lazy type-parameter value returns its single expression. */
         if (n->op == 1 && value) { spy_release(result); spy_release(executed); return value; }
         SPYValue *key = value ? spy_string(c, entry->text, strlen(entry->text)) : NULL;

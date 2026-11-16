@@ -62,3 +62,24 @@ assert_eq(run(), expected)
 log.clear()
 assert_eq("%x %d %.1f" % (N(255), M(), N(2)), "ff 9 2.0")
 assert_eq(log, ["index", "int", "index"])
+
+# A TypeError from a method that loops is the spec's too, %c's included.
+class Looping:
+    def __int__(self):
+        for _ in (): pass
+        raise TypeError("int")
+    def __index__(self):
+        for _ in (): pass
+        raise TypeError("index")
+    def __float__(self):
+        for _ in (): pass
+        raise TypeError("float")
+def looping():
+    out = []
+    for spec in ("%d", "%x", "%f", "%c"):
+        try: out.append(spec % Looping())
+        except TypeError as e: out.append(str(e))
+    return out
+assert_eq(looping(), ["format argument: %d requires a real number, not Looping", "format argument: %x requires an integer, not Looping",
+                      "format argument: %f requires a real number, not Looping",
+                      "format argument: %c requires an integer or a unicode character, not Looping"])
