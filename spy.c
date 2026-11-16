@@ -32391,7 +32391,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (began > 0) goto consume_generator;
                 if (began) break;
             }
-            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || a->type == SPY_SET ||
+            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || is_set(a) ||
                 (UNLIKELY(ins->arg == T_MODEQ) && percent_converts(c, a, b)) || (UNLIKELY(ins->arg == T_OREQ) && merges(a, b))) {
                 x = a; y = b; goto operator_step;
             }

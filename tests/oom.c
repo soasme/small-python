@@ -990,6 +990,23 @@ static const char *const programs[] = {
     "    return out\n"
     "print(gf())\n",
 
+    "class FAE:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __hash__(self): return 1\n"
+    "    def __eq__(self, o): return self.v == o.v\n"
+    "def fa():\n"
+    "    out = []\n"
+    "    for op in '|&-^':\n"
+    "        a = frozenset([FAE(1), FAE(2)])\n"
+    "        b = {FAE(2), FAE(3)}\n"
+    "        if op == '|': a |= b\n"
+    "        elif op == '&': a &= b\n"
+    "        elif op == '-': a -= b\n"
+    "        else: a ^= b\n"
+    "        out.append(sorted(e.v for e in a))\n"
+    "    return out\n"
+    "print(fa())\n",
+
     "class RS(set):\n"
     "    def __eq__(self, o):\n"
     "        for _ in (): pass\n"

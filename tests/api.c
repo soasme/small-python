@@ -2433,6 +2433,12 @@ int main(int argc, char **argv) {
                "def dropped():\n    out = []\n    held(out)\n    return out[0]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "dropped()", "dropped.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
+    /* So does a Python __eq__ that a frozenset's augmented assignment calls. */
+    execute(c, "class Same:\n    def __init__(self, v): self.v = v\n    def __hash__(self): return 1\n"
+               "    def __eq__(self, o):\n        for i in range(3000): pass\n        return self.v == o.v\n"
+               "def frozen():\n    a = frozenset([Same(1), Same(2)])\n    a &= {Same(2), Same(3)}\n    return len(a)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "frozen()", "frozen.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 3);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
