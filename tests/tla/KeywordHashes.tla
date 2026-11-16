@@ -8,9 +8,12 @@
 (* duplicate raises TypeError there, a display's keeps the first key with  *)
 (* the later value. A function's **kw, dict() and frozendict() then set    *)
 (* each keyword by DictSetItem, hashing its name once; a subclass's        *)
-(* construction, dict.update and a display merge without hashing.          *)
+(* construction, dict.update and a display merge without hashing. A       *)
+(* function with a parameter z first compares each name with z by its     *)
+(* __eq__, then hashes it into **kw.                                       *)
 (*                                                                         *)
-(* A program is a target, a call of a function taking only **kw, dict(), a *)
+(* A program is a target, a call of a function taking only **kw, or z=None *)
+(* and **kw, dict(), a                                                     *)
 (* dict subclass, dict.update, frozendict(), a frozendict subclass or a    *)
 (* dict display, given a=0 first or not, then one or two ** dicts of one   *)
 (* key each, a or b. The outcome is the result's items in order with the   *)
@@ -18,7 +21,7 @@
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
-Targets == {"call", "dict", "dict subclass", "update", "frozendict", "frozendict subclass", "display"}
+Targets == {"call", "parameter call", "dict", "dict subclass", "update", "frozendict", "frozendict subclass", "display"}
 Keys == UNION {[1..n -> {"a", "b"}] : n \in 1..2}
 Programs == [target : Targets, explicit : BOOLEAN, keys : Keys]
 
@@ -42,9 +45,13 @@ Merge(items, log, keys, i) ==
 \* Each merged name of the str subclass, not the exact str a, hashed once.
 Hashes(items, explicit) == [j \in 1..(Len(items) - IF explicit THEN 1 ELSE 0) |-> "hash"]
 
+\* Each such name compared with the parameter z, then hashed into **kw.
+Binds(items, explicit) == [j \in 1..(2 * (Len(items) - IF explicit THEN 1 ELSE 0)) |-> IF j % 2 = 1 THEN "eq" ELSE "hash"]
+
 Run(p) ==
     LET merged == Merge(IF p.explicit THEN <<<<"a", 0>>>> ELSE <<>>, <<>>, p.keys, 1)
-    IN  IF merged[1] # "ok" \/ p.target \notin {"call", "dict", "frozendict"} THEN merged
+    IN  IF merged[1] # "ok" \/ p.target \notin {"call", "parameter call", "dict", "frozendict"} THEN merged
+        ELSE IF p.target = "parameter call" THEN <<"ok", merged[2], merged[3] \o Binds(merged[2], p.explicit)>>
         ELSE <<"ok", merged[2], merged[3] \o Hashes(merged[2], p.explicit)>>
 
 Init == program \in Programs /\ outcome = Pending
@@ -56,5 +63,5 @@ Done == outcome # Pending
 
 \* No name is hashed more than once, nor compared without a duplicate.
 OnceEach == Done => Len(SelectSeq(outcome[3], LAMBDA e : e = "hash")) <= Len(program.keys)
-Duplicates == Done /\ program.target # "display" /\ outcome[1] = "ok" => outcome[3] \in {<<>>, <<"hash">>, <<"hash", "hash">>}
+Duplicates == Done /\ program.target \notin {"display", "parameter call"} /\ outcome[1] = "ok" => outcome[3] \in {<<>>, <<"hash">>, <<"hash", "hash">>}
 =============================================================================

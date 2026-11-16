@@ -30,6 +30,10 @@ def f(**kw):
     return kw
 
 
+def g(z=None, **kw):
+    return kw
+
+
 def outcome(p):
     first = {"a": 0} if p["explicit"] else {}
     sources = [{Name(k): i} for i, k in enumerate(p["keys"], 1)]
@@ -41,7 +45,7 @@ def outcome(p):
             result = {}
             result.update(**first, **sources[0], **(sources[1] if len(sources) > 1 else {}))
         else:
-            callee = {"call": f, "dict": dict, "dict subclass": D, "frozendict": frozendict, "frozendict subclass": F}[p["target"]]
+            callee = {"call": f, "parameter call": g, "dict": dict, "dict subclass": D, "frozendict": frozendict, "frozendict subclass": F}[p["target"]]
             result = callee(**first, **sources[0], **(sources[1] if len(sources) > 1 else {}))
     except TypeError:
         return ("TypeError", (), tuple(log))

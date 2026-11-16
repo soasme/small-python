@@ -5,7 +5,9 @@
 # a duplicate raising TypeError with no hash; a function's **kw, dict()
 # and frozendict() then hash each name once, while a dict or frozendict
 # subclass, dict.update(), dict.__init__ and a display's ** merge them
-# without hashing. Inside functions as at module level.
+# without hashing. A name's __hash__ that raises, or returns no int, when
+# **kw stores it fails the call, and the keywords after a hashed one bind
+# in turn. Inside functions as at module level.
 from harness import *
 
 log = []
@@ -57,8 +59,39 @@ expected = [([('a', 1)], ['hash']), ([('a', 1), ('b', 2)], ['hash', 'hash']), ([
             ([('a', 1), ('b', 2)], []), ([('a', 1)], ['eq']),
             ("TypeError: dict() got multiple values for keyword argument 'a'", ['eq']), (None, ['eq', 'hash'])]
 
-def main():
-    return results()
+class Late(str):
+    def __hash__(self):
+        for _ in range(2): pass
+        log.append("late")
+        if len(log) == 1: return str.__hash__(self)
+        if str(self) == "r": raise LookupError(str(self))
+        if str(self) == "t": raise TypeError(str(self))
+        return "no int" if str(self) == "s" else str.__hash__(self)
+    __eq__ = str.__eq__
 
-assert_eq(main(), expected)
-assert_eq(results(), expected)
+def late(call):
+    del log[:]
+    try:
+        r = call()
+        r = sorted((str(k), v) for k, v in r.items()) if isinstance(r, dict) else r
+    except (LookupError, TypeError) as e:
+        r = type(e).__name__ + ": " + str(e)
+    return r, log[:]
+
+def h(a=None, *, c=0, **kw): return a, c, kw
+
+def hashed():
+    return [late(lambda: f(**{Late("r"): 1})), late(lambda: f(**{Late("s"): 1})), late(lambda: f(**{Late("t"): 1})), late(lambda: f(**{Late("q"): 1})),
+            late(lambda: h(**{Late("q"): 1}, c=2)[1:]), late(lambda: h(**{Late("q"): 1}, a=3)[0]),
+            late(lambda: h(**{Late("q"): 1}, **{Name("c"): 4})[1])]
+
+expected_hashed = [('LookupError: r', ['late', 'late']), ("TypeError: cannot use 'Late' as a dict key (__hash__ method should return an integer)", ['late', 'late']), ("TypeError: cannot use 'Late' as a dict key (t)", ['late', 'late']), ([('q', 1)], ['late', 'late']), ((2, {'q': 1}), ['late', 'late']), (3, ['late', 'late']), (4, ['late', 'hash', 'late', 'eq', 'eq'])]
+
+def main():
+    return results(), hashed()
+
+# The functions' first calls, which run in C, bind as later ones.
+assert_eq(hashed(), expected_hashed)
+
+assert_eq(main(), (expected, expected_hashed))
+assert_eq((results(), hashed()), (expected, expected_hashed))

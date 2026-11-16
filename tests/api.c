@@ -2485,6 +2485,13 @@ int main(int argc, char **argv) {
                "def kw_named():\n    return kw_bound(**{KwName('b'): 2, KwName('a'): 3, KwName('z'): 0})\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "kw_named()", "kw_named.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 4);
+    /* So does the Python __hash__ of a name a function's **kwargs stores. */
+    execute(c, "class KwHashed(str):\n    __eq__ = str.__eq__\n    def __hash__(self):\n        for i in range(3000): pass\n"
+               "        return str.__hash__(self)\n"
+               "def kw_stored(**rest):\n    return len(rest)\n"
+               "def kw_hashes():\n    d = {KwHashed('p'): 1, KwHashed('q'): 2}\n    return kw_stored(**d) + kw_stored(**d)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "kw_hashes()", "kw_hashes.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 4);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
