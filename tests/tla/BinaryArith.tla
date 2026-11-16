@@ -40,7 +40,7 @@ Cases == {"int_float", "true_div", "floor_div", "mod_sign", "divmod", "complex_m
           "bool_arith", "int_div_zero", "int_floordiv_zero", "int_mod_zero", "float_div_zero", "float_mod_zero",
           "complex_div_zero", "pow_neg", "pow_frac_neg", "pow_zero_neg", "pow_zero_neg_float", "pow_precedence",
           "pow_overflow", "pow_float_neg_frac", "int_to_float_overflow", "int_true_div_big", "int_true_div_overflow",
-          "unary_str", "unary_neg_list", "unary_invert_float", "unary_ops", "str_mul", "str_mul_float", "seq_mul_overflow",
+          "unary_str", "unary_neg_list", "unary_invert_float", "unary_ops", "str_mul", "str_mul_float", "seq_mul_overflow", "pow_modulus_method", "pow_complex_declines",
           "str_add_int", "list_add_tuple", "int_add_str", "matmul_int", "float_floor_big", "nan_inf", "shift_neg",
           "shift_float", "bitwise_float", "big_mul", "complex_zero_power", "complex_overflow", "complex_matmul",
           "bool_matmul", "complex_shift", "divmod_complex", "complex_zero_div", "pow3_instance", "pow3_methods",
@@ -123,6 +123,10 @@ Case(c) ==
       [] c = "str_mul" -> "('abab', 'abab', [0, 0, 0], '', 'a')"
       [] c = "str_mul_float" -> "TypeError: can't multiply sequence by non-int of type 'float'"
       \* A repetition count's overflow names the object, as ToIndexSize does.
+      \* pow() with a modulus calls the base's __pow__ with it, then the built-in slots.
+      [] c = "pow_modulus_method" -> "(7, [(2, 5)], \"unsupported operand type(s) for ** or pow(): 'P', 'int', 'int'\")"
+      \* complex's power slot declines a base or exponent that is not a number.
+      [] c = "pow_complex_declines" -> "(\"unsupported operand type(s) for ** or pow(): 'P', 'int', 'complex'\", 'complex modulo')"
       [] c = "seq_mul_overflow" -> "OverflowError: cannot fit 'Huge' into an index-sized integer"
       [] c = "str_add_int" -> "TypeError: can only concatenate str (not \"int\") to str"
       [] c = "list_add_tuple" -> "TypeError: can only concatenate list (not \"tuple\") to list"

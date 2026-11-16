@@ -2468,6 +2468,11 @@ int main(int argc, char **argv) {
     execute(c, "def counted():\n    return sum(i for i, _ in enumerate('ab', Width())) + sum(i for i, _ in enumerate('a', start=Width())) + list(enumerate('a', Width()))[0][0]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "counted()", "counted.py"), SPY_STOP_STEPS, &pauses)) == 17 && pauses > 6);
+    /* So does pow()'s __pow__ given a modulus. */
+    execute(c, "class Powered:\n    def __pow__(self, b, m=None):\n        for i in range(3000): pass\n        return b * m\n"
+               "def powered():\n    return pow(Powered(), 2, 3) + pow(Powered(), 1, 4) + pow(Powered(), 2, 2)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "powered()", "powered.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses > 6);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

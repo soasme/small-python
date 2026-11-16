@@ -1098,6 +1098,19 @@ static const char *const programs[] = {
     "        except OverflowError as e: out.append(str(e))\n"
     "    return out\n"
     "print(rc())\n",
+    "class PWM:\n"
+    "    def __init__(self, r): self.r = r\n"
+    "    def __pow__(self, b, m=None):\n"
+    "        for _ in (): pass\n"
+    "        if self.r is None: raise LookupError('p')\n"
+    "        return self.r\n"
+    "def pw():\n"
+    "    out = [pow(PWM(7), 2, 5)]\n"
+    "    for f in (lambda: pow(PWM(None), 2, 5), lambda: pow(PWM(NotImplemented), 2, 5), lambda: pow(PWM(NotImplemented), 2, 1j)):\n"
+    "        try: f()\n"
+    "        except (LookupError, TypeError) as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(pw())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"

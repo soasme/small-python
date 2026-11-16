@@ -38,6 +38,13 @@ SOURCES = {
     "unary_ops": "result = (-(-3), +3.5, ~5, -0.0, abs(-2))",
     "str_mul": "result = ('ab' * 2, 2 * 'ab', [0] * 3, 'a' * -1, 'a' * True)",
     "str_mul_float": "'a' * 2.0",
+    "pow_modulus_method": "log = []\nclass P:\n    def __init__(self, r): self.r = r\n    def __pow__(self, b, m=None):\n        for _ in (): pass\n"
+                          "        log.append((b, m))\n        return self.r\n"
+                          "def bad():\n    try: pow(P(NotImplemented), 2, 5)\n    except TypeError as e: return str(e)\n"
+                          "result = (pow(P(7), 2, 5), log[:], bad())",
+    "pow_complex_declines": "class P:\n    def __pow__(self, b, m=None): return NotImplemented\n"
+                            "def bad(*a):\n    try: pow(*a)\n    except (TypeError, ValueError) as e: return str(e)\n"
+                            "result = (bad(P(), 2, 1j), bad(1j, 2, 3))",
     "seq_mul_overflow": "class Huge:\n    def __index__(self):\n        return 1 << 70\n'a' * Huge()",
     "str_add_int": "'a' + 1",
     "list_add_tuple": "[1] + (2,)",

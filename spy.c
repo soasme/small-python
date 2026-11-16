@@ -27019,6 +27019,32 @@ static NO_INLINE SPYValue *reduce_call(SPYContext *c, Machine *m, int id, size_t
     mem_free(consumer); spy_release(s.best); spy_release(s.item); spy_release(iterator);
     return consumer_end(c, &s);
 }
+static SPYValue *power_slots(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+/* The Python __pow__ on the machine, borrowed, that pow(argv[0], argv[1],
+ * argv[2]) calls first: of a plain instance's class, its modulus not None,
+ * and neither the exponent nor the modulus an instance or class whose
+ * slot could come first or after (ternary_op); else NULL. */
+static SPYValue *power_function(SPYContext *c, SPYValue *const *argv) {
+    for (int i = 1; i < 3; i++) if (argv[i]->type == SPY_INSTANCE || argv[i]->type == SPY_CLASS) return NULL;
+    SPYValue *function = argv[0]->type == SPY_INSTANCE && argv[2]->type != SPY_NONE ? class_lookup(argv[0]->as.map.parent, "__pow__") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* pow()'s __pow__ that pow_call called, state the arguments, returned
+ * result: NotImplemented goes on to the built-in slots (power_slots). */
+static SPYValue *pow_returned(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    SPYValue **v = state->as.seq.items;
+    if (result == c->not_implemented) { spy_release(result); result = power_slots(c, v[0], v[1], v[2]); }
+    spy_release(state);
+    return result;
+}
+/* pow() of argv's three arguments, which it takes, by __pow__ function
+ * of the first (power_function), on m (callk). */
+static SPYValue *pow_call(SPYContext *c, Machine *m, SPYValue *function, SPYValue **argv) {
+    SPYValue *state = spy_tuple(c, 3, argv);
+    if (!state) { release_all(3, argv); return NULL; }
+    return callk(c, m, function, 3, argv, pow_returned, state);
+}
 /* A call of call node n of callee (machine_builtin) with argc arguments
  * argv, which it takes with callee: exec() and eval() as source_call; the
  * Python method divmod() or pow() of two (and a None modulus) calls
@@ -27053,6 +27079,11 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
     if (checks_call(c, m, id, argc, argv, &result)) {
         release_all(argc, argv); spy_release(callee);
         return result;
+    }
+    if (id == B_POW && argc == 3 && (function = power_function(c, argv))) {
+        /* pow() of an instance with a Python __pow__ and a modulus. */
+        spy_release(callee);
+        return pow_call(c, m, function, argv);
     }
     if ((id == B_DIVMOD || id == B_POW) && argc == 2 + (size_t)(id == B_POW && argc == 3 && argv[2]->type == SPY_NONE) &&
         (argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_INSTANCE)) {
@@ -38482,6 +38513,23 @@ static SPYValue *divmod_declined(SPYContext *c, SPYValue *a, SPYValue *b) {
     SPYValue *result = quotient && remainder ? spy_tuple(c, 2, (SPYValue *[]){quotient, remainder}) : NULL;
     spy_release(quotient); spy_release(remainder); return result;
 }
+/* pow(a, b, modulus) once a Python __pow__ declined (ternary_op): each
+ * distinct built-in power slot in turn, of an instance its builtin value;
+ * int's declines other types, float's refuses a modulus, and complex's
+ * does once the base and exponent are numbers, declining otherwise. */
+static SPYValue *power_slots(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue *modulus) {
+    SPYValue *values[] = {a, b, modulus};
+    for (int i = 0; i < 3; i++) if (values[i]->type == SPY_INSTANCE && values[i]->as.map.base) values[i] = values[i]->as.map.base;
+    if (is_int(values[0]) && is_int(values[1]) && is_int(values[2])) return integer_modpow(c, values[0], values[1], values[2]);
+    int complexes = 1;
+    for (int i = 0; i < 2; i++) complexes &= is_int(values[i]) || values[i]->type == SPY_FLOAT || values[i]->type == SPY_COMPLEX;
+    for (int i = 0; i < 3; i++) {
+        int kind = is_int(values[i]) ? SPY_INT : values[i]->type;
+        if (kind == SPY_FLOAT) return spy_error(c, "TypeError", "pow() 3rd argument not allowed unless all arguments are integers");
+        if (kind == SPY_COMPLEX && complexes) return spy_error(c, "ValueError", "complex modulo");
+    }
+    return operand_error(c, "** or pow()", a, b, modulus);
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -38651,25 +38699,11 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc < 2 || argc > 3) goto arity;
         SPYValue *b = argv[1], *modulus = argc == 3 && argv[2]->type != SPY_NONE ? argv[2] : NULL;
         if (!modulus) return binary(c, T_POW, a, b);
-        SPYValue *operands[] = {a, b, modulus};
         if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) {
             SPYValue *result = binary_special(c, operator_of(T_POW), a, b, modulus);
             if (result || c->error_type[0]) return result;
-            if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
-            if (b->type == SPY_INSTANCE && b->as.map.base) b = b->as.map.base;
         }
-        /* int's power slot takes an int subclass's modulus by value. */
-        if (modulus->type == SPY_INSTANCE && modulus->as.map.base) modulus = modulus->as.map.base;
-        if (is_int(a) && is_int(b) && is_int(modulus)) return integer_modpow(c, a, b, modulus);
-        /* ternary_op: each distinct built-in power slot in turn; int's declines
-         * other types, float's and complex's refuse a modulus. */
-        SPYValue *values[] = {a, b, modulus};
-        for (int i = 0; i < 3; i++) {
-            int kind = is_int(values[i]) ? SPY_INT : values[i]->type;
-            if (kind == SPY_FLOAT) return spy_error(c, "TypeError", "pow() 3rd argument not allowed unless all arguments are integers");
-            if (kind == SPY_COMPLEX) return spy_error(c, "ValueError", "complex modulo");
-        }
-        return operand_error(c, "** or pow()", operands[0], operands[1], operands[2]);
+        return power_slots(c, a, b, modulus);
     }
     case B_DIVMOD: {
         if (argc != 2) goto arity;

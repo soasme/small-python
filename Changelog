@@ -287,6 +287,8 @@ Unreleased (0.10.0):
 - an unbound str, bytes or bytearray search given no object or one of another type names its descriptor
 - so does enumerate()'s start, by position or keyword, before a Python __iter__ of its iterable
 - a sequence repetition count too large for an index names its own type in the OverflowError
+- pow() given a modulus calls a Python __pow__ without nesting on the C stack
+- pow() with a modulus no longer reports "complex modulo" for a base or exponent that is not a number
 - a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a
   function's **kw, dict() or frozendict() stores the name, and not at all for update() or a subclass
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
