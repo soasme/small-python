@@ -48,6 +48,8 @@ SOURCES = {
     "seq_mul_overflow": "class Huge:\n    def __index__(self):\n        return 1 << 70\n'a' * Huge()",
     "str_add_int": "'a' + 1",
     "list_add_tuple": "[1] + (2,)",
+    "subclass_concat": "class St(str): pass\nclass I(int): pass\ndef f():\n    return St('a') + I(1)\nresult = f()",
+    "bytes_subclass_concat": "class B(bytes): pass\nclass St(str): pass\ndef f():\n    return B(b'') + St('a')\nresult = f()",
     "int_add_str": "1 + 'a'",
     "matmul_int": "1 @ 2",
     "float_floor_big": "result = (1e300 // 1e-300 == float('inf'), 5.0 // 0.1)",

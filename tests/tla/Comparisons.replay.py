@@ -22,6 +22,7 @@ SOURCES = {
     "seq_elem_err": "[1, 'a'] < [1, 2]",
     "str_int_eq": "result = ('1' == 1, '1' != 1)",
     "order_err": "1 < 'a'",
+    "builtin_sub_unordered": "class I(int): pass\nclass St(str): pass\ndef f():\n    return I(1) < St('a')\nresult = f()",
     "order_err_none": "None < None",
     "dict_eq": "result = ({1: 2, 3: 4} == {3: 4, 1: 2}, {1: 2} == {1: 3})",
     "dict_order": "{} < {}",

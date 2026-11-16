@@ -1141,6 +1141,16 @@ static const char *const programs[] = {
     "        out.append(len(s))\n"
     "    return out\n"
     "print(sk())\n",
+    "class BMI(int): pass\n"
+    "class BMS(str): pass\n"
+    "class BMB(bytes): pass\n"
+    "def bm():\n"
+    "    out = []\n"
+    "    for f in (lambda: BMI(1) < BMS('a'), lambda: BMS('a') + BMI(1), lambda: BMB(b'') + BMS('a'), lambda: [BMI(1)] < ['a']):\n"
+    "        try: f()\n"
+    "        except TypeError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(bm())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"

@@ -10477,10 +10477,22 @@ static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b
         if (!kept) return operand_error(c, binary_symbol(op), a, b, NULL);
     }
     SPYValue *result = binary(c, op, x, y);
-    /* An unsupported operation names the operands' own types. */
-    if (!result && !strcmp(c->error_type, "TypeError") && !strncmp(c->error_message, "unsupported operand type(s)", 27)) {
+    /* An unsupported operation names the operands' own types; a str, list
+     * or tuple concatenation, only the right operand's. A concatenation's
+     * TypeError of a Python method is its own. */
+    if (result || strcmp(c->error_type, "TypeError")) return result;
+    if (!strncmp(c->error_message, "unsupported operand type(s)", 27)) {
         spy_clear_error(c);
         return operand_error(c, binary_symbol(op), a, b, NULL);
+    }
+    if (y->type == SPY_INSTANCE) return result;
+    if (!strncmp(c->error_message, "can only concatenate", 20)) {
+        spy_clear_error(c);
+        return errorf(c, "TypeError", "can only concatenate %s (not \"%s\") to %s", type_name(x), type_name(b), type_name(x));
+    }
+    if (!strncmp(c->error_message, "can't concat", 12)) {
+        spy_clear_error(c);
+        return errorf(c, "TypeError", "can't concat %.*s to %.*s", shown(type_name(b), 100), type_name(b), shown(type_name(a), 100), type_name(a));
     }
     return result;
 }
@@ -10649,6 +10661,19 @@ static const int rich_reflected[] = {R_GT, R_GE, R_EQ, R_NE, R_LT, R_LE};
 static int rich_kind(int op) {
     return op == T_EQ ? R_EQ : op == T_NE ? R_NE : op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : op == T_GE ? R_GE : -1;
 }
+/* The TypeError of ordering op, which a and b do not support. */
+static SPYValue *unordered(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
+                  op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
+}
+/* Whether the error is the TypeError of ordering op that a and b do not
+ * support (unordered), not one of their items'. */
+static int unordered_by(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    char expected[sizeof(c->error_message)];
+    snprintf(expected, sizeof(expected), "'%s' not supported between instances of '%s' and '%s'",
+             op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
+    return !strcmp(c->error_type, "TypeError") && !strcmp(c->error_message, expected);
+}
 /* Rich comparison op of a and b once their special methods declined it. */
 static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base)) {
@@ -10659,13 +10684,17 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
          * reflected method, unless its class has a Python one. */
         int reflected = rich_reflected[rich_kind(op)];
         SPYValue *left = value_class(c, a), *right = value_class(c, b);
-        if (y != b && right != left && subclass(right, left) && !class_lookup(right, rich_names[reflected]))
-            return comparison(c, tokens[reflected], y, x);
-        return comparison(c, op, x, y);
+        int swapped = y != b && right != left && subclass(right, left) && !class_lookup(right, rich_names[reflected]);
+        SPYValue *result = swapped ? comparison(c, tokens[reflected], y, x) : comparison(c, op, x, y);
+        /* Builtin values that do not order name the operands' own types. */
+        if (!result && unordered_by(c, swapped ? tokens[reflected] : op, swapped ? y : x, swapped ? x : y)) {
+            spy_clear_error(c);
+            return unordered(c, op, a, b);
+        }
+        return result;
     }
     if (op == T_EQ || op == T_NE) return spy_bool(c, op == T_EQ ? a == b : a != b);
-    return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
-                  op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
+    return unordered(c, op, a, b);
 }
 static int pair_python(SPYContext *, SPYValue *, SPYValue *);
 /* A builtin scalar, bytes, bytearray or range, or a class of no
@@ -10853,8 +10882,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         if (n >= 4096 && spend(c, n / 64)) return NULL;
         order = memcmp(a->as.string.data, b->as.string.data, n);
         if (!order) order = a->as.string.len < b->as.string.len ? -1 : a->as.string.len > b->as.string.len;
-    } else return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
-                         op == '<' ? "<" : op == '>' ? ">" : op == T_LE ? "<=" : ">=", type_name(a), type_name(b));
+    } else return unordered(c, op, a, b);
     return spy_bool(c, op == '<' ? order < 0 : op == '>' ? order > 0 : op == T_LE ? order <= 0 : order >= 0);
 }
 
