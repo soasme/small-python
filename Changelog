@@ -160,7 +160,8 @@ Unreleased (0.10.0):
 - sorted(), list.sort(), min() and max() by a builtin key such as len call an item's Python method without nesting
   on the C stack
 - filter() of a builtin function such as len calls an item's Python method without nesting on the C stack
-- so do sorted(), min() and max() by a builtin key over a list or tuple iterator, a set or a dict
+- sorted(), min() and max() by a builtin key over a list or tuple iterator, a set or a dict call an item's
+  Python method without nesting on the C stack
 - iter(f, sentinel), also in a zip, map or enumerate, compares with a Python __eq__ of its sentinel without
   nesting on the C stack
 - a list's slice store or deletion calls its parts' Python __index__, then takes a generator's items, without
@@ -278,14 +279,17 @@ Unreleased (0.10.0):
 - the width of str's and bytes' padding methods, a tab size or maxsplit, and int()'s base call their
   Python __index__ without nesting on the C stack
 - int() given a base converts and checks the base before it refuses a value that is not a string
-- so do a maxsplit, tabsize or base given by keyword, bytes.hex()'s bytes_per_sep and int.to_bytes()' length
+- a maxsplit, tabsize or int() base given by keyword, bytes.hex()'s bytes_per_sep and int.to_bytes()' length
+  call their Python __index__ without nesting on the C stack
 - bytes.hex() converts bytes_per_sep before it checks sep
 - a bytearray's pop() and insert() index, the byte of insert(), append() and remove(), and its search bounds
   call their Python __index__ without nesting on the C stack, and may resize the array
 - bytearray's append, extend, pop, insert, remove, clear, copy and reverse report argument errors as CPython does
-- so do an unbound list.pop(), list.insert(), list.index(), tuple.index() and str, bytes and bytearray search
+- an unbound list.pop(), list.insert(), list.index(), tuple.index() and str, bytes and bytearray search call
+  an argument's Python __index__ without nesting on the C stack
 - an unbound str, bytes or bytearray search given no object or one of another type names its descriptor
-- so does enumerate()'s start, by position or keyword, before a Python __iter__ of its iterable
+- enumerate()'s start, by position or keyword, calls its Python __index__ without nesting on the C stack,
+  before a Python __iter__ of its iterable
 - a sequence repetition count too large for an index names its own type in the OverflowError
 - pow() given a modulus calls a Python __pow__ without nesting on the C stack
 - pow() with a modulus no longer reports "complex modulo" for a base or exponent that is not a number
