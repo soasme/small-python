@@ -52,6 +52,12 @@ SOURCES = {
     "setattr_nonstr": 'result = setattr(P(), 1, 2)',
     "hasattr_propagates": "class E:\n    @property\n    def p(self): raise ValueError('inner')\nresult = hasattr(E(), 'p')",
     "hasattr_attributeerror": "class E:\n    @property\n    def p(self): raise AttributeError('x')\nresult = hasattr(E(), 'p')",
+    "delattr_hook_calls": "log = []\nclass H:\n    def __delattr__(self, n):\n        log.append(n)\n        if n == 'bad': raise LookupError(n)\n"
+                          "class P:\n    p = property(lambda s: 1, None, lambda s: log.append('deleter'))\n"
+                          "class D:\n    def __get__(self, i, o): return 1\n    def __set__(self, i, v): pass\n"
+                          "    def __delete__(self, i): log.append('delete')\nclass Q:\n    d = D()\n"
+                          "def bad():\n    try: delattr(H(), 'bad')\n    except LookupError as e: return type(e).__name__\n"
+                          "result = (delattr(H(), 'x'), delattr(P(), 'p'), delattr(Q(), 'd'), bad(), log)",
     "property_get_calls": "log = []\nclass Q(property):\n    def __get__(self, obj, owner=None):\n        log.append('own')\n        return ('q', super().__get__(obj, owner))\n"
                           "class K:\n    @Q\n    def q(self):\n        for _ in (): pass\n        log.append('get')\n        return 2\n"
                           "k = K()\nd = K.__dict__['q']\n"

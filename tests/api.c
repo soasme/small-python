@@ -2439,6 +2439,12 @@ int main(int argc, char **argv) {
                "def frozen():\n    a = frozenset([Same(1), Same(2)])\n    a &= {Same(2), Same(3)}\n    return len(a)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "frozen()", "frozen.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 3);
+    /* So does the Python __delattr__ or deleter delattr() calls. */
+    execute(c, "class Deleting:\n    def __delattr__(self, n):\n        for i in range(3000): pass\n"
+               "    p = property(lambda s: 0, None, lambda s: [i for i in range(3000)])\n"
+               "def deleted():\n    d = Deleting()\n    delattr(d, 'x')\n    delattr(Deleting.__new__(Deleting), 'p')\n    return 5\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "deleted()", "deleted.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

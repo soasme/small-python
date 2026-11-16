@@ -7,12 +7,12 @@
 (* with a default, hasattr() (false only on AttributeError), setattr(),    *)
 (* and delattr(), which reach the instance dict and not class attributes   *)
 (* or __getattr__, refusing objects without a __dict__ and read-only       *)
-(* attributes; vars(), dir() (sorted, or __dir__ listed, a generator or   *)
-(* a Python __iter__ too), callable(),                                     *)
-(* id(), hash() (truncating big __hash__ results, refusing non-int ones    *)
-(* and classes that set __eq__ alone; a tuple's of its items' in order,    *)
-(* kept unless an item fails), object(), and type() with one or three      *)
-(* arguments.                                                              *)
+(* attributes, delattr() calling a Python __delattr__, property deleter or *)
+(* __delete__; vars(), dir() (sorted, or __dir__ listed, a generator or a  *)
+(* Python __iter__ too), callable(), id(), hash() (truncating big __hash__ *)
+(* results, refusing non-int ones and classes that set __eq__ alone; a     *)
+(* tuple's of its items' in order, kept unless an item fails), object(),   *)
+(* and type() with one or three arguments.                                 *)
 (*                                                                         *)
 (* A program takes an instance o of class A (with class attribute x), of   *)
 (* B(A) (setting y in __init__), of C (whose __getattr__ supplies names    *)
@@ -53,7 +53,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
              ELSE "AttributeError: 'int' object has no attribute '" \o n \o "' and no __dict__ for setting new attributes"
 
 
-Cases == {"getattr_nonstr", "property_get_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
+Cases == {"getattr_nonstr", "property_get_calls", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
           "dir_hook_bad", "callable_forms", "id_identity", "hash_big", "hash_bad", "hash_eq_only",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
@@ -83,6 +83,8 @@ Case(c) ==
       [] c = "hasattr_propagates" -> "ValueError: inner"
       [] c = "hasattr_attributeerror" -> "False"
       \* property.__get__ of an object, bound or through super(), calls its getter
+      \* delattr() calls a Python __delattr__, deleter or __delete__, their errors propagating.
+      [] c = "delattr_hook_calls" -> "(None, None, None, 'LookupError', ['x', 'deleter', 'delete', 'bad'])"
       [] c = "property_get_calls" -> "(('q', 2), 2, 2, False, ['own', 'get', 'get', 'get', 'own'])"
       [] c = "slots_setattr" -> "AttributeError: 'P' object has no attribute 't' and no __dict__ for setting new attributes"
       [] c = "slots_vars" -> "TypeError: vars() argument must have __dict__ attribute"

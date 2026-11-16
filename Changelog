@@ -274,6 +274,7 @@ Unreleased (0.10.0):
 - a dead generator's finally clause runs without nesting on the C stack when generators that close
   running nothing die just before it
 - a frozenset's augmented assignment calls its elements' Python __eq__ without nesting on the C stack
+- delattr() calls a Python __delattr__, deleter or __delete__ without nesting on the C stack
 - a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a
   function's **kw, dict() or frozendict() stores the name, and not at all for update() or a subclass
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs

@@ -1007,6 +1007,21 @@ static const char *const programs[] = {
     "    return out\n"
     "print(fa())\n",
 
+    "class DAH:\n"
+    "    def __delattr__(self, n):\n"
+    "        if n == 'bad': raise LookupError(n)\n"
+    "        object.__delattr__(self, n)\n"
+    "    p = property(lambda s: 0, None, lambda s: None)\n"
+    "def da():\n"
+    "    h = DAH()\n"
+    "    h.x = 1\n"
+    "    out = [delattr(h, 'x'), delattr(h, 'p')]\n"
+    "    for n in ('x', 'bad'):\n"
+    "        try: delattr(h, n)\n"
+    "        except (AttributeError, LookupError) as e: out.append(type(e).__name__)\n"
+    "    return out\n"
+    "print(da())\n",
+
     "class RS(set):\n"
     "    def __eq__(self, o):\n"
     "        for _ in (): pass\n"
