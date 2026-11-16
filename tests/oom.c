@@ -1897,6 +1897,23 @@ static const char *const programs[] = {
     "    return out\n"
     "print(isn())\n",
 
+    "khl = []\n"
+    "class KHN(str):\n"
+    "    def __hash__(self): khl.append('h'); return str.__hash__(self)\n"
+    "    def __eq__(self, o): khl.append('e'); return str.__eq__(self, o)\n"
+    "class KHD(dict): pass\n"
+    "def khf(**kw): return kw\n"
+    "def kh():\n"
+    "    a, b = {KHN('a'): 1}, {KHN('b'): 2}\n"
+    "    out = [khf(**a, **b), dict(**a), KHD(**a, **b), frozendict(**b)]\n"
+    "    x = {}\n"
+    "    x.update(**a)\n"
+    "    out.append(x)\n"
+    "    try: khf(a=0, **a)\n"
+    "    except TypeError: out.append('dup')\n"
+    "    return out, khl\n"
+    "print(kh())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

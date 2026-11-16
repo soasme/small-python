@@ -264,6 +264,8 @@ Unreleased (0.10.0):
   without nesting on the C stack
 - list(), sorted(), sum() and the other consumers call a map, zip, filter or enumerate subclass's
   Python __next__ without nesting on the C stack
+- a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a
+  function's **kw, dict() or frozendict() stores the name, and not at all for update() or a subclass
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
 - throw() of GeneratorExit, or of a subclass made without Python code, into a yield from closes its delegates without
   nesting on the C stack

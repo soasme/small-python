@@ -14612,11 +14612,11 @@ struct Sorter {
 typedef struct {
     int id, compensating, method, keyed, descending, calls, phase, swapped, stage, fed, hints;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched, *wrap;
-    SPYValue *keywords; /* dict()'s or dict.update()'s, merged after the source's items. */
+    SPYValue *keywords; /* dict()'s or dict.update()'s, merged after the source's items, set again when rehash (keywords_set). */
     SPYValue *call; /* A call's ** merge: the callee a duplicate keyword's error names (merge_keyword). */
     SPYValue *awaited; /* An asend or __anext__ awaitable's send or __next__ (asend_resumes): the operation. */
     SPYValue *instance; /* A class call's instance whose list's or set's __init__ extends it (constructed): the value. */
-    int updating, subset;
+    int updating, subset, rehash;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
@@ -15519,10 +15519,11 @@ static SPYValue *function_str(SPYContext *c, SPYValue *f) {
     mem_free(text.data); spy_release(qualname); spy_release(module);
     return result;
 }
-/* Whether a call's keywords result already has key, the duplicate
- * keyword's error raised then for callable; -1 on an error. */
-static int keyword_taken(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *callable) {
-    if (map_find(result, key) >= 0) {
+/* Whether a call's keywords already have key, found at entry at or
+ * not (-1), the duplicate keyword's error raised then for callable; -1
+ * on an error. */
+static int keyword_found(SPYContext *c, ptrdiff_t at, SPYValue *key, SPYValue *callable) {
+    if (at >= 0) {
         /* As %V in _PyEval_FormatKwargsError: "function" when naming it fails. */
         SPYValue *name = function_str(c, callable);
         if (!name) spy_clear_error(c);
@@ -15532,6 +15533,9 @@ static int keyword_taken(SPYContext *c, SPYValue *result, SPYValue *key, SPYValu
         return 1;
     }
     return c->error_type[0] ? -1 : 0;
+}
+static int keyword_taken(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *callable) {
+    return keyword_found(c, map_find(result, key), key, callable);
 }
 static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
     return keyword_taken(c, result, key, callable) ? -1 : map_set(c, result, key, value);
@@ -15607,8 +15611,9 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
         for (size_t i = 0; i < source->as.map.len; i++) {
             Entry entry = map_items(source)[i];
             spy_retain(entry.key); spy_retain(entry.value);
-            int status = callable ? merge_keyword(c, result, entry.key, entry.value, callable) :
-                map_set_hash(c, result, entry.key, entry.value, entry.hash);
+            /* A dict's keys keep their stored hashes. */
+            int status = callable && keyword_found(c, map_find_hash(result, entry.key, entry.hash), entry.key, callable) ? -1 :
+                         map_set_hash(c, result, entry.key, entry.value, entry.hash);
             spy_release(entry.key); spy_release(entry.value);
             if (status) return -1;
             if (source->as.map.len != size) { spy_error(c, "RuntimeError", "dict mutated during update"); return -1; }
@@ -15698,11 +15703,24 @@ static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
     }
     return c->error_type[0] ? -1 : 0;
 }
-static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+/* A dict() or frozendict() call sets each keyword in d by DictSetItem,
+ * hashing its name again (26.1.1); 0, or -1 on an error. */
+static int keywords_set(SPYContext *c, SPYValue *d, SPYValue *keywords) {
+    for (size_t i = 0; i < keywords->as.map.len; i++) {
+        SPYValue *key = spy_retain(map_items(keywords)[i].key), *value = spy_retain(map_items(keywords)[i].value);
+        int status = map_set(c, d, key, value);
+        spy_release(key); spy_release(value);
+        if (status) return -1;
+    }
+    return 0;
+}
+/* frozendict(...) of argc arguments and keywords, set again when rehash
+ * (keywords_set), else merged with their hashes as by __new__. */
+static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, int rehash) {
     if (argc > 1) return errorf(c, "TypeError", "frozendict expected at most 1 argument, got %zu", argc);
     SPYValue *dict = value_new(c, SPY_FROZENDICT);
     if (!dict) return NULL;
-    if ((argc && dict_update(c, dict, argv[0])) || (keywords && extend_display(c, dict, keywords))) {
+    if ((argc && dict_update(c, dict, argv[0])) || (keywords && (rehash ? keywords_set : extend_display)(c, dict, keywords))) {
         spy_release(dict); return NULL;
     }
     return dict;
@@ -24616,7 +24634,9 @@ static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *
     size_t blocks = m->block_len;
     if (id == B_DICT || id == B_EXTEND) consume(c, m, id, callee, -1, NULL, spy_retain(source), NULL);
     if (m->block_len == blocks) { spy_release(keywords); return c->error_type[0] ? -1 : 0; }
-    m->blocks[m->block_len - 1].consumer->keywords = keywords;
+    Consumer *s = m->blocks[m->block_len - 1].consumer;
+    s->keywords = keywords;
+    s->rehash = callee == c->types[SPY_DICT] || callee == c->types[SPY_FROZENDICT];
     return 1;
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
@@ -36287,7 +36307,7 @@ static SPYValue *frozendict_method(SPYContext *c, size_t argc, SPYValue *const *
     const char *name = data ? "__getnewargs__" : "copy";
     SPYValue *self = method_self(c, argc, argv, SPY_FROZENDICT, name);
     if (!self || no_arguments(c, SPY_FROZENDICT, name, argc - 1, keywords)) return NULL;
-    if (!data) return argv[0]->type == SPY_FROZENDICT ? spy_retain(self) : frozendict_construct(c, 1, &self, NULL);
+    if (!data) return argv[0]->type == SPY_FROZENDICT ? spy_retain(self) : frozendict_construct(c, 1, &self, NULL, 0);
     SPYValue *dict = builtin(c, 1, argv, (void *)(intptr_t)B_DICT);
     SPYValue *args = dict ? value_new(c, SPY_TUPLE) : NULL;
     if (args && sequence_append(c, args, dict)) { spy_release(args); args = NULL; }
@@ -38057,7 +38077,7 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         spy_release(returned);
         return NULL;
     }
-    if (s->keywords && !c->error_type[0]) extend_display(c, s->result, s->keywords);
+    if (s->keywords && !c->error_type[0]) (s->rehash ? keywords_set : extend_display)(c, s->result, s->keywords);
     if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
     /* intersection_update swaps its result into the set; issubset is
      * whether the intersection has all the set's entries. */
@@ -39963,7 +39983,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
     }
     case B_FROZENDICT: {
         if (argc == 1 && argv[0]->type == SPY_FROZENDICT && (!keywords || !keywords->as.map.len)) return spy_retain(argv[0]);
-        return frozendict_construct(c, argc, argv, keywords);
+        return frozendict_construct(c, argc, argv, keywords, 1);
     }
     default: break;
     }
@@ -40102,7 +40122,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
                           owner->as.native.name ? owner->as.native.name->as.string.data : "builtin");
     }
     SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
-    if (value && id == B_DICT && keywords && extend_display(c, value, keywords)) { spy_release(value); return NULL; }
+    if (value && id == B_DICT && keywords && keywords_set(c, value, keywords)) { spy_release(value); return NULL; }
     return value;
 }
 typedef SPYValue *(*NativeMethod)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -40268,7 +40288,7 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
             return errorf(c, "TypeError", "%s.__new__(%s) is not safe, use %s.__new__()", name_text(owner, "__name__")->as.string.data, name_text(cls, "__name__")->as.string.data, class_tname(base));
         break;
     }
-    if (cls == owner && type == SPY_FROZENDICT) return frozendict_construct(c, argc - 1, argv + 1, keywords);
+    if (cls == owner && type == SPY_FROZENDICT) return frozendict_construct(c, argc - 1, argv + 1, keywords, 0);
     if (type == SPY_PROPERTY || type == SPY_CLASSMETHOD || type == SPY_STATICMETHOD)
         return descriptor_new(c, cls, type, argc - 1, argv + 1, keywords);
     if ((type == SPY_TUPLE || type == SPY_FLOAT || type == SPY_FROZENSET) && replaces(cls, owner, "__init__")) keywords = NULL;
@@ -40276,6 +40296,7 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     size_t most = type == SPY_INT ? 2 : type == SPY_STRING ? 3 : SIZE_MAX;
     if (argc - 1 > most) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", type == SPY_INT ? "int" : "str", most, argc - 1);
     SPYValue *base = type == SPY_BYTEARRAY ? bytearray_new(c, "", 0) : mutable_layout(type) ? value_new(c, type) :
+        type == SPY_FROZENDICT ? frozendict_construct(c, argc - 1, argv + 1, keywords, 0) :
         builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!base || cls == owner) return base;
     if (base->type == SPY_INSTANCE) { /* a __bytes__ result of a bytes subclass */
@@ -40317,9 +40338,10 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (parse_arguments(c, "bytearray", argc - 1, argv + 1, keywords, names, 3, 0, 0, parsed) ||
             bytearray_exported(c, self) || bytearray_resize(c, self, 0)) return NULL;
     }
-    SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
+    /* dict.__init__ merges its keywords with their hashes. */
+    SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, type == SPY_DICT ? NULL : keywords, owner);
     if (!fresh) return NULL;
-    if (type == SPY_DICT) extend_display(c, self, fresh);
+    if (type == SPY_DICT && !extend_display(c, self, fresh) && keywords) extend_display(c, self, keywords);
     else swap_contents(self, fresh);
     spy_release(fresh);
     return c->error_type[0] ? NULL : spy_none(c);

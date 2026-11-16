@@ -172,7 +172,7 @@ Contents | - navigation
 13 Expressions > 13.2 Displays | = sections
 13 Expressions > 13.2 Displays > 13.2.1 Tuple and list displays | Displays
 13 Expressions > 13.2 Displays > 13.2.2 Set displays | Displays, Sets
-13 Expressions > 13.2 Displays > 13.2.3 Dictionary displays | Displays, Dicts
+13 Expressions > 13.2 Displays > 13.2.3 Dictionary displays | Displays, Dicts, KeywordHashes
 13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings | = sections
 13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings > 13.2.4.1 Plain literals | StringLiterals
 13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings > 13.2.4.2 f-strings | FStrings
@@ -183,7 +183,7 @@ Contents | - navigation
 13 Expressions > 13.3 Primaries > 13.3.1 Attribute references | Attributes
 13 Expressions > 13.3 Primaries > 13.3.2 Subscriptions | Subscripts
 13 Expressions > 13.3 Primaries > 13.3.3 Slicings | Subscripts, Slices
-13 Expressions > 13.3 Primaries > 13.3.4 Calls | Calls
+13 Expressions > 13.3 Primaries > 13.3.4 Calls | Calls, KeywordHashes
 13 Expressions > 13.4 The `await` expression | Awaitables
 13 Expressions > 13.5 The power operator | BinaryArith, Precedence
 13 Expressions > 13.6 Unary arithmetic and bitwise operations | BinaryArith, NumericTypes
@@ -465,11 +465,11 @@ Contents | - navigation
 25 Sequences > 25.5 Common sequence operations > 25.5.4 Mutable sequence operations | Lists
 26 Mappings and Sets | Dicts, Sets
 26 Mappings and Sets > 26.1 The `dict` type | = sections
-26 Mappings and Sets > 26.1 The `dict` type > 26.1.1 dict ( [ *source* ], **kwargs ) | DictMethods
+26 Mappings and Sets > 26.1 The `dict` type > 26.1.1 dict ( [ *source* ], **kwargs ) | DictMethods, KeywordHashes
 26 Mappings and Sets > 26.1 The `dict` type > 26.1.2 Operations | DictMethods, Dicts, Containers
 26 Mappings and Sets > 26.1 The `dict` type > 26.1.3 Methods | DictMethods, Dicts
 26 Mappings and Sets > 26.1 The `dict` type > 26.1.4 Mutation during iteration | Iterators
-26 Mappings and Sets > 26.2 The `frozendict` type | FrozenDicts
+26 Mappings and Sets > 26.2 The `frozendict` type | FrozenDicts, KeywordHashes
 26 Mappings and Sets > 26.3 The `set` and `frozenset` types | = sections
 26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.1 set ( [ *iterable* ] ) and frozenset ( [ *iterable* ] ) | Sets
 26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.2 Operations | Sets, SetWalks
