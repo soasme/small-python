@@ -2370,6 +2370,12 @@ int main(int argc, char **argv) {
                "def measured():\n    return len(Measured()) + bool(Measured()) + sum(x for x in reversed(Measured()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "measured()", "measured.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So does a list's or tuple's subclass's Python __iter__ for list(), sorted() and tuple(). */
+    execute(c, "class Walked(list):\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter((1, 2))\n"
+               "class Paired(tuple):\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter((3,))\n"
+               "def walked():\n    return sum(list(Walked())) + sum(sorted(Walked())) + sum(tuple(Paired()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "walked()", "walked.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

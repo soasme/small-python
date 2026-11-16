@@ -167,6 +167,10 @@ SOURCES = {
     "join_bare_iterator": "class Bare:\n    def __next__(self): raise StopIteration\n"
                           "class Handing:\n    def __iter__(self): return Bare()\nresult = ''.join(Handing())",
     "pair_iterates_once": "log = []\nclass P:\n    def __iter__(self): log.append('iter'); return iter('ab')\nresult = (dict([P()]), log)",
+    "subclass_iter": "log = []\nclass L(list):\n    def __iter__(self): log.append('iter'); return iter((7, 8))\n"
+                     "    def __len__(self): log.append('len'); return 1\n"
+                     "class T(tuple):\n    def __iter__(self): log.append('titer'); return iter((1,))\n"
+                     "result = (list(L([1, 2])), sorted(L()), tuple(T((5,))), [*T()], log)",
 }
 
 

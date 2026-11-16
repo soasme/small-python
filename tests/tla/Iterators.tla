@@ -1,25 +1,28 @@
 ----------------------------- MODULE Iterators ------------------------------
 (***************************************************************************)
 (* Iterator types, as the Built-in Types chapter specifies them            *)
-(* (library/stdtypes.html#iterator-types and #generator-types, with iter() *)
-(* and next() of library/functions.html): an iterable's __iter__ returns   *)
-(* an iterator, whose own __iter__ returns itself and whose __next__       *)
-(* returns the next item or raises StopIteration, and keeps raising it     *)
-(* once it has; iter() and for reject a non-iterable, an __iter__ of None, *)
-(* and an __iter__ that returns something without __next__, and fall back  *)
-(* to the sequence protocol, which stops at IndexError or StopIteration;   *)
-(* iter(callable, sentinel) calls until a result equals the sentinel;      *)
-(* next() returns a default instead of raising; a generator implements the *)
-(* protocol, its StopIteration becoming RuntimeError; dicts and sets      *)
-(* refuse to change size during iteration; an exhausted iterator releases  *)
-(* its source, a dict subclass reached through a view included; and        *)
-(* enumerate, filter, map and zip ask their iterables again on each next; *)
-(* a list made of an iterable's items, and bytes(), ask its length hint   *)
-(* after __iter__ (__len__, then __length_hint__ when that is absent or   *)
-(* raises TypeError), its errors propagating and a hint's TypeError or    *)
-(* NotImplemented meaning none; other consumers ask none. str.join,      *)
-(* bytes.join and dict pairs take the iterator once and list it as list() *)
-(* would: its own __iter__ again, then its length hint.                  *)
+(* (library/stdtypes.html#iterator-types and #generator-types, with        *)
+(* iter() and next() of library/functions.html): an iterable's             *)
+(* __iter__ returns an iterator, whose own __iter__ returns itself and     *)
+(* whose __next__ returns the next item or raises StopIteration, and       *)
+(* keeps raising it once it has; iter() and for reject a non-iterable,     *)
+(* an __iter__ of None, and an __iter__ that returns something without     *)
+(* __next__, and fall back to the sequence protocol, which stops at        *)
+(* IndexError or StopIteration; iter(callable, sentinel) calls until a     *)
+(* result equals the sentinel; next() returns a default instead of         *)
+(* raising; a generator implements the protocol, its StopIteration         *)
+(* becoming RuntimeError; dicts and sets refuse to change size during      *)
+(* iteration; an exhausted iterator releases its source, a dict            *)
+(* subclass reached through a view included; and enumerate, filter,        *)
+(* map and zip ask their iterables again on each next; a list made of      *)
+(* an iterable's items, and bytes(), ask its length hint after             *)
+(* __iter__ (__len__, then __length_hint__ when that is absent or          *)
+(* raises TypeError), its errors propagating and a hint's TypeError or     *)
+(* NotImplemented meaning none; other consumers ask none. str.join,        *)
+(* bytes.join and dict pairs take the iterator once and list it as         *)
+(* list() would: its own __iter__ again, then its length hint. A           *)
+(* list's or tuple's subclass with its own __iter__ gives that             *)
+(* method's items to every consumer, not its storage.                      *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -68,7 +71,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
-          "join_lists_iterator", "join_bare_iterator", "pair_iterates_once"}
+          "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -129,6 +132,8 @@ Case(c) ==
       [] c = "join_lists_iterator" -> "('a-b', ['iter', 'iter', 'len'])"
       [] c = "join_bare_iterator" -> "TypeError: 'Bare' object is not iterable"
       [] c = "pair_iterates_once" -> "({'a': 'b'}, ['iter'])"
+      \* a list's or tuple's subclass gives the items of its own __iter__
+      [] c = "subclass_iter" -> "([7, 8], [7, 8], (1,), [1], ['iter', 'len', 'iter', 'len', 'titer', 'titer'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

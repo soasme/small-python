@@ -1852,6 +1852,21 @@ static const char *const programs[] = {
     "    return out\n"
     "print(li())\n",
 
+    "class SSL(list):\n"
+    "    def __iter__(self):\n"
+    "        if getattr(self, 'bad', False): raise LookupError('x')\n"
+    "        return iter((7, 8))\n"
+    "class SST(tuple):\n"
+    "    def __iter__(self): return iter((1,))\n"
+    "def ss():\n"
+    "    b = SSL()\n"
+    "    b.bad = True\n"
+    "    out = [list(SSL([1])), sorted(SSL()), tuple(SST((5,))), [*SST()]]\n"
+    "    try: list(b)\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(ss())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
