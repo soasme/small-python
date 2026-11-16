@@ -15743,6 +15743,8 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
  * file or a trace function needs attention; 1 on the machine when a Python
  * __del__ is due there first (finalizer). */
 static SPYValue *finalizer(SPYContext *);
+static int closes_quietly(SPYContext *, SPYValue *);
+static void finalize_ahead(SPYContext *, size_t);
 /* A machine's tick at a step of no node (TICK_DEFER) leaves a finalizer
  * the machine runs (finalizer) for the next node's. */
 enum { TICK_DEFER = 2 };
@@ -15751,6 +15753,15 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
     /* A collection waits for the finalizers that wait (a boundary inside
      * __del__), so that it can run its own and free what they leave. */
     if (c->collect_due && !finalizers_wait(c) && !stress_waits(c)) collect(c);
+    /* Dead generators that close running nothing close here, in line,
+     * so that one after them the machine closes is first. */
+    while (machine && c->finalize_calls_len && !finalizer(c) && closes_quietly(c, c->finalize_first)) {
+        SPYValue *g = finalize_pop(c);
+        size_t waiting = c->finalize_calls_len;
+        generator_close(g);
+        spy_release(g);
+        finalize_ahead(c, waiting);
+    }
     int machined = machine && c->finalize_calls_len && finalizer(c);
     if (machined && machine != TICK_DEFER) return 1;
     if (!machined && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
@@ -33224,6 +33235,13 @@ static SPYValue *thrown_exception(SPYContext *c, size_t argc, SPYValue *const *a
  * CPython's gen_close does: it yielded outside every try, with and except,
  * not to an await or a yield from, and no trace or profile function would
  * see the GeneratorExit unwind it. */
+static int close_quietly(SPYContext *c, SPYValue *g);
+/* Whether dead v is a generator or coroutine whose close runs nothing
+ * (generator_method's M_CLOSE). */
+static int closes_quietly(SPYContext *c, SPYValue *v) {
+    return !finalizers_wait(c) && (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) && !v->as.generator.running &&
+           (!v->as.generator.started || v->as.generator.done || close_quietly(c, v));
+}
 static int close_quietly(SPYContext *c, SPYValue *g) {
     Machine *m = g->as.generator.machine;
     if (g->type == SPY_ASYNC_GENERATOR || !m || m->awaiting != AWAIT_YIELD || c->settings[SET_TRACE] || c->settings[SET_PROFILE]) return 0;

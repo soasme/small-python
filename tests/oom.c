@@ -975,6 +975,21 @@ static const char *const programs[] = {
     "    return out\n"
     "print(mg())\n",
 
+    "def gfq():\n"
+    "    yield 1\n"
+    "def gfg(out, tag):\n"
+    "    try: yield 1\n"
+    "    finally: out.append(tag)\n"
+    "def gf():\n"
+    "    out = []\n"
+    "    q = gfq(); next(q)\n"
+    "    g = gfg(out, 'g'); next(g)\n"
+    "    r = gfq(); next(r)\n"
+    "    h = gfg(out, 'h'); next(h)\n"
+    "    q = g = r = h = None\n"
+    "    return out\n"
+    "print(gf())\n",
+
     "class RS(set):\n"
     "    def __eq__(self, o):\n"
     "        for _ in (): pass\n"

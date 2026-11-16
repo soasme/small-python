@@ -104,6 +104,14 @@ def make(kind, variant):
     return me, release
 
 
+def quietly():
+    def body():
+        yield
+    started = body()
+    next(started)
+    return started
+
+
 def text(value):
     return "None" if value is None else value
 
@@ -150,12 +158,13 @@ for walk in walks():
     target, release = make(start["kind"], start["variant"])
     recent = []
     for state in steps:
-        if state["op"] == ("drop",):
+        if state["op"] in (("drop",), ("drop_after",)):
             # The object's last reference goes; it is closed before the
-            # next statement.
+            # next statement, after a quiet generator dying just before it.
             del log[:]
             release()
-            target = None
+            quiet = quietly() if state["op"] == ("drop_after",) else None
+            quiet = target = None
             actual = ("dropped", log[0] if log else "none")
         else:
             actual = perform(start["kind"], target, state["op"])

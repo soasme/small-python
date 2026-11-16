@@ -31,15 +31,16 @@
 (*                                                                         *)
 (* A throw is of ValueError or KeyError, or of PyValueError, a ValueError  *)
 (* subclass whose Python __init__ throw() calls to make the exception, or  *)
-(* of NewValueError, one whose Python __new__ and __init__ it calls.       *)
-(* A throw passes the class alone or, in its three-argument form, with a  *)
-(* None value and a None traceback or a traceback object, the thrown      *)
-(* exception's; neither changes an outcome.                                *)
-(* A throw is made while its caller handles `handled` (an IndexError) or   *)
-(* nothing. With variant 'bare' the loop's yield stands outside the try,   *)
-(* so a throw there propagates and close() ends the object without a      *)
-(* handler running. A drop's result is what its close logged; what the     *)
-(* close raised is reported, not seen.                                     *)
+(* of NewValueError, one whose Python __new__ and __init__ it calls. A     *)
+(* throw passes the class alone or, in its three-argument form, with a     *)
+(* None value and a None traceback or a traceback object, the thrown       *)
+(* exception's; neither changes an outcome. A throw is made while its      *)
+(* caller handles `handled` (an IndexError) or nothing. With variant       *)
+(* 'bare' the loop's yield stands outside the try, so a throw there        *)
+(* propagates and close() ends the object without a handler running. A     *)
+(* drop's result is what its close logged, also when a quietly closing     *)
+(* generator dies just before it; what the close raised is reported, not   *)
+(* seen.                                                                   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -51,7 +52,7 @@ Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
 Thrown == {"ValueError", "KeyError", "PyValueError", "NewValueError"}
 Handled == {"None", "IndexError"}               \* what the caller of a throw handles
 Forms == {"one", "three", "traced"}              \* throw(e), throw(e, None, None) or throw(e, None, tb)
-Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h, f>> : e \in Thrown, h \in Handled, f \in Forms} \cup {<<"close">>, <<"drop">>}
+Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h, f>> : e \in Thrown, h \in Handled, f \in Forms} \cup {<<"close">>, <<"drop">>, <<"drop_after">>}
 
 \* Where the body is suspended: before its first line, at the loop's yield,
 \* at the yield inside the GeneratorExit handler, or finished; or the object
@@ -115,8 +116,10 @@ Close ==
 
 (* The last reference goes: a body suspended in the loop's try runs its    *)
 (* GeneratorExit handler, as close() would; elsewhere no handler runs.      *)
-Drop ==
-    /\ op' = <<"drop">>
+(* With drop_after a started generator whose close runs no handler dies    *)
+(* in the same statement just before it, which changes nothing.            *)
+Drop(o) ==
+    /\ op' = <<o>>
     /\ pc' = "gone" /\ UNCHANGED <<i, last>>
     /\ result' = <<"dropped", IF pc = "loop" /\ variant # "bare" THEN "exit" ELSE "none">>
 
@@ -126,7 +129,7 @@ Next ==
     /\ \/ \E v \in Sent : Send(v)
        \/ \E e \in Thrown, h \in Handled, f \in Forms : Throw(e, h, f)
        \/ Close
-       \/ Drop
+       \/ \E o \in {"drop", "drop_after"} : Drop(o)
 
 Spec == Init /\ [][(Next)]_vars
 
@@ -138,7 +141,7 @@ DoneIsFinal == [][(pc = "done" => pc' \in {"done", "gone"})]_vars
 
 \* Dropping a body suspended in the loop's try runs its handler, before the
 \* program goes on.
-DropCloses == [][(op' = <<"drop">> => (result'[2] = "exit" <=> pc = "loop" /\ variant # "bare"))]_vars
+DropCloses == [][(op' \in {<<"drop">>, <<"drop_after">>} => (result'[2] = "exit" <=> pc = "loop" /\ variant # "bare"))]_vars
 
 \* Throwing into a just-started generator raises at its start: the body
 \* never runs and the object is finished.

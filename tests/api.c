@@ -2426,6 +2426,13 @@ int main(int argc, char **argv) {
                "def classed():\n    return sum(Classed) + list(reversed(Classed))[0] + sorted(Classed)[1]\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "classed()", "classed.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 6);
+    /* So does a dead generator's finally after one that closes running nothing. */
+    execute(c, "def quiet():\n    yield 1\n"
+               "def guarded(out):\n    try: yield 1\n    finally:\n        for i in range(3000): pass\n        out.append(2)\n"
+               "def held(out):\n    q = quiet(); next(q)\n    g = guarded(out); next(g)\n    r = quiet(); next(r)\n"
+               "def dropped():\n    out = []\n    held(out)\n    return out[0]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "dropped()", "dropped.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
