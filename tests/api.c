@@ -2393,6 +2393,11 @@ int main(int argc, char **argv) {
                "def spelled():\n    d = {}\n    for i in range(3000): pass\n    d.update(**{Spelled('a'): 1})\n    return d['a']\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "spelled()", "spelled.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    /* And dict()'s and dict.update()'s of a zip subclass's pairs. */
+    execute(c, "class Zipped(zip):\n    def __next__(self):\n        for i in range(3000): pass\n        return super().__next__()\n"
+               "def zipped():\n    d = dict(Zipped('a', [1]))\n    d.update(Zipped('b', [2]))\n    return d['a'] + d['b']\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

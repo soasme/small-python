@@ -176,7 +176,7 @@ SOURCES = {
                               "class Z(zip):\n    def __next__(self): return super().__next__()[::-1]\n"
                               "class E(enumerate):\n    def __next__(self): i, v = super().__next__(); return v * i\n"
                               "result = (list(M(abs, [-1, -2])), sorted(F(None, [0, 1, 2])), sum(Z([1], [2]), ()), list(E('ab')),\n"
-                              "          [*M(abs, [1, 2])] and log)",
+                              "          [*M(abs, [1, 2])] and log, dict(Z([1], 'k')))",
 }
 
 

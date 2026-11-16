@@ -23,7 +23,8 @@
 (* list() would: its own __iter__ again, then its length hint. A list's or *)
 (* tuple's subclass with its own __iter__ gives that method's items to     *)
 (* every consumer, not its storage; a map's, zip's, filter's or            *)
-(* enumerate's subclass keeping its __iter__ gives its own __next__'s.     *)
+(* enumerate's subclass keeping its __iter__ gives its own __next__'s,     *)
+(* to dict() as pairs too.                                                 *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -136,7 +137,7 @@ Case(c) ==
       [] c = "pair_iterates_once" -> "({'a': 'b'}, ['iter'])"
       \* a list's or tuple's subclass gives the items of its own __iter__
       [] c = "subclass_iter" -> "([7, 8], [7, 8], (1,), [1], ['iter', 'len', 'iter', 'len', 'titer', 'titer'])"
-      [] c = "iterator_subclass_next" -> "([('M', 1), ('M', 2)], [-2, -1], (2, 1), ['', 'b'], [1, 2, 1, 2])"
+      [] c = "iterator_subclass_next" -> "([('M', 1), ('M', 2)], [-2, -1], (2, 1), ['', 'b'], [1, 2, 1, 2], {'k': 1})"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

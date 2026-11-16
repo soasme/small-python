@@ -24328,7 +24328,8 @@ static SPYValue *keys_function(SPYContext *c, SPYValue *v, int *bound) {
  * an attribute hook could give, so that dict() and dict.update() take
  * its pairs. */
 static int keyless(SPYValue *v) {
-    if (!plain_instance(v) || name_local(v, "keys")) return 0;
+    int iterator = v->type == SPY_INSTANCE && v->as.map.base && v->as.map.base->type == SPY_ITERATOR;
+    if (!(plain_instance(v) || iterator) || name_local(v, "keys")) return 0;
     SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
     return (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) && !class_lookup(cls, "keys") &&
            !class_lookup(cls, "__getattr__");

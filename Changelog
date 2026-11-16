@@ -262,7 +262,7 @@ Unreleased (0.10.0):
   without nesting on the C stack
 - frozendict() of a mapping with a Python keys() or __getitem__, or of a generator, takes its items
   without nesting on the C stack
-- list(), sorted(), sum() and the other consumers call a map, zip, filter or enumerate subclass's
+- list(), sorted(), sum(), dict() and the other consumers call a map, zip, filter or enumerate subclass's
   Python __next__ without nesting on the C stack
 - a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a
   function's **kw, dict() or frozendict() stores the name, and not at all for update() or a subclass

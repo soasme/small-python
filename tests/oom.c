@@ -1914,6 +1914,20 @@ static const char *const programs[] = {
     "    return out, khl\n"
     "print(kh())\n",
 
+    "class DZI(zip):\n"
+    "    def __next__(self):\n"
+    "        r = super().__next__()\n"
+    "        if r[0] == 'bad': raise LookupError(r)\n"
+    "        return r\n"
+    "def dz():\n"
+    "    d = {'q': 0}\n"
+    "    d.update(DZI('ab', [1, 2]))\n"
+    "    out = [dict(DZI('x', [3])), d, frozendict(DZI('y', [4]), w=5)]\n"
+    "    try: dict(DZI(['ok', 'bad'], [1, 2]))\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(dz())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
