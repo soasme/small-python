@@ -1125,6 +1125,22 @@ static const char *const programs[] = {
     "        except (LookupError, TypeError) as e: out.append(str(e))\n"
     "    return out\n"
     "print(cx())\n",
+    "class SKS(set): pass\n"
+    "class SKH(set):\n"
+    "    def __hash__(self):\n"
+    "        for _ in (): pass\n"
+    "        raise TypeError('h')\n"
+    "def sk():\n"
+    "    out = []\n"
+    "    for key in (SKS([5]), SKH([5]), SKH([6])):\n"
+    "        s = {frozenset({5}), 1}\n"
+    "        out.append(key in s)\n"
+    "        s.discard(key)\n"
+    "        try: s.remove(key)\n"
+    "        except KeyError as e: out.append(e.args[0] is key)\n"
+    "        out.append(len(s))\n"
+    "    return out\n"
+    "print(sk())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"

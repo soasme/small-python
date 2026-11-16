@@ -48,7 +48,13 @@
 (*     taken; intersection, isdisjoint and issubset stop at the first,     *)
 (*     which decides; the symmetric ones make a set of the items,          *)
 (*     comparing none, then toggle K(1), comparing it once; a subclass's   *)
-(*     methods make a set, its updates change it.                          *)
+(*     methods make a set, its updates change it; or                       *)
+(*   - in a function, key in a, key not in a, a.discard(key),              *)
+(*     a.remove(key) or a.add(key) of a = {frozenset({1}), 0}, or {0}      *)
+(*     without present, and key {1} a set, an S, or an SH, a set subclass  *)
+(*     whose Python __hash__ logs "h" and raises TypeError: a set key is   *)
+(*     looked up as the equal frozenset, its hash called once, and         *)
+(*     remove's KeyError has the key itself; add refuses it.               *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -72,6 +78,7 @@ Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : 
             \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset", "issubset",
                                               "symmetric_difference", "symmetric_difference_update", "update"},
                   source : {"list", "generator", "iterator"}, kind : {"set", "S"}, form : {"statement", "argument"}]
+            \cup [op : {"setkey"}, key : {"set", "S", "SH"}, use : {"in", "not in", "discard", "remove", "add"}, present : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -127,8 +134,18 @@ RunIterable(p) ==
           [] p.method \in {"symmetric_difference", "symmetric_difference_update"} -> <<made, log, {2}>>
           [] OTHER -> <<"bool", log, {}>>
 
+\* A set key is looked up as its frozenset: 1 stands for frozenset({1}).
+RunSetKey(p) ==
+    LET log == IF p.key = "SH" THEN "h" ELSE ""
+        found == IF p.use = "not in" THEN ~p.present ELSE p.present
+    IN  CASE p.use \in {"in", "not in"} -> <<IF found THEN "True" ELSE "False", log, {}>>
+          [] p.use = "discard" \/ (p.use = "remove" /\ p.present) -> <<"set", log, {0}>>
+          [] p.use = "remove" -> <<"KeyError", log, {}>>          \* of the key itself
+          [] p.use = "add" -> <<"TypeError", log, {}>>
+
 Run(p) ==
-    IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>
+    IF p.op = "setkey" THEN RunSetKey(p)
+    ELSE IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>
     ELSE IF p.op = "iterable" THEN RunIterable(p)
     ELSE IF p.op = "hashed" THEN RunHashed(p)
     ELSE IF p.op = "merge" THEN <<Built(p.form), "", {0, 1, 2}>>

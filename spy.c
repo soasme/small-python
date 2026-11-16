@@ -581,6 +581,8 @@ static const char *type_name(SPYValue *);
 static const char *type_fqname(SPYValue *, char *, size_t);
 static SPYValue *set_copy_type(SPYContext *, SPYValue *, int);
 static SPYValue *set_key(SPYContext *, SPYValue *, SPYValue *, int64_t *);
+static int frozen_lookup(SPYContext *, SPYValue *, SPYValue *);
+static SPYValue *frozen_key(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *set_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *set_updated(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *set_intersection(SPYContext *, SPYValue *, SPYValue *);
@@ -26237,6 +26239,7 @@ static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPY
 }
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *hashed_map(SPYValue *, int, size_t, SPYValue *const *, size_t *);
+static int frozen_drop(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *hash_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* A call of callee, method number method of it or -1, on argc arguments
  * argv, which hashes key first (hashing_call): its Python __hash__,
@@ -29269,6 +29272,10 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         SPYValue *map = hashed_map(operands[0], (int)operands[argc + 1]->as.integer_data.small, argc, operands + 1, &at);
         /* hash() of a tuple has no map. */
         if (!map) {
+        } else if (!hashed && frozen_drop(c, operands[0], map, key)) {
+            m = call_hashed(c, m, ins, key, 0, 0);
+            if (!c->error_type[0]) machine_push(c, m, spy_none(c));
+            return m;
         } else if (!hashed) hash_failed(c, map, key);
         else if (store_lookup(map, key, 1) && map_collides(map, key, hash)) {
             /* The call runs under the lookup's state (call_hashed). */
@@ -29301,7 +29308,9 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     }
     SPYValue *y = machine_pop(m), *x = machine_pop(m);
     int contains = step_operation(ins, &op) != OPERATE_INDEX;
-    if (!hashed) hash_failed(c, contains ? y : x, key);
+    /* A set whose Python __hash__ raised TypeError is looked up as a frozenset. */
+    SPYValue *frozen = !hashed && contains ? frozen_key(c, y, key) : NULL;
+    if (!hashed && !frozen) hash_failed(c, contains ? y : x, key);
     SPYValue *map = hashed ? lookup_storage(c, contains ? y : x, contains) : NULL;
     if (hashed && machine_lookup(map, key, contains) && lookup_found(c, ins, map, key, hash)) {
         if (!contains && missing_push(c, m, x, map) < 0) m->pc = operator_finish(c, m, ins, y, NULL, pc);
@@ -29314,8 +29323,8 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         Call *call = function ? call_enter(c, function, env, m) : NULL;
         if (call) call->m.outermost = CALL_OPERATOR;
         else if (function) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
-        else m->pc = operator_finish(c, m, ins, y, hashed ? operation(c, ins, x, y) : NULL, pc);
-        spy_release(x); spy_release(y);
+        else m->pc = operator_finish(c, m, ins, y, hashed || frozen ? operation(c, ins, frozen ? frozen : x, y) : NULL, pc);
+        spy_release(x); spy_release(y); spy_release(frozen);
         return call ? &call->m : m;
     }
     spy_release(x); spy_release(y);
@@ -29578,7 +29587,11 @@ static void operator_keep(SPYContext *c, Machine *m, Instruction *ins, SPYValue 
 static NO_INLINE SPYValue *native_lookup(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, SPYValue **env) {
     int64_t hash;
     ptrdiff_t found;
-    if (map_hash(c, map, key, &hash)) return NULL;
+    if (map_hash(c, map, key, &hash)) {
+        /* The operation looks a set up as a frozenset itself (set_key). */
+        if (frozen_lookup(c, map, key)) spy_clear_error(c);
+        return NULL;
+    }
     if (!lookup_found(c, ins, map, key, hash)) {
         if (!c->looked) hash_kept(c, spy_retain(key), 1, hash);
         return NULL;
@@ -36593,14 +36606,22 @@ static void set_remove_at(SPYValue *set, size_t i) {
     Entry old = map_remove(set, i);
     spy_release(old.key); spy_release(old.value);
 }
-/* The element to look key up as, with its hash: a set (a subclass's too)
- * whose hashing raises TypeError is looked up as the equivalent frozenset. */
+/* Whether a lookup in set of key, whose hashing raised TypeError, takes
+ * key as the equivalent frozenset: key is a set, a subclass's too. */
+static int frozen_lookup(SPYContext *c, SPYValue *set, SPYValue *key) {
+    return (set->type == SPY_SET || set->type == SPY_FROZENSET) && error_is(c, "TypeError") && builtin_value(c, key, SPY_SET);
+}
+/* The frozenset a lookup in set takes key as (frozen_lookup), the error
+ * cleared; else NULL, the error kept. */
+static SPYValue *frozen_key(SPYContext *c, SPYValue *set, SPYValue *key) {
+    if (!frozen_lookup(c, set, key)) return NULL;
+    spy_clear_error(c);
+    return set_copy_type(c, builtin_value(c, key, SPY_SET), SPY_FROZENSET);
+}
+/* The element to look key up as, with its hash: key, or its frozenset. */
 static SPYValue *set_key(SPYContext *c, SPYValue *set, SPYValue *key, int64_t *hash) {
     if (!map_hash(c, set, key, hash)) return spy_retain(key);
-    SPYValue *items = error_is(c, "TypeError") ? builtin_value(c, key, SPY_SET) : NULL;
-    if (!items) return NULL;
-    spy_clear_error(c);
-    SPYValue *frozen = set_copy_type(c, items, SPY_FROZENSET);
+    SPYValue *frozen = frozen_key(c, set, key);
     if (frozen && hash_value(c, frozen, hash)) { spy_release(frozen); return NULL; }
     return frozen;
 }
@@ -36865,6 +36886,26 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
     return spy_none(c);
 }
 enum { SET_ADD, SET_DISCARD, SET_REMOVE, SET_POP, SET_CLEAR, SET_COPY, SET_REDUCE };
+/* Discard, or by which remove, key from set, looked up as element with
+ * its hash (set_key); remove's KeyError names key. */
+static void set_drop(SPYContext *c, SPYValue *set, SPYValue *key, SPYValue *element, int64_t hash, int which) {
+    ptrdiff_t found = map_find_hash(set, element, hash);
+    if (found >= 0) set_remove_at(set, (size_t)found);
+    else if (!c->error_type[0] && which == SET_REMOVE) missing_key(c, key);
+}
+/* For a set's discard or remove callee (hashed_map) of key, whose Python
+ * __hash__ raised TypeError: the call's work on key's frozenset
+ * (frozen_key), any error raised; else 0, the error kept. */
+static int frozen_drop(SPYContext *c, SPYValue *callee, SPYValue *set, SPYValue *key) {
+    if (!frozen_lookup(c, set, key)) return 0;
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee, *frozen;
+    int64_t hash;
+    int which = (int)((intptr_t)function->as.native.data & 255);
+    if (which == SET_ADD || !(frozen = frozen_key(c, set, key))) return 0;
+    if (!hash_value(c, frozen, &hash)) set_drop(c, set, key, frozen, hash, which);
+    spy_release(frozen);
+    return 1;
+}
 static const char *const set_item_names[] = {"add", "discard", "remove", "pop", "clear", "copy", "__reduce__"};
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* The dict or set a call of callee, method number method of it or -1,
@@ -36908,9 +36949,7 @@ static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *ar
         int64_t hash;
         SPYValue *key = set_key(c, self, args[0], &hash);
         if (!key) return NULL;
-        ptrdiff_t found = map_find_hash(self, key, hash);
-        if (found >= 0) set_remove_at(self, (size_t)found);
-        else if (!c->error_type[0] && which == SET_REMOVE) missing_key(c, args[0]);
+        set_drop(c, self, args[0], key, hash, which);
         spy_release(key);
         return c->error_type[0] ? NULL : spy_none(c);
     }

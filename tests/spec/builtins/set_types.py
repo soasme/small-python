@@ -120,6 +120,25 @@ for key in ({5}, MySet([5])):
     error = assert_raises(KeyError, nested.remove, key)
     assert_is(error.args[0], key)
 
+# So in a function, also for a set whose __hash__ raises TypeError, called once.
+hashes = []
+class TypeHashed(set):
+    def __hash__(self):
+        hashes.append(self)
+        raise TypeError("no hash")
+def look_up(key):
+    nested = {frozenset({5}), 1}
+    found = (key in nested, key not in nested)
+    nested.discard(key)
+    error = assert_raises(KeyError, nested.remove, key)
+    assert_is(error.args[0], key)
+    assert_raises(TypeError, nested.add, key)
+    return found, nested
+for key in ({5}, MySet([5]), TypeHashed([5])):
+    del hashes[:]
+    assert_eq(look_up(key), ((True, False), {1}))
+    assert_eq(len(hashes), 5 if type(key) is TypeHashed else 0)
+
 # A recursive repr shows the type name; the reduction lists the elements.
 class Wrapper:
     def __repr__(self):

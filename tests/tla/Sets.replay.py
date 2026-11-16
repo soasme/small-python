@@ -121,7 +121,36 @@ def iterable(p):
     return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
 
 
+class SH(set):
+    def __init__(self, items, log):
+        super().__init__(items)
+        self.log = log
+    def __hash__(self):
+        self.log.append("h")
+        raise TypeError("SH")
+SETKEY = {"in": "r = key in a", "not in": "r = key not in a", "discard": "a.discard(key)\n    r = a",
+          "remove": "a.remove(key)\n    r = a", "add": "a.add(key)\n    r = a"}
+
+
+def setkey(p):
+    log = []
+    key = {"set": lambda: {1}, "S": lambda: S({1}), "SH": lambda: SH({1}, log)}[p["key"]]()
+    space = {"a": {frozenset({1}), 0} if p["present"] else {0}, "key": key}
+    try:
+        exec("def run(a, key):\n    %s\n    return r\nr = run(a, key)" % SETKEY[p["use"]], space)
+    except KeyError as error:
+        return ("KeyError" if error.args == (key,) else repr(error.args), " ".join(log), frozenset())
+    except TypeError:
+        return ("TypeError", " ".join(log), frozenset())
+    r = space["r"]
+    if type(r) is bool:
+        return (repr(r), " ".join(log), frozenset())
+    return (type(r).__name__, " ".join(log), frozenset(1 if v == frozenset({1}) else v for v in r))
+
+
 def outcome(p):
+    if p["op"] == "setkey":
+        return setkey(p)
     if p["op"] == "iterable":
         return iterable(p)
     if p["op"] == "hashed":

@@ -295,6 +295,7 @@ Unreleased (0.10.0):
 - pow() with a modulus no longer reports "complex modulo" for a base or exponent that is not a number
 - complex() falling back to a Python __float__ or __index__ calls it without nesting on the C stack
 - complex(real, imag) checks that both parts are numbers before it converts either, and never converts imag by __complex__
+- in, discard and remove in a function look a set subclass's instance up as a frozenset again, as at module level
 - a call's ** of a dict keeps its keys' hashes, so a str subclass's __hash__ runs once, when a
   function's **kw, dict() or frozendict() stores the name, and not at all for update() or a subclass
 - a ** keyword whose name is a str subclass binds the parameter its __eq__ finds equal, not **kwargs
