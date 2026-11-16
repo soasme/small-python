@@ -2478,6 +2478,13 @@ int main(int argc, char **argv) {
                "def complexed():\n    return int((complex(Floated()) + complex(Floated()) + complex(Width())).real)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "complexed()", "complexed.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 6);
+    /* So does the Python __eq__ of a ** keyword's str subclass name. */
+    execute(c, "class KwName(str):\n    __hash__ = str.__hash__\n    def __eq__(self, other):\n        for i in range(3000): pass\n"
+               "        return str.__eq__(self, other)\n"
+               "def kw_bound(a, b=1, **rest):\n    return a + b + len(rest)\n"
+               "def kw_named():\n    return kw_bound(**{KwName('b'): 2, KwName('a'): 3, KwName('z'): 0})\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "kw_named()", "kw_named.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 4);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

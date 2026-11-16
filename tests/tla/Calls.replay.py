@@ -31,6 +31,10 @@ def source(p):
     elif p["keys"]:
         arguments.append("**{" + ", ".join(f"Name('{k}'): 'k_{k}'" for k in sorted(p["keys"])) + "}")
     name = "class Name(str):\n    __hash__ = str.__hash__\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return str.__eq__(self, other)\n"
+    if p["named"] == "truth":
+        name = ("class Truth:\n    def __init__(self, same): self.same = same\n    def __bool__(self):\n        for _ in range(2): pass\n"
+                "        return self.same\n"
+                "class Name(str):\n    __hash__ = str.__hash__\n    def __eq__(self, other): return Truth(str.__eq__(self, other))\n")
     return f"{name}def f({', '.join(params)}):\n    return ({values}, {rest})\nresult = f({', '.join(arguments)})\n"
 
 

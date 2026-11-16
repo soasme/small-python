@@ -484,6 +484,11 @@ struct SPYContext {
      * whose subscript's lookup calls its Python __missing__ for an absent
      * key (lookup_finish). */
     SPYValue *missing;
+    /* The machine of the call step binding a function's arguments, and the
+     * C calls running in it, where a keyword name's Python __eq__ is a call
+     * on the machine (keyword_compare). */
+    Machine *bind_machine;
+    size_t bind_entries;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -17292,6 +17297,12 @@ static int keyword_matches(SPYContext *c, SPYValue *key, const char *name) {
     spy_release(text);
     return match;
 }
+static int bind_named(SPYContext *, SPYValue *, SPYValue *, size_t, SPYValue *, size_t, Node *, int);
+static int bind_rest(SPYContext *, SPYValue *, SPYValue *, size_t);
+static SPYValue *parts_tuple(SPYContext *, size_t, SPYValue **);
+static SPYValue *keyword_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* Bind fn's arguments into env: 0, or -1 with an error, or 2 when a
+ * keyword's binding goes on on the machine (keyword_compare). */
 static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     Node *params = function_parameters(fn);
     /* The common call passes exactly the positional parameters, by position. */
@@ -17305,13 +17316,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
             return 0;
         }
     }
-    SPYValue *defaults = name_local(fn->as.function.metadata, "__defaults__");
-    SPYValue *kwdefaults = name_local(fn->as.function.metadata, "__kwdefaults__");
-    const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
-    size_t positional = 0, index = 0;
-    size_t default_count = defaults->type == SPY_TUPLE ? defaults->as.seq.len : 0;
-    int varargs = 0;
-    SPYValue *extra = NULL; /* Borrowed from env after insertion. */
+    size_t positional = 0;
     for (Node *arg = params; arg; arg = arg->next) {
         if (arg->op == P_POSITIONAL || arg->op == P_POSONLY) {
             if (positional < argc && name_set(c, env, arg->text, argv[positional])) return -1;
@@ -17319,23 +17324,53 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
         } else if (arg->op == P_VARARGS || arg->op == P_KWARGS) {
             SPYValue *value = value_new(c, arg->op == P_VARARGS ? SPY_TUPLE : SPY_DICT);
             if (!value) return -1;
-            if (arg->op == P_VARARGS) {
-                varargs = 1;
+            if (arg->op == P_VARARGS)
                 for (size_t i = positional; i < argc && !c->error_type[0]; i++) sequence_append(c, value, argv[i]);
-            } else extra = value;
             int status = name_set(c, env, arg->text, value);
             spy_release(value);
             if (status || c->error_type[0]) return -1;
         }
     }
+    int status = bind_named(c, fn, env, argc, keywords, 0, NULL, 0);
+    return status ? status : bind_rest(c, fn, env, argc);
+}
+/* Whether binding fn into env after argc positional arguments compares
+ * keyword i of keywords, a str subclass's instance, with parameter arg by
+ * its Python __eq__ on the call step's machine (callk, keyword_compared):
+ * 1, the binding going on there, or with an error; else 0. */
+static NO_INLINE int keyword_compare(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i, Node *arg) {
+    Machine *m = c->bind_machine;
+    SPYValue *key = map_items(keywords)[i].key, *text, *function;
+    if (!m || c->bind_entries != c->entries || key->type != SPY_INSTANCE || fn->as.function.signature) return 0;
+    if (!(text = spy_string(c, arg->text, strlen(arg->text)))) return 1;
+    if (!(function = rich_function(c, key, text, R_EQ))) { spy_release(text); return 0; }
+    size_t at = 0;
+    for (Node *param = function_parameters(fn); param != arg; param = param->next) at++;
+    SPYValue *state = parts_tuple(c, 7, (SPYValue *[]){spy_retain(fn), spy_retain(env), spy_retain(keywords), int_value(c, (int64_t)i),
+                                                        int_value(c, (int64_t)at), text, int_value(c, (int64_t)argc)});
+    if (state) callk(c, m, function, 2, (SPYValue *[]){spy_retain(key), spy_retain(state->as.seq.items[5])}, keyword_compared, state);
+    return 1;
+}
+/* bind_arguments's keywords into env from keyword i: the one at i bound
+ * to parameter from when matched, else compared from from's next one, or
+ * from the first when from is NULL. 0 when they are bound, -1 with an
+ * error; 2 when a keyword's comparison goes on on the machine
+ * (keyword_compare). */
+static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i, Node *from, int matched) {
+    Node *params = function_parameters(fn);
+    const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
+    SPYValue *extra = NULL;
+    for (Node *arg = params; arg; arg = arg->next) if (arg->op == P_KWARGS) extra = bound_local(env, arg->text);
     /* Validate keywords in call order before argument counts or defaults. */
-    for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
+    for (; keywords && i < keywords->as.map.len; i++, from = NULL, matched = 0) {
         Entry *entry = &map_items(keywords)[i];
         const char *keyword = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
-        Node *arg;
-        for (arg = params; arg && !c->error_type[0]; arg = arg->next)
-            if ((arg->op == P_POSITIONAL || arg->op == P_KWONLY) &&
-                keyword_matches(c, entry->key, arg->text)) break;
+        Node *arg = matched ? from : from ? from->next : params;
+        for (; !matched && arg && !c->error_type[0]; arg = arg->next) {
+            if (arg->op != P_POSITIONAL && arg->op != P_KWONLY) continue;
+            if (entry->key->type != SPY_STRING && keyword_compare(c, fn, env, argc, keywords, i, arg)) return c->error_type[0] ? -1 : 2;
+            if (keyword_matches(c, entry->key, arg->text)) break;
+        }
         if (c->error_type[0]) return -1;
         if (arg) {
             if (bound_local(env, arg->text)) {
@@ -17362,6 +17397,22 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
             }
             mem_free(names.data); return -1;
         }
+    }
+    return 0;
+}
+/* bind_arguments's argument counts and defaults, once the positional
+ * arguments, argc of them, and the keywords are bound into env. */
+static int bind_rest(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc) {
+    Node *params = function_parameters(fn);
+    SPYValue *defaults = name_local(fn->as.function.metadata, "__defaults__");
+    SPYValue *kwdefaults = name_local(fn->as.function.metadata, "__kwdefaults__");
+    const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
+    size_t positional = 0, index = 0;
+    size_t default_count = defaults->type == SPY_TUPLE ? defaults->as.seq.len : 0;
+    int varargs = 0;
+    for (Node *arg = params; arg; arg = arg->next) {
+        if (arg->op == P_POSITIONAL || arg->op == P_POSONLY) positional++;
+        else if (arg->op == P_VARARGS) varargs = 1;
     }
     if (!varargs && argc > positional) {
         int64_t required = (int64_t)positional - (int64_t)default_count;
@@ -17488,7 +17539,7 @@ static int bind_keywords(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc
                          const Entry *kw, size_t kwc, SPYValue *keywords) {
     if (keywords || !kwc) return bind_arguments(c, fn, env, argc, argv, keywords);
     SPYValue *dict = entries_dict(c, kw, kwc);
-    int failed = !dict || bind_arguments(c, fn, env, argc, argv, dict);
+    int failed = dict ? bind_arguments(c, fn, env, argc, argv, dict) : -1;
     spy_release(dict);
     return failed;
 }
@@ -17539,9 +17590,11 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
         if (take) release_all(argc - fit, argv + fit);
     } else {
         failed = !plain ? bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords) || declare_locals(c, env) :
-            declare_locals(c, env) || bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
+            declare_locals(c, env) ? -1 : bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
         if (take) release_all(argc, argv);
     }
+    /* A binding going on on the machine holds env (keyword_compare). */
+    if (failed == 2) { spy_release(env); return NULL; }
     if (failed) { release_locals(env); return NULL; }
     return env;
 }
@@ -27224,6 +27277,59 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
     return result;
 }
 static SPYValue *getter_fallback(SPYValue *, SPYValue *);
+/* function_env of a call step on m, where a keyword name's Python __eq__
+ * is a call on m (keyword_compare): NULL with no error then. */
+static SPYValue *step_env(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    Machine *machine = c->bind_machine;
+    size_t entries = c->bind_entries;
+    c->bind_machine = m; c->bind_entries = c->entries;
+    SPYValue *env = function_env(c, fn, argc, argv, keywords, 0);
+    c->bind_machine = machine; c->bind_entries = entries;
+    return env;
+}
+/* Keyword state's comparison with its parameter, found or not: the
+ * binding goes on from there (bind_named), entering the function at last
+ * (method_called), or its next comparison is the call on m. State taken. */
+static SPYValue *keyword_matched(SPYContext *c, Machine *m, SPYValue *state, int found) {
+    SPYValue **items = state->as.seq.items, *fn = items[0], *env = spy_retain(items[1]);
+    Node *arg = function_parameters(fn);
+    for (int64_t at = items[4]->as.integer_data.small; at; at--) arg = arg->next;
+    Machine *machine = c->bind_machine;
+    size_t entries = c->bind_entries;
+    c->bind_machine = m; c->bind_entries = c->entries;
+    int status = c->error_type[0] ? -1 : bind_named(c, fn, env, (size_t)items[6]->as.integer_data.small, items[2], (size_t)items[3]->as.integer_data.small, arg, found);
+    c->bind_machine = machine; c->bind_entries = entries;
+    if (!status) status = bind_rest(c, fn, env, (size_t)items[6]->as.integer_data.small);
+    if (!status) { c->k_fn = spy_retain(fn); c->k_env = spy_retain(env); c->k = method_called; c->k_ctx = NULL; }
+    spy_release(state);
+    if (status && status != 2) release_locals(env);
+    else spy_release(env);
+    return NULL;
+}
+/* The truth that the comparison's result's Python __bool__ or __len__
+ * returned in result, the state and the result in held (keyword_matched). */
+static SPYValue *keyword_truth(SPYContext *c, Machine *m, SPYValue *held, SPYValue *result) {
+    SPYValue *state = spy_retain(held->as.seq.items[0]);
+    int truth = result ? truth_result(c, held->as.seq.items[1], held->as.seq.items[2] == c->booleans[1], result) : 0;
+    spy_release(held);
+    return keyword_matched(c, m, state, truth);
+}
+/* The Python __eq__ of a keyword's name that keyword_compare called
+ * returned result: NotImplemented leaves str's comparison, and a Python
+ * __bool__ or __len__ of what it gave is a call on m (keyword_truth). */
+static SPYValue *keyword_compared(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *key = map_items(items[2])[items[3]->as.integer_data.small].key;
+    SPYValue *test = result ? compared(c, T_EQ, key, items[5], result) : NULL, *function;
+    int length = 0;
+    if (test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) && (function = truth_function(c, test, &length))) {
+        SPYValue *held = parts_tuple(c, 3, (SPYValue *[]){state, spy_retain(test), spy_bool(c, !length)});
+        if (!held) { spy_release(test); return NULL; }
+        return callk(c, m, function, 1, &test, keyword_truth, held);
+    }
+    int found = test && !c->error_type[0] && truthy(test);
+    spy_release(test);
+    return keyword_matched(c, m, state, found);
+}
 /* Pop the object and argc arguments of a method call from m's stack. */
 static void method_drop(Machine *m, int argc) {
     for (int i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -27939,7 +28045,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         if (!rest) { spy_release(keywords); spy_release(callee); return NULL; }
     }
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
-        result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
+        result = (*env = step_env(c, m, callee, args->as.seq.len, args->as.seq.items, keywords)) ? spy_retain(callee) : NULL;
     else if (calls && !called && (function = bound_function(c, callee)) && string_keys(c, keywords))
         self = spy_retain(callee->type == SPY_METHOD ? callee->as.method.self : callee);
     else if (calls && callee->type == SPY_CLASS && (function = called ? called_init(c, callee, &plain) : class_init(c, callee, &plain)) &&
@@ -28003,7 +28109,8 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         SPYValue *all = spy_list(c);
         int failed = !all || sequence_append(c, all, self);
         for (size_t i = 0; !failed && i < args->as.seq.len; i++) failed = sequence_append(c, all, args->as.seq.items[i]);
-        if (!failed && (*env = function_env(c, function, all->as.seq.len, all->as.seq.items, keywords, 0)))
+        if (!failed && (*env = init ? function_env(c, function, all->as.seq.len, all->as.seq.items, keywords, 0) :
+                                      step_env(c, m, function, all->as.seq.len, all->as.seq.items, keywords)))
             result = spy_retain(init ? callee : function);
         spy_release(all); spy_release(self);
     }
