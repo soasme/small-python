@@ -2,7 +2,8 @@
 # description: isinstance and issubclass of objects that are not classes read
 # __bases__ and __class__ through their Python properties and __getattr__
 # fallbacks in protocol order, a tuple target trying each item in turn,
-# called directly or with starred arguments;
+# called directly, with starred arguments, by map, or as type's
+# __instancecheck__ and __subclasscheck__;
 # searching several bases counts toward the recursion depth; inside
 # functions as at module level.
 from harness import *
@@ -100,3 +101,43 @@ try:
     raise AssertionError("no RecursionError")
 except RecursionError:
     pass
+
+# type.__instancecheck__ and __subclasscheck__ called directly, and the
+# builtins called by map, follow the same protocol.
+class One:
+    __bases__ = ()
+class Through:
+    @property
+    def __bases__(self): return (one,)
+class Failing:
+    @property
+    def __bases__(self): raise LookupError("bases")
+class Several:
+    __bases__ = (One, int)
+one = One()
+class Claims:
+    __class__ = property(lambda self: Through())
+class Raises:
+    @property
+    def __class__(self): raise LookupError("class")
+class Missing:
+    @property
+    def __class__(self): raise AttributeError("class")
+class Small(int): pass
+class Names:
+    __class__ = Small
+def checks():
+    out = []
+    for f, args in ((type.__subclasscheck__, (int, Through())), (type.__subclasscheck__, (int, Several())),
+                    (type.__subclasscheck__, (int, 1)), (type.__subclasscheck__, (int, Failing())),
+                    (type.__subclasscheck__, (int, Small)), (type.__instancecheck__, (int, Claims())),
+                    (type.__instancecheck__, (int, Raises())), (type.__instancecheck__, (int, Missing())),
+                    (type.__instancecheck__, (int, Names())), (type.__instancecheck__, (int, 1))):
+        try: out.append(f(*args))
+        except Exception as e: out.append((type(e).__name__, str(e)))
+    out.append(list(map(isinstance, [1, Claims()], [one, one])))
+    out.append(list(map(issubclass, [Through()], [one])))
+    return out
+expected_checks = [False, True, ("TypeError", "issubclass() arg 1 must be a class"), ("LookupError", "bases"), True,
+                   False, ("LookupError", "class"), False, True, True, [False, True], [True]]
+assert_eq(checks(), expected_checks)
