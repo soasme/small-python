@@ -38,9 +38,9 @@ def stopping():
     out = []
     for x in map(stop, [1, 2, 3]):
         out.append(x)
-    return out, list(map(stop, [1, 2, 3]))
+    return out, list(map(stop, [1, 2, 3])), sorted(map(stop, [3, 2, 1])), set(map(stop, [3, 2]))
 
-assert stopping() == ([1], [1])
+assert stopping() == ([1], [1], [3], {3})
 
 def raising():
     seen = []

@@ -1,6 +1,6 @@
 # spec: PLS-315 27.1.3
 # description: a callable iterator iter(f, sentinel) of a Python function
-# f, which may loop, calls f for each item a for loop, a comprehension, a
+# f, which may loop, or of a builtin's, calls f for each item a for loop, a comprehension, a
 # consumer such as list() or sum(), or next() takes, comparing the result
 # with the sentinel: an equal one ends it for good, a StopIteration from f
 # exhausts it, another error propagates and leaves it; a call of f that
@@ -69,3 +69,13 @@ def ends():
     return out
 
 assert_eq(ends(), [([], []), ("b",), 3, []])
+
+# A builtin's function ends the iterator by StopIteration, and its other
+# exceptions propagate.
+def natives():
+    out = [list(iter(iter([1, 2]).__next__, 0))]
+    try: list(iter([1].pop, None))
+    except IndexError as e: out.append(str(e))
+    return out
+
+assert_eq(natives(), [[1, 2], "pop from empty list"])

@@ -76,3 +76,16 @@ def errors():
 
 assert_eq(errors(), [("init",), ("new",), "__init__() should return None, not 'int'",
                      "descriptor '__call__' requires a 'type' object but received a 'int'"])
+
+# Through an attribute of an object an expression gives, as a method call's
+# callee.
+class Holder: pass
+holder = Holder()
+holder.make = type.__call__
+def held(): return holder
+def through():
+    log.clear()
+    return [held().make(P, 6).a, held().make(Plain, 7).v]
+assert_eq(through(), [(6,), 7])
+assert_eq(log, [("init", (6,), {}), ("plain", 7)])
+log.clear()

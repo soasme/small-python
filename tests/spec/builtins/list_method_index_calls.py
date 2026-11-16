@@ -1,7 +1,8 @@
 # spec: PLS-315 25.1.3, 7.5.3
 # description: a list's pop() and insert() of an instance with a Python
 # __index__ call it once and use the int it returns, also through a bound
-# method value or starred arguments; a non-int result raises, and an
+# method value, held by an object an expression gives, or starred
+# arguments; a non-int result raises, and an
 # arity error comes before any conversion; inside functions as at module
 # level.
 from harness import *
@@ -54,3 +55,15 @@ assert_eq(errors(), [
     ("IndexError", "pop index out of range", [5]),
     ("IndexError", "pop from empty list", [0]),
 ])
+
+# A bound method value held by an object a call gives.
+class Holder: pass
+holder = Holder()
+def held(): return holder
+def through():
+    s = [5, 6, 7]
+    holder.pop, holder.insert = s.pop, s.insert
+    x, y = X(1), X(0)
+    log.clear()
+    return held().pop(x), held().insert(y, 8), s, log[:]
+assert_eq(through(), (6, None, [8, 5, 7], [1, 0]))

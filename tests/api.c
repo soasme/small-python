@@ -1806,6 +1806,22 @@ int main(int argc, char **argv) {
                "def newed():\n    return sum(n.v for n in map(Newed, [1, 2])) + Holds().made(4).v\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "newed()", "newed.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 3);
+    /* So does such a call of a class whose Python __new__ makes a
+     * subclass's instance, whose __init__, list's or one that is no
+     * function, must return None. */
+    execute(c, "class InitCall:\n    def __call__(self, *a): return a[0] or None\n"
+               "class NewK:\n    def __new__(cls, v):\n        for i in range(3000): pass\n"
+               "        return list.__new__(ListK) if isinstance(v, list) else object.__new__(InitK)\n"
+               "    def __init__(self, v):\n        for i in range(3000): pass\n"
+               "class InitK(NewK):\n    __init__ = InitCall()\n"
+               "class ListK(NewK, list):\n    __init__ = list.__init__\n"
+               "class HoldsK:\n    @property\n    def made(self): return NewK\n"
+               "def newk(v):\n    return len(HoldsK().made([1, 2])) + len(str(HoldsK().made(v)))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "newk(0) > 2", "newk.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    assert(!run_paused(c, spy_eval(c, "newk(1)", "newk.py"), SPY_STOP_STEPS, &pauses) &&
+           !strcmp(spy_error_message(c), "__init__() should return None, not 'int'"));
+    spy_clear_error(c);
     /* So does a class body's load of a name by its namespace's Python __getitem__. */
     execute(c, "class Loads(dict):\n    def __getitem__(self, k):\n        for i in range(3000): pass\n        return dict.__getitem__(self, k)\n"
                "class LoadMeta(type):\n    @classmethod\n    def __prepare__(m, n, b): return Loads()\n"
