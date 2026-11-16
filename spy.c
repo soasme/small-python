@@ -10127,7 +10127,9 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
             return errorf(c, "TypeError", "can't multiply sequence by non-int of type '%s'", type_name(b));
         }
         spy_release(method);
-        SPYValue *count = index_object(c, b), *result = count ? sequence_binary(c, op, a, count) : NULL;
+        /* An overflow names the object, not its int. */
+        SPYValue *count = index_object(c, b), *result = !count ? NULL : count->as.integer_data.big ?
+            errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(b)) : sequence_binary(c, op, a, count);
         spy_release(count); return result;
     }
     if (op == '+' && a->type == b->type && (sequence || text)) {
@@ -40766,9 +40768,14 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     SPYValue *other = argc ? operand_value(c, argv[0]) : NULL;
     if ((op == '*' || op == T_MULEQ) && (kind == SLOT_BINARY || kind == SLOT_RBINARY || kind == SLOT_INPLACE) &&
         (type == SPY_LIST || type == SPY_TUPLE || type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY)) {
-        /* sq_repeat and sq_inplace_repeat wrappers: the count is any index. */
+        /* sq_repeat and sq_inplace_repeat wrappers: the count is any index,
+         * whose overflow names it. */
         SPYValue *count = index_object(c, argv[0]), *result;
         if (!count) return NULL;
+        if (count->as.integer_data.big) {
+            spy_release(count);
+            return errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(argv[0]));
+        }
         result = kind == SLOT_INPLACE ? inplace(c, op, value, count) : binary(c, '*', value, count);
         spy_release(count);
         /* In place a subclass's instance is the result; a repetition once

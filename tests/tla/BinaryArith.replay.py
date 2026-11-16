@@ -38,6 +38,7 @@ SOURCES = {
     "unary_ops": "result = (-(-3), +3.5, ~5, -0.0, abs(-2))",
     "str_mul": "result = ('ab' * 2, 2 * 'ab', [0] * 3, 'a' * -1, 'a' * True)",
     "str_mul_float": "'a' * 2.0",
+    "seq_mul_overflow": "class Huge:\n    def __index__(self):\n        return 1 << 70\n'a' * Huge()",
     "str_add_int": "'a' + 1",
     "list_add_tuple": "[1] + (2,)",
     "int_add_str": "1 + 'a'",

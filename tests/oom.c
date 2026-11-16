@@ -1089,6 +1089,15 @@ static const char *const programs[] = {
     "    except LookupError as e: out.append(str(e))\n"
     "    return out\n"
     "print(en())\n",
+    "class RCH:\n"
+    "    def __index__(self): return 1 << 70\n"
+    "def rc():\n"
+    "    out = []\n"
+    "    for f in (lambda: 'a' * RCH(), lambda: [1].__mul__(RCH()), lambda: RCH() * (1,)):\n"
+    "        try: f()\n"
+    "        except OverflowError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(rc())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"
