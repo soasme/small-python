@@ -27509,7 +27509,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         (callee->as.native.data == (void *)(intptr_t)B_MIN || callee->as.native.data == (void *)(intptr_t)B_MAX) &&
         (argc > 1 || (argc && (argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) && argv[0]->as.seq.len)))
         return fold_begin(c, m, argc, env);
-    if (calls && argv[0]->type == SPY_INSTANCE && argc > 1 && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
+    if (calls && argc > 1 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
         callee->as.native.data == (void *)(intptr_t)(argc == 3 ? B_SETATTR : argc == 2 ? B_DELATTR : -1))
         return setattr_call(c, m, argc, env);
     if (!convert && argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta)) && (convert = check_method(c, callee, argv, found))) {
