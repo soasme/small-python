@@ -545,7 +545,6 @@ static SPYValue *tuple_next(SPYContext *, Machine *, SPYValue **, int64_t *);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
 static int abstract_reaches(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *abstract_from(SPYContext *, Machine *, int, SPYValue *, SPYValue *, SPYValue *, size_t);
-static int checks_call(SPYContext *, Machine *, int, size_t, SPYValue *const *, SPYValue **);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
 static int unknown_keywords(SPYContext *, const char *, SPYValue *, const char *const *, size_t);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
@@ -2130,7 +2129,7 @@ static int set_like(SPYValue *v) { return is_set(set_storage(v)); }
 static int is_dict(SPYValue *v) { return v->type == SPY_DICT || v->type == SPY_FROZENDICT; }
 /* Whether v may be the other operand of a set method that walks it
  * (set_walk_call): set_like, or an exact dict or frozendict. */
-static int walk_operand(SPYValue *v) { return set_like(v) || is_dict(v); }
+static ALWAYS_INLINE int walk_operand(SPYValue *v) { return set_like(v) || is_dict(v); }
 /* Whether v is a list, tuple, dict, frozendict, set or frozenset, whose
  * repr may be a job (repr_items). */
 static ALWAYS_INLINE int repr_container(SPYValue *v) {
@@ -10391,6 +10390,12 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
     return is_set(a) ? set_compared(c, op, a, b) : comparison(c, op, a, b);
 }
 static int class_union(int, SPYValue *, SPYValue *);
+/* Whether a or b is an instance, a class or a set, which an operator may
+ * reach Python code or a set's walk through: tested before anything slower. */
+static ALWAYS_INLINE int python_kinds(SPYValue *a, SPYValue *b) {
+    return (UINT64_C(1) << a->type | UINT64_C(1) << b->type) &
+           (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET) ? 1 : 0;
+}
 static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
 /* Whether str or bytes % y may convert an argument by a Python method on the
  * machine (percent_call): an instance, not a str's, or a container of a
@@ -10432,9 +10437,9 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
                (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
-    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || (is_set(a) && set_walks(op, a, b)) ||
-           class_union(op, a, b) || (op == '|' && merges(a, b)) ||
-           (op == '%' && percent_converts(c, a, b)) ? NULL : binary(c, op, a, b);
+    return (python_kinds(a, b) && (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) ||
+                                    (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b))) ||
+           (op == '|' && merges(a, b)) || (op == '%' && percent_converts(c, a, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
@@ -18022,9 +18027,13 @@ static SPYValue *type_called(SPYContext *c, SPYValue *callee) {
 /* The class an unbound type.__call__, callee, calls when first is a
  * class, its first argument; else NULL. Borrowed. */
 static SPYValue *unbound_called(SPYContext *c, SPYValue *callee, SPYValue *first) {
-    return callee == name_local(c->types[SPY_CLASS], "__call__") && first->type == SPY_CLASS ? first : NULL;
+    return first->type == SPY_CLASS && callee->type == SPY_NATIVE && callee == name_local(c->types[SPY_CLASS], "__call__") ? first : NULL;
 }
-static SPYValue *new_called(SPYContext *, SPYValue *, int);
+static SPYValue *new_called_rest(SPYContext *, SPYValue *, int);
+/* new_called_rest of a class that is no builtin's and has an MRO. */
+static ALWAYS_INLINE SPYValue *new_called(SPYContext *c, SPYValue *callee, int called) {
+    return callee->as.map.flags == 2 || callee->as.map.native || !callee->as.map.mro ? NULL : new_called_rest(c, callee, called);
+}
 static int called_machine(SPYContext *, SPYValue *);
 /* class_init of a call of type.__call__ on cls (type_called), uncached. */
 static SPYValue *called_init(SPYContext *c, SPYValue *cls, int *plain) {
@@ -21675,16 +21684,24 @@ enter:
     return spy_retain(function);
 }
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
-static SPYValue *native_entered(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+static SPYValue *native_entered_rest(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+/* native_entered_rest of a native callee or a method of one. */
+static ALWAYS_INLINE SPYValue *native_entered(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
+    return callee->type == SPY_NATIVE || callee->type == SPY_METHOD ? native_entered_rest(c, m, callee, argc, argv, env) : NULL;
+}
 /* Whether callee of argc arguments argv makes a class class_make makes:
  * type() or a metaclass type_made of a name, bases of no more derived
  * metaclass and a namespace, or type.__new__. */
-static int class_maker(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+static NO_INLINE int class_maker_rest(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_NATIVE) return argc == 4 && callee->as.native.kwcall == type_method && !callee->as.native.data;
     if (argc != 3 || argv[1]->type != SPY_TUPLE || !type_made(c, callee)) return 0;
     for (size_t i = 0; i < argv[1]->as.seq.len; i++)
         if (argv[1]->as.seq.items[i]->type != SPY_CLASS || !subclass(callee, value_class(c, argv[1]->as.seq.items[i]))) return 0;
     return 1;
+}
+/* class_maker_rest of a call of three or four arguments. */
+static ALWAYS_INLINE int class_maker(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    return (argc == 3 || argc == 4) && class_maker_rest(c, callee, argc, argv);
 }
 /* The class of state, its first item, once its callbacks ran, each Python
  * one the calling step's (callk), whose return class_made_k goes on from;
@@ -26035,10 +26052,9 @@ static SPYValue *tuple_of(SPYContext *c, size_t n, SPYValue *const *items) {
  * else NULL. Borrowed. */
 static SPYValue *new_method(SPYContext *c, SPYValue *callee) { return new_called(c, callee, 0); }
 /* new_method, called whether type.__call__ is called (type_called). */
-static NO_INLINE SPYValue *new_called(SPYContext *c, SPYValue *callee, int called) {
+static NO_INLINE SPYValue *new_called_rest(SPYContext *c, SPYValue *callee, int called) {
     SPYValue *meta = callee->as.map.meta, *allocator;
-    if (callee->as.map.flags == 2 || callee->as.map.native || !callee->as.map.mro ||
-        (!called && meta && class_lookup(meta, "__call__") != name_local(c->types[SPY_CLASS], "__call__")) ||
+    if ((!called && meta && class_lookup(meta, "__call__") != name_local(c->types[SPY_CLASS], "__call__")) ||
         !(allocator = slot_new(c, callee)) || allocator->type != SPY_STATICMETHOD ||
         !machine_function(c, allocator->as.wrapper.function)) return NULL;
     c->entering_kind = CALL_CHECKED;
@@ -26398,7 +26414,21 @@ static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n,
 static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, int *, int *, SPYValue **);
 static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
-static unsigned index_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+enum { INDEX_PARTS = 1u << 8, INDEX_MOST = 4 };
+static unsigned index_arguments_rest(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+/* index_arguments_rest of a call that may need it: only an instance
+ * argument has a Python __index__, or a slice's indices() a part's. */
+static ALWAYS_INLINE unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    if (argc > INDEX_MOST) return 0;
+    for (size_t i = 0; i < argc; i++)
+        if (argv[i]->type == SPY_INSTANCE) return index_arguments_rest(c, callee, method, argc, argv);
+    return method == M_INDICES ? index_arguments_rest(c, callee, method, argc, argv) : 0;
+}
+static int checks_call_rest(SPYContext *, Machine *, int, size_t, SPYValue *const *, SPYValue **);
+/* checks_call_rest of isinstance() or issubclass() of two arguments. */
+static ALWAYS_INLINE int checks_call(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv, SPYValue **result) {
+    return (id == B_ISINSTANCE || id == B_ISSUBCLASS) && argc == 2 && checks_call_rest(c, m, id, argc, argv, result);
+}
 static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
 static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, int, SPYValue **);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
@@ -26599,7 +26629,7 @@ static SPYValue *check_from(SPYContext *c, Machine *m, int sub, SPYValue *a, SPY
 /* isinstance() or issubclass(), as id, of argv, two, on m: a tuple tests
  * its items in turn (check_from), an argument by the abstract protocol
  * reads on m (abstract_from), *result their value; else 0. */
-static int checks_call(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv, SPYValue **result) {
+static NO_INLINE int checks_call_rest(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv, SPYValue **result) {
     int sub = id == B_ISSUBCLASS;
     if ((!sub && id != B_ISINSTANCE) || argc != 2) return 0;
     if (argv[1]->type == SPY_TUPLE) *result = check_from(c, m, sub, argv[0], argv[1], 0);
@@ -26826,7 +26856,6 @@ static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t a
  * a native method's (native_indices), int()'s base, enumerate()'s start, and the size of bytes() of a plain
  * instance with __index__ and without __bytes__ or of bytearray(); a
  * slice's indices() its length, then its parts (INDEX_PARTS); else 0. */
-enum { INDEX_PARTS = 1u << 8, INDEX_MOST = 4 };
 static SPYValue *slice_part(SPYContext *, SPYValue *);
 static SPYValue *text_pad(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *text_split(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -26875,8 +26904,7 @@ static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size
     else if (owner == c->types[SPY_TUPLE] && method == M_INDEX) seq = builtin_value(c, self, SPY_TUPLE);
     return seq && method >= 0 ? index_arguments(c, seq, method, argc, argv) : 0;
 }
-static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
-    if (argc > INDEX_MOST) return 0;
+static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     int indices = method == M_INDICES && callee->type == SPY_SLICE && argc == 1;
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
@@ -29364,19 +29392,24 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
  * into a one-dimensional writable memoryview, which checks those first;
  * else NULL. */
 static SPYValue *slice_part(SPYContext *, SPYValue *);
-static SPYValue *list_index(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
+static NO_INLINE SPYValue *list_index_rest(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
     SPYValue *base = object->type == SPY_INSTANCE ? builtin_base(c, object, name, NULL) : object;
     if (base && base->type == SPY_MEMORYVIEW)
         return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ? index_function(c, key) : NULL;
     if (key->type == SPY_SLICE) return base && base->type == SPY_LIST ? index_function(c, slice_part(c, key)) : NULL;
     return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_function(c, key) : NULL;
 }
+/* list_index_rest of an instance, a list, a bytearray or a memoryview. */
+static ALWAYS_INLINE SPYValue *list_index(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
+    return UINT64_C(1) << object->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_BYTEARRAY |
+                                          UINT64_C(1) << SPY_MEMORYVIEW) ? list_index_rest(c, object, key, name) : NULL;
+}
 static int memory_index(SPYContext *, SPYValue *, SPYValue *, int, ptrdiff_t *);
 /* Whether tuple key of view, unreleased, of as many items as dimensions,
  * for a store writable, indexes it by an instance's Python __index__
  * (memory_key_next), its other items ints. */
-static int memory_key_calls(SPYContext *c, SPYValue *view, SPYValue *key, int store) {
-    if (view->type != SPY_MEMORYVIEW || key->type != SPY_TUPLE || view->as.memory.released || (store && view->as.memory.readonly) ||
+static NO_INLINE int memory_key_calls_rest(SPYContext *c, SPYValue *view, SPYValue *key, int store) {
+    if (view->as.memory.released || (store && view->as.memory.readonly) ||
         (size_t)view->as.memory.ndim != key->as.seq.len)
         return 0;
     int calls = 0;
@@ -29386,6 +29419,10 @@ static int memory_key_calls(SPYContext *c, SPYValue *view, SPYValue *key, int st
         else if (!is_int(item)) return 0;
     }
     return calls;
+}
+/* memory_key_calls_rest of a memoryview and a tuple. */
+static ALWAYS_INLINE int memory_key_calls(SPYContext *c, SPYValue *view, SPYValue *key, int store) {
+    return view->type == SPY_MEMORYVIEW && key->type == SPY_TUPLE && memory_key_calls_rest(c, view, key, store);
 }
 /* The dimensions of tuple key of view from *d on, checked in order, up
  * to the first whose item is an instance, *d then its dimension (1);
@@ -32602,7 +32639,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (began > 0) goto consume_generator;
                 if (began) break;
             }
-            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || is_set(a) ||
+            if ((python_kinds(a, b) && (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || is_set(a))) ||
                 (UNLIKELY(ins->arg == T_MODEQ) && percent_converts(c, a, b)) || (UNLIKELY(ins->arg == T_OREQ) && merges(a, b))) {
                 x = a; y = b; goto operator_step;
             }
@@ -40690,7 +40727,7 @@ static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue
  * __missing__, owned, with *env, to enter as the call; else NULL. A
  * view's release() or __exit__() whose exporter's __release_buffer__ is
  * Python leaves that call on m (memory_released): NULL, c->k_fn set. */
-static SPYValue *native_entered(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
+static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     SPYValue *self = NULL, *function;
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
     if (callee->type != SPY_NATIVE || (!self && !argc--)) return NULL;
