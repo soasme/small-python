@@ -2365,6 +2365,11 @@ int main(int argc, char **argv) {
                "def indexed():\n    a, b, s = slice(Slow(1), Slow(5)).indices(Slow(9))\n    return a + b + s + len([0, 1, 2][Sub(1):Slow(3)])\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "indexed()", "indexed.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
+    /* So does len(), bool() and reversed() of a __len__ whose result has a Python __index__. */
+    execute(c, "class Measured:\n    def __len__(self): return Slow(2)\n    def __getitem__(self, i): return i\n"
+               "def measured():\n    return len(Measured()) + bool(Measured()) + sum(x for x in reversed(Measured()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "measured()", "measured.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

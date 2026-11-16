@@ -1835,6 +1835,23 @@ static const char *const programs[] = {
     "    return out\n"
     "print(si())\n",
 
+    "class LIN:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __index__(self):\n"
+    "        if self.n is None: raise LookupError('x')\n"
+    "        return self.n\n"
+    "class LIL:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __len__(self): return LIN(self.n)\n"
+    "    def __getitem__(self, i): return i\n"
+    "def li():\n"
+    "    out = [len(LIL(3)), bool(LIL(0)), [x for x in reversed(LIL(2))]]\n"
+    "    for n in (None, -1):\n"
+    "        try: len(LIL(n))\n"
+    "        except (LookupError, ValueError) as e: out.append(type(e).__name__)\n"
+    "    return out\n"
+    "print(li())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

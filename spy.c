@@ -30950,13 +30950,19 @@ static NO_INLINE int check_truth_call(SPYContext *c, Machine *m, SPYValue *name,
  * isinstance() and issubclass() take the
  * result's truth, ascii() ("ascii" its __repr__) escapes the text,
  * round() ("round" an ndigits' __index__, v the number and ndigits)
- * rounds by the int, and the others' text is a str. */
+ * rounds by the int, and the others' text is a str. A length's Python
+ * __index__ is m's call first (length_indexed). */
 static SPYValue *buffer_copied(SPYContext *, Machine *, SPYValue *, int, SPYValue *);
+static SPYValue *length_indexed(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue *v, SPYValue *name, SPYValue *result) {
-    SPYValue *whole = NULL;
+    SPYValue *whole = NULL, *index;
     Buffer b = { .ctx = c, .whole = &whole };
     int64_t length;
     const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
+    if (m && (name == c->booleans[0] || !strcmp(method, "__len__") || !strcmp(method, "reversed")) && (index = index_function(c, result))) {
+        SPYValue *state = spy_tuple(c, 3, (SPYValue *[]){v, name, result});
+        return state ? callk(c, m, index, 1, (SPYValue *[]){spy_retain(result)}, length_indexed, state) : NULL;
+    }
     if (!strcmp(method, "__len__")) return length_result(c, result, &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "reversed")) return length_result(c, result, &length) ? NULL : reversed_iterator(c, v, length);
     if (!strcmp(method, "next") || !strcmp(method, "write") || !strcmp(method, "flush")) return spy_retain(result);
@@ -31000,6 +31006,14 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue 
         return c->error_type[0] ? NULL : spy_bool(c, truth);
     }
     return whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
+}
+/* What the Python __index__ of the length state's method returned:
+ * conversion_value of its int. */
+static SPYValue *length_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *index = index_result(c, items[2], result);
+    SPYValue *value = index ? conversion_value(c, m, items[0], items[1], index) : NULL;
+    spy_release(index); spy_release(state);
+    return value;
 }
 static int next_ended(SPYContext *, SPYValue *);
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {

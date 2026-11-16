@@ -11,6 +11,35 @@ def gen(self):
     yield 2
 
 
+class Index:
+    def __init__(self, value, log):
+        self.value, self.log = value, log
+
+    def __index__(self):
+        for _ in ():  # a loop: __index__ runs on the machine
+            pass
+        self.log.append("index")
+        return self.value
+
+
+def length(kind, op):
+    log = []
+
+    class X:
+        def __len__(self):
+            log.append("len")
+            return 3 if kind == "three" else Index({"index": 2, "negative": -1, "str": "s"}[kind], log)
+
+        def __getitem__(self, i):
+            return i * 10
+    try:
+        x = X()
+        result = repr(len(x) if op == "len" else bool(x) if op == "bool" else [y for y in reversed(x)])
+    except (TypeError, ValueError) as error:
+        result = type(error).__name__
+    return " ".join([result] + log)
+
+
 def outcome(p):
     part = p["part"]
     body = {}
@@ -36,6 +65,8 @@ def outcome(p):
                 body["__missing__"] = lambda self, key: "m"
             d = type("D", (dict,), body)({"b": 1})
             return repr(d["a"] if p["op"] == "index" else d.get("a"))
+        if part == "length":
+            return length(p["length"], p["op"])
         x = type("X", (), {"__getitem__": lambda self, i: ITEMS[i]})()
         if p["op"] == "set":
             x[0] = 1
