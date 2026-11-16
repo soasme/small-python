@@ -179,3 +179,95 @@ except KeyError as e:
     assert type(e.__context__) is ExceptionGroup
 star_else()
 assert (star_final, star_branch) == (1, 2)
+
+# A clause that matches nothing passes on what the split left, a new
+# ExceptionGroup, so later clauses split that.
+group = Logged("eg", [ValueError(1), TypeError(2)])
+failure = KeyError(3)
+def plain():
+    try:
+        raise group
+    except* KeyError:
+        caught = 0
+    except* ValueError as match:
+        caught = match
+    except* TypeError:
+        rest = 1
+    finally:
+        done = 1
+    return caught, rest, done
+def raising():
+    try:
+        raise group
+    except* ValueError:
+        1 / 0
+def unhandled():
+    try:
+        raise group
+    except* ValueError:
+        caught = 1
+    finally:
+        done = 1
+def overriding():
+    try:
+        raise group
+    except* ValueError:
+        caught = 1
+    finally:
+        raise failure
+def outcome(f):
+    try:
+        return f()
+    except BaseException as error:
+        return error
+def outcomes():
+    out = []
+    for f in (plain, raising, unhandled, overriding):
+        out.append((repr(outcome(f)), [c.__name__ for c in calls]))
+        calls.clear()
+    return out
+expected_outcomes = [("(ExceptionGroup('eg', [ValueError(1)]), 1, 1)", ['KeyError']), ("ExceptionGroup('', [ZeroDivisionError('division by zero'), ExceptionGroup('eg', [TypeError(2)])])", ['ValueError']), ("ExceptionGroup('eg', [TypeError(2)])", ['ValueError']), ('KeyError(3)', ['ValueError'])]
+assert_eq(outcomes(), expected_outcomes)
+
+# A naked exception raised with no call in the body matches the same way,
+# a full match wrapped in a group.
+def matched_plain():
+    try:
+        1 / 0
+    except* KeyError:
+        caught = 0
+    except* ZeroDivisionError as match:
+        caught = match
+    finally:
+        done = 1
+    return caught, done
+def raising_plain():
+    try:
+        1 / 0
+    except* ZeroDivisionError:
+        missing
+def unhandled_plain():
+    try:
+        1 / 0
+    except* KeyError:
+        caught = 1
+    finally:
+        done = 1
+def overriding_plain():
+    try:
+        1 / 0
+    except* ZeroDivisionError:
+        caught = 1
+    finally:
+        missing
+def otherwise_plain():
+    try:
+        done = 0
+    except* ValueError:
+        done = 1
+    else:
+        done = 2
+    return done
+assert_eq([repr(outcome(f)) for f in (matched_plain, raising_plain, unhandled_plain, overriding_plain, otherwise_plain)],
+          ["(ExceptionGroup('', (ZeroDivisionError('division by zero'),)), 1)", 'NameError("name \'missing\' is not defined")',
+           "ZeroDivisionError('division by zero')", 'NameError("name \'missing\' is not defined")', '2'])

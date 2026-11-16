@@ -595,6 +595,15 @@ int main(int argc, char **argv) {
     assert(!strcmp(o.text, "6\n"));
     assert(!strcmp(spy_error_type(c), "ZeroDivisionError"));
     spy_clear_error(c);
+    /* Its except* clauses split what the clause before left, a new group. */
+    execute(c, "class Logged(ExceptionGroup):\n    def split(self, condition):\n        splits.append(condition)\n"
+               "        return super().split(condition)\nsplits = []\n");
+    o.len = 0;
+    interactive = spy_eval_interactive(c, "try:\n    raise Logged('g', [ValueError(1)])\nexcept* KeyError:\n    pass\n"
+                                          "except* ValueError:\n    len(splits)\n", "stars.py");
+    assert(interactive); spy_release(interactive);
+    assert(!strcmp(o.text, "1\n"));
+    execute(c, "del Logged, splits\n");
     execute(c, "f = None\nC = None\n");
     /* A repr that imports sys sends the default display to sys.stdout. */
     static const char *const late[][2] = {{"", "late\n"}, {"del sys.stdout\n        ", ""}, {"sys.stdout = None\n        ", ""}};

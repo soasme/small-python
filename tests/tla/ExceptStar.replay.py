@@ -9,7 +9,15 @@ EXCEPTIONS = {
     "EG(V,T)": "ExceptionGroup('', [ValueError(), TypeError()])",
     "EG(V,EG(K))": "ExceptionGroup('', [ValueError(), ExceptionGroup('', [KeyError()])])",
     "EG(T,K)": "ExceptionGroup('', [TypeError(), KeyError()])",
+    "LG(V,T)": "Logged('', [ValueError(), TypeError()])",
 }
+splits = []
+
+
+class Logged(ExceptionGroup):
+    def split(self, condition):
+        splits.append(condition)
+        return super().split(condition)
 LETTERS = {ValueError: "V", TypeError: "T", KeyError: "K", RuntimeError: "R"}
 
 
@@ -27,11 +35,12 @@ def outcome(p):
         lines.append("    log.append((%d, leaves(eg)))" % k)
         lines.append({"pass": "    pass", "raise": "    raise", "new": "    raise RuntimeError()"}[clause["action"]])
     log = []
+    del splits[:]
     try:
-        exec("\n".join(lines) + "\n", {"log": log, "leaves": leaves})
+        exec("\n".join(lines) + "\n", {"log": log, "leaves": leaves, "Logged": Logged})
     except Exception as e:
-        return (tuple(log), "group" if isinstance(e, BaseExceptionGroup) else "single", leaves(e))
-    return (tuple(log), "none", "")
+        return (tuple(log), "group" if isinstance(e, BaseExceptionGroup) else "single", leaves(e), len(splits))
+    return (tuple(log), "none", "", len(splits))
 
 
 failures = 0

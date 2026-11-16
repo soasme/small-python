@@ -12,15 +12,16 @@
 (*     except* <type 2> as eg: ...                                         *)
 (*                                                                         *)
 (* The exception is a ValueError (V), a TypeError (T), a KeyError (K), or  *)
-(* a group of them, possibly nested; the types are ValueError, TypeError,  *)
+(* a group of them, possibly nested, or LG(V,T), a group of a subclass     *)
+(* whose split logs its calls; the types are ValueError, TypeError,        *)
 (* LookupError, and Exception. leaves() lists an exception's leaves in     *)
-(* name order, a RuntimeError being R. The outcome is the log and what     *)
-(* the statement raised: nothing, a single exception, or a group, with     *)
-(* its leaves.                                                             *)
+(* name order, a RuntimeError being R. The outcome is the log, what the    *)
+(* statement raised: nothing, a single exception, or a group, with its     *)
+(* leaves, and how often the subclass's split ran.                         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-Raised == {"V", "T", "K", "EG(V,T)", "EG(V,EG(K))", "EG(T,K)"}
+Raised == {"V", "T", "K", "EG(V,T)", "EG(V,EG(K))", "EG(T,K)", "LG(V,T)"}
 Types == {"ValueError", "TypeError", "LookupError", "Exception"}
 Actions == {"pass", "raise", "new"}
 Clauses == [type : Types, action : Actions]
@@ -29,9 +30,9 @@ Programs == Raised \X (UNION {[1..n -> Clauses] : n \in 1..2})
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
-Pending == <<<<>>, "pending", "">>
+Pending == <<<<>>, "pending", "", 0>>
 
-LeavesOf(r) == CASE r = "EG(V,T)" -> {"V", "T"} [] r = "EG(V,EG(K))" -> {"V", "K"}
+LeavesOf(r) == CASE r \in {"EG(V,T)", "LG(V,T)"} -> {"V", "T"} [] r = "EG(V,EG(K))" -> {"V", "K"}
                  [] r = "EG(T,K)" -> {"T", "K"} [] OTHER -> {r}
 IsGroup(r) == Cardinality(LeavesOf(r)) > 1
 Matches(type, leaf) == CASE type = "ValueError" -> leaf = "V" [] type = "TypeError" -> leaf = "T"
@@ -65,7 +66,11 @@ Run(p) ==
             [] items = 0 -> "none"
             [] items = 1 /\ new = 1 -> "single"
             [] OTHER -> "group",
-          Name(kept, new)>>
+          Name(kept, new),
+          \* The first clause splits the group unless its type matches it whole;
+          \* what a split leaves is a new ExceptionGroup, which later clauses
+          \* split, whether or not that clause matched.
+          IF r = "LG(V,T)" /\ cs[1].type # "Exception" THEN 1 ELSE 0>>
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -81,6 +86,9 @@ AtMostOnce == Done => \A i, j \in DOMAIN outcome[1] : i < j => outcome[1][i][1] 
 \* what clauses raise escapes.
 CatchAll == Done /\ program[2][Len(program[2])].type = "Exception" /\ (\A k \in DOMAIN program[2] : program[2][k].action = "pass")
             => outcome[2] = "none"
+
+\* A group's own split runs at most once, whatever the clauses.
+SplitOnce == Done => outcome[4] <= 1
 
 \* A single exception no clause matches propagates unchanged.
 Unmatched == Done /\ outcome[1] = <<>> => outcome[2] = (IF IsGroup(program[1]) THEN "group" ELSE "single")

@@ -22398,8 +22398,9 @@ static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
             int status = type ? star_match(c, rest, type, &match, &remaining) : -1;
             spy_release(type);
             if (status) break;
-            if (!match) { spy_release(remaining); continue; }
+            /* What the split left goes on to the next clause, matched or not. */
             spy_release(rest); rest = remaining;
+            if (!match) continue;
             spy_release(handled); c->handled = handled = match;
             if (h->c) name_set(c, f->env, h->c->text, match);
             Result body = execute(c, f, h->b);
@@ -33097,8 +33098,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             SPYValue *state = m->blocks[m->block_len - 1].value, *match = NULL, *rest = NULL;
             if (state->as.seq.items[0] == c->none) { pc = ins->target; break; }
             if (star_match(c, state->as.seq.items[0], a, &match, &rest)) break;
-            if (!match) { spy_release(rest); pc = ins->target; break; }
             spy_release(state->as.seq.items[0]); state->as.seq.items[0] = rest ? rest : spy_none(c);
+            if (!match) { pc = ins->target; break; }
             Block *inner = push_block(c, m, BLOCK_EXCEPT, ins);
             if (!inner) { spy_release(match); break; }
             inner->target = ins->other;
