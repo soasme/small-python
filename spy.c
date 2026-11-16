@@ -26132,6 +26132,10 @@ converted:
     /* int() and float() with no __int__ or __float__ convert the int the
      * instance's __index__ returns, named by the builtin. */
     if (!function && (id == B_INT || id == B_FLOAT) && (function = class_lookup(cls, "__index__"))) method = id == B_INT ? "int" : "float";
+    /* complex() with no __complex__ converts the float its __float__
+     * returns, else the int its __index__ does. */
+    if (!function && id == B_COMPLEX && (function = class_lookup(cls, "__float__"))) method = "complex.__float__";
+    else if (!function && id == B_COMPLEX && (function = class_lookup(cls, "__index__"))) method = "complex";
     /* reversed() of a sequence without __reversed__ calls its __len__,
      * named "reversed". */
     if (!function && id == B_REVERSED && class_lookup(cls, "__getitem__") && !subclass(cls, c->types[SPY_DICT]))
@@ -31233,10 +31237,15 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue 
         spy_release(index);
         return value;
     }
-    if (!strcmp(method, "int") || !strcmp(method, "float") || !strcmp(method, "index")) {
-        SPYValue *index = index_result(c, v, spy_retain(result)), *value = index;
+    if (!strcmp(method, "int") || !strcmp(method, "float") || !strcmp(method, "index") || !strncmp(method, "complex", 7)) {
+        /* complex()'s __float__ returns a float, the others' __index__ an int. */
+        SPYValue *index = !strcmp(method, "complex.__float__") ? number_result(c, v, 1, spy_retain(result)) : index_result(c, v, spy_retain(result));
+        SPYValue *value = index;
         double real;
-        if (index && *method == 'f') { value = spy_as_float(c, index, &real) ? NULL : spy_float(c, real); spy_release(index); }
+        if (index && (*method == 'f' || *method == 'c')) {
+            value = spy_as_float(c, index, &real) ? NULL : *method == 'f' ? spy_float(c, real) : complex_new(c, complex_parts(real, 0));
+            spy_release(index);
+        }
         return value;
     }
     if (!strcmp(method, "ascii")) {
@@ -34661,24 +34670,28 @@ invalid:
     mem_free(source); return spy_error(c, "ValueError", "complex() arg is a malformed string");
 }
 /* role names the argument of complex(real, imag), or is NULL for complex(x). */
+/* The number value converts by, with its kind: itself or its builtin
+ * value (NULL), or the method of its __complex__ (allow_complex), its
+ * __float__ or its __index__; an error naming role when it has none. */
+static int complex_method(SPYContext *c, SPYValue **value, int allow_complex, const char *role, SPYValue **method, const char **kind) {
+    SPYValue *v = *value, *base = builtin_base(c, v, allow_complex ? "__complex__" : "__float__", "__float__");
+    if (base && (base->type == SPY_COMPLEX || is_number(base))) v = *value = base;
+    *method = NULL;
+    if (v->type == SPY_COMPLEX || is_number(v)) return 0;
+    static const char *const kinds[] = {"__complex__", "__float__", "__index__"};
+    for (int i = !allow_complex; i < 3 && !*method && !c->error_type[0]; i++) *method = special_method(c, v, *kind = kinds[i]);
+    if (*method || c->error_type[0]) return *method ? 0 : -1;
+    char fq[256];
+    if (role) errorf(c, "TypeError", "complex() argument '%s' must be a real number, not %s", role, type_fqname(v, fq, sizeof(fq)));
+    else errorf(c, "TypeError", "complex() argument must be a string or a number, not %s", type_fqname(v, fq, sizeof(fq)));
+    return -1;
+}
 static int as_complex(SPYContext *c, SPYValue *value, double complex *number, int *was_complex, int allow_complex, const char *role) {
-    SPYValue *base = builtin_base(c, value, allow_complex ? "__complex__" : "__float__", "__float__");
-    if (base && (base->type == SPY_COMPLEX || is_number(base))) value = base;
+    SPYValue *method;
+    const char *kind;
+    if (complex_method(c, &value, allow_complex, role, &method, &kind)) return -1;
     *was_complex = value->type == SPY_COMPLEX;
-    if (value->type == SPY_COMPLEX || is_number(value)) {
-        *number = numeric_complex(c, value); return c->error_type[0] ? -1 : 0;
-    }
-    SPYValue *method = allow_complex ? special_method(c, value, "__complex__") : NULL;
-    const char *kind = "__complex__";
-    if (!method && !c->error_type[0]) { method = special_method(c, value, "__float__"); kind = "__float__"; }
-    if (!method && !c->error_type[0]) { method = special_method(c, value, "__index__"); kind = "__index__"; }
-    if (!method) {
-        if (c->error_type[0]) return -1;
-        char fq[256];
-        if (role) errorf(c, "TypeError", "complex() argument '%s' must be a real number, not %s", role, type_fqname(value, fq, sizeof(fq)));
-        else errorf(c, "TypeError", "complex() argument must be a string or a number, not %s", type_fqname(value, fq, sizeof(fq)));
-        return -1;
-    }
+    if (!method) { *number = numeric_complex(c, value); return c->error_type[0] ? -1 : 0; }
     SPYValue *converted;
     if (!strcmp(kind, "__index__")) { spy_release(method); converted = index_object(c, value); }
     else { converted = call(c, method, 0, NULL); spy_release(method); }
@@ -34701,8 +34714,20 @@ static SPYValue *complex_construct(SPYContext *c, SPYValue *real_value, SPYValue
     if (text) return parse_complex(c, text);
     if (!pair && real_value->type == SPY_COMPLEX) return spy_retain(real_value);
     double complex real, imag = complex_parts(0, 0);
-    int real_complex, imag_complex = 0;
-    if (as_complex(c, real_value, &real, &real_complex, 1, pair ? "real" : NULL) ||
+    int real_complex, imag_complex = 0, early = 0;
+    if (imag_value) {
+        /* The real part's __complex__ comes first; then both parts must be
+         * numbers before either converts. */
+        SPYValue *method, *checked = real_value;
+        const char *kind;
+        int failed = complex_method(c, &checked, 1, "real", &method, &kind);
+        spy_release(method);
+        if (!failed && method && !strcmp(kind, "__complex__")) failed = as_complex(c, real_value, &real, &real_complex, 1, "real"), early = 1;
+        checked = imag_value;
+        if (failed || complex_method(c, &checked, 0, "imag", &method, &kind)) return NULL;
+        spy_release(method);
+    }
+    if ((!early && as_complex(c, real_value, &real, &real_complex, 1, pair ? "real" : NULL)) ||
         (imag_value && as_complex(c, imag_value, &imag, &imag_complex, 0, "imag"))) return NULL;
     if (!imag_value) return complex_new(c, real);
     double x = creal(real), y = creal(imag);

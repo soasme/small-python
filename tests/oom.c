@@ -1111,6 +1111,20 @@ static const char *const programs[] = {
     "        except (LookupError, TypeError) as e: out.append(str(e))\n"
     "    return out\n"
     "print(pw())\n",
+    "class CXF:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __float__(self):\n"
+    "        for _ in (): pass\n"
+    "        if self.v is None: raise LookupError('f')\n"
+    "        return self.v\n"
+    "class CXN: pass\n"
+    "def cx():\n"
+    "    out = [complex(CXF(1.5))]\n"
+    "    for f in (lambda: complex(CXF(None)), lambda: complex(CXF('s')), lambda: complex(CXF(1.0), CXN())):\n"
+    "        try: f()\n"
+    "        except (LookupError, TypeError) as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(cx())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"

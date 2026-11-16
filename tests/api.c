@@ -2473,6 +2473,11 @@ int main(int argc, char **argv) {
                "def powered():\n    return pow(Powered(), 2, 3) + pow(Powered(), 1, 4) + pow(Powered(), 2, 2)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "powered()", "powered.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses > 6);
+    /* So does complex()'s __float__ or __index__ with no __complex__. */
+    execute(c, "class Floated:\n    def __float__(self):\n        for i in range(3000): pass\n        return 2.0\n"
+               "def complexed():\n    return int((complex(Floated()) + complex(Floated()) + complex(Width())).real)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "complexed()", "complexed.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 6);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

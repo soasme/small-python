@@ -59,7 +59,7 @@ Cases == {"round_half_even", "round_float_digits", "round_none", "round_keyword_
           "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
           "min_first_of_equal", "max_mixed", "bin_index", "index_calls", "int_index_calls", "round_index_calls", "round_index_bad", "bin_float", "hex_float_method", "complex_forms",
           "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "int_forms",
-          "int_bad_base", "int_base_first", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
+          "int_bad_base", "int_base_first", "complex_fallbacks", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
 Programs == [op : Ops, a : {-25, -15, -7, -1, 0, 3, 8, 25, 35}, b : {-3, -1, 0, 2, 5}]
             \cup [case : Cases]
 
@@ -137,6 +137,8 @@ Case(c) ==
       [] c = "int_bad_base" -> "ValueError: int() base must be >= 2 and <= 36, or 0"
       \* The base converts, and is checked, before the value's type is.
       [] c = "int_base_first" -> "(4, 'TypeError', 'ValueError', 3)"
+      \* complex() falls back to __float__, then __index__; given two parts it checks both are numbers first.
+      [] c = "complex_fallbacks" -> "((1.5+0j), (2+0j), \"complex() argument 'imag' must be a real number, not N\", \"complex() argument 'imag' must be a real number, not str\", (2+1.5j), ['float', 'index', 'index', 'float'])"
       [] c = "int_leading_zero" -> "ValueError: invalid literal for int() with base 0: '010'"
       [] c = "int_float_inf" -> "OverflowError: cannot convert float infinity to integer"
       [] c = "int_float_nan" -> "ValueError: cannot convert float NaN to integer"
