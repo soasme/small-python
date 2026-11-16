@@ -9,10 +9,18 @@ SOURCES = {"hash": "hash(x)", "hash list": "hash(kind_x(a=[]))", "setitem": "x['
            "popitem": "x.popitem"}
 
 
+class Mapping:
+    def __init__(self, pairs): self.pairs = pairs
+    def keys(self): return [k for k, _ in self.pairs]
+    def __getitem__(self, key): return dict(self.pairs)[key]
+
+
 def outcome(p):
     if p["op"] == "build":
         kind, positional = p["positional"]
-        f = frozendict(**dict(p["keywords"])) if kind == "none" else frozendict(list(positional), **dict(p["keywords"]))
+        sources = {"pairs": lambda: list(positional), "mapping": lambda: Mapping(positional),
+                   "generator": lambda: (pair for pair in positional)}
+        f = frozendict(**dict(p["keywords"])) if kind == "none" else frozendict(sources[kind](), **dict(p["keywords"]))
         return (type(f).__name__, "", tuple(f.items()))
     kinds = {"dict": dict, "frozendict": frozendict}
     x, y = kinds[p["kx"]](p["x"]), kinds[p["ky"]](p["y"])

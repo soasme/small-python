@@ -2376,6 +2376,13 @@ int main(int argc, char **argv) {
                "def walked():\n    return sum(list(Walked())) + sum(sorted(Walked())) + sum(tuple(Paired()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "walked()", "walked.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
+    /* So do frozendict()'s mapping's Python keys() and __getitem__, and its generator. */
+    execute(c, "class Frozen:\n    def keys(self):\n        for i in range(3000): pass\n        return ['a']\n"
+               "    def __getitem__(self, k):\n        for i in range(3000): pass\n        return 2\n"
+               "def thawed():\n    yield ('b', 3)\n"
+               "def frozen():\n    return frozendict(Frozen())['a'] + frozendict(thawed(), c=4)['b']\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "frozen()", "frozen.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

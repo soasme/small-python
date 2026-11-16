@@ -24542,11 +24542,11 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && (callee->type == SPY_GENERATOR || wrapped))) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
-    /* dict() and dict.update() merge an instance as a mapping, on the
-     * machine when its keys() is Python (method_function); one with no
-     * keys as pairs. */
-    int mapping = argc && argv[0]->type == SPY_INSTANCE && !keyless(argv[0]) &&
-                  (callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT));
+    /* dict(), frozendict() and dict.update() merge an instance as a
+     * mapping, on the machine when its keys() is Python (method_function);
+     * one with no keys as pairs. */
+    int dicts = callee == c->types[SPY_DICT] || callee == c->types[SPY_FROZENDICT];
+    int mapping = argc && argv[0]->type == SPY_INSTANCE && !keyless(argv[0]) && (dicts || (method == M_UPDATE && callee->type == SPY_DICT));
     /* dict.fromkeys, as a set, hashes its keys on the machine. */
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
     int fromkeys = function && callee->as.method.self == c->types[SPY_DICT] && function->type == SPY_NATIVE &&
@@ -24564,7 +24564,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (init && callee->type == SPY_METHOD && !builtin_value(c, callee->as.method.self, init)) return -1;
     int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates != -1 || init == SPY_SET;
     /* As do dict() and dict.update() of pairs. */
-    int pairs = callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT);
+    int pairs = dicts || (method == M_UPDATE && callee->type == SPY_DICT);
     if (!argc || (mapping ? !keys_function(c, argv[0], &(int){0}) :
                   !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) &&
                   !(updates != -1 && compared_items(c, set_storage(callee->as.method.self), argv[0], (int)((intptr_t)function->as.native.data & 255))) && !(updates == B_SET_DISJOINT && set_storage(argv[0]) != argv[0]) &&
@@ -24575,7 +24575,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
              bytes_joining(callee) ? B_JOIN :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
-             callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS : updates != -1 ? updates :
+             dicts ? B_DICT : fromkeys ? B_FROMKEYS : updates != -1 ? updates :
              callee == c->types[SPY_BYTES] ? B_BYTES : callee == c->types[SPY_BYTEARRAY] || bytes_extend(callee) ? B_BYTEARRAY :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     /* bytes(), bytearray() and bytearray.extend() of an iterable, an
@@ -24602,7 +24602,8 @@ static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, S
 static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *source, SPYValue *keywords) {
     int updating = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_UPDATE &&
                    callee->as.bound.self->type == SPY_DICT;
-    int dict = updating || callee == c->types[SPY_DICT] || (callee->type == SPY_CLASS && built_type(c, callee) == c->types[SPY_DICT]);
+    int dict = updating || callee == c->types[SPY_DICT] || callee == c->types[SPY_FROZENDICT] ||
+               (callee->type == SPY_CLASS && built_type(c, callee) == c->types[SPY_DICT]);
     int id = dict ? consumer_of(c, callee, -1, 1, &source) : -1;
     size_t blocks = m->block_len;
     if (id == B_DICT || id == B_EXTEND) consume(c, m, id, callee, -1, NULL, spy_retain(source), NULL);
@@ -24844,7 +24845,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) :
                        id == B_BYTES || id == B_BYTEARRAY ? bytearray_new(c, "", 0) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || id == B_FROMKEYS || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
-                                 id == B_DICT || id == B_FROMKEYS ? SPY_DICT : SPY_LIST) : NULL;
+                                 callee == c->types[SPY_FROZENDICT] ? SPY_FROZENDICT : id == B_DICT || id == B_FROMKEYS ? SPY_DICT : SPY_LIST) : NULL;
     SPYValue *searched = id == B_SET_KEEP || id == B_SET_DISJOINT || id == B_SET_SUPERSET || id == B_SET_TOGGLE ? spy_retain(callee) : NULL;
     /* A symmetric difference first makes a set of the source, a frozenset
      * for a frozenset's (set_toggled). */

@@ -1867,6 +1867,22 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ss())\n",
 
+    "class FZM:\n"
+    "    def keys(self): return ['a', 'b']\n"
+    "    def __getitem__(self, k):\n"
+    "        if k == 'b' and getattr(self, 'bad', False): raise LookupError(k)\n"
+    "        return k * 2\n"
+    "def fzg():\n"
+    "    yield ('x', 1)\n"
+    "def fz():\n"
+    "    b = FZM()\n"
+    "    b.bad = True\n"
+    "    out = [frozendict(FZM()), frozendict(fzg(), y=2), frozendict(FZM(), a=0)]\n"
+    "    try: frozendict(b)\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(fz())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

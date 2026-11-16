@@ -11,8 +11,10 @@
 (*                                                                         *)
 (* A program is either                                                     *)
 (*   - frozendict(<pairs>, **<keywords>), pairs up to two of a, b with     *)
-(*     values 1, 2 (or no positional argument), keywords up to two of a, c *)
-(*     with values 3, 4; or                                                *)
+(*     values 1, 2, given as a list, as a mapping whose Python keys()      *)
+(*     and __getitem__ give them, or as a generator of them (or no         *)
+(*     positional argument), keywords up to two of a, c with values 3,     *)
+(*     4; or                                                               *)
 (*   - x and y, each a dict or frozendict with up to two items of a, b,    *)
 (*     and one of  x | y, x == y, x |= y (with x aliased as z), hash(x),   *)
 (*     hash of x with a list value, x[k] = 1, del x[k], x.pop(k),          *)
@@ -29,7 +31,8 @@ Mappings == {s \in Pairs({"a", "b"}, {1, 2}) : Distinct(s)}
 Kinds == {"dict", "frozendict"}
 Ops == {"|", "==", "|=", "hash", "hash list", "setitem", "delitem", "pop", "update", "setdefault", "clear",
         "popitem", "copy", "isdict"}
-Programs == [op : {"build"}, positional : {<<"none", <<>>>>} \cup {<<"pairs", s>> : s \in Pairs({"a", "b"}, {1, 2})},
+Programs == [op : {"build"}, positional : {<<"none", <<>>>>} \cup
+                                         {<<kind, s>> : kind \in {"pairs", "mapping", "generator"}, s \in Pairs({"a", "b"}, {1, 2})},
              keywords : {s \in Pairs({"a", "c"}, {3, 4}) : Distinct(s)}]
             \cup [op : Ops, kx : Kinds, x : Mappings, ky : Kinds, y : Mappings]
 
