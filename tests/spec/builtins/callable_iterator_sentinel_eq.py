@@ -52,3 +52,11 @@ log.clear()
 
 assert_eq([x for x in iter(counter([7, 8]), S(8))], [7])
 assert_eq(log, [("eq", 8, 7), ("eq", 8, 8)])
+log.clear()
+
+# When both methods return NotImplemented, identity decides.
+def declined():
+    end = T(9)
+    return [x.n for x in iter(counter([T(1), T(2), end, T(3)]), end)]
+assert_eq(declined(), [1, 2])
+assert_eq(log, [("teq", 9, 1), ("teq", 1, 9), ("teq", 9, 2), ("teq", 2, 9)])
