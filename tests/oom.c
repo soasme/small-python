@@ -1061,6 +1061,19 @@ static const char *const programs[] = {
     "        except (LookupError, TypeError) as e: out.append(str(e))\n"
     "    return out\n"
     "print(bx())\n",
+    "class UBX:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        if self.v is None: raise LookupError('x')\n"
+    "        return self.v\n"
+    "def ub():\n"
+    "    l = [1, 2, 3]\n"
+    "    out = [list.pop(l, UBX(0)), list.insert(l, UBX(1), 7), l, str.find('abcb', 'b', UBX(2)), tuple.index((1, 2), 2, UBX(0))]\n"
+    "    for f in (lambda: list.pop(l, UBX(None)), lambda: str.find(1, 'a', UBX(0)), lambda: str.find()):\n"
+    "        try: f()\n"
+    "        except (LookupError, TypeError) as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(ub())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"

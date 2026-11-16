@@ -20,7 +20,7 @@ def parts(p, name):
 
 
 def index(p):
-    return Index(p["i"]) if p["by"] == "index" else p["i"]
+    return p["i"] if p["by"] == "int" else Index(p["i"])
 
 
 def arg(v):
@@ -72,9 +72,10 @@ def outcome(p):
         elif op == "reverse":
             s.reverse()
         elif op == "insert":
-            s.insert(index(p), 7)
+            (kind.insert(s, index(p), 7) if p["by"] == "unbound" else s.insert(index(p), 7))
         elif op == "pop":
-            return ("item", s.pop() if p["i"] == 99 else s.pop(index(p)), tuple(s))
+            item = s.pop() if p["i"] == 99 else kind.pop(s, index(p)) if p["by"] == "unbound" else s.pop(index(p))
+            return ("item", item, tuple(s))
         else:
             s.remove(p["x"])
     except (IndexError, ValueError, TypeError) as error:

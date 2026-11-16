@@ -13475,9 +13475,12 @@ static int search_bound(SPYContext *c, SPYValue *value, int64_t *result) {
     }
     return slice_index(c, value, result);
 }
+static const char *search_name(int method) {
+    return method == M_STARTSWITH ? "startswith" : method == M_ENDSWITH ? "endswith" : method == M_FIND ? "find" :
+           method == M_RFIND ? "rfind" : method == M_STRING_INDEX ? "index" : method == M_RINDEX ? "rindex" : "count";
+}
 static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t argc, SPYValue *const *argv) {
-    const char *name = method == M_STARTSWITH ? "startswith" : method == M_ENDSWITH ? "endswith" : method == M_FIND ? "find" :
-        method == M_RFIND ? "rfind" : method == M_STRING_INDEX ? "index" : method == M_RINDEX ? "rindex" : "count";
+    const char *name = search_name(method);
     if (argc < 1 || argc > 3) return method_arity(c, type_name(self), name, 1, 3, argc);
     int tail = method == M_STARTSWITH || method == M_ENDSWITH;
     if (self->type == SPY_BYTES && (buffer_exporter(c, argv[0]) || (tail && argv[0]->type == SPY_TUPLE))) {
@@ -13593,7 +13596,10 @@ static SPYValue *exported(SPYContext *c, SPYNativeKeywords f, size_t argc, SPYVa
 static SPYValue *string_search_method(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int descriptor = (int)(intptr_t)data, type = descriptor >> 16, method = descriptor & 65535;
     SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
-    if (!self) return spy_error(c, "TypeError", "string method requires an instance of its type");
+    const char *owner = name_text(c->types[type], "__name__")->as.string.data;
+    if (!argc) return errorf(c, "TypeError", "unbound method %s.%s() needs an argument", owner, search_name(method));
+    if (!self)
+        return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", search_name(method), owner, type_name(argv[0]));
     if (self->type != SPY_BYTEARRAY) return string_search(c, self, method, argc - 1, argv + 1);
     /* The bounds convert first, free to resize the array; the export
      * then keeps the view's storage while the needle converts. */
@@ -26780,11 +26786,10 @@ static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t a
  * __index__, in turn, as a
  * mask, when one of them is an instance (indexed_call): all of range()'s,
  * a list's pop() and insert() index, a search's bounds (search_bounds),
- * a str's, bytes' or bytearray's width, tab size or maxsplit after the
- * object (text_indices), int()'s base, and the size of bytes() of a plain
+ * a native method's (native_indices), int()'s base, and the size of bytes() of a plain
  * instance with __index__ and without __bytes__ or of bytearray(); a
  * slice's indices() its length, then its parts (INDEX_PARTS); else 0. */
-enum { INDEX_PARTS = 1u << 8 };
+enum { INDEX_PARTS = 1u << 8, INDEX_MOST = 4 };
 static SPYValue *slice_part(SPYContext *, SPYValue *);
 static SPYValue *text_pad(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *text_split(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -26802,35 +26807,48 @@ static int searches(SPYValue *callee) {
     return callee->type == SPY_STRING || callee->type == SPY_BYTES ||
            (callee->type == SPY_NATIVE && callee->as.native.call == string_search_method);
 }
-/* Of a native method callee given the object and the rest, argc in all:
- * center's, ljust's and rjust's width (not their fill), zfill's,
- * expandtabs' tab size, split's and rsplit's maxsplit, hex's
- * bytes_per_sep, int.to_bytes' length, a bytearray's pop() and insert()
- * index, the byte of its insert(), append() and remove() and its search's
- * bounds, the arguments converted before
- * the method looks at the others; else 0. */
-static unsigned text_indices(SPYValue *callee, size_t argc) {
-    SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = callee->as.native.kwcall;
-    intptr_t which = (intptr_t)callee->as.native.data;
-    if (call == text_pad) return argc == 2 || (argc == 3 && (which & 0xff) != 3) ? 2 : 0;
-    if (call == text_expandtabs) return argc == 2 ? 2 : 0;
-    if (call == int_to_bytes) return argc == 2 || argc == 3 ? 2 : 0;
-    if (callee->as.native.call == string_search_method)
-        return (which >> 16 == SPY_BYTEARRAY) && (argc == 3 || argc == 4) ? 12u & ((1u << argc) - 1) : 0;
+/* Of native method fn of self with argc further arguments argv: center's,
+ * ljust's and rjust's width (not their fill), zfill's, expandtabs' tab
+ * size, split's and rsplit's maxsplit, hex's bytes_per_sep, int.to_bytes'
+ * length, a bytearray's pop() and insert() index and the byte of its
+ * insert(), append() and remove(), a search's bounds (search_bounds) and
+ * an unbound list's pop() and insert() index, the arguments converted
+ * before the method looks at the others; else 0. */
+static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size_t argc, SPYValue *const *argv) {
+    SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = fn->as.native.kwcall;
+    intptr_t which = (intptr_t)fn->as.native.data;
+    if (call == text_pad) return argc == 1 || (argc == 2 && (which & 0xff) != 3);
+    if (call == text_expandtabs) return argc == 1;
+    if (call == int_to_bytes) return argc == 1 || argc == 2;
     if (call == bytearray_method)
-        return which == BA_INSERT ? argc == 3 ? 6 : 0 : (which == BA_POP || which == BA_APPEND || which == BA_REMOVE) && argc == 2 ? 2 : 0;
-    return (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex) && argc == 3 ? 4 : 0;
+        return which == BA_INSERT ? argc == 2 ? 3 : 0 : (which == BA_POP || which == BA_APPEND || which == BA_REMOVE) && argc == 1;
+    if (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex) return argc == 2 ? 2 : 0;
+    if (fn->as.native.call == string_search_method) {
+        /* A bytearray's search is a bytes one. */
+        int type = (int)(which >> 16);
+        SPYValue *seq = builtin_value(c, self, type), view = {.type = SPY_BYTES};
+        return seq ? search_bounds(c, type == SPY_BYTEARRAY ? &view : seq, (int)(which & 65535), argc, argv) : 0;
+    }
+    if (call != slot_call || !fn->as.native.owner) return 0;
+    /* An unbound list or tuple method as the bound one. */
+    const char *name = fn->as.native.name->as.string.data;
+    SPYValue *owner = fn->as.native.owner, *seq = NULL;
+    int method = !strcmp(name, "pop") ? M_POP : !strcmp(name, "insert") ? M_INSERT : !strcmp(name, "index") ? M_INDEX : -1;
+    if (owner == c->types[SPY_LIST]) seq = builtin_value(c, self, SPY_LIST);
+    else if (owner == c->types[SPY_TUPLE] && method == M_INDEX) seq = builtin_value(c, self, SPY_TUPLE);
+    return seq && method >= 0 ? index_arguments(c, seq, method, argc, argv) : 0;
 }
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    if (argc > INDEX_MOST) return 0;
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     int indices = method == M_INDICES && callee->type == SPY_SLICE && argc == 1;
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
                                   1 : indices ? 1 | INDEX_PARTS : search_bounds(c, callee, method, argc, argv) :
                     callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
-                    callee->type == SPY_NATIVE ? text_indices(callee, argc) : callee == c->types[SPY_INT] ? argc == 2 ? 2 : 0 :
-                    /* A bound one's object is not among the arguments. */
+                    callee->type == SPY_NATIVE ? argc ? native_indices(c, callee, argv[0], argc - 1, argv + 1) << 1 : 0 :
+                    callee == c->types[SPY_INT] ? argc == 2 ? 2 : 0 :
                     callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE ?
-                    text_indices(callee->as.method.function, argc + 1) >> 1 :
+                    native_indices(c, callee->as.method.function, callee->as.method.self, argc, argv) :
                     argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
     for (size_t i = 0; i < argc; i++) if (mask >> i & 1 && argv[i]->type == SPY_INSTANCE) return mask;
@@ -26898,7 +26916,7 @@ static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     return value;
 }
 /* The position, after argc arguments, at which keyword entry kw of a call
- * of callee converts by its Python __index__ as text_indices' arguments
+ * of callee converts by its Python __index__ as native_indices' arguments
  * do: split's and rsplit's maxsplit, the sep before it None, hex's
  * bytes_per_sep after its sep, expandtabs' tabsize, to_bytes' length and
  * int()'s base, given a value; else -1. A bound method's object is not
@@ -26921,7 +26939,7 @@ static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue
  * by position at instead (keyword_index), after None defaults: on m, as
  * indexed_call's. */
 static SPYValue *keyword_indexed(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, const Entry *kw, ptrdiff_t at) {
-    SPYValue *args[3];
+    SPYValue *args[INDEX_MOST];
     size_t count = 0;
     for (; count < argc; count++) args[count] = spy_retain(argv[count]);
     while (count < (size_t)at) args[count++] = spy_none(c);
@@ -27325,7 +27343,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->error_type[0])) return result;
     if (calls && index_arguments(c, callee, -1, argc, argv)) {
-        SPYValue *args[3];
+        SPYValue *args[INDEX_MOST];
         memcpy(args, argv, argc * sizeof(*argv));
         m->len -= argc + 1;
         result = indexed_call(c, m, callee, -1, NULL, argc, args);
@@ -27570,7 +27588,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     /* A list's pop() or insert() of an index with a Python __index__, and the others
      * of index_arguments, bound too (indexed_call). */
     if (callee && calls && skip && (method >= 0 || callee->type == SPY_BOUND_METHOD) && index_arguments(c, callee, method, argc, argv + 1)) {
-        SPYValue *args[8];
+        SPYValue *args[INDEX_MOST];
         memcpy(args, argv + 1, argc * sizeof(*argv));
         spy_release(argv[0]);
         m->len -= argc + 1;
@@ -27580,7 +27598,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     }
     /* So do a text method's of the object (index_arguments). */
     if (callee && calls && !skip && callee->type == SPY_NATIVE && index_arguments(c, callee, -1, argc + 1, argv)) {
-        SPYValue *args[4];
+        SPYValue *args[INDEX_MOST];
         memcpy(args, argv, (argc + 1) * sizeof(*argv));
         m->len -= argc + 1;
         result = indexed_call(c, m, callee, -1, NULL, argc + 1, args);
@@ -27849,7 +27867,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
     else if (calls && !keywords->as.map.len && checks_call(c, m, builtin_id(callee), args->as.seq.len, args->as.seq.items, &result)) ;
     else if (calls && !keywords->as.map.len && index_arguments(c, callee, -1, args->as.seq.len, args->as.seq.items)) {
-        SPYValue *argv[3];
+        SPYValue *argv[INDEX_MOST];
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = indexed_call(c, m, callee, -1, NULL, args->as.seq.len, argv);
     } else if (calls && keywords->as.map.len == 1 && (at = keyword_index(c, callee, args->as.seq.len, map_items(keywords))) >= 0)
