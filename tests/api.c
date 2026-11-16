@@ -2405,6 +2405,12 @@ int main(int argc, char **argv) {
                "    return m.__next__() + map.__next__(m) + w() + next(Supered(slow, [4]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "nexted()", "nexted.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 3);
+    /* So does the Python __iter__ of what a mapping's keys() returns, for ** and dict(). */
+    execute(c, "class Listed:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter('ab')\n"
+               "class Keyed:\n    def keys(self): return Listed()\n    def __getitem__(self, k): return 1\n"
+               "def keyed():\n    return len({**Keyed()}) + len(dict(Keyed()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

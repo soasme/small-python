@@ -25548,8 +25548,9 @@ static NO_INLINE int keys_listing(SPYContext *c, Block *top, SPYValue *keys) {
     Consumer *s = top->consumer;
     s->mapping = top->value; top->value = NULL;
     if (keys->type == SPY_LIST) return keys_merge(c, top, keys);
-    if (resumable(keys)) {
-        top->value = keys; s->keyed = 0;
+    /* So is an instance whose Python __iter__ gives them (KEY_ITER). */
+    if (resumable(keys) || iter_function(c, keys)) {
+        top->value = keys; s->keyed = resumable(keys) ? 0 : KEY_ITER;
         return (s->listed = value_new(c, SPY_LIST)) ? 0 : -1;
     }
     SPYValue *iterator = keys_iterator(c, s->mapping, keys), *list = iterator ? value_new(c, SPY_LIST) : NULL;

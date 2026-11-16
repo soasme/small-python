@@ -1599,6 +1599,25 @@ static const char *const programs[] = {
     "    return out\n"
     "print(nm())\n",
 
+    "class MKI:\n"
+    "    def __init__(self, ks): self.ks = ks\n"
+    "    def __iter__(self):\n"
+    "        if not self.ks: raise LookupError('iter')\n"
+    "        return iter(self.ks)\n"
+    "class MKM:\n"
+    "    def __init__(self, ks): self.ks = ks\n"
+    "    def keys(self): return MKI(self.ks)\n"
+    "    def __getitem__(self, k): return k * 2\n"
+    "def mkf(**kw): return kw\n"
+    "def mk():\n"
+    "    d = {}\n"
+    "    d.update(MKM('q'))\n"
+    "    out = [{**MKM('ab')}, mkf(**MKM('c')), dict(MKM('d')), d]\n"
+    "    try: dict(MKM(''))\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(mk())\n",
+
     "class SK:\n"
     "    def __init__(s, v): s.v = v\n"
     "    def __hash__(s): return s.v % 2\n"

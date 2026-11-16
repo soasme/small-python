@@ -24,6 +24,9 @@ SOURCES = {
                            "result = {**M()}",
     "dstar_keys_listed": "class M:\n    def keys(self):\n        yield t('a')\n        yield t('b')\n"
                          "    def __getitem__(self, k): return t(k.upper())\nresult = {**M()}",
+    "dstar_keys_iterable": "class K:\n    def __iter__(self):\n        t('iter')\n        return iter('ab')\n"
+                           "class M:\n    def keys(self): return K()\n    def __getitem__(self, k): return t(k.upper())\n"
+                           "def f(**kw): return kw\nresult = [{**M()}, f(**M())]",
     "dstar_nested": "class M:\n    def keys(self): return [t('a')]\n    def __getitem__(self, k): return t(k.upper())\n"
                     "result = [{**M()}, ({**M()}, t(1))]",
     "dstar_subclass_entries": "class D(dict):\n    def keys(self): return ['k']\n    def __getitem__(self, k): return k.upper()\n"
