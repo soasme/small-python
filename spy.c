@@ -24308,7 +24308,9 @@ static NO_INLINE SPYValue *adapter_call(SPYContext *c, Machine *m, SPYValue *cal
 /* The Python __getitem__ on the machine of plain instance v's class,
  * borrowed; else NULL. */
 static SPYValue *getitem_function(SPYContext *c, SPYValue *v) {
-    SPYValue *cls = v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__getitem__", NULL) ? NULL : v->as.map.parent;
+    /* A class's is its metaclass's. */
+    SPYValue *cls = metaclassed(v) ? value_class(c, v) :
+                    v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__getitem__", NULL) ? NULL : v->as.map.parent;
     SPYValue *function = cls ? class_lookup(cls, "__getitem__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
@@ -24350,7 +24352,7 @@ static int keyless(SPYValue *v) {
 /* Whether instance v iterates by a getitem_function, its class having no
  * __iter__. */
 static int getitem_iterated(SPYContext *c, SPYValue *v) {
-    SPYValue *cls = v->type == SPY_INSTANCE ? v->as.map.parent : NULL;
+    SPYValue *cls = v->type == SPY_INSTANCE ? v->as.map.parent : metaclassed(v) ? value_class(c, v) : NULL;
     return cls && !class_lookup(cls, "__iter__") && getitem_function(c, v);
 }
 /* Whether a call gives iterator v's next items (next_call_of): a map's,
@@ -24360,7 +24362,8 @@ static ALWAYS_INLINE int adapts(SPYValue *);
 static int called_iterator(SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
-    return kind == I_MAP || kind == I_FILTER || ((kind == I_GETITEM || kind == I_REVERSED) && v->as.iterator.source->type == SPY_INSTANCE) ||
+    return kind == I_MAP || kind == I_FILTER ||
+           ((kind == I_GETITEM || kind == I_REVERSED) && (v->as.iterator.source->type == SPY_INSTANCE || metaclassed(v->as.iterator.source))) ||
            (kind == I_CALLABLE && v->as.iterator.source->type == SPY_FUNCTION) || adapts(v);
 }
 /* Whether next() of v takes its item on the machine (consume): one that
@@ -24670,6 +24673,7 @@ static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
+                     metaclassed(argv[0]) ||
                      argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
@@ -24685,7 +24689,8 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
  * generator, and one of __getitem__ alone its iterator, as a set's list
  * or tuple (hashed_items). The consumer's keyed. */
 static int consumer_source(SPYContext *c, SPYValue **v) {
-    if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && (*v)->type != SPY_DICT_VALUES && !is_dict(*v)) return 0;
+    if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && (*v)->type != SPY_DICT_VALUES && !is_dict(*v) &&
+        !metaclassed(*v)) return 0;
     SPYValue *iter = iter_function(c, *v);
     if (iter && machine_function(c, iter)) return KEY_ITER;
     SPYValue *iterator = get_iterator(c, *v);

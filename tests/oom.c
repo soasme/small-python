@@ -1597,6 +1597,21 @@ static const char *const programs[] = {
     "    return out\n"
     "print(bc())\n",
 
+    "class MGM(type):\n"
+    "    def __len__(cls): return 3\n"
+    "    def __getitem__(cls, i):\n"
+    "        if i == cls.bad: raise LookupError(i)\n"
+    "        if i > 2: raise IndexError(i)\n"
+    "        return i * 2\n"
+    "class MGS(metaclass=MGM): bad = -1\n"
+    "class MGB(metaclass=MGM): bad = 1\n"
+    "def mg():\n"
+    "    out = [list(MGS), list(reversed(MGS)), sorted(MGS, reverse=True), sum(MGS), 4 in MGS]\n"
+    "    try: tuple(MGB)\n"
+    "    except LookupError: out.append('bad')\n"
+    "    return out\n"
+    "print(mg())\n",
+
     "class NM:\n"
     "    def __iter__(s): return s\n"
     "    def __next__(s): return 1\n"

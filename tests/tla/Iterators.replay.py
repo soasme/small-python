@@ -177,6 +177,11 @@ SOURCES = {
                               "class E(enumerate):\n    def __next__(self): i, v = super().__next__(); return v * i\n"
                               "result = (list(M(abs, [-1, -2])), sorted(F(None, [0, 1, 2])), sum(Z([1], [2]), ()), list(E('ab')),\n"
                               "          [*M(abs, [1, 2])] and log, dict(Z([1], 'k')))",
+    "metaclass_getitem": "log = []\nclass Meta(type):\n    def __len__(cls): return 2\n    def __getitem__(cls, i):\n"
+                         "        log.append(i)\n        if i == cls.bad: raise LookupError(i)\n        if i > 1: raise IndexError(i)\n"
+                         "        return i * 10\nclass S(metaclass=Meta): bad = -1\nclass B(metaclass=Meta): bad = 0\n"
+                         "def bad():\n    try: return list(B)\n    except LookupError: return 'LookupError'\n"
+                         "result = (list(S), list(reversed(S)), sum(S), sorted(S, reverse=True), bad(), log)",
     "next_method": "log = []\ndef sq(x): log.append(x); return x * x\nclass M(map):\n    def __next__(self): return super().__next__()\n"
                    "m, w = map(sq, [1, 2]), map(sq, [3]).__next__\n"
                    "try: map.__next__(filter(None, [1]))\nexcept TypeError as e: kind = 'TypeError'\n"
