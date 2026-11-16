@@ -15,24 +15,26 @@
 (*                                                                         *)
 (* A loop program drives a coroutine running `async for x in SRC:          *)
 (* BODY` with an else clause, where SRC is an async generator that         *)
-(* awaits a step (which passes out "tick") before yielding 0 and 1, a      *)
-(* class whose __anext__ returns 1 and 2, a class whose __anext__          *)
-(* awaits a step before returning 1 and 2 and before raising               *)
-(* StopAsyncIteration, a class without __aiter__, a class whose            *)
-(* __anext__ returns 5, or a class whose __aiter__ returns 5; and BODY     *)
-(* appends x and then completes, breaks, or raises KeyError. A             *)
-(* comprehension program builds a list, set, or dict over the              *)
-(* generator, or a list over the class whose __anext__ returns 1 and       *)
-(* 2, its Python __aiter__ called as the comprehension is evaluated. A     *)
-(* syntax program compiles async for, async with, await, or an             *)
-(* asynchronous comprehension in a plain function. The outcome is the      *)
-(* values passed out, the items, and whether else ran, or the              *)
-(* exception.                                                              *)
+(* awaits a step (which passes out "tick") before yielding 0 and 1, an     *)
+(* async generator that yields each of its items by a yield statement      *)
+(* inside its own async for over it, a class whose __anext__ returns 1     *)
+(* and 2, a class whose __anext__ awaits a step before returning 1 and     *)
+(* 2 and before raising StopAsyncIteration, a class without __aiter__,     *)
+(* a class whose __anext__ returns 5, or a class whose __aiter__           *)
+(* returns 5; and BODY appends x and then completes, breaks, or raises     *)
+(* KeyError. A comprehension program builds a list, set, or dict over      *)
+(* the first generator, a list over it whose element awaits a step         *)
+(* before giving ten times the item, the steps of both passing out in      *)
+(* turn, or a list over the class whose __anext__ returns 1 and 2, its     *)
+(* Python __aiter__ called as the comprehension is evaluated. A syntax     *)
+(* program compiles async for, async with, await, or an asynchronous       *)
+(* comprehension in a plain function. The outcome is the values passed     *)
+(* out, the items, and whether else ran, or the exception.                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"loop"}, source : {"agen", "class", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
-            \cup [part : {"comprehension"}, kind : {"list", "set", "dict", "class"}]
+Programs == [part : {"loop"}, source : {"agen", "relay", "class", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
+            \cup [part : {"comprehension"}, kind : {"list", "set", "dict", "class", "element"}]
             \cup [part : {"syntax"}, construct : {"for", "with", "await", "comprehension"}]
 
 VARIABLES program, outcome
@@ -41,10 +43,11 @@ vars == <<program, outcome>>
 Pending == "pending"
 
 Ticks(n) == CASE n = 0 -> "[]" [] n = 1 -> "['tick']" [] n = 2 -> "['tick', 'tick']" [] n = 3 -> "['tick', 'tick', 'tick']"
+                [] n = 4 -> "['tick', 'tick', 'tick', 'tick']"
 
 Loop(p) ==
     IF p.source \in {"noaiter", "badanext", "noanext"} THEN "[] TypeError"
-    ELSE LET agen == p.source = "agen"
+    ELSE LET agen == p.source \in {"agen", "relay"}
              awaiting == p.source = "awaiting"
              first == IF agen THEN "0" ELSE "1"
              second == IF agen THEN "1" ELSE "2"
@@ -56,6 +59,7 @@ Comprehension(p) == CASE p.kind = "list" -> "['tick', 'tick'] [0, 1]"
                       [] p.kind = "set" -> "['tick', 'tick'] {0, 1}"
                       [] p.kind = "dict" -> "['tick', 'tick'] {0: 0, 1: 1}"
                       [] p.kind = "class" -> "[] [1, 2]"
+                      [] p.kind = "element" -> Ticks(4) \o " [0, 10]"
 
 Run(p) == CASE p.part = "loop" -> Loop(p)
             [] p.part = "comprehension" -> Comprehension(p)

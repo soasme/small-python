@@ -29,6 +29,16 @@ async def agen():
         yield i
 
 
+async def element(x):
+    await Step()
+    return x * 10
+
+
+async def relay():
+    async for x in agen():
+        yield x
+
+
 class Counter:
     def __init__(self):
         self.i = 0
@@ -69,7 +79,7 @@ class NoAnext:
         return 5
 
 
-SOURCES = {"agen": agen, "class": Counter, "awaiting": Awaiting, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
+SOURCES = {"agen": agen, "relay": relay, "class": Counter, "awaiting": Awaiting, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
 SYNTAX = {"for": "def f():\n    async for x in y: pass", "with": "def f():\n    async with x: pass",
           "await": "def f():\n    await x", "comprehension": "def f():\n    return [x async for x in y]"}
 
@@ -95,6 +105,8 @@ def comprehension(kind):
             return [x async for x in agen()]
         if kind == "class":
             return [x async for x in Counter()]
+        if kind == "element":
+            return [await element(x) async for x in agen()]
         if kind == "set":
             return {x async for x in agen()}
         return {x: x async for x in agen()}

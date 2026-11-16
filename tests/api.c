@@ -2351,6 +2351,14 @@ int main(int argc, char **argv) {
                "def reflected():\n    return ([1] * Rmul(0)) + len((2,) * Rmul(3))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "reflected()", "reflected.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
+    /* So does an asynchronous comprehension resumed at an await of its source. */
+    execute(c, "class Tick:\n    def __await__(self): yield 1\n"
+               "async def ticking():\n    for i in range(2):\n        await Tick()\n        for j in range(3000): pass\n        yield i\n"
+               "async def gathered(): return [x async for x in ticking()]\n"
+               "def run_gathered():\n    g = gathered(); n = 0\n    try:\n        while True: g.send(None); n += 1\n"
+               "    except StopIteration as e: return len(e.value) + n\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "run_gathered()", "gathered.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

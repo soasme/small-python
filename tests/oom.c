@@ -1801,6 +1801,27 @@ static const char *const programs[] = {
     "    return out\n"
     "print(sr())\n",
 
+    "class ACP:\n"
+    "    def __await__(self): return (yield 1)\n"
+    "async def acs(n):\n"
+    "    for i in range(n):\n"
+    "        await ACP()\n"
+    "        yield i\n"
+    "async def acr():\n"
+    "    async for x in acs(2):\n"
+    "        yield x * 10\n"
+    "async def acg():\n"
+    "    out = [x async for x in acr()]\n"
+    "    try: [1 // x async for x in acs(2)]\n"
+    "    except ZeroDivisionError: out.append('zero')\n"
+    "    return out\n"
+    "def ap():\n"
+    "    c, n = acg(), 0\n"
+    "    try:\n"
+    "        while True: c.send(None); n += 1\n"
+    "    except StopIteration as e: return n, e.value\n"
+    "print(ap())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"
