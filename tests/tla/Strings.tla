@@ -131,7 +131,7 @@ Padded(p) ==
           [] OTHER -> "'" \o Fill("0", pad) \o Cat(s) \o "'"
 
 
-Cases == {"capitalize", "casefold", "lower_upper", "final_sigma", "swapcase", "title", "istitle", "isupper_islower",
+Cases == {"capitalize", "index_arguments", "casefold", "lower_upper", "final_sigma", "swapcase", "title", "istitle", "isupper_islower",
           "isalpha_isalnum", "isascii", "digit_classes", "isidentifier", "isprintable", "isspace",
           "expandtabs", "splitlines", "splitlines_boundaries", "split_vs_splitlines", "split_maxsplit",
           "rsplit_maxsplit", "split_bad_sep", "join", "join_nonstr", "join_bytes", "maketrans_dict",
@@ -166,6 +166,8 @@ Generated(p) ==
 
 Case(c) ==
     CASE c = "capitalize" -> "('Hello world', '\\u01c5a', '', '1a')"
+      \* A width, tab size or maxsplit converts by its __index__ before the other arguments are looked at.
+      [] c = "index_arguments" -> "('ab***', '   ab', 'a   b', ['a', 'b c'], 'TypeError', [5, 5, 4, 1, 3])"
       [] c = "casefold" -> "('strasse', '\\u03c3\\u03b1\\u03c3', 'fi')"
       [] c = "lower_upper" -> "('\\xe0b\\xe7', 'STRASSE', 'FI', 'i\\u0307', 2)"
       [] c = "final_sigma" -> "('\\u03c3\\u03b1\\u03c2', '\\u03b1\\u03c2 \\u03c3', '\\u03c3')"

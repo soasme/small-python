@@ -26769,17 +26769,36 @@ static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t a
  * __index__, in turn, as a
  * mask, when one of them is an instance (indexed_call): all of range()'s,
  * a list's pop() and insert() index, a search's bounds (search_bounds),
- * and the size of bytes() of a plain
+ * a str's, bytes' or bytearray's width, tab size or maxsplit after the
+ * object (text_indices), int()'s base, and the size of bytes() of a plain
  * instance with __index__ and without __bytes__ or of bytearray(); a
  * slice's indices() its length, then its parts (INDEX_PARTS); else 0. */
 enum { INDEX_PARTS = 1u << 8 };
 static SPYValue *slice_part(SPYContext *, SPYValue *);
+static SPYValue *text_pad(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *text_split(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *bytearray_split(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *text_expandtabs(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Of a native text method callee given the object and the rest, argc in
+ * all: center's, ljust's and rjust's width (not their fill), zfill's,
+ * expandtabs' tab size and split's and rsplit's maxsplit, the arguments
+ * converted before the method looks at the others; else 0. */
+static unsigned text_indices(SPYValue *callee, size_t argc) {
+    SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = callee->as.native.kwcall;
+    int zfill = call == text_pad && ((intptr_t)callee->as.native.data & 0xff) == 3;
+    return call == text_pad ? argc == 2 || (argc == 3 && !zfill) ? 2 : 0 : call == text_expandtabs ? argc == 2 ? 2 : 0 :
+           (call == text_split || call == bytearray_split) && argc == 3 ? 4 : 0;
+}
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     int indices = method == M_INDICES && callee->type == SPY_SLICE && argc == 1;
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
                                   1 : indices ? 1 | INDEX_PARTS : search_bounds(c, callee, method, argc, argv) :
                     callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
+                    callee->type == SPY_NATIVE ? text_indices(callee, argc) : callee == c->types[SPY_INT] ? argc == 2 ? 2 : 0 :
+                    /* A bound one's object is not among the arguments. */
+                    callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE ?
+                    text_indices(callee->as.method.function, argc + 1) >> 1 :
                     argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
     for (size_t i = 0; i < argc; i++) if (mask >> i & 1 && argv[i]->type == SPY_INSTANCE) return mask;
@@ -27494,6 +27513,15 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         spy_release(argv[0]);
         m->len -= argc + 1;
         result = indexed_call(c, m, callee, method, n->a->b->global_key, argc, args);
+        spy_release(callee);
+        return result;
+    }
+    /* So do a text method's of the object (index_arguments). */
+    if (callee && calls && !skip && callee->type == SPY_NATIVE && index_arguments(c, callee, -1, argc + 1, argv)) {
+        SPYValue *args[4];
+        memcpy(args, argv, (argc + 1) * sizeof(*argv));
+        m->len -= argc + 1;
+        result = indexed_call(c, m, callee, -1, NULL, argc + 1, args);
         spy_release(callee);
         return result;
     }
@@ -38891,11 +38919,12 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *base = builtin_base(c, a, id == B_INT ? "__int__" : "__float__", NULL);
         if (base && (base->type == SPY_STRING || base->type == SPY_BYTES || base->type == SPY_BYTEARRAY || is_number(base))) a = base;
         if (id == B_INT && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY || argc == 2)) {
-            if (a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY)
-                return spy_error(c, "TypeError", "int() can't convert non-string with explicit base");
+            /* The base converts first. */
             int64_t base = 10;
             if (argc == 2 && slice_index(c, argv[1], &base)) return NULL;
             if (base != 0 && (base < 2 || base > 36)) return spy_error(c, "ValueError", "int() base must be >= 2 and <= 36, or 0");
+            if (a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY)
+                return spy_error(c, "TypeError", "int() can't convert non-string with explicit base");
             return int_from_text(c, a, (int)base);
         }
         if (is_number(a)) {

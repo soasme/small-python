@@ -37,6 +37,9 @@ def pad(method, s, width):
 
 
 SOURCES = {
+    "index_arguments": "log = []\nclass N:\n    def __init__(self, v): self.v = v\n    def __index__(self):\n        log.append(self.v)\n        return self.v\n"
+                       "def bad():\n    try: return 'ab'.ljust(N(3), 1)\n    except TypeError as e: return type(e).__name__\n"
+                       "result = ('ab'.ljust(N(5), '*'), 'ab'.rjust(N(5)), 'a\\tb'.expandtabs(N(4)), 'a b c'.split(None, N(1)), bad(), log)",
     "capitalize": "result = ('hELLO wORLD'.capitalize(), '\u01c6a'.capitalize(), ''.capitalize(), '1a'.capitalize())",
     "casefold": "result = ('Stra\xdfe'.casefold(), '\u03a3\u0391\u03a3'.casefold(), '\ufb01'.casefold())",
     "lower_upper": "result = ('\xc0b\xc7'.lower(), 'stra\xdfe'.upper(), '\ufb01'.upper(), '\u0130'.lower(), len('\u0130'.lower()))",

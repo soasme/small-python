@@ -1022,6 +1022,20 @@ static const char *const programs[] = {
     "    return out\n"
     "print(da())\n",
 
+    "class TIX:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        if self.v is None: raise LookupError('x')\n"
+    "        return self.v\n"
+    "def ti():\n"
+    "    s = 'a b c'\n"
+    "    out = [s.ljust(TIX(7), '*'), s.zfill(TIX(6)), s.split(None, TIX(1)), b'ab'.center(TIX(4)), int('11', TIX(2))]\n"
+    "    for f in (lambda: s.ljust(TIX(None)), lambda: int(5, TIX(2))):\n"
+    "        try: f()\n"
+    "        except (LookupError, TypeError) as e: out.append(type(e).__name__)\n"
+    "    return out\n"
+    "print(ti())\n",
+
     "class RS(set):\n"
     "    def __eq__(self, o):\n"
     "        for _ in (): pass\n"

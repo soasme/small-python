@@ -97,6 +97,9 @@ SOURCES = {
     "float_forms": "result = (float(), float(' -1.5e3 '), float('-inf'), repr(float('nan')), float('1_0.5'), float(True))",
     "float_bad": "result = float('1__0')",
     "int_forms": "result = (int(), int(3.9), int(-3.9), int('0x1f', 16), int('0x1f', 0), int(' 0b101 ', 0), int('z', 36), int(True))",
+    "int_base_first": "log = []\nclass B:\n    def __index__(self):\n        log.append(2)\n        return 2\n"
+                      "def bad(*a):\n    try: return int(*a)\n    except (TypeError, ValueError) as e: return type(e).__name__\n"
+                      "result = (int('100', B()), bad(5, B()), bad(5, 99), len(log) + int('1', B()))",
     "int_bad_base": "result = int('10', 1)",
     "int_leading_zero": "result = int('010', 0)",
     "int_float_inf": "result = int(float('inf'))",

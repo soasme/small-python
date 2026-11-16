@@ -2445,6 +2445,11 @@ int main(int argc, char **argv) {
                "def deleted():\n    d = Deleting()\n    delattr(d, 'x')\n    delattr(Deleting.__new__(Deleting), 'p')\n    return 5\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "deleted()", "deleted.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
+    /* So does the __index__ of a text method's width or maxsplit, or of int()'s base. */
+    execute(c, "class Width:\n    def __index__(self):\n        for i in range(3000): pass\n        return 4\n"
+               "def widened():\n    s = 'ab'\n    return len(s.ljust(Width(), '*')) + len('a b c d e'.split(None, Width())) + int('10', Width())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "widened()", "widened.py"), SPY_STOP_STEPS, &pauses)) == 13 && pauses > 6);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
