@@ -177,6 +177,10 @@ SOURCES = {
                               "class E(enumerate):\n    def __next__(self): i, v = super().__next__(); return v * i\n"
                               "result = (list(M(abs, [-1, -2])), sorted(F(None, [0, 1, 2])), sum(Z([1], [2]), ()), list(E('ab')),\n"
                               "          [*M(abs, [1, 2])] and log, dict(Z([1], 'k')))",
+    "next_method": "log = []\ndef sq(x): log.append(x); return x * x\nclass M(map):\n    def __next__(self): return super().__next__()\n"
+                   "m, w = map(sq, [1, 2]), map(sq, [3]).__next__\n"
+                   "try: map.__next__(filter(None, [1]))\nexcept TypeError as e: kind = 'TypeError'\n"
+                   "result = (m.__next__(), map.__next__(m), w(), next(M(sq, [3]).__iter__()) - 6, kind, log + list(M(sq, [2, 3])))",
 }
 
 

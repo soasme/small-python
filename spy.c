@@ -24530,6 +24530,17 @@ static SPYValue *const *athrow_args(SPYContext *c, SPYValue *op, size_t *argc) {
     *argc = args->as.seq.len;
     return args->as.seq.items;
 }
+static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* The builtin iterator whose type's __next__ slot callee calls: given it
+ * as its one argument, or bound to it or to an instance it is the base of
+ * (a method-wrapper, super().__next__); else NULL. */
+static SPYValue *slotted_next(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    SPYValue *self = callee->type == SPY_METHOD && !argc ? callee->as.method.self : callee->type == SPY_NATIVE && argc == 1 ? argv[0] : NULL;
+    SPYValue *slot = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    if (self && self->type == SPY_INSTANCE) self = self->as.map.base;
+    return self && self->type == SPY_ITERATOR && slot->type == SPY_NATIVE && slot->as.native.kwcall == slot_call &&
+           slot->as.native.owner == value_class(c, self) && !strcmp(slot->as.native.name->as.string.data, "__next__") ? self : NULL;
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
     if (built) callee = built;
@@ -24565,6 +24576,10 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                                                 (argc == 2 || argv[2]->type == SPY_NONE || argv[2]->type == SPY_TRACEBACK))) &&
                throws_in(c, callee, argc ? argv[0] : NULL) && thrown_at(c, callee->as.generator.machine, argc, argc ? argv[0] : NULL) ?
                method == M_THROW ? B_THROW : B_CLOSE : -1;
+    /* An iterator's __next__, bound or given it, of a Python function is next() of it. */
+    if (method == M_NEXT && !argc && callee->type == SPY_ITERATOR) return next_calls(c, callee) ? B_NEXT : -1;
+    SPYValue *slot = method < 0 ? slotted_next(c, callee, argc, argv) : NULL;
+    if (slot) return next_calls(c, slot) ? B_NEXT : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && (callee->type == SPY_GENERATOR || wrapped))) &&
@@ -24648,7 +24663,8 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
                        callee->type == SPY_METHOD || callee->type == SPY_CLASS || (callee->type == SPY_NATIVE && argc == 2))) ||
                      ((argv[0]->type == SPY_BYTES || argv[0]->type == SPY_BYTEARRAY || argv[0]->type == SPY_SET) && callee->type == SPY_NATIVE && argc == 2))) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR || callee->type == SPY_BOUND_METHOD ||
-           callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ? consumer_id(c, callee, method, argc, argv) : -1;
+           callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ||
+           (!argc && callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* A consumer's source *v, owned (iter_function): an instance whose
  * __iter__ is on the machine stays, its call the consumer's first
@@ -24788,6 +24804,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         if (!bound) { spy_release(start); return; }
         generator = start; start = NULL; callee = bound;
     }
+    /* A method-wrapper's or super()'s __next__ is next() of its iterator (slotted_next). */
+    if (id == B_NEXT && callee->type == SPY_METHOD && !generator) generator = spy_retain(slotted_next(c, callee, 0, NULL));
     /* An athrow's or aclose's first send throws its exception (athrow_args). */
     SPYValue *op = callee->type == SPY_BOUND_METHOD ? callee->as.bound.self : method < 0 && generator ? generator : callee, *awaited = NULL;
     if (id == B_THROW && op->type == SPY_ASYNC_GENERATOR_ATHROW && method != M_THROW) {
@@ -27332,7 +27350,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
     id = consumer_of(c, callee, -1, argc, argv);
-    SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
+    SPYValue *generator = id >= 0 && argc ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     SPYValue *traceback = id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
     SPYValue *getter = id < 0 && calls ? native_entered(c, m, callee, argc, argv, env) : NULL;
     int plain = 0;

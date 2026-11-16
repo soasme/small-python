@@ -23,8 +23,10 @@
 (* list() would: its own __iter__ again, then its length hint. A list's or *)
 (* tuple's subclass with its own __iter__ gives that method's items to     *)
 (* every consumer, not its storage; a map's, zip's, filter's or            *)
-(* enumerate's subclass keeping its __iter__ gives its own __next__'s,     *)
-(* to dict() as pairs too.                                                 *)
+(* enumerate's subclass keeping its __iter__ gives its own __next__'s, to  *)
+(* dict() as pairs too. A map's or filter's __next__, bound, given it by   *)
+(* its type, stored or reached by super(), is next() of it; another type's *)
+(* raises TypeError.                                                       *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -74,7 +76,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
-          "iterator_subclass_next"}
+          "iterator_subclass_next", "next_method"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -138,6 +140,7 @@ Case(c) ==
       \* a list's or tuple's subclass gives the items of its own __iter__
       [] c = "subclass_iter" -> "([7, 8], [7, 8], (1,), [1], ['iter', 'len', 'iter', 'len', 'titer', 'titer'])"
       [] c = "iterator_subclass_next" -> "([('M', 1), ('M', 2)], [-2, -1], (2, 1), ['', 'b'], [1, 2, 1, 2], {'k': 1})"
+      [] c = "next_method" -> "(1, 4, 9, 3, 'TypeError', [1, 2, 3, 3, 2, 3, 4, 9])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

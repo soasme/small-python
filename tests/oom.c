@@ -1928,6 +1928,21 @@ static const char *const programs[] = {
     "    return out\n"
     "print(dz())\n",
 
+    "def nmf(x):\n"
+    "    if x == 9: raise LookupError(x)\n"
+    "    return x + 1\n"
+    "class NMM(map):\n"
+    "    def __next__(self): return super().__next__() * 2\n"
+    "def nm():\n"
+    "    m, w = map(nmf, [1, 2, 9]), map(nmf, [5]).__next__\n"
+    "    out = [m.__next__(), map.__next__(m), (0, w(), 1), list(NMM(nmf, [3]))]\n"
+    "    try: m.__next__()\n"
+    "    except LookupError: out.append('bad')\n"
+    "    try: w()\n"
+    "    except StopIteration: out.append('stop')\n"
+    "    return out\n"
+    "print(nm())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

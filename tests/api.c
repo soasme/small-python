@@ -2398,6 +2398,13 @@ int main(int argc, char **argv) {
                "def zipped():\n    d = dict(Zipped('a', [1]))\n    d.update(Zipped('b', [2]))\n    return d['a'] + d['b']\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So does a map's function for its explicit __next__, bound, stored or by super(). */
+    execute(c, "def slow(x):\n    for i in range(3000): pass\n    return x\n"
+               "class Supered(map):\n    def __next__(self): return super().__next__()\n"
+               "def nexted():\n    m = map(slow, [1, 2])\n    w = map(slow, [3]).__next__\n"
+               "    return m.__next__() + map.__next__(m) + w() + next(Supered(slow, [4]))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "nexted()", "nexted.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 3);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
