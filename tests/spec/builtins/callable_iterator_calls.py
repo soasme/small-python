@@ -79,3 +79,17 @@ def natives():
     return out
 
 assert_eq(natives(), [[1, 2], "pop from empty list"])
+
+# A builtin callable's StopIteration ends the iterator, and another error
+# propagates, whatever takes its items: a starred display, unpacking,
+# zip(), any() and all().
+def builtin_nexts(): return iter(iter([1, 2]).__next__, None)
+def taken():
+    out = [[*builtin_nexts()]]
+    a, b = builtin_nexts(); out.append((a, b))
+    out.append(list(zip(builtin_nexts(), builtin_nexts())))
+    out.append((any(builtin_nexts()), all(builtin_nexts())))
+    try: [*iter([].pop, None)]
+    except IndexError as e: out.append(str(e))
+    return out
+assert_eq(taken(), [[1, 2], (1, 2), [(1, 1), (2, 2)], (True, True), "pop from empty list"])

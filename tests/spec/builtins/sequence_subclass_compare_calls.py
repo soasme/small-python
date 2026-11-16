@@ -5,6 +5,8 @@
 # which may loop, in order, with the subclass instance's items first when
 # it is the right operand of its base's object, then for an ordering the
 # first unequal pair's Python method; a method's exception propagates.
+# Items whose == is identity, with no Python __eq__, are unequal at once,
+# so an ordering calls the first distinct pair's method, or its reflection.
 # Inside functions as at module level.
 from harness import *
 
@@ -48,8 +50,26 @@ expected = [False, False, True, True, True, False, False, False, True, True, Tru
              ('eq', 1, 1), ('eq', 3, 2), ('lt', 2, 3), ('eq', 1, 1), ('eq', 3, 2), ('lt', 2, 3), ('eq', 0, 'bad'),
              ('eq', 'bad', 0)]]
 
-def main():
-    return compares()
+class Ordered:
+    def __init__(self, v): self.v = v
+    def __lt__(self, other):
+        for _ in range(2): pass
+        log.append(("lt", self.v, other.v))
+        return self.v < other.v
+    def __gt__(self, other):
+        log.append(("gt", self.v, other.v))
+        return self.v > other.v
 
-assert_eq(main(), expected)
-assert_eq(compares(), expected)
+def identities():
+    del log[:]
+    x, y = Ordered(1), Ordered(2)
+    out = [L([x]) < L([y]), L([x]) < [y], [x] > L([y]), T((1, x)) < T((1, y)), T((y,)) > (x,)]
+    return out + [list(log)]
+
+ordered = [True, True, False, True, True, [("lt", 1, 2), ("lt", 1, 2), ("lt", 2, 1), ("lt", 1, 2), ("gt", 2, 1)]]
+
+def main():
+    return compares(), identities()
+
+assert_eq(main(), (expected, ordered))
+assert_eq((compares(), identities()), (expected, ordered))

@@ -1,10 +1,11 @@
-# spec: PLS-315 25.1.2, 25.2, 19.3.31, 19.3.32
+# spec: PLS-315 25.1.2, 25.2, 19.3.5, 19.3.31, 19.3.32
 # description: repr(), str(), format() and an f-string field of a list or
 # tuple call each item's __repr__ in order, which may loop, also the items
 # of a list or tuple item, and join the texts; a list or tuple being represented shows as [...] or (...) inside an
 # item's __repr__ and again normally once it is done, also after an item's
 # exception propagated. Items added or removed meanwhile, also by a native
-# __repr__ before them, are seen as the items are read by index; a __repr__
+# __repr__ before them, are seen as the items are read by index, also in
+# a nested list, ascii(), % and str.format; a __repr__
 # returning no str raises TypeError; a str subclass's text is joined. print
 # writes such a list's repr, inside functions as at module level.
 from harness import *
@@ -81,6 +82,10 @@ def results():
     out.append(repr(shown))
     shown = [Remover(), Item("popped")]
     out.append(repr(shown))
+    for shape in (lambda: repr([1, shown]), lambda: ascii(shown), lambda: f"{[shown]}", lambda: "%s" % (shown,),
+                  lambda: "%s" % ([shown],), lambda: "{}".format([shown])):
+        shown = [Remover(), Item("popped")]
+        out.append(shape())
     shown = [Item("grow"), Item("g2")]
     out.append(repr(shown))
     shown = [Item("shrink"), Item("s2"), Item("gone")]
@@ -110,6 +115,7 @@ expected = ["[<a>, 1, 's', <b>]", "[<a>, 1, 's', <b>]", "[<a>, 1, 's', <b>]", "[
             ("KeyError", "'bad'"),
             "[0, <never>]",
             ("ZeroDivisionError", "division by zero"), "['r', <z>]", "[removed]",
+            "[1, [removed]]", "[removed]", "[[removed]]", "[removed]", "[[removed]]", "[[removed]]",
             "[<grow>, <g2>, <added>]",
             "[<shrink>, <s2>]",
             ("KeyError", "'bad'"), "[<o>, []]",

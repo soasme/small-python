@@ -107,3 +107,28 @@ try:
 except KeyError as e:
     assert_eq(e.args, ("boom",))
 assert_eq("kept" in globals(), False)
+
+# A subject's __eq__, or a property, with no call or loop that fails: a
+# value pattern's error propagates, a class pattern's AttributeError
+# fails the pattern.
+class Zero:
+    def __eq__(self, o): return 1 / 0
+class Gone:
+    @property
+    def y(self): return self.missing
+class Five:
+    K = 5
+def failing(v):
+    try:
+        match v:
+            case Five.K: return "k"
+            case Gone(y=1): return "y"
+            case _: return "other"
+    except ZeroDivisionError: return "zero"
+assert_eq((failing(Zero()), failing(Gone())), ("zero", "other"))
+try:
+    match Zero():
+        case Five.K: pass
+    caught = None
+except ZeroDivisionError: caught = "zero"
+assert_eq(caught, "zero")

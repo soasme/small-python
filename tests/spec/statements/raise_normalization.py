@@ -110,3 +110,21 @@ assert_eq(failures(), [("Strict.__new__() takes 1 positional argument but 2 were
                        ("Hidden.__new__() takes 1 positional argument but 2 were given",
                         ["Normalization failed: type=Hidden args=<unknown>"]),
                        "LookupError"])
+
+# The same of a __new__ with no call or loop, from a function, with and
+# without a cause.
+SWAPPED = KeyError("w")
+class PlainSwaps(Exception):
+    def __new__(cls, *a): return a[0] if a else SWAPPED
+class PlainFive(Exception):
+    def __new__(cls, *a): return 5 if a else SWAPPED
+def plain():
+    out = []
+    for k in (PlainSwaps, PlainFive):
+        try: raise k
+        except BaseException as e: out.append((type(e).__name__, e is SWAPPED, getattr(e, "__notes__", [])))
+        try: raise k from None
+        except BaseException as e: out.append((type(e).__name__, e is SWAPPED, e.__suppress_context__))
+    return out
+assert_eq(plain(), [("KeyError", True, []), ("KeyError", True, True),
+                    ("TypeError", False, ["Normalization failed: type=PlainFive args=KeyError('w')"]), ("TypeError", False, False)])
