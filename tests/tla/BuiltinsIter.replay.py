@@ -51,6 +51,18 @@ def iterate(op, l):
         return "ValueError: %s" % error
 
 SOURCES = {
+    "enumerate_start_first": "log = []\n"
+                             "class I:\n"
+                             "    def __iter__(self):\n"
+                             "        for _ in (): pass\n"
+                             "        log.append('iter')\n"
+                             "        return iter('ab')\n"
+                             "class N:\n"
+                             "    def __index__(self):\n"
+                             "        for _ in (): pass\n"
+                             "        log.append('index')\n"
+                             "        return 3\n"
+                             "result = (list(enumerate(I(), N())), list(enumerate(I(), start=N())), log)",
     "iter_sequence_protocol": 'result = (list(iter(Seq())), list(reversed(Seq())), 20 in Seq())',
     "reversed_hook": 'result = list(reversed(Rev()))',
     "reversed_len": "log = []\nclass S:\n    def __init__(s, n): s.n = n\n    def __len__(s):\n        for _ in (): pass\n"

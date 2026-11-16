@@ -26786,7 +26786,7 @@ static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t a
  * __index__, in turn, as a
  * mask, when one of them is an instance (indexed_call): all of range()'s,
  * a list's pop() and insert() index, a search's bounds (search_bounds),
- * a native method's (native_indices), int()'s base, and the size of bytes() of a plain
+ * a native method's (native_indices), int()'s base, enumerate()'s start, and the size of bytes() of a plain
  * instance with __index__ and without __bytes__ or of bytearray(); a
  * slice's indices() its length, then its parts (INDEX_PARTS); else 0. */
 enum { INDEX_PARTS = 1u << 8, INDEX_MOST = 4 };
@@ -26846,7 +26846,7 @@ static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, siz
                                   1 : indices ? 1 | INDEX_PARTS : search_bounds(c, callee, method, argc, argv) :
                     callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
                     callee->type == SPY_NATIVE ? argc ? native_indices(c, callee, argv[0], argc - 1, argv + 1) << 1 : 0 :
-                    callee == c->types[SPY_INT] ? argc == 2 ? 2 : 0 :
+                    callee == c->types[SPY_INT] || callee == c->iterator_types[IT_ENUMERATE] ? argc == 2 ? 2 : 0 :
                     callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE ?
                     native_indices(c, callee->as.method.function, callee->as.method.self, argc, argv) :
                     argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
@@ -26881,6 +26881,11 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
         release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
         return state ? callk(c, m, index_function(c, part), 1, (SPYValue *[]){spy_retain(part)}, index_argued, state) : NULL;
+    }
+    if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, args->as.seq.len, args->as.seq.items)) {
+        /* enumerate() goes on to its iterable's Python __iter__ (adapter_call). */
+        for (size_t k = 0; k < args->as.seq.len; k++) spy_retain(args->as.seq.items[k]);
+        return adapter_call(c, m, spy_retain(callee), args->as.seq.len, args->as.seq.items);
     }
     return method >= 0 ? call_native_method(c, callee, method, name, args->as.seq.len, args->as.seq.items) :
            call(c, callee, args->as.seq.len, args->as.seq.items);
@@ -26918,13 +26923,14 @@ static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 /* The position, after argc arguments, at which keyword entry kw of a call
  * of callee converts by its Python __index__ as native_indices' arguments
  * do: split's and rsplit's maxsplit, the sep before it None, hex's
- * bytes_per_sep after its sep, expandtabs' tabsize, to_bytes' length and
- * int()'s base, given a value; else -1. A bound method's object is not
+ * bytes_per_sep after its sep, expandtabs' tabsize, to_bytes' length,
+ * int()'s base and enumerate()'s start, given a value; else -1. A bound method's object is not
  * among the arguments. */
 static ptrdiff_t keyword_index(SPYContext *c, SPYValue *callee, size_t argc, const Entry *kw) {
     if (kw->value->type != SPY_INSTANCE || kw->key->type != SPY_STRING) return -1;
     const char *name = kw->key->as.string.data;
     if (callee == c->types[SPY_INT]) return argc == 1 && !strcmp(name, "base") ? 1 : -1;
+    if (callee == c->iterator_types[IT_ENUMERATE]) return argc == 1 && !strcmp(name, "start") ? 1 : -1;
     size_t bound = callee->type == SPY_METHOD;
     SPYValue *fn = bound ? callee->as.method.function : callee;
     if (fn->type != SPY_NATIVE || !(argc + bound)) return -1;

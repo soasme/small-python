@@ -59,7 +59,7 @@ Zero(s) == [i \in DOMAIN s |-> s[i] - 1]
 Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 
-Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "next_stop",
+Cases == {"iter_sequence_protocol", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth", "filter_builtin", "filter_next",
@@ -97,6 +97,8 @@ Generated(p) ==
 
 Case(c) ==
     CASE c = "iter_sequence_protocol" -> "([0, 10, 20], [20, 10, 0], True)"
+      \* enumerate() converts its start, by position or keyword, before it calls iter() of the iterable.
+      [] c = "enumerate_start_first" -> "([(3, 'a'), (4, 'b')], [(3, 'a'), (4, 'b')], ['index', 'iter', 'index', 'iter'])"
       [] c = "reversed_hook" -> "['r', 'e', 'v']"
       \* reversed() of a sequence calls its Python __len__, which must give a
       \* length and must exist

@@ -1074,6 +1074,21 @@ static const char *const programs[] = {
     "        except (LookupError, TypeError) as e: out.append(str(e))\n"
     "    return out\n"
     "print(ub())\n",
+    "class ENI:\n"
+    "    def __iter__(self):\n"
+    "        for _ in (): pass\n"
+    "        return iter('ab')\n"
+    "class ENX:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        if self.v is None: raise LookupError('x')\n"
+    "        return self.v\n"
+    "def en():\n"
+    "    out = [list(enumerate(ENI(), ENX(2))), list(enumerate('c', start=ENX(5)))]\n"
+    "    try: enumerate(ENI(), ENX(None))\n"
+    "    except LookupError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(en())\n",
 
     "class RS(set):\n"
     "    def __eq__(self, o):\n"
