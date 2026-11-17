@@ -1,4 +1,4 @@
-# spec: PLS-315 7.3.4 7.3.7 7.3.8 7.3.9
+# spec: PLS-315 7.3.4, 7.3.7, 7.3.8, 7.3.9
 # description: getattr, hasattr, setattr and delattr given a str subclass's
 # instance pass that object itself as the name: to __getattribute__,
 # __getattr__, __setattr__ and __delattr__, as an AttributeError's name,
