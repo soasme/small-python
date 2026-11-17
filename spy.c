@@ -26486,6 +26486,9 @@ static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const
 static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
 enum { INDEX_PARTS = 1u << 8, INDEX_MOST = 4 };
+/* Whether mask marks argument i: marks are the bits below INDEX_PARTS,
+ * flags the bits from it up, and a later argument has no mark. */
+static int index_marked(unsigned mask, size_t i) { return i < 8 && mask >> i & 1; }
 static unsigned index_arguments_rest(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 /* index_arguments_rest of a call that may need it: only an instance
  * argument has a Python __index__, or a slice's indices() a part's. */
@@ -26987,7 +26990,7 @@ static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, 
                     native_indices(c, callee->as.method.function, callee->as.method.self, argc, argv) :
                     argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
-    for (size_t i = 0; i < argc; i++) if (mask >> i & 1 && argv[i]->type == SPY_INSTANCE) return mask;
+    for (size_t i = 0; i < argc; i++) if (index_marked(mask, i) && argv[i]->type == SPY_INSTANCE) return mask;
     return indices && slice_part(c, callee) ? mask : 0;
 }
 /* The call (index_arguments) of state's callee, method number and name
@@ -27000,7 +27003,7 @@ static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, 
  * bytes of the size (index_bytes). */
 static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args, size_t i, unsigned mask) {
     for (; i < args->as.seq.len; i++) {
-        SPYValue *item = args->as.seq.items[i], *function = mask >> i & 1 ? index_function(c, item) : NULL;
+        SPYValue *item = args->as.seq.items[i], *function = index_marked(mask, i) ? index_function(c, item) : NULL;
         if (function) {
             SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)i), int_value(c, mask)};
             SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
@@ -27008,7 +27011,7 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
             return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(item)}, index_argued, state) : NULL;
         }
         /* A search bound may be None. */
-        if (mask >> i & 1 && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE || !searches(callee))) break;
+        if (index_marked(mask, i) && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE || !searches(callee))) break;
     }
     SPYValue *part = i == args->as.seq.len && mask & INDEX_PARTS && integer_sign(builtin_value(c, args->as.seq.items[0], SPY_INT)) >= 0 ?
                      slice_part(c, callee) : NULL;
