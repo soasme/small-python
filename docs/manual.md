@@ -485,8 +485,40 @@ spy conforms to the Core profile of PLS-315. The evidence is
 - All 112 TLA+ models check. Of the 111 that replay on an engine, every
   transition passes on spy, as it does on the oracle.
 
-Where PLS-315 leaves a choice to the host or the implementation, this
-section states spy's choice.
+Where PLS-315 leaves a choice to the implementation (its Annex D), spy
+chooses as follows, on a 64-bit build:
+
+| Item | Clause | spy |
+| --- | --- | --- |
+| Index-size range | 7.5.4 | −2<sup>63</sup> to 2<sup>63</sup> − 1 |
+| Recursion limit | 9.6, B.6 | 1,000 by default (`SPY_LIMIT_RECURSION`); calls of Python functions and `repr` count |
+| Reclamation and finalization order | 9.7 | reference counting, with an automatic cycle collector ([4.4](#44-garbage-collection)); finalizers run in the order their objects are queued |
+| Identity of separately computed immutable values | 6.1.2, 25.2, 26.2, 26.3.1 | integers −5 to 256 are shared; `tuple(t)` is `t`, and a frozenset's `copy()` is itself; empty containers, empty strings, and one-character strings are not shared |
+| `id` and `object.__repr__` | 19.3.19, 20.1.3 | the value's address |
+| Hashes | 22.1.9, 23.1, 25.2 | `str` and `bytes` by FNV-1a, the same in every process; an object hashed by identity, its address divided by 16; `None`, 4238894112; width 64 |
+| Iteration order of sets | 26.3 | insertion order |
+| Elements of a set added to an empty set compared with one another | 26.3.1 | never |
+| Keys of a mapping merged into an empty dict compared with one another | 26.1.1 | never |
+| A dict iterator after keys were removed and added at an unchanged size | 26.1.4 | it produces no further key and raises `RuntimeError` at its next step |
+| Syntax error column offsets | 18.2.1 | the offending token or construct |
+| Home modules of intrinsics | 4.3 | the library module that publishes each (Annex C), such as `string.templatelib` for `Template` |
+| *host*(*f*) in messages | 5.2.6 | the names of Annex C.5, such as `sys.set_int_max_str_digits()`, whether or not the host registers `sys` |
+| Names bound by a partly successful match | 15.6 | a case whose pattern fails binds none of its names; one whose guard fails keeps them |
+| Extra names in a class namespace | 16.4.2 | none |
+| Sorting algorithm | 25.1.4 | a stable merge sort: descending runs are reversed, short runs extended to 32 items by insertion, and neighbouring runs merged |
+| Assertions by default | 14.5, B.6 | run (optimization level 0) |
+| A single-field f-string, `str.format` or `%` result | 13.2.4.2, 23.4, 23.6 | always a new `str` |
+| Code object internals | 28.2, 28.3, 28.9 | `co_code`, `co_linetable` and `co_exceptiontable` are empty, `co_stacksize` is 1, `co_consts` holds only a docstring, `f_lasti` and `tb_lasti` are 0; code objects are made only by compiling and `replace` |
+| Effect of other `code.replace` changes | 28.2.1 | none: the code runs its original source |
+| Fused complex arithmetic | 22.4 | as the C compiler contracts them; the Makefile passes no contraction flag |
+| Docstrings and `__text_signature__` of built-in objects | 28.5 | `None` |
+| `__name__` of string iterators | 27.1.1 | `str_ascii_iterator` for ASCII strings, `str_iterator` otherwise |
+| `__sizeof__` | 20.1.3, 20.2 | the size of one value cell, 208 bytes, for every object |
+| errno values and `ERANGE` | 21.3.4, 22.3.2 | the host's `<errno.h>` |
+| memoryview native formats | 24.4.2 | the platform ABI |
+| Nesting limits | 18.2.3 | 200 parentheses, 99 indentation levels, 64 nested f-strings or t-strings, no limit on nested blocks; deeper expressions raise `RecursionError` when the compiler's stack runs out |
+| Integer size limit | 22.1.3 | a shift or power whose count does not fit 64 bits raises "too many digits in integer"; below that, memory is the limit |
+| Additional dunder attributes | throughout | none beyond those PLS-315 lists |
 
 Porting CPython's language test modules into `tests/spec/ports` continues.
 A port that finds a difference is a defect in spy or in the standard, and is
