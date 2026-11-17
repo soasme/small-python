@@ -6,7 +6,8 @@
 (* memoryview(), bytes() and bytearray() then use it, and when the buffer  *)
 (* is released (by release(), leaving a with block, or the view being      *)
 (* destroyed, and by bytes() or bytearray() once it has copied)            *)
-(* __release_buffer__ receives the view; an object that exports no buffer  *)
+(* __release_buffer__ receives the view, an exception it raises reported   *)
+(* as unraisable and not propagated; an object that exports no buffer      *)
 (* is refused with TypeError; and while a view of a bytearray is           *)
 (* unreleased the bytearray cannot be resized. A view released by Python   *)
 (* code it runs is not touched after: an index or an item converted after  *)
@@ -16,7 +17,8 @@
 (*                                                                         *)
 (* An export program defines class B whose __buffer__ logs "buffer" and    *)
 (* its flags, 284, and returns memoryview(b"abc") or b"abc", or raises     *)
-(* ValueError, with or without a __release_buffer__ that logs "release";   *)
+(* ValueError, with no __release_buffer__ or one that logs "release" and   *)
+(* returns or then raises KeyError;                                        *)
 (* then takes bytes(B()) or bytes(bytearray(B())), or makes m =            *)
 (* memoryview(B()) and reads bytes(m) inside `with m:`, before m.release() *)
 (* or memoryview.release(m), or before del m. A resize program appends to  *)
@@ -36,7 +38,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : BOOLEAN, how : {"bytes", "bytearray", "with", "release", "unbound", "del"}]
+Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"none", "logs", "fails"}, how : {"bytes", "bytearray", "with", "release", "unbound", "del"}]
             \cup [part : {"resize"}, released : BOOLEAN]
             \cup [part : {"plain"}]
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
@@ -51,7 +53,7 @@ Pending == "pending"
 Export(p) ==
     CASE p.ret = "bytes" -> "buffer 284 TypeError"             \* __buffer__ must return a memoryview
       [] p.ret = "raise" -> "buffer 284 ValueError"            \* its exception propagates, nothing exported
-      [] OTHER -> "buffer 284 " \o (IF p.release THEN "release " ELSE "") \o "b'abc'"
+      [] OTHER -> "buffer 284 " \o (IF p.release # "none" THEN "release " ELSE "") \o "b'abc'"
 
 \* Whether an item of view v, or a store into it, converts its index.
 Indexes(v, store) == v \in IF store THEN {"plain"} ELSE {"plain", "readonly", "grid"}
@@ -82,8 +84,9 @@ Spec == Init /\ [][Execute]_vars
 -----------------------------------------------------------------------------
 Done == outcome # Pending
 
-\* A buffer obtained is released exactly once, however it is let go.
-ReleasedOnce == Done /\ program.part = "export" /\ program.ret = "view" /\ program.release =>
+\* A buffer obtained is released exactly once, however it is let go and
+\* whether or not its __release_buffer__ raises.
+ReleasedOnce == Done /\ program.part = "export" /\ program.ret = "view" /\ program.release # "none" =>
     outcome = "buffer 284 release b'abc'"
 
 \* A buffer never obtained is never released.

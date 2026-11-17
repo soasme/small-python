@@ -12,8 +12,12 @@ def export(p, log):
             raise ValueError
         return memoryview(b"abc") if p["ret"] == "view" else b"abc"
     body = {"__buffer__": __buffer__}
-    if p["release"]:
-        body["__release_buffer__"] = lambda self, view: log.append("release")
+    def __release_buffer__(self, view):
+        log.append("release")
+        if p["release"] == "fails":
+            raise KeyError("release")
+    if p["release"] != "none":
+        body["__release_buffer__"] = __release_buffer__
     B = type("B", (), body)
     how = p["how"]
     if how == "bytes":
@@ -132,7 +136,7 @@ def outcome(p):
             result = grid(p, log)
         else:
             result = repr(memoryview(object()))
-    except (TypeError, BufferError, ValueError, NotImplementedError, IndexError) as error:
+    except (TypeError, BufferError, ValueError, NotImplementedError, IndexError, KeyError) as error:
         result = type(error).__name__
     return " ".join(log + [result])
 

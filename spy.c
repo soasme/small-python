@@ -37268,7 +37268,14 @@ static void memory_unexport(SPYValue *m) {
     SPYValue *source = m->as.memory.source;
     if (source->type == SPY_BYTEARRAY && source->as.string.exports) source->as.string.exports--;
 }
-/* release(): an exporter's view goes back through its __release_buffer__. */
+/* An error obj's __release_buffer__ raised, which cannot propagate. */
+static void release_unraisable(SPYContext *c, SPYValue *obj) {
+    char text[sizeof(c->error_message)];
+    snprintf(text, sizeof text, "Exception ignored in __release_buffer__ of %s", type_name(obj));
+    report_unraisable(c, text, NULL, NULL);
+}
+/* release(): an exporter's view goes back through its __release_buffer__,
+ * an error already pending kept. */
 static int memory_release(SPYContext *c, SPYValue *m) {
     if (m->as.memory.released) return 0;
     int exports = m->as.memory.exports;
@@ -37276,34 +37283,42 @@ static int memory_release(SPYContext *c, SPYValue *m) {
     memory_unexport(m);
     SPYValue *view = m->as.memory.view;
     if (!view) return 0;
-    if (m->as.memory.obj->type == SPY_INSTANCE && class_lookup(m->as.memory.obj->as.map.parent, "__release_buffer__"))
+    if (m->as.memory.obj->type == SPY_INSTANCE && class_lookup(m->as.memory.obj->as.map.parent, "__release_buffer__")) {
+        ErrorState pending = take_error(c);
         spy_release(call_special(c, m->as.memory.obj, "__release_buffer__", 1, &view));
+        if (c->error_type[0]) release_unraisable(c, m->as.memory.obj);
+        restore_error(c, &pending);
+    }
     memory_unexport(view);
     return c->error_type[0] ? -1 : 0;
 }
-/* The __release_buffer__ that memory_released called returned result:
- * the view the exporter gave, pair's first, released too; its second. */
+/* The __release_buffer__ that memory_released called returned result, or
+ * raised an unraisable error: the view the exporter gave, pair's first,
+ * released too; its second. */
 static SPYValue *buffer_released(SPYContext *c, Machine *machine, SPYValue *pair, SPYValue *result) {
     (void)machine;
     spy_release(result);
+    if (c->error_type[0]) release_unraisable(c, pair->as.seq.items[2]);
     memory_unexport(pair->as.seq.items[0]);
-    SPYValue *value = c->error_type[0] ? NULL : spy_retain(pair->as.seq.items[1]);
+    SPYValue *value = spy_retain(pair->as.seq.items[1]);
     spy_release(pair);
     return value;
 }
 /* The release of view m on machine, its exporter's __release_buffer__
  * Python: m released, the method then machine's call (callk), its view
  * released when it returns (buffer_released), value, which it takes, the
- * call's; 1, or 0 to release m as memory_release does. */
-static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m, SPYValue *value) {
+ * call's; 1 with *result what callk returned, or 0 to release m as
+ * memory_release does. */
+static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m, SPYValue *value, SPYValue **result) {
     SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function, *pair;
     if (m->as.memory.released || m->as.memory.exports || !view || obj->type != SPY_INSTANCE ||
         !(function = class_lookup(obj->as.map.parent, "__release_buffer__")) || !machine_function(c, function)) return 0;
     memory_unexport(m);
-    pair = tuple_of(c, 2, (SPYValue *[]){view, value});
+    pair = tuple_of(c, 3, (SPYValue *[]){view, value, obj});
     spy_release(value);
+    *result = NULL;
     if (!pair) { memory_unexport(view); return 1; }
-    callk(c, machine, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view)}, buffer_released, pair);
+    *result = callk(c, machine, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view)}, buffer_released, pair);
     return 1;
 }
 static int memory_check(SPYContext *c, SPYValue *m) {
@@ -37605,7 +37620,7 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
 /* bytes() or bytearray() (array) of object, whose __buffer__ returned
  * view: a copy of the view's bytes, the view then released, by a Python
  * __release_buffer__ as m's call (memory_released) leaving NULL, c->k_fn
- * set, the copy its value. */
+ * set, the copy its value, or at once when that call cannot start. */
 static SPYValue *buffer_copied(SPYContext *c, Machine *m, SPYValue *object, int array, SPYValue *view) {
     SPYValue *exported = memory_exported(c, object, spy_retain(view)), *copy = NULL;
     if (!exported) return NULL;
@@ -37614,8 +37629,7 @@ static SPYValue *buffer_copied(SPYContext *c, Machine *m, SPYValue *object, int 
         copy = bytes && array ? bytearray_new(c, bytes->as.string.data, bytes->as.string.len) : spy_retain(bytes);
         spy_release(bytes);
     }
-    if (copy && m && memory_released(c, m, exported, copy)) copy = NULL;
-    else if (memory_release(c, exported)) { spy_release(copy); copy = NULL; }
+    if ((!copy || !m || !memory_released(c, m, exported, copy, &copy)) && memory_release(c, exported)) { spy_release(copy); copy = NULL; }
     spy_release(exported);
     return copy;
 }
@@ -40913,7 +40927,7 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     return c->error_type[0] ? NULL : spy_none(c);
 }
 static int native_absent(SPYContext *, SPYValue *, SPYValue *);
-static int memory_released(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static int memory_released(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* A call of callee with argc arguments argv, bound or not, that is
  * property.__get__ of an object whose property's getter is Python, or
@@ -40929,7 +40943,9 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     if (!self) self = *argv++;
     if (callee->as.native.kwcall == memory_method) {
         intptr_t op = (intptr_t)callee->as.native.data;
-        if (self->type == SPY_MEMORYVIEW && (op == MV_EXIT || (op == MV_RELEASE && !argc))) memory_released(c, m, self, spy_none(c));
+        SPYValue *released = NULL;
+        if (self->type == SPY_MEMORYVIEW && (op == MV_EXIT || (op == MV_RELEASE && !argc))) memory_released(c, m, self, spy_none(c), &released);
+        spy_release(released);
         return NULL;
     }
     if (callee->as.native.kwcall == slot_call) {
