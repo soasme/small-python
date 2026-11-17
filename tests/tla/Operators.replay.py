@@ -30,12 +30,13 @@ def outcome(p):
     if p["rel"] in ("same", "exact"):
         source += "R = L\n"
     else:
-        source += ("class R(L):\n" if p["rel"] == "sub" else "class R(type):\n" if meta else f"class R({base}):\n" if base else
-                   "class R:\n") + body("R", p["R"]) + "\n"
+        source += ("class R(L):\n" if p["rel"] == "sub" else "class R(type):\n" if meta else
+                   f"class R({base}):\n" if base and p["rel"] != "plain" else "class R:\n") + body("R", p["R"]) + "\n"
     made = "('X', (), {})" if meta else "()"
     left, right = ("(1)", "(2)") if base == "int" else ("('a')", "('b')") if base else (made, made)
     source += f"x = L{left}; x.name = 'x'\n"
-    source += (f"y = {base}{right}\n" if p["rel"] == "exact" else f"y = R{right}; y.name = 'y'\n")
+    source += (f"y = {base}{right}\n" if p["rel"] == "exact" else "y = R(); y.name = 'y'\n" if p["rel"] == "plain" else
+               f"y = R{right}; y.name = 'y'\n")
     source += "x += y\nresult = x\n" if p["op"] == "+=" else f"result = x {p['op']} y\n"
     namespace = {}
     try:

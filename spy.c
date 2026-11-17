@@ -41170,6 +41170,9 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     }
     switch (kind) {
     case SLOT_BINARY: case SLOT_RBINARY:
+        /* An sq_concat wrapper raises for an operand it cannot concatenate. */
+        if (op == '+' && (type == SPY_LIST || type == SPY_TUPLE || type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY))
+            return binary_builtin(c, '+', value, other);
         if (op == '%' && (type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY))
             return text_mod_slot(c, kind == SLOT_RBINARY, type, value, self, argv[0]);
         if (!slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);

@@ -24,7 +24,11 @@
 (* both operands' methods, unless L defines __add__. x may instead be      *)
 (* the exact str "a" with y of an unrelated plain class R (relation        *)
 (* "left"): a sequence has no method of +, so only y's __radd__            *)
-(* answers before its concatenation raises TypeError.                      *)
+(* answers before its concatenation raises TypeError. Or x may be of L     *)
+(* subclassing str with y of an unrelated plain class R (relation          *)
+(* "plain"): str's __add__ is the concatenation and raises TypeError for   *)
+(* y rather than returning NotImplemented, so once L defines __radd__ y's  *)
+(* __radd__ is never reached.                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -53,6 +57,8 @@ Programs == (UNION {
     : rel \in Rels \cup {"exact"}})
     \cup {[op |-> "+", rel |-> "left", holder |-> "str", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
            l \in [{} -> Kinds], r \in [UsesR("+") -> Kinds]}
+    \cup {[op |-> "+", rel |-> "plain", holder |-> "str", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
+           l \in [UsesL("+") -> Kinds], r \in [UsesR("+") -> Kinds]}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -69,15 +75,17 @@ Builtin(p, m) == IF (p.holder = "int" /\ m \in {"add", "radd"}) \/ (p.holder = "
 \* builtin's), or "none".
 Definer(p, who, m) ==
     CASE who = "y" /\ p.rel = "exact" -> Builtin(p, m)
+      [] who = "y" /\ p.rel = "plain" -> IF p.R[m] # "none" THEN "R" ELSE "none"
       [] who = "x" \/ p.rel = "same" -> IF p.L[m] # "none" THEN "L" ELSE Builtin(p, m)
       [] p.rel = "other" -> IF p.R[m] # "none" THEN "R" ELSE Builtin(p, m)
       [] OTHER -> IF p.R[m] # "none" THEN "R" ELSE IF p.L[m] # "none" THEN "L" ELSE Builtin(p, m)
 
 \* What calling who.m(other) returns: a value, or NI (also when there is no
-\* such method, or only object's, which returns NotImplemented).
+\* such method, or only object's, which returns NotImplemented); str's
+\* __add__ raises TypeError for a y that is no str.
 Call(p, who, m) ==
     LET d == Definer(p, who, m)
-    IN  IF d = "B" THEN (IF p.holder = "int" THEN "3" ELSE "ab")
+    IN  IF d = "B" THEN (IF p.holder = "int" THEN "3" ELSE IF p.rel = "plain" THEN "TypeError" ELSE "ab")
         ELSE IF d = "none" \/ (IF d = "L" THEN p.L[m] ELSE p.R[m]) = "NI" THEN NI
         ELSE d \o "." \o m \o ":" \o who
 
@@ -98,7 +106,7 @@ Add(p) ==
     LET first == p.rel = "sub" /\ p.R.radd # "none"
         calls == IF first THEN <<Call(p, "y", "radd"), Call(p, "x", "add")>>
                  ELSE <<Call(p, "x", "add")>> \o (IF p.rel = "same" THEN <<>> ELSE <<Call(p, "y", "radd")>>)
-    IN  First(calls, IF p.holder = "str" /\ p.L.add = "none" /\ p.rel # "left" THEN "ab" ELSE "TypeError")
+    IN  First(calls, IF p.holder = "str" /\ p.L.add = "none" /\ p.rel \notin {"left", "plain"} THEN "ab" ELSE "TypeError")
 
 \* A comparison tries the reflected method of y first when R is a proper
 \* subclass of L, otherwise after x's; then falls back to identity.
@@ -135,6 +143,11 @@ SubclassFirst == Done /\ program.op = "+" /\ program.rel = "sub" /\ program.R.ra
 
 \* == and != never raise without a method that does; < does.
 EqualityTotal == Done /\ program.op \in {"==", "!="} => outcome # "TypeError"
+
+\* A str subclass defining __radd__ has str's concatenation as its __add__,
+\* which raises for a y that is no str before y's __radd__ is tried.
+ConcatenationRaises == Done /\ program.rel = "plain" /\ program.L.add = "none" /\ program.L.radd # "none" =>
+    outcome = "TypeError"
 
 \* An in-place method returning a value is used as is.
 InPlaceFirst == Done /\ program.op = "+=" /\ program.L.iadd = "value" => outcome = "L.iadd:x"
