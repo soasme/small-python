@@ -17874,6 +17874,8 @@ static ALWAYS_INLINE SPYValue *run_function(SPYContext *c, SPYValue *fn, SPYValu
     else if (!enter_frame(c, env, fn)) {
         Result r = execute(c, &frame, def->b);
         leave_frame(c, r.flow == FLOW_RETURN ? r.value : r.flow == FLOW_NORMAL ? c->none : NULL);
+        /* What its caller raises next is at the caller's line. */
+        if (r.flow != FLOW_ERROR) c->line = *c->frame_line;
         if (r.flow == FLOW_RETURN) result = r.value;
         else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
     }
@@ -32458,6 +32460,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     }
                     m = call_leave(c, (Call *)m, result);
                     f = m->frame; code = m->code->items; pc = m->pc;
+                    /* What the step that made it raises next is at its line. */
+                    if (result) c->line = *c->frame_line;
                     if (kind == CALL_INIT) {
                         /* An __init__ returns None into its class call,
                          * whose value is already on the caller's stack. */
