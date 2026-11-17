@@ -11884,6 +11884,10 @@ static NO_INLINE SPYValue *native_attribute(SPYContext *c, SPYValue *cls, const 
     return method;
 }
 static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
+    /* A metaclass's own data descriptor answers before type's attributes. */
+    SPYValue *meta_own = v->type == SPY_CLASS && v->as.map.meta && name[0] == '_' && !type_answers(c, v, name) ?
+                         instance_lookup(v->as.map.meta, name) : NULL;
+    if (data_descriptor_get(meta_own)) return descriptor_get(c, meta_own, v, v->as.map.meta);
     if (v->type != SPY_INSTANCE && !strcmp(name, "__class__")) return spy_retain(value_class(c, v));
     if ((v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD) && !strcmp(name, "__module__")) {
         SPYValue **slot = builtin_module_slot(v);
@@ -12574,14 +12578,15 @@ static int class_hooked(SPYValue *v) {
  * or data descriptor of its metaclass, else a class attribute's __get__,
  * else a metaclass attribute's; else NULL. */
 static SPYValue *class_getter(SPYContext *c, SPYValue *v, const char *name) {
-    SPYValue *meta = v->as.map.meta, *found = meta ? class_lookup(meta, name) : NULL, *value = found;
+    SPYValue *meta = v->as.map.meta, *found = meta ? instance_lookup(meta, name) : NULL, *value = found;
     if (!data_descriptor_get(found) && (value = class_lookup(v, name)) == NULL) value = found;
     /* A class's own property is itself. */
     if (!value || !(value->type == SPY_INSTANCE || (value == found && value->type == SPY_PROPERTY))) return NULL;
     /* Special names have their own answers, and a builtin base's
      * attribute comes before the class's, or the metaclass's non-data,
      * descriptor (attribute_value). */
-    if (!strncmp(name, "__", 2) || (value != found ? builtin_slot_before(c, v, name) != NULL :
+    if ((!strncmp(name, "__", 2) && !(value == found && data_descriptor_get(found) && !type_answers(c, v, name))) ||
+        (value != found ? builtin_slot_before(c, v, name) != NULL :
                                     !data_descriptor_get(found) && builtin_descriptor_lookup(c, v, name))) return NULL;
     return python_getter(c, value) ? value : NULL;
 }

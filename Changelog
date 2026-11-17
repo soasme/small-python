@@ -432,6 +432,8 @@ Unreleased (0.10.0):
   of raising `TypeError`; a container subclass's keeps its base's search when pausing
 - a builtin subclass's Python `__iter__`, in a loop, a comprehension, a generator expression or a dict
   subclass's consumer, runs without nesting on the C stack
+- a metaclass property named `__name__`, `__bases__`, `__mro__`, `__base__` or `__class__` answers a read
+  of its class's attribute, as any other metaclass data descriptor does
 
 2026-11-10 0.9.0:
 

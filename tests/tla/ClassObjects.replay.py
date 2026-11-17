@@ -7,11 +7,14 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 def source(p):
     params = "[T]" if p["generic"] else ""
-    bases = "(" + ", ".join(p["bases"]) + ")" if p["bases"] else ""
+    meta = p.get("meta")
+    bases = "(" + ", ".join(list(p["bases"]) + (["metaclass=M"] if meta else [])) + ")" if p["bases"] or meta else ""
     body = ("'doc'\n" if p["doc"] else "") + ("x: int\n" if p["ann"] else "") + \
         "def m(self):\n    self.b = 1\n    self.a = 2\n"
     cls = "class C" + params + bases + ":\n" + "".join("    " + line + "\n" for line in body.splitlines())
     head = "class A:\n    w = 0\nclass B: pass\n".replace("class A:\n    w = 0\n", "class A: w = 0\n")
+    if meta:
+        head += "M = type('M', (type,), {%r: property(lambda cls: 'P')})\n" % p["attr"]
     if p["nested"]:
         return head + "def f():\n" + "".join("    " + line + "\n" for line in cls.splitlines()) + "    return C\nC = f()\n"
     return head + cls
@@ -31,10 +34,12 @@ def name(v):
 
 def outcome(p):
     namespace = {"__name__": "m"}
-    exec(source(p), namespace)
-    C, A = namespace["C"], namespace["A"]
     op = p["op"]
     try:
+        exec(source(p), namespace)
+        C, A = namespace["C"], namespace["A"]
+        if op == "read" and p["meta"]:
+            return repr(getattr(C, p["attr"]))
         if op == "read":
             v = getattr(C, p["attr"])
             if p["attr"] == "__dict__":

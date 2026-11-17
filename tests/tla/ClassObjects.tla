@@ -19,7 +19,9 @@
 (* its method m assigns self.b and self.a. It reads one attribute of C, or *)
 (* does one of: C.__dict__["x"] = 1; D(C).__doc__; A.__subclasses__();    *)
 (* C.w = 1 then A.w; c.w = 5 then C.w; c.z = 1 then c.__dict__;            *)
-(* c.__class__.                                                            *)
+(* c.__class__. A read may give C a metaclass whose property of that name *)
+(* answers first (TypeGetAttr), "P"; a __qualname__ one, or a __dict__   *)
+(* one under a type parameter, makes defining C raise TypeError.           *)
 (*                                                                         *)
 (* The outcome is the result, classes by name, or the exception.           *)
 (***************************************************************************)
@@ -29,7 +31,7 @@ Bases == {<<>>, <<"A">>, <<"A", "B">>, <<"A", "int">>, <<"int">>}
 Reads == {"__name__", "__qualname__", "__module__", "__dict__", "__bases__", "__base__", "__doc__", "__annotations__",
           "__annotate__", "__type_params__", "__static_attributes__", "__firstlineno__", "__mro__"}
 Ops == {"dictwrite", "subdoc", "subclasses", "classset", "instanceset", "instancedict", "class"}
-Programs == [bases : Bases, doc : BOOLEAN, ann : BOOLEAN, generic : BOOLEAN, nested : BOOLEAN, op : {"read"}, attr : Reads]
+Programs == [bases : Bases, doc : BOOLEAN, ann : BOOLEAN, generic : BOOLEAN, nested : BOOLEAN, op : {"read"}, attr : Reads, meta : BOOLEAN]
             \cup [bases : Bases, doc : BOOLEAN, ann : BOOLEAN, generic : BOOLEAN, nested : BOOLEAN, op : Ops]
 
 VARIABLES program, outcome
@@ -64,7 +66,9 @@ Read(p, a) ==
 
 HasA(p) == \E i \in DOMAIN p.bases : p.bases[i] = "A"
 Run(p) ==
-    IF p.op = "read" THEN Read(p, p.attr)
+    IF p.op = "read" THEN IF ~p.meta THEN Read(p, p.attr)
+                          \* Generic's __init_subclass__ reads the class's __dict__.
+                          ELSE IF p.attr = "__qualname__" \/ (p.attr = "__dict__" /\ p.generic) THEN "TypeError" ELSE "'P'"
     ELSE CASE p.op = "dictwrite" -> "TypeError"                   \* a read-only view
            [] p.op = "subdoc" -> "None"                            \* not inherited
            [] p.op = "subclasses" -> IF HasA(p) THEN "[C]" ELSE "[]"
@@ -81,6 +85,6 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* The layout base is one of the bases.
-BaseIsBase == Done /\ program.op = "read" /\ program.attr = "__base__" =>
+BaseIsBase == Done /\ program.op = "read" /\ ~program.meta /\ program.attr = "__base__" =>
     \E i \in DOMAIN AllBases(program) : AllBases(program)[i] = outcome
 =============================================================================
