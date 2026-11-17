@@ -408,6 +408,8 @@ Unreleased (0.10.0):
   `__dict__` and `dir()`
 - `bytes.__bytes__` is a method descriptor, and `cr_origin` and `ag_running` member descriptors
 - a bytes `%b` or `%s` takes a `bytearray` subclass's contents without calling its `__bytes__`
+- `int()` and `float()` of a `str`, `bytes` or `bytearray` subclass's instance convert by its `__index__`
+  before its text, and name text they reject by its own `__repr__`
 
 2026-11-10 0.9.0:
 

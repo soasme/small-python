@@ -26174,6 +26174,27 @@ static NO_INLINE SPYValue *sequence_next(SPYContext *c, SPYValue *v, SPYValue **
  * format or the ndigits round passes it, or NULL; else NULL. */
 static SPYValue *index_function(SPYContext *, SPYValue *);
 static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static int numeric_rejects(SPYContext *, SPYValue *, int);
+static SPYValue *numeric_repr_error(SPYContext *, SPYValue *, const char *, int);
+/* The Python __repr__ that float() of a str, bytes or bytearray subclass's
+ * instance, or int() of a str subclass's in base 10 or an int base, calls
+ * to name the text it rejects, its class with no __float__ or __index__,
+ * or __int__ or __index__ for int() of one argument: *name "float.repr" or
+ * "int.repr BASE"; else NULL. */
+static NO_INLINE SPYValue *numeric_named(SPYContext *c, int id, size_t argc, SPYValue *const *argv, SPYValue **name) {
+    SPYValue *cls = argv[0]->as.map.parent, *text = builtin_value(c, argv[0], SPY_STRING), *function;
+    int64_t base = 10;
+    if (!text && id == B_FLOAT && !(text = builtin_value(c, argv[0], SPY_BYTES))) text = builtin_value(c, argv[0], SPY_BYTEARRAY);
+    if (!text || argc > 1 + (id == B_INT) || (argc == 2 && (argv[1]->type != SPY_INT || argv[1]->as.integer_data.big || (base = argv[1]->as.integer_data.small) < 0 || base == 1 || base > 36)) ||
+        class_lookup(cls, "__index__") || (argc == 1 && class_lookup(cls, id == B_FLOAT ? "__float__" : "__int__")) ||
+        !(function = class_lookup(cls, "__repr__")) || !machine_function(c, function) || !numeric_rejects(c, text, id == B_FLOAT ? -1 : (int)base))
+        return NULL;
+    char method[16];
+    snprintf(method, sizeof(method), id == B_FLOAT ? "float.repr" : "int.repr %d", (int)base);
+    if (!(*name = spy_string(c, method, strlen(method)))) return NULL;
+    c->entering_kind = CALL_CHECKED;
+    return function;
+}
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
     /* object.__format__ of an empty spec is str() of its argument. */
@@ -26201,6 +26222,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
         callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR || id == B_ASCII;
+    if ((id == B_FLOAT || id == B_INT) && argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base) { *spec = NULL; return numeric_named(c, id, argc, argv, name); }
     if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND || id == B_NEXT) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
          id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && id != B_HEX && id != B_OCT && id != B_BIN &&
@@ -26254,7 +26276,9 @@ converted:
     /* str and bytes define __str__; other builtin bases only __repr__ (format_value). */
     if (first && (id < 0 || id == B_FORMAT) && first->type != SPY_STRING && first->type != SPY_BYTES && first->type != SPY_BYTEARRAY)
         first = builtin_base(c, argv[0], "__repr__", NULL);
-    if (first) return NULL;
+    /* int() and float() of a text subclass's instance with __index__ convert by it. */
+    if (first && !((id == B_INT || id == B_FLOAT) && (first->type == SPY_STRING || first->type == SPY_BYTES || first->type == SPY_BYTEARRAY) &&
+                   class_lookup(cls, "__index__"))) return NULL;
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
     /* int() and float() with no __int__ or __float__ convert the int the
@@ -31503,6 +31527,12 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue 
         }
         return value;
     }
+    if (!strncmp(method, "float.repr", 10) || !strncmp(method, "int.repr", 8)) {
+        /* float() and int() name the text they reject by its __repr__ (numeric_named). */
+        int base = *method == 'f' ? -1 : atoi(method + 9);
+        SPYValue *text = whole_text(&b, append_conversion(&b, v, result, "__repr__"));
+        return numeric_repr_error(c, text, base < 0 ? "could not convert string to float: %s" : "invalid literal for int() with base %d: %s", base);
+    }
     if (!strcmp(method, "ascii")) {
         SPYValue *text = whole_text(&b, append_conversion(&b, v, result, "__repr__"));
         return text ? ascii_text(c, text, builtin_value(c, text, SPY_STRING)) : NULL;
@@ -35402,9 +35432,9 @@ static int float_text(SPYContext *c, const char *text, size_t len, double *resul
     mem_free(clean);
     return 0;
 }
-/* The repr of a rejected numeric string, truncated to 200 characters. */
-static SPYValue *numeric_error(SPYContext *c, SPYValue *text, const char *format, int base) {
-    SPYValue *repr = spy_repr(c, text);
+/* A rejected numeric string's ValueError showing repr, which it takes,
+ * cut to 200 characters for int() (base 0 or more). */
+static SPYValue *numeric_repr_error(SPYContext *c, SPYValue *repr, const char *format, int base) {
     if (!repr) return NULL;
     /* int() shows at most 200 characters of the text, float() and complex() all of it. */
     size_t bytes = repr->as.string.len;
@@ -35419,6 +35449,10 @@ static SPYValue *numeric_error(SPYContext *c, SPYValue *text, const char *format
     else errorf(c, "ValueError", format, quoted);
     mem_free(quoted);
     return NULL;
+}
+/* The ValueError of a rejected numeric string, showing text's repr. */
+static SPYValue *numeric_error(SPYContext *c, SPYValue *text, const char *format, int base) {
+    return numeric_repr_error(c, spy_repr(c, text), format, base);
 }
 /* int() of a str, bytes, or bytearray; a rejected bytearray shows as bytes. */
 static SPYValue *int_from_text(SPYContext *c, SPYValue *value, int base) {
@@ -35444,6 +35478,16 @@ static SPYValue *float_from_text(SPYContext *c, SPYValue *value, SPYValue *shown
     mem_free(text);
     if (status) return numeric_error(c, shown, "could not convert string to float: %s", -1);
     return spy_float(c, d);
+}
+/* Whether int() in base, or float() (base -1), rejects the text of value,
+ * a str or bytes-like object; no error is left. */
+static int numeric_rejects(SPYContext *c, SPYValue *value, int base) {
+    SPYValue *result = base < 0 ? float_from_text(c, value, value) : int_from_text(c, value, base);
+    int rejected = !result && error_is(c, "ValueError") &&
+        !strncmp(c->error_message, base < 0 ? "could not convert" : "invalid literal", base < 0 ? 17 : 15);
+    if (!result) spy_clear_error(c);
+    spy_release(result);
+    return rejected;
 }
 enum { CASE_LOWER, CASE_UPPER, CASE_TITLE, CASE_FOLD };
 /* Mapping rows are start << 11 | count << 2 | kind, then a value: kind 0 offsets
@@ -39395,7 +39439,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (!argc) return id == B_INT ? spy_int(c, 0) : spy_float(c, 0);
         if (id == B_FLOAT && a->type == SPY_FLOAT) return spy_retain(a); /* PyNumber_Float */
         SPYValue *base = builtin_base(c, a, id == B_INT ? "__int__" : "__float__", NULL);
-        if (base && (base->type == SPY_STRING || base->type == SPY_BYTES || base->type == SPY_BYTEARRAY || is_number(base))) a = base;
+        /* A text subclass's __index__ converts before its text. */
+        int text = base && (base->type == SPY_STRING || base->type == SPY_BYTES || base->type == SPY_BYTEARRAY);
+        if (base && (is_number(base) || (text && !class_lookup(a->as.map.parent, "__index__")))) a = base;
         if (id == B_INT && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY || argc == 2)) {
             /* The base converts first. */
             int64_t base = 10;
@@ -39403,7 +39449,13 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (base != 0 && (base < 2 || base > 36)) return spy_error(c, "ValueError", "int() base must be >= 2 and <= 36, or 0");
             if (a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY)
                 return spy_error(c, "TypeError", "int() can't convert non-string with explicit base");
-            return int_from_text(c, a, (int)base);
+            SPYValue *result = int_from_text(c, a, (int)base);
+            /* A str subclass's instance shows its own repr. */
+            if (!result && a != argv[0] && a->type == SPY_STRING && error_is(c, "ValueError") && !strncmp(c->error_message, "invalid literal", 15)) {
+                spy_clear_error(c);
+                numeric_error(c, argv[0], "invalid literal for int() with base %d: %s", (int)base);
+            }
+            return result;
         }
         if (is_number(a)) {
             if (id == B_FLOAT) {
@@ -39446,7 +39498,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             return result;
         }
         if (id == B_INT) return int_from_text(c, a, 10);
-        return float_from_text(c, a, a);
+        return float_from_text(c, a, argv[0]);
     }
     default: break;
     }

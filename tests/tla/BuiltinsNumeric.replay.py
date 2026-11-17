@@ -16,6 +16,14 @@ class J:
         J.calls += 1
         return 65
 class Int(int): pass
+class Shown(str):
+    def __repr__(self):
+        for _ in (): pass
+        return "shown"
+class IndexedText(str):
+    def __index__(self): return 7
+class ShownArray(bytearray):
+    def __repr__(self): return "array"
 class F(float): pass
 class Z:
     def __radd__(self, other): return 0.0
@@ -96,6 +104,9 @@ SOURCES = {
     "complex_string_second": "result = complex('1', 2)",
     "float_forms": "result = (float(), float(' -1.5e3 '), float('-inf'), repr(float('nan')), float('1_0.5'), float(True))",
     "float_bad": "result = float('1__0')",
+    "text_index": "result = (int(IndexedText('x')), float(IndexedText('1.5')))",
+    "text_repr": "def rejected(f):\n    try: f()\n    except ValueError as e: return str(e)\n"
+                 "result = [rejected(f) for f in (lambda: float(Shown('x')), lambda: int(Shown('x'), 16), lambda: float(ShownArray(b'x')), lambda: int(ShownArray(b'x')))]",
     "int_forms": "result = (int(), int(3.9), int(-3.9), int('0x1f', 16), int('0x1f', 0), int(' 0b101 ', 0), int('z', 36), int(True))",
     "complex_fallbacks": "log = []\n"
                          "class F:\n"

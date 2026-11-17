@@ -58,7 +58,7 @@ Cases == {"round_half_even", "round_float_digits", "round_none", "round_keyword_
           "pow_zero_zero", "sum_floats", "sum_compensated", "sum_stages", "sum_add", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
           "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
           "min_first_of_equal", "max_mixed", "bin_index", "index_calls", "int_index_calls", "round_index_calls", "round_index_bad", "bin_float", "hex_float_method", "complex_forms",
-          "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "int_forms",
+          "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "text_repr", "text_index", "int_forms",
           "int_bad_base", "int_base_first", "complex_fallbacks", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
 Programs == [op : Ops, a : {-25, -15, -7, -1, 0, 3, 8, 25, 35}, b : {-3, -1, 0, 2, 5}]
             \cup [case : Cases]
@@ -133,6 +133,10 @@ Case(c) ==
       [] c = "complex_string_second" -> "TypeError: complex() argument 'real' must be a real number, not str"
       [] c = "float_forms" -> "(0.0, -1500.0, -inf, 'nan', 10.5, 1.0)"
       [] c = "float_bad" -> "ValueError: could not convert string to float: '1__0'"
+      \* A text subclass's __index__ converts before its text
+      [] c = "text_index" -> "(7, 7.0)"
+      \* A subclass's own __repr__ names rejected text; int() shows a bytes-like one's bytes
+      [] c = "text_repr" -> "['could not convert string to float: shown', 'invalid literal for int() with base 16: shown', 'could not convert string to float: array', \"invalid literal for int() with base 10: b'x'\"]"
       [] c = "int_forms" -> "(0, 3, -3, 31, 31, 5, 35, 1)"
       [] c = "int_bad_base" -> "ValueError: int() base must be >= 2 and <= 36, or 0"
       \* The base converts, and is checked, before the value's type is.
