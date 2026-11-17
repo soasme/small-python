@@ -24674,8 +24674,14 @@ static int eq_reaches(SPYValue *);
 /* Whether a set method's list or tuple v, or set's own entries, may be
  * compared by a Python __eq__ (eq_reaches); or the keys of v, an exact
  * dict or frozendict which method which of set iterates, hashing each
- * (set_method), may be hashed or compared by Python (hashed_item). */
+ * (set_method), or of a dict subclass's instance iterated by dict's
+ * __iter__, which every method hashes, may be hashed or compared by
+ * Python (hashed_item). */
 static int compared_items(SPYContext *c, SPYValue *set, SPYValue *v, int which) {
+    if (v->type == SPY_INSTANCE && v->as.map.base && is_dict(v->as.map.base) && builtin_base(c, v, "__iter__", NULL)) {
+        v = v->as.map.base;
+        which = 1;
+    }
     if (is_dict(v)) {
         if (!(which == 1 || which == 5 || which == 6 || which == 9 || which == 10 || (which == 2 && set->as.map.len >> 2 > v->as.map.len)))
             return 0;
@@ -24850,7 +24856,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     static const int set_ids[] = {B_SET_UNION, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE, B_EXTEND, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE,
                                   B_SET_KEEP, B_SET_SUPERSET, B_SET_DISJOINT};
     int updates = function && is_set(set_storage(callee->as.method.self)) && function->type == SPY_NATIVE && function->as.native.kwcall == set_method &&
-                  argc == 1 && (!(argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base && (is_set(argv[0]->as.map.base) || is_dict(argv[0]->as.map.base))) ||
+                  argc == 1 && (!(argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base && is_set(argv[0]->as.map.base)) ||
                                 (((intptr_t)function->as.native.data & 255) == 10 && is_set(argv[0]->as.map.base))) ?
                   set_ids[(intptr_t)function->as.native.data & 255] : -1;
     /* list.__init__ and set.__init__ bound to their type's object, not another (init_extends). */
@@ -28009,6 +28015,15 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         if ((*env = function_env(c, callee, argc + !skip, argv + skip, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
+    }
+    if (callee && method < 0 && calls && !skip && argc == 1 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method &&
+        set_like(argv[0]) && !walk_operand(argv[1])) {
+        /* A set's method of one source is bound to the set, as a consumer
+         * takes it (consumer_of). */
+        SPYValue *bound = bind_method(c, argv[0], callee);
+        spy_release(callee);
+        if (!bound) { for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m)); return NULL; }
+        callee = bound; skip = 1;
     }
     int id, inplace;
     SPYValue *y;

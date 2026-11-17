@@ -426,6 +426,8 @@ Unreleased (0.10.0):
   nesting on the C stack
 - A dict's `get`/`setdefault`/`pop` and a set's `add`/`discard`/`remove` of a tuple key call its items'
   Python `__hash__` and `__eq__` without nesting on the C stack
+- A set's methods given a dict subclass, or an argument computed in the call, hash and compare without
+  nesting on the C stack
 
 2026-11-10 0.9.0:
 

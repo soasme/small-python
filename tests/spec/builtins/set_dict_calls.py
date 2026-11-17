@@ -6,8 +6,9 @@
 # dict unless the set is more than four times larger; intersection,
 # issuperset, isdisjoint, difference_update and the larger difference hash
 # each key in turn, as for any iterable; a dict subclass's keys are hashed
-# as any iterable's. Each lookup compares by the stored element's Python
-# __eq__. Inside functions as at module level.
+# as any iterable's, by every method, and so are a list's items, the
+# argument a name or computed in the call. Each lookup compares by the
+# stored element's Python __eq__. Inside functions as at module level.
 from harness import *
 
 log = []
@@ -71,6 +72,34 @@ def subclass():
 
 assert_eq(subclass(), ([1, 2, 3], [("h", 2), ("e", 1, 2), ("e", 2, 2), ("h", 3), ("e", 1, 3), ("e", 2, 3)]))
 log.clear()
+
+# Each method takes a dict subclass's keys so, and a list's items, given
+# the argument computed in the call.
+def computed():
+    out = []
+    for call in (lambda a: a.union(DS(dk())), lambda a: a.intersection(DS(dk())), lambda a: a.difference(DS(dk())),
+                 lambda a: a.issuperset(DS(dk())), lambda a: a.isdisjoint(DS(dk())), lambda a: a.update(DS(dk())),
+                 lambda a: a.intersection_update(DS(dk())), lambda a: a.difference_update(DS(dk())),
+                 lambda a: a.symmetric_difference_update(DS(dk())), lambda a: a.union([E(2), E(3)]),
+                 lambda a: a.update([E(2), E(3)])):
+        a = mk(); log.clear()
+        r = call(a)
+        out.append((r if type(r) is bool else sorted(x.v for x in (a if r is None else r)), log[:]))
+    log.clear()
+    return out
+
+COMPUTED = [([1, 2, 3], [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3), ('e', 2, 3)]),
+ ([2], [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3), ('e', 2, 3)]),
+ ([1], [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3)]),
+ (False, [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3), ('e', 2, 3)]),
+ (False, [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2)]),
+ ([1, 2, 3], [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3), ('e', 2, 3)]),
+ ([2], [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3), ('e', 2, 3)]),
+ ([1], [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3)]),
+ ([1, 3], [('h', 2), ('h', 3), ('e', 2, 3), ('h', 2), ('h', 3), ('e', 2, 3), ('e', 1, 2), ('e', 2, 2), ('e', 1, 3), ('e', 1, 3)]),
+ ([1, 2, 3], [('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3), ('e', 2, 3)]),
+ ([1, 2, 3], [('h', 2), ('e', 1, 2), ('e', 2, 2), ('h', 3), ('e', 1, 3), ('e', 2, 3)])]
+assert_eq(computed(), COMPUTED)
 
 # An error from __eq__ propagates from the method, the set unchanged by update.
 class Bad(E):
