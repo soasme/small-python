@@ -489,6 +489,20 @@ struct SPYContext {
      * __hash__ is a call on the machine (binding_machine). */
     Machine *bind_machine;
     size_t bind_entries;
+    /* While a buffered operation's native code runs at frame depth
+     * buffer_depth: the views its exporters gave, a list of obj, view
+     * pairs, and the exporter whose Python __buffer__ it needs next, owned
+     * (buffered_go). */
+    SPYValue *buffer_views, *buffer_wanted;
+    size_t buffer_depth;
+    /* The operation it runs, borrowed, its bytearrays' exports when it
+     * began, and those it had exported when it asked for buffer_wanted
+     * (buffer_values). */
+    SPYValue *buffer_op;
+    size_t *buffer_base;
+    uint64_t buffer_mask;
+    /* What a continuation returns that ended its operator step itself (buffered_end). */
+    SPYValue *stepped;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -10432,7 +10446,10 @@ static int merges(SPYValue *, SPYValue *);
 static int merge_call(SPYValue *, size_t, SPYValue *const *);
 static SPYValue *update_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *merge_walk(SPYContext *, Machine *, SPYValue *, SPYValue *, int, SPYValue **);
+static SPYValue *machine_exporter(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    /* An operand's Python __buffer__ is a call on the machine (buffered_step). */
+    if (machine_exporter(c, a) || machine_exporter(c, b)) return NULL;
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
      * before any identical one. */
@@ -13527,26 +13544,27 @@ static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t
     int tail = method == M_STARTSWITH || method == M_ENDSWITH;
     if (self->type == SPY_BYTES && (buffer_exporter(c, argv[0]) || (tail && argv[0]->type == SPY_TUPLE))) {
         // Buffer needles search as their bytes.
-        SPYValue *needle;
-        if (argv[0]->type != SPY_TUPLE) buffer_bytes(c, argv[0], &needle);
-        else {
-            size_t n = argv[0]->as.seq.len, i = 0;
-            for (; i < n && !buffer_exporter(c, argv[0]->as.seq.items[i]); i++) {}
-            if (i == n) goto search;
-            if (!(needle = value_new(c, SPY_TUPLE))) return NULL;
-            for (i = 0; i < n; i++) {
-                SPYValue *item = argv[0]->as.seq.items[i];
-                if (!buffer_exporter(c, item)) spy_retain(item);
-                else buffer_bytes(c, item, &item);
-                int status = !item || sequence_append(c, needle, item);
-                spy_release(item);
-                if (status) { spy_release(needle); return NULL; }
-            }
+        SPYValue *needle, *choices = argv[0], *result = NULL;
+        if (choices->type != SPY_TUPLE) {
+            buffer_bytes(c, choices, &needle);
+            SPYValue *args[3] = {needle, argc > 1 ? argv[1] : NULL, argc > 2 ? argv[2] : NULL};
+            result = needle ? string_search(c, self, method, argc, args) : NULL;
+            spy_release(needle); return result;
         }
-        if (!needle) return NULL;
-        SPYValue *args[3] = {needle, argc > 1 ? argv[1] : NULL, argc > 2 ? argv[2] : NULL};
-        SPYValue *result = string_search(c, self, method, argc, args);
-        spy_release(needle); return result;
+        size_t n = choices->as.seq.len, i = 0;
+        for (; i < n && !buffer_exporter(c, choices->as.seq.items[i]); i++) {}
+        if (i == n) goto search;
+        /* Each choice in turn, its buffer released before the next, until one matches. */
+        for (i = 0; i < n && (!result || result == c->booleans[0]); i++) {
+            SPYValue *item = choices->as.seq.items[i];
+            spy_release(result);
+            needle = buffer_exporter(c, item) ? (buffer_bytes(c, item, &needle), needle) : spy_tuple(c, 1, &item);
+            SPYValue *args[3] = {needle, argc > 1 ? argv[1] : NULL, argc > 2 ? argv[2] : NULL};
+            result = needle ? string_search(c, self, method, argc, args) : NULL;
+            spy_release(needle);
+            if (!result) return NULL;
+        }
+        return result;
     }
 search:;
     /* A str's needle is refused before its bounds are converted. */
@@ -26520,13 +26538,14 @@ static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n,
 static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, int *, int *, SPYValue **);
 static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
-enum { INDEX_PARTS = 1u << 8, INDEX_MOST = 4 };
+enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_MOST = 4 };
 /* Whether mask marks argument i: marks are the bits below INDEX_PARTS,
  * flags the bits from it up, and a later argument has no mark. */
 static int index_marked(unsigned mask, size_t i) { return i < 8 && mask >> i & 1; }
 static unsigned index_arguments_rest(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 /* index_arguments_rest of a call that may need it: only an instance
- * argument has a Python __index__, or a slice's indices() a part's. */
+ * argument has a Python __index__ or __buffer__, or a slice's indices()
+ * a part's. */
 static ALWAYS_INLINE unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (argc > INDEX_MOST) return 0;
     for (size_t i = 0; i < argc; i++)
@@ -26540,6 +26559,8 @@ static ALWAYS_INLINE int checks_call(SPYContext *c, Machine *m, int id, size_t a
 }
 static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
 static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, int, SPYValue **);
+static unsigned buffer_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+static int buffer_argument(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -26568,7 +26589,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         release_all(argc, argv); spy_release(callee);
         return result;
     }
-    if (index_arguments(c, callee, method, argc, argv)) {
+    /* A list or tuple of exporters, as join() and startswith() take, too (buffer_argument). */
+    if (index_arguments(c, callee, method, argc, argv) ||
+        (argc <= INDEX_MOST && buffer_arguments(c, callee, method, argc, argv))) {
         result = indexed_call(c, m, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc, argv);
         spy_release(callee);
         return result;
@@ -27013,8 +27036,32 @@ static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size
     else if (owner == c->types[SPY_TUPLE] && method == M_INDEX) seq = builtin_value(c, self, SPY_TUPLE);
     return seq && method >= 0 ? index_arguments(c, seq, method, argc, argv) : 0;
 }
+static SPYValue *machine_exporter(SPYContext *, SPYValue *);
+/* Whether v, or an item of v when it is a list or tuple, is an instance
+ * whose __buffer__ is a machine function (machine_exporter). */
+static int buffer_argument(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_LIST && v->type != SPY_TUPLE) return machine_exporter(c, v) != NULL;
+    for (size_t i = 0; i < v->as.seq.len; i++) if (machine_exporter(c, v->as.seq.items[i])) return 1;
+    return 0;
+}
+/* INDEX_BUFFERS when a call of callee, method number method of it or -1,
+ * is a native one, a builtin type's or a method of a builtin receiver,
+ * and one of its argc arguments argv holds a machine exporter
+ * (buffer_argument), for the call to run on the machine (buffered_call);
+ * else 0. */
+static unsigned buffer_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
+    if (method < 0 && function->type != SPY_NATIVE && (function->type != SPY_CLASS || !function->as.map.native)) return 0;
+    /* startswith() and endswith() release each choice's buffer before the next (string_search). */
+    for (size_t i = 0; i < argc; i++)
+        if (buffer_argument(c, argv[i]) && (argv[i]->type != SPY_TUPLE || (method != M_STARTSWITH && method != M_ENDSWITH)))
+            return INDEX_BUFFERS;
+    return 0;
+}
 static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    unsigned buffers = buffer_arguments(c, callee, method, argc, argv);
     int indices = method == M_INDICES && callee->type == SPY_SLICE && argc == 1;
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
                                   1 : indices ? 1 | INDEX_PARTS : search_bounds(c, callee, method, argc, argv) :
@@ -27025,9 +27072,10 @@ static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, 
                     native_indices(c, callee->as.method.function, callee->as.method.self, argc, argv) :
                     argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
-    for (size_t i = 0; i < argc; i++) if (index_marked(mask, i) && argv[i]->type == SPY_INSTANCE) return mask;
-    return indices && slice_part(c, callee) ? mask : 0;
+    for (size_t i = 0; i < argc; i++) if (index_marked(mask, i) && argv[i]->type == SPY_INSTANCE) return mask | buffers;
+    return indices && slice_part(c, callee) ? mask | buffers : buffers;
 }
+static SPYValue *buffered_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, SPYValue *);
 /* The call (index_arguments) of state's callee, method number and name
  * (or -1 and None) on the arguments of its tuple, from the i-th on: the
  * next masked one's Python __index__ is m's call (callk), the call going
@@ -27061,6 +27109,7 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         for (size_t k = 0; k < args->as.seq.len; k++) spy_retain(args->as.seq.items[k]);
         return adapter_call(c, m, spy_retain(callee), args->as.seq.len, args->as.seq.items);
     }
+    if (mask & INDEX_BUFFERS) return buffered_call(c, m, callee, method, name, args);
     return method >= 0 ? call_native_method(c, callee, method, name, args->as.seq.len, args->as.seq.items) :
            call(c, callee, args->as.seq.len, args->as.seq.items);
 }
@@ -27133,7 +27182,7 @@ static SPYValue *indexed_call(SPYContext *c, Machine *m, SPYValue *callee, int m
     if (method < 0 && callee->type == SPY_BOUND_METHOD) {
         method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self;
     }
-    unsigned mask = index_arguments(c, callee, method, argc, argv);
+    unsigned mask = argc > INDEX_MOST ? 0 : index_arguments_rest(c, callee, method, argc, argv);
     SPYValue *args = tuple_of(c, argc, argv), *result = args ? index_from(c, m, callee, method, name ? name : c->none, args, 0, mask) : NULL;
     spy_release(args); release_all(argc, argv);
     return result;
@@ -27307,10 +27356,14 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        /* a set method given its set (set_call, consumer_of) */
                                                        callee->as.native.kwcall == set_method ||
                                                        (walk_operand(argv[1]) && callee->as.native.kwcall == slot_call) ||
+                                                       /* a bytes join of exporters (buffer_argument) */
+                                                       ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||
                                                        (argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
-                                        (argc == 3 && argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
+                                        (argc == 3 && ((argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
+                                                       /* an instance's __index__ or __buffer__ (index_arguments) */
+                                                       argv[1]->type == SPY_INSTANCE || argv[2]->type == SPY_INSTANCE)) ||
                                         /* type.__new__ (class_make) */
                                         (argc == 4 && callee->as.native.kwcall == type_method) ||
                                         /* a set method given its set and others (set_chain_call) */
@@ -27871,8 +27924,11 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         return update_call(c, m, callee, source, env);
     }
     /* A list's pop() or insert() of an index with a Python __index__, and the others
-     * of index_arguments, bound too (indexed_call). */
-    if (callee && calls && skip && (method >= 0 || callee->type == SPY_BOUND_METHOD) && index_arguments(c, callee, method, argc, argv + 1)) {
+     * of index_arguments, bound too, and a bytes join's of a list or tuple
+     * of exporters (indexed_call). */
+    if (callee && calls && skip &&
+        (((method >= 0 || callee->type == SPY_BOUND_METHOD) && index_arguments(c, callee, method, argc, argv + 1)) ||
+         (argc == 1 && (argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee) && buffer_argument(c, argv[1])))) {
         SPYValue *args[INDEX_MOST];
         memcpy(args, argv + 1, argc * sizeof(*argv));
         spy_release(argv[0]);
@@ -27881,8 +27937,10 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return result;
     }
-    /* So do a text method's of the object (index_arguments). */
-    if (callee && calls && !skip && callee->type == SPY_NATIVE && index_arguments(c, callee, -1, argc + 1, argv)) {
+    /* So do a text method's of the object (index_arguments), and a bytes join's. */
+    if (callee && calls && !skip && callee->type == SPY_NATIVE &&
+        (index_arguments(c, callee, -1, argc + 1, argv) ||
+         (argc == 1 && (argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee) && buffer_argument(c, argv[1])))) {
         SPYValue *args[INDEX_MOST];
         memcpy(args, argv, (argc + 1) * sizeof(*argv));
         m->len -= argc + 1;
@@ -28795,6 +28853,8 @@ static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, s
 }
 static NO_INLINE size_t operator_finish(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t);
 static SPYValue *operation(SPYContext *, Instruction *, SPYValue *, SPYValue *);
+static SPYValue *buffered_step(SPYContext *, Machine *, size_t, SPYValue *, SPYValue *);
+static SPYValue *machine_exporter(SPYContext *, SPYValue *);
 /* Keep key's hash for its step to use once (hash_value), taking the key;
  * whether it was hashed. */
 static int hash_kept(SPYContext *c, SPYValue *key, int hashed, int64_t hash) {
@@ -31712,7 +31772,10 @@ static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *
         return unit;
     }
     SPYValue *function = operator_call(c, m, ins, x, y, env);
-    return function || c->error_type[0] ? function : c->looked ? looked(c) : operate(c, ins->node, x, y);
+    if (function || c->error_type[0]) return function;
+    if (c->looked) return looked(c);
+    /* An operand's Python __buffer__ is a call on m (buffered_step). */
+    return machine_exporter(c, x) || machine_exporter(c, y) ? buffered_step(c, m, (size_t)(ins - m->code->items), x, y) : operate(c, ins->node, x, y);
 }
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Machine *m, Frame *f, Node *n) { return assign(c, f, n, m); }
@@ -32484,7 +32547,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         c->k_host = ((Call *)m)->host;
                         m = call_leave(c, (Call *)m, result);
                         f = m->frame; code = m->code->items; pc = m->pc;
-                        if ((result = k(c, m, k_ctx, result))) machine_push(c, m, result);
+                        if ((result = k(c, m, k_ctx, result)) == c->stepped) {
+                            /* It ended its operator step (buffered_end). */
+                            pc = m->pc;
+                            if (c->k_fn) goto enter_k;
+                        } else if (result) machine_push(c, m, result);
                         /* consume_generator enters a further callk first. */
                         else if (c->k_fn || !c->error_type[0]) goto consume_generator;
                         continue;
@@ -32662,6 +32729,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 callee_env = NULL;
                 value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
                 if (callee_env) { special = c->entering_kind; goto enter_special; }
+                if (UNLIKELY(!value && c->k_fn)) goto enter_k;
             }
             machine_push(c, m, value);
             NEXT;
@@ -32955,6 +33023,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     callee_env = NULL;
                     value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
                     if (callee_env) { special = c->entering_kind; goto enter_special; }
+                    if (UNLIKELY(!value && c->k_fn)) goto enter_k;
                 }
                 if (!(a = value)) break;
                 truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a);
@@ -33406,7 +33475,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             special = c->entering_kind;
             goto enter_special;
         }
-        pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : operation(c, ins, x, y), pc);
+        if (!c->error_type[0] && y && ins->op != BC_INDEX && (machine_exporter(c, x) || machine_exporter(c, y))) {
+            /* An operand's Python __buffer__ is a call on m, whose continuation ends the step (buffered_step). */
+            if (!(value = buffered_step(c, m, (size_t)(ins - code), x, y)) && c->k_fn) {
+                if (a) spy_release(a);
+                if (b) spy_release(b);
+                goto enter_k;
+            }
+        } else value = c->error_type[0] ? NULL : operation(c, ins, x, y);
+        pc = operator_finish(c, m, ins, y, value, pc);
         if (a) spy_release(a);
         if (b) spy_release(b);
         if (UNLIKELY(c->k_fn)) goto enter_k;
@@ -37618,6 +37695,69 @@ static SPYValue *memory_bytes_order(SPYContext *c, SPYValue *m, int fortran) {
 static SPYValue *memory_bytes(SPYContext *c, SPYValue *m) { return memory_bytes_order(c, m, 0); }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
 static int buffer_exporter(SPYContext *, SPYValue *);
+/* The Python __buffer__ of instance v with no bytes or bytearray base, a
+ * machine function, borrowed; else NULL. */
+static SPYValue *machine_exporter(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_INSTANCE || builtin_value(c, v, SPY_BYTES) || builtin_value(c, v, SPY_BYTEARRAY)) return NULL;
+    SPYValue *function = class_lookup(v->as.map.parent, "__buffer__");
+    return function && machine_function(c, function) ? function : NULL;
+}
+static void error_unbox(SPYContext *, SPYValue *);
+enum { BUFFERED_CALL, BUFFERED_STEP };
+/* The number of values of buffered operation op (buffered_go) whose
+ * exports it may hold, at most 64: a step's two operands, or a call's
+ * receiver and arguments. */
+static size_t buffer_values(SPYValue *op) {
+    if (op->as.seq.items[0]->as.integer_data.small == BUFFERED_STEP) return 2;
+    size_t n = 1 + op->as.seq.items[4]->as.seq.len;
+    return n < 64 ? n : 64;
+}
+/* Value i of those (buffer_values), borrowed, or NULL. */
+static SPYValue *buffer_value(SPYValue *op, size_t i) {
+    SPYValue **o = op->as.seq.items;
+    if (o[0]->as.integer_data.small == BUFFERED_STEP) return o[2 + i];
+    if (i) return o[4]->as.seq.items[i - 1];
+    return o[2]->as.integer_data.small >= 0 ? o[1] : o[1]->type == SPY_BOUND_METHOD ? o[1]->as.bound.self :
+           o[1]->type == SPY_METHOD ? o[1]->as.method.self : NULL;
+}
+/* While a buffered operation's native code runs (buffered_go), the view
+ * v's __buffer__ gave it, borrowed, or NULL with the error it raised;
+ * NULL with an error, v kept as the exporter it needs next, when that
+ * __buffer__ is a machine function; else NULL. */
+static SPYValue *buffer_held(SPYContext *c, SPYValue *v) {
+    if (!c->buffer_views || c->buffer_depth != c->py_depth) return NULL;
+    SPYValue **items = c->buffer_views->as.seq.items;
+    for (size_t i = 0; i + 1 < c->buffer_views->as.seq.len; i += 2)
+        if (items[i] == v) {
+            if (items[i + 1]->type == SPY_MEMORYVIEW) return items[i + 1];
+            error_unbox(c, items[i + 1]);
+            return NULL;
+        }
+    if (!machine_exporter(c, v)) return NULL;
+    /* A native that went on past the first one it needs still gets that one first. */
+    if (c->buffer_wanted) return spy_error(c, "SystemError", "a buffer is needed first");
+    c->buffer_wanted = spy_retain(v);
+    c->buffer_mask = 0;
+    for (size_t i = 0, n = buffer_values(c->buffer_op); i < n; i++) {
+        SPYValue *value = buffer_value(c->buffer_op, i);
+        if (value && value->type == SPY_BYTEARRAY && value->as.string.exports > c->buffer_base[i]) c->buffer_mask |= UINT64_C(1) << i;
+    }
+    spy_error(c, "SystemError", "a buffer is needed first");
+    return NULL;
+}
+/* While a buffered operation's native code runs (buffered_go), *v is
+ * what it was when the operation first ran, so that a retry after a
+ * __buffer__ sees what came before that call; 0, or -1 with an error. */
+static int buffer_memo(SPYContext *c, size_t *v) {
+    if (!c->buffer_views || c->buffer_depth != c->py_depth) return 0;
+    SPYValue *views = c->buffer_views, **items = views->as.seq.items;
+    for (size_t i = 0; i + 1 < views->as.seq.len; i += 2)
+        if (items[i] == c->stepped) { *v = (size_t)items[i + 1]->as.integer_data.small; return 0; }
+    SPYValue *memo = int_value(c, (int64_t)*v);
+    int status = !memo || sequence_append(c, views, c->stepped) || sequence_append(c, views, memo) ? -1 : 0;
+    spy_release(memo);
+    return status;
+}
 /* The bytes of a bytes-like object: a borrowed bytes or bytearray value, or
  * for a memoryview or a __buffer__ exporter a contiguous copy returned in
  * *owned. NULL otherwise. */
@@ -37627,6 +37767,9 @@ static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
     if (!bytes) bytes = builtin_value(c, v, SPY_BYTEARRAY);
     if (bytes) return bytes;
     if (v->type == SPY_INSTANCE && class_lookup(v->as.map.parent, "__buffer__")) {
+        SPYValue *held = buffer_held(c, v);
+        if (held) return *owned = memory_check(c, held) ? NULL : memory_bytes(c, held);
+        if (c->error_type[0]) return NULL;
         SPYValue *view = memory_from(c, v);
         if (view) *owned = memory_check(c, view) ? NULL : memory_bytes(c, view);
         if (view && memory_release(c, view)) { spy_release(*owned); *owned = NULL; }
@@ -37659,6 +37802,9 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
     SPYValue *source = builtin_value(c, object, SPY_BYTES);
     if (!source) source = builtin_value(c, object, SPY_BYTEARRAY);
     if (!source && object->type == SPY_INSTANCE && class_lookup(object->as.map.parent, "__buffer__")) {
+        SPYValue *held = buffer_held(c, object);
+        if (held) return memory_check(c, held) ? NULL : memory_copy(c, held, held->as.memory.ndim);
+        if (c->error_type[0]) return NULL;
         SPYValue *flags = spy_int(c, BUFFER_FLAGS), *view = flags ? call_special(c, object, "__buffer__", 1, &flags) : NULL;
         spy_release(flags);
         return memory_exported(c, object, view);
@@ -37667,6 +37813,163 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
     SPYValue *m = memory_new(c, object, source, "B", 1, 1, source->type == SPY_BYTES);
     if (m) { memory_shape(m)[0] = (ptrdiff_t)source->as.string.len; memory_strides(m)[0] = 1; }
     return m;
+}
+/* The pending error, taken, boxed for a continuation's state or a view
+ * that could not be had (buffer_held): its
+ * ErrorState's bytes and its exception (error_unbox); NULL, the error
+ * kept, on a failure. */
+static SPYValue *error_box(SPYContext *c) {
+    ErrorState error = take_error(c);
+    SPYValue *exception = error.value, *bytes;
+    error.value = NULL;
+    SPYValue *box = (bytes = spy_bytes(c, (const char *)&error, sizeof(error))) ? spy_tuple(c, 2, (SPYValue *[]){bytes, exception ? exception : c->none}) : NULL;
+    spy_release(bytes);
+    error.value = exception;
+    if (!box) restore_error(c, &error);
+    else spy_release(exception);
+    return box;
+}
+/* Raise again the error box holds (error_box). */
+static void error_unbox(SPYContext *c, SPYValue *box) {
+    ErrorState error;
+    memcpy(&error, box->as.seq.items[0]->as.string.data, sizeof(error));
+    error.value = box->as.seq.items[1]->type == SPY_NONE ? NULL : spy_retain(box->as.seq.items[1]);
+    restore_error(c, &error);
+}
+/* A buffered operation, op, is a tuple of its kind and, for a call
+ * (buffered_call), its callee, method number, name and argument tuple, or
+ * for an operator step (buffered_step) its instruction's index and
+ * operands; it runs on machine m, its exporters' views held in views. */
+static SPYValue *buffered_run(SPYContext *c, Machine *m, SPYValue *op) {
+    SPYValue **o = op->as.seq.items;
+    if (o[0]->as.integer_data.small == BUFFERED_STEP) return operation(c, &m->code->items[o[1]->as.integer_data.small], o[2], o[3]);
+    int method = (int)o[2]->as.integer_data.small;
+    return method >= 0 ? call_native_method(c, o[1], method, o[3], o[4]->as.seq.len, o[4]->as.seq.items) :
+           call(c, o[1], o[4]->as.seq.len, o[4]->as.seq.items);
+}
+/* Buffered operation op ends with value, which it takes, or its error:
+ * an operator step that a continuation (stepped) goes on with ends there
+ * (operator_finish), the continuation's value c->stepped; else value. */
+static SPYValue *buffered_end(SPYContext *c, Machine *m, SPYValue *op, SPYValue *value, int stepped) {
+    SPYValue **o = op->as.seq.items;
+    if (!stepped || o[0]->as.integer_data.small != BUFFERED_STEP) return value;
+    m->pc = operator_finish(c, m, &m->code->items[o[1]->as.integer_data.small], o[3], value, m->pc);
+    return c->stepped;
+}
+static SPYValue *views_release(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *, int);
+/* What the Python __release_buffer__ views_release called returned in
+ * result: its view goes back, an error it raised unraisable, and the
+ * release goes on with the next view; state holds op, views, the index,
+ * the value or a boxed error (error_box), and whether it was an error. */
+static SPYValue *view_released(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **s = state->as.seq.items, *views = s[1], *value = NULL;
+    size_t i = (size_t)s[2]->as.integer_data.small;
+    spy_release(result);
+    if (c->error_type[0]) release_unraisable(c, views->as.seq.items[i]);
+    memory_unexport(views->as.seq.items[i + 1]->as.memory.view);
+    if (s[4] == c->booleans[1]) error_unbox(c, s[3]);
+    else value = spy_retain(s[3]);
+    value = views_release(c, m, s[0], views, i + 2, value, 1);
+    spy_release(state);
+    return value;
+}
+/* Release views from pair i on, after op ended with value, which it
+ * takes, or with its error, which stays: a Python __release_buffer__ that
+ * is a machine function is m's call (view_released), others run here
+ * (memory_release); then op ends (buffered_end). */
+static SPYValue *views_release(SPYContext *c, Machine *m, SPYValue *op, SPYValue *views, size_t i, SPYValue *value, int stepped) {
+    for (; i + 1 < views->as.seq.len; i += 2) {
+        SPYValue *obj = views->as.seq.items[i], *view = views->as.seq.items[i + 1], *function;
+        if (view->type != SPY_MEMORYVIEW) continue;
+        if (!view->as.memory.released && !view->as.memory.exports && view->as.memory.view &&
+            (function = class_lookup(obj->as.map.parent, "__release_buffer__")) && machine_function(c, function)) {
+            SPYValue *kept = value ? value : error_box(c), *index = kept ? int_value(c, (int64_t)i) : NULL;
+            SPYValue *state = index ? spy_tuple(c, 5, (SPYValue *[]){op, views, index, kept, c->booleans[!value]}) : NULL;
+            spy_release(index);
+            if (state) {
+                spy_release(kept);
+                memory_unexport(view);
+                return callk(c, m, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view->as.memory.view)}, view_released, state);
+            }
+            /* Out of memory: the view goes back here, the error kept. */
+            if (!value && kept) error_unbox(c, kept);
+            spy_release(kept);
+            value = NULL;
+        }
+        if (memory_release(c, view) && value) { spy_release(value); value = NULL; }
+    }
+    return buffered_end(c, m, op, value, stepped);
+}
+/* Add delta to the exports of op's bytearrays in mask (buffer_held). */
+static void buffer_hold(SPYValue *op, uint64_t mask, int delta) {
+    for (size_t i = 0; mask; i++, mask >>= 1)
+        if (mask & 1) buffer_value(op, i)->as.string.exports += (size_t)delta;
+}
+static SPYValue *buffered_go(SPYContext *, Machine *, SPYValue *, SPYValue *, int);
+/* What the exporter's Python __buffer__ that buffered_go called returned
+ * in result, state holding op, views and the exporter: the view it gave,
+ * or the error it raised (error_box), held and op run again. */
+static SPYValue *buffer_acquired(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **s = state->as.seq.items, *op = s[0], *views = s[1];
+    buffer_hold(op, (uint64_t)s[3]->as.integer_data.small, -1);
+    SPYValue *view = result ? memory_exported(c, s[2], result) : NULL, *value;
+    if (!view && !c->stopped) view = error_box(c);
+    if (view && (sequence_append(c, views, s[2]) || sequence_append(c, views, view))) {
+        if (view->type == SPY_MEMORYVIEW) memory_release(c, view);
+        spy_release(view); view = NULL;
+    }
+    value = view ? buffered_go(c, m, op, views, 1) : views_release(c, m, op, views, 0, NULL, 1);
+    spy_release(view); spy_release(state);
+    return value;
+}
+/* Run op on m with the views it holds (buffer_held): an exporter it needs
+ * next, a Python __buffer__ that is a machine function, is m's call with
+ * the flags (buffer_acquired), op then running again; else its views go
+ * back (views_release). stepped when a continuation runs it. */
+static SPYValue *buffered_go(SPYContext *c, Machine *m, SPYValue *op, SPYValue *views, int stepped) {
+    SPYValue *held = c->buffer_views, *running = c->buffer_op;
+    size_t depth = c->buffer_depth, *base = c->buffer_base, exports[64];
+    for (size_t i = 0, n = buffer_values(op); i < n; i++) {
+        SPYValue *value = buffer_value(op, i);
+        exports[i] = value && value->type == SPY_BYTEARRAY ? value->as.string.exports : 0;
+    }
+    c->buffer_views = views; c->buffer_depth = c->py_depth; c->buffer_op = op; c->buffer_base = exports;
+    SPYValue *value = buffered_run(c, m, op), *wanted = c->buffer_wanted;
+    c->buffer_views = held; c->buffer_depth = depth; c->buffer_op = running; c->buffer_base = base;
+    if (!wanted) return views_release(c, m, op, views, 0, value, stepped);
+    c->buffer_wanted = NULL;
+    spy_release(value); spy_clear_error(c);
+    uint64_t mask = c->buffer_mask;
+    SPYValue *function = machine_exporter(c, wanted), *flags = spy_int(c, BUFFER_FLAGS), *bits = int_value(c, (int64_t)mask);
+    SPYValue *state = flags && bits ? spy_tuple(c, 4, (SPYValue *[]){op, views, wanted, bits}) : NULL;
+    spy_release(bits);
+    if (!state) { release_all(2, (SPYValue *[]){flags, wanted}); return views_release(c, m, op, views, 0, NULL, stepped); }
+    /* What the native had exported when it asked stays so while __buffer__ runs. */
+    buffer_hold(op, mask, 1);
+    return callk(c, m, function, 2, (SPYValue *[]){wanted, flags}, buffer_acquired, state);
+}
+/* Start buffered operation op, which it takes, on m. */
+static SPYValue *buffered_start(SPYContext *c, Machine *m, SPYValue *op) {
+    SPYValue *views = op ? spy_list(c) : NULL, *value = views ? buffered_go(c, m, op, views, 0) : NULL;
+    spy_release(views); spy_release(op);
+    return value;
+}
+/* The call of callee, method number method of it or -1, named name, on
+ * the arguments of tuple args (index_from), of which one's Python
+ * __buffer__ is a machine function (buffer_arguments), on m. */
+static SPYValue *buffered_call(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args) {
+    SPYValue *kind = int_value(c, BUFFERED_CALL), *number = int_value(c, method);
+    SPYValue *op = kind && number ? spy_tuple(c, 5, (SPYValue *[]){kind, callee, number, name, args}) : NULL;
+    spy_release(kind); spy_release(number);
+    return buffered_start(c, m, op);
+}
+/* Operator step at index at of m's code on x and y, one an instance
+ * whose __buffer__ is a machine function, on m. */
+static SPYValue *buffered_step(SPYContext *c, Machine *m, size_t at, SPYValue *x, SPYValue *y) {
+    SPYValue *kind = int_value(c, BUFFERED_STEP), *index = int_value(c, (int64_t)at);
+    SPYValue *op = kind && index ? spy_tuple(c, 4, (SPYValue *[]){kind, index, x, y}) : NULL;
+    spy_release(kind); spy_release(index);
+    return buffered_start(c, m, op);
 }
 /* bytes() or bytearray() (array) of object, whose __buffer__ returned
  * view: a copy of the view's bytes, the view then released, by a Python
@@ -38199,6 +38502,7 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
          * ran, as CPython assigns self[len:len]; an iterable's at the end. */
         Buffer out = {.ctx = c};
         size_t at = self->as.string.len;
+        if (buffer_memo(c, &at)) return NULL;
         SPYValue *copy, *actual = buffer_bytes(c, args[0], &copy);
         int status = actual ? append(&out, actual->as.string.data, actual->as.string.len) : c->error_type[0] ||
             collect_bytes(c, args[0], &out, "can't extend bytearray with %s", 1);
@@ -42019,9 +42323,10 @@ SPYContext *spy_context_new(void) {
     c->augmenting = value_new(c, V_UNBOUND);
     c->chaining = value_new(c, V_UNBOUND);
     c->missing = value_new(c, V_UNBOUND);
+    c->stepped = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->missing || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->missing || !c->stepped || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

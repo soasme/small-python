@@ -121,6 +121,27 @@ def grid(p, log):
     return repr(bytes(m.obj))
 
 
+class Exporter:
+    def __init__(self, log, name, data): self.log, self.name, self.data = log, name, data
+    def __buffer__(self, flags):
+        for _ in (): pass
+        self.log.append("get" + self.name)
+        return memoryview(self.data)
+    def __release_buffer__(self, view):
+        for _ in (): pass
+        self.log.append("rel" + self.name)
+
+
+def several(p, log):
+    a, b = Exporter(log, "A", b"XY"), Exporter(log, "B", b"Q")
+    op = p["op"]
+    if op == "replace": return repr(b"zXYz".replace(a, b))
+    if op == "join": return repr(b"-".join([a, b]))
+    if op == "first": return repr(b"XYz".startswith((a, b)))
+    if op == "second": return repr(b"XYz".startswith((b, a)))
+    return repr(memoryview(b"XY") == a)
+
+
 def outcome(p):
     log = []
     try:
@@ -134,6 +155,8 @@ def outcome(p):
             result = index(p, log)
         elif p["part"] == "grid":
             result = grid(p, log)
+        elif p["part"] == "several":
+            result = several(p, log)
         else:
             result = repr(memoryview(object()))
     except (TypeError, BufferError, ValueError, NotImplementedError, IndexError, KeyError) as error:

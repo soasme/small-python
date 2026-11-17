@@ -410,6 +410,8 @@ Unreleased (0.10.0):
 - a bytes `%b` or `%s` takes a `bytearray` subclass's contents without calling its `__bytes__`
 - `int()` and `float()` of a `str`, `bytes` or `bytearray` subclass's instance convert by its `__index__`
   before its text, and name text they reject by its own `__repr__`
+- bytes methods, `in`, `+` and `==` call a Python `__buffer__` and `__release_buffer__` without
+  nesting on the C stack, releasing their buffers once all are read, as `replace` and `join` do
 
 2026-11-10 0.9.0:
 

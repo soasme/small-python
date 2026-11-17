@@ -34,7 +34,11 @@
 (* before the index; a two-dimensional item fails after it. A grid program *)
 (* reads or stores m[a, b] of a (2, 2) view of bytearray(b"abcd"), a's and *)
 (* b's __index__ logging their names, b returning 1 and a 0, or 5, out of  *)
-(* bounds. The outcome is the log and the result or the exception.         *)
+(* bounds. A several program has exporters A of b"XY" and B of b"Q",      *)
+(* whose __buffer__ and __release_buffer__ log "getA" and "relA" and loop: *)
+(* b"zXYz".replace(A, B), b"-".join([A, B]), b"XYz".startswith((A, B)) or  *)
+(* startswith((B, A)), or memoryview(b"XY") == A. The outcome is the log   *)
+(* and the result or the exception.                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -44,6 +48,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
             \cup [part : {"index"}, view : {"plain", "released", "readonly", "zero", "grid"}, store : BOOLEAN]
             \cup [part : {"grid"}, first : {"in", "out"}, store : BOOLEAN]
+            \cup [part : {"several"}, op : {"replace", "join", "first", "second", "compare"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -70,7 +75,16 @@ Index(p) ==
 \* A grid's key converts its items in order, each checked for its dimension before the next.
 Grid(p) == IF p.first = "out" THEN "a IndexError" ELSE "a b " \o (IF p.store THEN "b'aBcd'" ELSE "98")
 
+\* Several buffers are all obtained, in the order read, before any is
+\* released; startswith takes each choice in turn and stops at a match.
+Several(p) == CASE p.op = "replace" -> "getA getB relA relB b'zQz'"
+                [] p.op = "join" -> "getA getB relA relB b'XY-Q'"
+                [] p.op = "first" -> "getA relA True"
+                [] p.op = "second" -> "getB relB getA relA True"
+                [] p.op = "compare" -> "getA relA True"
+
 Run(p) == CASE p.part = "export" -> Export(p)
+            [] p.part = "several" -> Several(p)
             [] p.part = "index" -> Index(p)
             [] p.part = "grid" -> Grid(p)
             [] p.part = "resize" -> IF p.released THEN "3" ELSE "BufferError"
@@ -98,6 +112,12 @@ ReleasedUntouched == Done /\ program.part = "reenter" => outcome \in {"ValueErro
 
 \* A view checks what it can before an index's __index__ runs.
 ChecksFirst == Done /\ program.part = "index" /\ program.view \in {"released", "zero"} => outcome \in {"ValueError", "TypeError"}
+
+\* An operation reading several buffers releases none of them before it has them all.
+HeldTogether == Done /\ program.part = "several" /\ program.op \in {"replace", "join"} => outcome \in {"getA getB relA relB b'zQz'", "getA getB relA relB b'XY-Q'"}
+
+\* Every buffer obtained is released, a choice's before the next is obtained.
+ChoicesInTurn == Done /\ program.part = "several" /\ program.op = "second" => outcome = "getB relB getA relA True"
 
 \* A dimension out of bounds stops the key before its next item's __index__.
 DimensionsInOrder == Done /\ program.part = "grid" /\ program.first = "out" => outcome = "a IndexError"
