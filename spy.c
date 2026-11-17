@@ -32825,7 +32825,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (UNLIKELY(a->type == SPY_LIST && ins->arg == T_ADDEQ)) {
                 int began = list_augments(c, m, a, b);
                 if (began > 0) goto consume_generator;
-                if (began) break;
+                if (began) { a = b = NULL; break; }
             }
             if ((python_kinds(a, b) && (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || is_set(a))) ||
                 (UNLIKELY(ins->arg == T_MODEQ) && percent_converts(c, a, b)) || (UNLIKELY(ins->arg == T_OREQ) && merges(a, b))) {
