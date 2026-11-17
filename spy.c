@@ -26736,8 +26736,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return result;
     if (argc && (argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
                  metaclassed(argv[0]) ||
-                 (argc == 1 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
-                 (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
+                 (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
+                 (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed)))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     /* A set's method given its set first, as a method call's operands
      * give it, consumes its source as the bound method does. */
@@ -27154,6 +27154,11 @@ static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee,
     return 0;
 }
 static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    /* Of a receiver's methods, only a bytes-like one's, a class's
+     * (int.from_bytes) or a subclass instance's read a buffer. */
+    if (method >= 0 && !(UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BYTEARRAY |
+                                                         UINT64_C(1) << SPY_MEMORYVIEW | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_INSTANCE)))
+        return 0;
     /* A builtin subclass's instance's native method, too. */
     if (callee->type == SPY_METHOD && callee->as.method.self->type == SPY_INSTANCE && callee->as.method.self->as.map.base)
         return buffer_arguments_rest(c, callee, method, argc, argv);
@@ -27444,8 +27449,10 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
                       callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ||
                       (argc && (argv[0]->type == SPY_INSTANCE ||
-                                /* bytes choices (buffered_choice) */
-                                (argv[0]->type == SPY_TUPLE && (method == M_STARTSWITH || method == M_ENDSWITH) && callee->type != SPY_STRING))) ||
+                                /* bytes choices (buffered_choice), a dict's tuple key (hashing_call) */
+                                (argv[0]->type == SPY_TUPLE && (((method == M_STARTSWITH || method == M_ENDSWITH) && callee->type != SPY_STRING) ||
+                                                                ((method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP) &&
+                                                                 argv[0]->listed && !argv[0]->as.seq.plain))))) ||
                       /* a slice's parts (slice_part) */
                       method == M_INDICES) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR ||
@@ -27460,8 +27467,9 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
                                                        /* round() with ndigits (conversion_method) */
                                                        ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
-                                                       /* a set method given its set (set_call, consumer_of) */
+                                                       /* a set method given its set (set_call, consumer_of), or its tuple key (hashing_call) */
                                                        callee->as.native.kwcall == set_method ||
+                                                       (argv[1]->type == SPY_TUPLE && argv[1]->listed && callee->as.native.kwcall == set_item_method) ||
                                                        (walk_operand(argv[1]) && callee->as.native.kwcall == slot_call) ||
                                                        /* a bytes join of exporters (buffer_argument), or choices (buffered_choice) */
                                                        ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||

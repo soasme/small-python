@@ -424,6 +424,8 @@ Unreleased (0.10.0):
   int subclass call their Python methods without nesting on the C stack
 - `x in b` of a bytes or bytearray `b` and a bytes search's needle call a Python `__index__` without
   nesting on the C stack
+- A dict's `get`/`setdefault`/`pop` and a set's `add`/`discard`/`remove` of a tuple key call its items'
+  Python `__hash__` and `__eq__` without nesting on the C stack
 
 2026-11-10 0.9.0:
 
