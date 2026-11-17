@@ -27053,9 +27053,12 @@ static unsigned buffer_arguments(SPYContext *c, SPYValue *callee, int method, si
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
     if (method < 0 && function->type != SPY_NATIVE && (function->type != SPY_CLASS || !function->as.map.native)) return 0;
-    /* startswith() and endswith() release each choice's buffer before the next (string_search). */
+    /* Only a join reads the exporters a list or tuple holds; startswith()
+     * and endswith() release each choice's buffer before the next
+     * (string_search). */
+    int joins = argc == 1 + (method < 0 && callee->type == SPY_NATIVE) && (method == M_JOIN || bytes_joining(callee));
     for (size_t i = 0; i < argc; i++)
-        if (buffer_argument(c, argv[i]) && (argv[i]->type != SPY_TUPLE || (method != M_STARTSWITH && method != M_ENDSWITH)))
+        if (argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE ? joins && buffer_argument(c, argv[i]) : machine_exporter(c, argv[i]) != NULL)
             return INDEX_BUFFERS;
     return 0;
 }
@@ -36026,6 +36029,8 @@ static SPYValue *text_expandtabs(SPYContext *c, size_t argc, SPYValue *const *ar
 }
 /* Like CPython, join snapshots an iterable into a list (a list or tuple is
  * used directly), so an item's __buffer__ may change the sequence's size. */
+static int buffer_memo(SPYContext *, size_t *);
+static SPYValue *buffer_item(SPYContext *, SPYValue *, size_t);
 static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     SPYValue *self = method_self(c, argc, argv, type, "join"), *args[1];
@@ -36033,8 +36038,14 @@ static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, S
     SPYValue *seq = args[0];
     if (!(seq = sequence_fast(c, seq, "can only join an iterable"))) return NULL;
     Buffer out = {.ctx = c};
-    for (size_t i = 0, n = seq->as.seq.len; !c->error_type[0] && i < n; i++) {
-        SPYValue *item = spy_retain(seq->as.seq.items[i]), *copy, *actual = buffer_bytes(c, item, &copy);
+    /* A retry after a Python __buffer__ reads what was read before it (buffer_item). */
+    size_t n = seq->as.seq.len;
+    if (buffer_memo(c, &n)) { spy_release(seq); return NULL; }
+    for (size_t i = 0; !c->error_type[0] && i < n; i++) {
+        if (i >= seq->as.seq.len) { spy_error(c, "RuntimeError", "sequence changed size during iteration"); break; }
+        SPYValue *item = buffer_item(c, seq, i), *copy, *actual;
+        if (!item) break;
+        actual = buffer_bytes(c, spy_retain(item), &copy);
         if (!actual) { spy_clear_error(c); errorf(c, "TypeError", "sequence item %zu: expected a bytes-like object, %s found", i, type_name(item)); }
         else if (seq->as.seq.len != n) spy_error(c, "RuntimeError", "sequence changed size during iteration");
         else if (!i || !append(&out, self->as.string.data, self->as.string.len)) append(&out, actual->as.string.data, actual->as.string.len);
@@ -37757,6 +37768,20 @@ static int buffer_memo(SPYContext *c, size_t *v) {
     int status = !memo || sequence_append(c, views, c->stepped) || sequence_append(c, views, memo) ? -1 : 0;
     spy_release(memo);
     return status;
+}
+/* Item i of list or tuple seq, borrowed, as a buffered operation (buffered_go)
+ * first read it, so that a retry after a __buffer__ that changed seq sees
+ * what each item was when reached; NULL with an error. */
+static SPYValue *buffer_item(SPYContext *c, SPYValue *seq, size_t i) {
+    if (!c->buffer_views || c->buffer_depth != c->py_depth) return seq->as.seq.items[i];
+    SPYValue *views = c->buffer_views, **items = views->as.seq.items, *read = NULL;
+    for (size_t j = 0; j + 1 < views->as.seq.len && !read; j += 2) if (items[j] == c->missing) read = items[j + 1];
+    if (!read) {
+        if (!(read = spy_list(c)) || sequence_append(c, views, c->missing) || sequence_append(c, views, read)) { spy_release(read); return NULL; }
+        spy_release(read);
+    }
+    if (i < read->as.seq.len) return read->as.seq.items[i];
+    return sequence_append(c, read, seq->as.seq.items[i]) ? NULL : seq->as.seq.items[i];
 }
 /* The bytes of a bytes-like object: a borrowed bytes or bytearray value, or
  * for a memoryview or a __buffer__ exporter a contiguous copy returned in

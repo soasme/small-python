@@ -5,8 +5,10 @@
 # bytes.replace, bytes.join and bytearray.join of a list or tuple, and
 # find() and in; startswith() and endswith() given a tuple obtain and
 # release each choice in turn and stop at the first match; a memoryview
-# compared with an exporter releases its buffer. Inside functions as at
-# module level.
+# compared with an exporter releases its buffer. A join reads each item
+# once, when it reaches it: an exporter that empties the list makes it
+# raise RuntimeError, one that replaces itself or a later item is read as
+# it was or as it now is. Inside functions as at module level.
 from harness import *
 
 log = []
@@ -48,8 +50,32 @@ expected = [(b"zQz", ["getX", "getY", "relX", "relY"]),
             (True, ["getY", "relY"]),
             (True, ["getX", "relX"])]
 
+class Mutating:
+    def __init__(self, mutate): self.mutate = mutate
+    def __buffer__(self, flags):
+        for _ in range(2): pass
+        self.mutate()
+        return memoryview(b"x")
+
+def mutations():
+    out = []
+    for sep in (b"-", bytearray(b"-")):
+        seq = [b"a", Mutating(lambda: seq.clear()), b"c"]
+        out.append(str(assert_raises(RuntimeError, sep.join, seq)))
+        def replace(): seq[1] = b"z"
+        seq = [b"a", Mutating(replace), b"c"]
+        out.append(sep.join(seq))
+        def later(): seq[2] = b"q"
+        seq = [b"a", Mutating(later), b"c"]
+        out.append(sep.join(seq))
+    return out
+
+changed = ["sequence changed size during iteration", b"a-x-c", b"a-x-q"] * 2
+
 def main():
+    assert_eq(mutations(), changed)
     return orders()
 
 assert_eq(main(), expected)
 assert_eq(orders(), expected)
+assert_eq(mutations(), changed)
