@@ -15,7 +15,9 @@
 (* every named parameter keyword-only, binds arguments by its own          *)
 (* signature (PLS-315 28.2). A module's code compiled from  v = 1,        *)
 (* optionally after a "doc" docstring, starts co_consts with the          *)
-(* docstring too, without the flag.                                        *)
+(* docstring too, without the flag. Its replace, __replace__, co_lines    *)
+(* and co_positions are method descriptors of the code type, which dir    *)
+(* lists (op "methods").                                                   *)
 (*                                                                         *)
 (* A program, after  v = 1  on line 1, defines f on line 2, or inside      *)
 (*  def outer(): v = 1  on line 4 (then returns it), as                    *)
@@ -46,7 +48,7 @@ Reads == {"co_name", "co_qualname", "co_argcount", "co_posonlyargcount", "co_kwo
 Ops == {"doc", "replace", "copy", "setattr", "badkw", "lines", "positions", "rename", "resig"}
 Programs == [sig : Sigs, kind : Kinds, doc : BOOLEAN, closure : Closures, nested : BOOLEAN, op : {"read"}, attr : Reads]
             \cup [sig : Sigs, kind : Kinds, doc : BOOLEAN, closure : Closures, nested : BOOLEAN, op : Ops]
-            \cup [doc : BOOLEAN, op : {"module"}]
+            \cup [doc : BOOLEAN, op : {"module", "methods"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -84,6 +86,7 @@ Run(p) ==
     IF p.op = "read" THEN Read(p, p.attr)
     ELSE CASE p.op = "doc" -> IF p.doc THEN "'doc'" ELSE "no docstring"
            [] p.op = "module" -> (IF p.doc THEN "'doc'" ELSE "no docstring") \o " 0"
+           [] p.op = "methods" -> "True True"
            [] p.op = "replace" -> "z 9 f False"      \* replace(co_name="z", co_firstlineno=9): a changed copy
            [] p.op = "copy" -> "True"                \* replace() with unchanged values is equal, with an equal hash
            \* co_varnames with "n_" before each parameter's name: a call passing

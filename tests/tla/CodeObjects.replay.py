@@ -21,8 +21,12 @@ def source(p):
 
 
 def outcome(p):
-    if p["op"] == "module":
+    if p["op"] in ("module", "methods"):
         co = compile(('"doc"\n' if p["doc"] else "") + "v = 1\n", "m", "exec")
+        if p["op"] == "methods":
+            names = ("replace", "__replace__", "co_lines", "co_positions")
+            return "%s %s" % (all(n in dir(co) for n in names),
+                              all(type(type(co).__dict__.get(n)).__name__ == "method_descriptor" for n in names))
         return ("'doc'" if co.co_consts[:1] == ("doc",) else "no docstring") + " " + str(co.co_flags & 0x4000000)
     namespace = {}
     exec(source(p), namespace)

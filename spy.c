@@ -3006,7 +3006,7 @@ static int native_kind(SPYValue *v) {
     static const char *const methods[] = {"__ceil__", "__floor__", "__round__", "__trunc__", "__format__", "__getnewargs__",
         "__reduce__", "__reduce_ex__", "__sizeof__", "__dir__", "__reversed__", "__complex__", "__getstate__", "__setstate__",
         "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__", "__length_hint__", "__instancecheck__",
-        "__subclasscheck__", "__subclasses__"};
+        "__subclasscheck__", "__subclasses__", "__replace__"};
     int wrapper = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
     for (size_t i = 0; wrapper && i < sizeof(methods) / sizeof(*methods); i++) if (!strcmp(name, methods[i])) wrapper = 0;
     if (wrapper && !strcmp(name, "__contains__"))
@@ -41297,12 +41297,15 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
     SPYValue *cached = name_local(c->slots, key);
     if (cached) return cached->type == SPY_NONE ? NULL : cached;
     int exists = index >= 0;
-    /* Generators have no sample value to probe; their methods are known. */
+    /* Generators and code have no sample value to probe; their methods are known. */
     static const char *const generator_methods[][2] = {
-        {"send", " throw close "}, {"send", " throw close __await__ "}, {"asend", " athrow aclose __aiter__ __anext__ "}};
+        {"send", " throw close "}, {"send", " throw close __await__ "}, {"asend", " athrow aclose __aiter__ __anext__ "},
+        {"replace", " __replace__ co_lines co_positions "}};
     int awaitable = type == SPY_ASYNC_GENERATOR_ASEND || type == SPY_ASYNC_GENERATOR_ATHROW || type == SPY_ANEXT_AWAITABLE;
-    if (!exists && (type == SPY_GENERATOR || type == SPY_COROUTINE_ITERATOR || type == SPY_COROUTINE || type == SPY_ASYNC_GENERATOR || awaitable)) {
-        const char *const *known = generator_methods[type == SPY_COROUTINE || awaitable ? 1 : type == SPY_ASYNC_GENERATOR ? 2 : 0];
+    if (!exists && (type == SPY_GENERATOR || type == SPY_COROUTINE_ITERATOR || type == SPY_COROUTINE || type == SPY_ASYNC_GENERATOR ||
+                    awaitable || type == SPY_CODE)) {
+        const char *const *known = generator_methods[type == SPY_COROUTINE || awaitable ? 1 : type == SPY_ASYNC_GENERATOR ? 2 :
+                                                     type == SPY_CODE ? 3 : 0];
         char padded[136];
         snprintf(padded, sizeof(padded), " %s ", name);
         exists = !strcmp(known[0], name) || strstr(known[1], padded);
@@ -41351,7 +41354,7 @@ static SPYValue *class_namespace(SPYContext *c, SPYValue *cls) {
         "reverse", "sort", "get", "items", "keys", "popitem", "setdefault", "update", "values", "format", "isidentifier",
         "isprintable", "join", "splitlines", "bit_count", "bit_length", "conjugate", "indices", "startswith", "endswith",
         "find", "rfind", "rindex", "isdisjoint", "send", "throw", "close", "asend", "athrow", "aclose", "__await__",
-        "__aiter__", "__anext__"};
+        "__aiter__", "__anext__", "replace", "__replace__", "co_lines", "co_positions"};
     size_t count = sizeof(slots) / sizeof(*slots) + sizeof(methods) / sizeof(*methods);
     for (size_t i = 0; builtin_type_id(c, cls) >= 0 && i < count && !c->error_type[0]; i++) {
         const char *name = i < sizeof(slots) / sizeof(*slots) ? slots[i].name : methods[i - sizeof(slots) / sizeof(*slots)];
