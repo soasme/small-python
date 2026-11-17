@@ -516,6 +516,7 @@ chooses as follows, on a 64-bit build:
 | `__sizeof__` | 20.1.3, 20.2 | the size of one value cell, 208 bytes, for every object |
 | errno values and `ERANGE` | 21.3.4, 22.3.2 | the host's `<errno.h>` |
 | memoryview native formats | 24.4.2 | the platform ABI |
+| `obj` of a view a Python `__buffer__` returned | 24.4.2 | the exporter, the object that defines `__buffer__` |
 | Nesting limits | 18.2.3 | 200 parentheses, 99 indentation levels, 64 nested f-strings or t-strings, no limit on nested blocks; deeper expressions raise `RecursionError` when the compiler's stack runs out |
 | Integer size limit | 22.1.3 | a shift or power whose count does not fit 64 bits raises "too many digits in integer"; below that, memory is the limit |
 | Additional dunder attributes | throughout | none beyond those PLS-315 lists |
