@@ -535,6 +535,7 @@ static SPYValue *value_class(SPYContext *, SPYValue *);
 /* A class with a metaclass, whose special methods the metaclass supplies. */
 static ALWAYS_INLINE int metaclassed(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
+static SPYValue *contained_base(SPYContext *, SPYValue *);
 static int special_dispatch(SPYValue *);
 static int mapping_type(SPYContext *, SPYValue *);
 static SPYValue *super_new(SPYContext *, SPYValue *, SPYValue *);
@@ -10858,7 +10859,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             if ((result = sequence_search(c, a, b)) < 0) return NULL;
             return spy_bool(c, op == O_IN ? result : !result);
         }
-        SPYValue *base = builtin_base(c, b, "__contains__", NULL);
+        SPYValue *base = contained_base(c, b);
         if (base) return comparison(c, op, a, base);
         if (special_dispatch(b)) {
             SPYValue *method = special_method_maybe(c, b, "__contains__");
@@ -11045,6 +11046,15 @@ static SPYValue *builtin_base(SPYContext *c, SPYValue *v, const char *name, cons
         if ((name && name_local(cls, name)) || (other && name_local(cls, other))) return NULL;
     }
     return v->as.map.base;
+}
+/* The base of v, a container's subclass not overriding __contains__,
+ * which searches it; else NULL: another builtin's subclass is searched by
+ * its __iter__ (PySequence_Contains). */
+static SPYValue *contained_base(SPYContext *c, SPYValue *v) {
+    SPYValue *base = builtin_base(c, v, "__contains__", NULL);
+    return base && UINT64_C(1) << base->type & (UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
+                                                UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET |
+                                                UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BYTEARRAY) ? base : NULL;
 }
 /* Instances and classes whose metaclass is not type look up special methods
  * on their type. */
@@ -14944,9 +14954,10 @@ static int expands(Node *n, int calls) {
                            n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || starred(n) || (n->kind == N_ASSIGN && ((n->op >= T_ADDEQ && n->op <= T_XOREQ) ||
                                                                                                   unpacks(n->a) || unpacks(n->args)))))) return 1;
     /* A list, set or dictionary comprehension runs on the machine of the
-     * code holding it, which can pause in its body. */
+     * code holding it, which can pause in its body; while calls can pause,
+     * so does a generator expression's iter() of its source. */
     if (n->kind == N_COMPREHENSION)
-        return (calls && n->op != N_TUPLE) || expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
+        return (calls && n->op != N_TUPLE) || calls == PAUSING || expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
     /* A loop whose iterable alone holds a call makes that call once: it
      * stays a walker statement, where the call nests in C. */
@@ -24463,12 +24474,13 @@ static int generator_function(SPYContext *c, SPYValue *fn) {
     Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
     return def && def->kind == N_DEF && !def->op && def->code && !def->flat;
 }
-/* The Python __iter__ of plain instance v's class, or of a list's or
- * tuple's subclass, which every consumer iterates by it, borrowed: one on
- * the machine, or a generator function (generator_function); else NULL. */
+/* The Python __iter__ of plain instance v's class, or of a list's,
+ * tuple's or dict's subclass, which every consumer iterates by it,
+ * borrowed: one on the machine, or a generator function
+ * (generator_function); else NULL. */
 static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
     SPYValue *base = v->type == SPY_INSTANCE ? v->as.map.base : NULL;
-    SPYValue *cls = v->type != SPY_INSTANCE || (base && base->type != SPY_LIST && base->type != SPY_TUPLE) ||
+    SPYValue *cls = v->type != SPY_INSTANCE || (base && base->type != SPY_LIST && base->type != SPY_TUPLE && !is_dict(base)) ||
                     builtin_base(c, v, "__iter__", NULL) ? NULL : v->as.map.parent;
     SPYValue *function = cls ? class_lookup(cls, "__iter__") : NULL;
     return function && (machine_function(c, function) || generator_function(c, function)) ? function : NULL;
@@ -28786,6 +28798,7 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
  * their end; else 0, with an error pending when __iter__ failed, a
  * TypeError replaced as the native search replaces it. */
 static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y) {
+    if (contained_base(c, y)) return 0;
     if (y->type != SPY_DICT_VALUES && !(y->type == SPY_ITERATOR && y->as.iterator.kind == I_REVERSED) && !resumable(y) &&
         (!(iter_function(c, y) || getitem_iterated(c, y)) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
     /* An __iter__ on the machine is the search's first call (KEY_ITER). */
@@ -30707,7 +30720,7 @@ static NO_INLINE int iter_returned(SPYContext *c, Machine *m, Instruction *ins, 
  * whose generator the step takes (iter_returned); else NULL. */
 static NO_INLINE SPYValue *iter_call(SPYContext *c, Machine *m, Instruction *ins, const char *name, SPYValue **env) {
     SPYValue *v = m->stack[m->len - 1];
-    SPYValue *function = v->as.map.base || builtin_base(c, v, name, NULL) ? NULL : class_lookup(v->as.map.parent, name);
+    SPYValue *function = builtin_base(c, v, name, NULL) ? NULL : class_lookup(v->as.map.parent, name);
     if (!function || (!machine_function(c, function) && !generator_function(c, function))) return NULL;
     SPYValue *self = spy_retain(v);
     if (machine_function(c, function)) return (*env = function_env(c, function, 1, &self, NULL, 1)) ? spy_retain(function) : NULL;

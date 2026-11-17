@@ -19,7 +19,8 @@
 (* unequal to itself while containers test identity first, and ints and    *)
 (* floats compare exactly; is compares identity; in uses __contains__ (its *)
 (* result made a bool), then iteration, then __getitem__ with indices from *)
-(* 0, and strings, bytes, and dicts and sets have their own rules.         *)
+(* 0, and strings, bytes, and dicts and sets have their own rules, which   *)
+(* their subclasses keep over an __iter__ of their own.                    *)
 (*                                                                         *)
 (* A program evaluates x OP y for an instance x of class A and y of class  *)
 (* B, B either unrelated to A or a subclass of it (RELATION), where A and  *)
@@ -37,7 +38,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "nan_distinct", "seq_lex", "seq_type_err", "seq_elem_err", "str_int_eq", "order_err", "order_err_none",
           "dict_eq", "dict_order", "set_order", "range_eq", "int_float", "complex_order", "complex_eq", "bool_int",
           "in_list", "in_str_type", "in_bytes_type", "in_identity", "contains_nonbool", "contains_falsy",
-          "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
+          "contains_iter", "contains_int_sub_iter", "contains_list_sub_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
           "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
@@ -124,6 +125,8 @@ Case(c) ==
       [] c = "contains_nonbool" -> <<"(True, False)", <<"'yes'", "'yes'">>>>
       [] c = "contains_falsy" -> <<"False", <<>>>>
       [] c = "contains_iter" -> <<"True", <<"1", "2">>>>                  \* stops at the first match
+      [] c = "contains_int_sub_iter" -> <<"True", <<"1", "2">>>>          \* a non-container's subclass iterates
+      [] c = "contains_list_sub_iter" -> <<"(True, False)", <<>>>>        \* a list's subclass searches its items
       [] c = "contains_getitem" -> <<"(True, False)", <<"0", "10", "20", "0", "10", "20", "30">>>>
       [] c = "contains_none" -> <<"TypeError: argument of type 'C' is not a container or iterable", <<>>>>
       [] c = "contains_is_none" -> <<"TypeError: 'C' object is not a container", <<>>>>

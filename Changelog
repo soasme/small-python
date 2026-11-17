@@ -428,6 +428,10 @@ Unreleased (0.10.0):
   Python `__hash__` and `__eq__` without nesting on the C stack
 - A set's methods given a dict subclass, or an argument computed in the call, hash and compare without
   nesting on the C stack
+- `x in y` of an `int` subclass (or any non-container builtin's) with `__iter__` searches by it instead
+  of raising `TypeError`; a container subclass's keeps its base's search when pausing
+- a builtin subclass's Python `__iter__`, in a loop, a comprehension, a generator expression or a dict
+  subclass's consumer, runs without nesting on the C stack
 
 2026-11-10 0.9.0:
 

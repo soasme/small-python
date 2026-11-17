@@ -39,6 +39,8 @@ SOURCES = {
     "contains_nonbool": "class C:\n    def __contains__(s, x): return t('yes')\nresult = (1 in C(), 1 not in C())",
     "contains_falsy": "class C:\n    def __contains__(s, x): return 0\nresult = 1 in C()",
     "contains_iter": "class C:\n    def __iter__(s):\n        yield t(1)\n        yield t(2)\n        yield t(3)\nresult = 2 in C()",
+    "contains_int_sub_iter": "class C(int):\n    def __iter__(s):\n        yield t(1)\n        yield t(2)\n        yield t(3)\nresult = 2 in C()",
+    "contains_list_sub_iter": "class C(list):\n    def __iter__(s):\n        yield t(9)\nresult = (2 in C([2]), 9 in C([2]))",
     "contains_getitem": "class C:\n    def __getitem__(s, i):\n        if i > 3: raise IndexError\n        return t(i * 10)\nresult = (20 in C(), 50 in C())",
     "contains_none": "class C: pass\n1 in C()",
     "contains_is_none": "class C:\n    __contains__ = None\n    def __iter__(s): return iter([1])\n1 in C()",
