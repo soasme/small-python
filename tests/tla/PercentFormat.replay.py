@@ -26,6 +26,9 @@ class Q:
     def __float__(self): spin(); Q.log.append('float'); return 2.5
 class Y(Q):
     def __bytes__(self): spin(); Q.log.append('bytes'); return b'by'
+class OwnA(bytearray):
+    def __bytes__(self): return b"no"
+    def __buffer__(self, flags): return memoryview(b"no")
 class OwnB(bytes):
     def __bytes__(self): spin(); return b'no'
 class Grow:
@@ -100,6 +103,7 @@ SOURCES = {
     "method_number_bad": "result = '%x' % NotIndex()",
     "bytes_methods": "Q.log.clear(); L.log.clear(); result = (b'%d-%x-%c|%s|%r' % (Q(), Q(), Q(), Y(), L('a')), Q.log, L.log)",
     "bytes_own": "result = b'%s' % OwnB(b'yes')",
+    "bytearray_own": "result = (b'%b' % OwnA(b'yes'), bytearray(b'%s') % OwnA(b'yes'))",
     "c_index_type": "result = '%c' % NotIndex()",
     "bytes_c_index_type": "result = b'%c' % NotIndex()",
     "bytearray_methods": "Q.log.clear(); result = (bytearray(b'%d-%x-%c|%s') % (Q(), Q(), Q(), Y()), Q.log)",

@@ -22966,6 +22966,7 @@ static SPYValue *percent_char(SPYContext *c, PercentArgs *p, SPYValue *key, SPYV
 /* format_obj from bytesobject.c: bytes, bytearray, or __bytes__. */
 static SPYValue *percent_bytes(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v) {
     SPYValue *base = v->type == SPY_INSTANCE ? builtin_value(c, v, SPY_BYTES) : NULL;
+    if (!base && v->type == SPY_INSTANCE) base = builtin_value(c, v, SPY_BYTEARRAY);
     if (base) v = base;
     if (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY) return spy_bytes(c, v->as.string.data, v->as.string.len);
     SPYValue *method = special_dispatch(v) ? special_method(c, v, "__bytes__") : NULL;
@@ -23205,7 +23206,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
         case 's': case 'r': case 'a': case 'b':
             if (bytes && (ch == 's' || ch == 'b')) {
                 if (converted) { piece = converted; converted = NULL; }
-                else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) &&
+                else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) && !builtin_value(c, v, SPY_BYTEARRAY) &&
                          (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
                     deferred = 1;
                 else piece = percent_bytes(c, &p, key, v);

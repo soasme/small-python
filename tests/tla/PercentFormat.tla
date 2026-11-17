@@ -89,7 +89,7 @@ Cases == {"s_r_a", "s_object", "percent_literal", "mapping", "mapping_missing", 
           "bytes_basic", "bytes_b_alias", "bytes_dunder", "bytes_str_rejected", "bytes_r_is_a", "bytes_c",
           "bytes_c_bad", "bytes_mapping", "bytes_percent", "bytearray_result", "bytes_not_all",
           "bytes_unsupported", "bytes_float", "method_order", "method_mapping", "method_raises", "method_not_str",
-          "method_too_few", "method_items", "method_items_augmented", "method_numbers", "method_number_bad", "bytes_methods", "bytes_own",
+          "method_too_few", "method_items", "method_items_augmented", "method_numbers", "method_number_bad", "bytes_methods", "bytes_own", "bytearray_own",
           "c_index_type", "bytes_c_index_type", "bytearray_methods", "bytearray_exported"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 255}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
              type : {"d", "i", "o", "x", "X", "u"}, target : {"str", "bytes"}]
@@ -165,6 +165,8 @@ Case(c) ==
       \* bytes' %d, %x, %c, %s and %r of instances call __int__, __index__, __bytes__ and __repr__ in order
       [] c = "bytes_methods" -> "(b'9-1f-\\x1f|by|A\\\\xe9', ['int', 'index', 'index', 'bytes'], ['ra'])"
       [] c = "bytes_own" -> "b'yes'"
+      \* A bytearray subclass's contents, not its __bytes__ or __buffer__
+      [] c = "bytearray_own" -> "(b'yes', bytearray(b'yes'))"
       [] c = "bytearray_methods" -> "(bytearray(b'9-1f-\\x1f|by'), ['int', 'index', 'index', 'bytes'])"
       \* The format is exported while __index__ runs, released when the formatting ends.
       [] c = "bytearray_exported" -> "(bytearray(b'E'), bytearray(b'%c\\x01'), ['Existing exports of data: object cannot be re-sized'])"
