@@ -10446,7 +10446,12 @@ static int merges(SPYValue *, SPYValue *);
 static int merge_call(SPYValue *, size_t, SPYValue *const *);
 static SPYValue *update_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *merge_walk(SPYContext *, Machine *, SPYValue *, SPYValue *, int, SPYValue **);
-static SPYValue *machine_exporter(SPYContext *, SPYValue *);
+static SPYValue *instance_exporter(SPYContext *, SPYValue *);
+/* The Python __buffer__ of instance v with no bytes or bytearray base, a
+ * machine function, borrowed; else NULL. */
+static ALWAYS_INLINE SPYValue *machine_exporter(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_INSTANCE ? instance_exporter(c, v) : NULL;
+}
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* An operand's Python __buffer__ is a call on the machine (buffered_step). */
     if (machine_exporter(c, a) || machine_exporter(c, b)) return NULL;
@@ -26559,7 +26564,7 @@ static ALWAYS_INLINE int checks_call(SPYContext *c, Machine *m, int id, size_t a
 }
 static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
 static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, int, SPYValue **);
-static unsigned buffer_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static int buffer_argument(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
@@ -26589,7 +26594,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         release_all(argc, argv); spy_release(callee);
         return result;
     }
-    /* A list or tuple of exporters, as join() and startswith() take, too (buffer_argument). */
+    /* An exporter argument, or a list or tuple of them a join takes, too (buffer_argument). */
     if (index_arguments(c, callee, method, argc, argv) ||
         (argc <= INDEX_MOST && buffer_arguments(c, callee, method, argc, argv))) {
         result = indexed_call(c, m, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc, argv);
@@ -27036,7 +27041,6 @@ static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size
     else if (owner == c->types[SPY_TUPLE] && method == M_INDEX) seq = builtin_value(c, self, SPY_TUPLE);
     return seq && method >= 0 ? index_arguments(c, seq, method, argc, argv) : 0;
 }
-static SPYValue *machine_exporter(SPYContext *, SPYValue *);
 /* Whether v, or an item of v when it is a list or tuple, is an instance
  * whose __buffer__ is a machine function (machine_exporter). */
 static int buffer_argument(SPYContext *c, SPYValue *v) {
@@ -27049,7 +27053,7 @@ static int buffer_argument(SPYContext *c, SPYValue *v) {
  * and one of its argc arguments argv holds a machine exporter
  * (buffer_argument), for the call to run on the machine (buffered_call);
  * else 0. */
-static unsigned buffer_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
     if (method < 0 && function->type != SPY_NATIVE && (function->type != SPY_CLASS || !function->as.map.native)) return 0;
@@ -27060,6 +27064,12 @@ static unsigned buffer_arguments(SPYContext *c, SPYValue *callee, int method, si
     for (size_t i = 0; i < argc; i++)
         if (argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE ? joins && buffer_argument(c, argv[i]) : machine_exporter(c, argv[i]) != NULL)
             return INDEX_BUFFERS;
+    return 0;
+}
+static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    for (size_t i = 0; i < argc; i++)
+        if (argv[i]->type == SPY_INSTANCE || argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE)
+            return buffer_arguments_rest(c, callee, method, argc, argv);
     return 0;
 }
 static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
@@ -28857,7 +28867,6 @@ static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, s
 static NO_INLINE size_t operator_finish(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t);
 static SPYValue *operation(SPYContext *, Instruction *, SPYValue *, SPYValue *);
 static SPYValue *buffered_step(SPYContext *, Machine *, size_t, SPYValue *, SPYValue *);
-static SPYValue *machine_exporter(SPYContext *, SPYValue *);
 /* Keep key's hash for its step to use once (hash_value), taking the key;
  * whether it was hashed. */
 static int hash_kept(SPYContext *c, SPYValue *key, int hashed, int64_t hash) {
@@ -37706,10 +37715,9 @@ static SPYValue *memory_bytes_order(SPYContext *c, SPYValue *m, int fortran) {
 static SPYValue *memory_bytes(SPYContext *c, SPYValue *m) { return memory_bytes_order(c, m, 0); }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
 static int buffer_exporter(SPYContext *, SPYValue *);
-/* The Python __buffer__ of instance v with no bytes or bytearray base, a
- * machine function, borrowed; else NULL. */
-static SPYValue *machine_exporter(SPYContext *c, SPYValue *v) {
-    if (v->type != SPY_INSTANCE || builtin_value(c, v, SPY_BYTES) || builtin_value(c, v, SPY_BYTEARRAY)) return NULL;
+/* machine_exporter of an instance. */
+static NO_INLINE SPYValue *instance_exporter(SPYContext *c, SPYValue *v) {
+    if (builtin_value(c, v, SPY_BYTES) || builtin_value(c, v, SPY_BYTEARRAY)) return NULL;
     SPYValue *function = class_lookup(v->as.map.parent, "__buffer__");
     return function && machine_function(c, function) ? function : NULL;
 }
