@@ -23652,7 +23652,8 @@ static NO_INLINE int replay_log(SPYContext *c, Replay *r, SPYValue *fn, SPYValue
  * machine (callk, CALL_PATTERN), the log atop m's stack. */
 static NO_INLINE int pattern_step(SPYContext *c, Machine *m, Frame *f, Node *n, int replaying) {
     SPYValue *log = replaying ? m->stack[m->len - 1] : value_new(c, SPY_LIST), *subject = m->stack[m->len - 1 - replaying];
-    if (!log || (!replaying && (sequence_append(c, log, c->none) || machine_push(c, m, log)))) { if (!replaying) spy_release(log); return -1; }
+    if (!replaying && (!log || sequence_append(c, log, c->none))) { spy_release(log); return -1; }
+    if (!replaying && machine_push(c, m, log)) return -1;
     Replay r = {.log = log, .missing = log->as.seq.items[0], .at = 1}, *outer = c->replay;
     c->replay = &r;
     int matched = match_case(c, f, n, subject);
@@ -23901,6 +23902,13 @@ static ALWAYS_INLINE int machine_push(SPYContext *c, Machine *m, SPYValue *v) {
     m->stack[m->len++] = v; return 0;
 }
 static SPYValue *machine_pop(Machine *m) { return m->stack[--m->len]; }
+/* Push the n values v, all taken, including on failure: 0, or -1 with
+ * those before the failing one on the stack. */
+static int machine_push_all(SPYContext *c, Machine *m, size_t n, SPYValue *const *v) {
+    for (size_t i = 0; i < n; i++)
+        if (machine_push(c, m, v[i])) { release_all(n - i - 1, v + i + 1); return -1; }
+    return 0;
+}
 static Block *push_block(SPYContext *c, Machine *m, int kind, Instruction *ins) {
     if (grow(c, (void **)&m->blocks, &m->block_cap, m->block_len + 1, sizeof(*m->blocks))) return NULL;
     Block *b = &m->blocks[m->block_len++];
@@ -26432,7 +26440,7 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
          * "round" and the pair on the stack (conversion_value). */
         SPYValue *pair = round_pair(c, argv[0], argv[1]);
         spy_release(callee); spy_release(argv[0]);
-        if (machine_push(c, m, spy_string(c, "round", 5)) || machine_push(c, m, pair)) { spy_release(argv[1]); return NULL; }
+        if (machine_push_all(c, m, 2, (SPYValue *[]){spy_string(c, "round", 5), pair})) { spy_release(argv[1]); return NULL; }
         if (!(*env = function_env(c, convert, 1, argv + 1, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
@@ -26581,7 +26589,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         /* A class call enters its Python __new__ (CALL_CHECKED) with the
          * class first, the class and the arguments on the stack. */
         SPYValue *args = tuple_of(c, argc, argv);
-        if (machine_push(c, m, spy_retain(callee)) || machine_push(c, m, args)) { release_all(argc, argv); spy_release(callee); return NULL; }
+        if (machine_push_all(c, m, 2, (SPYValue *[]){spy_retain(callee), args})) { release_all(argc, argv); spy_release(callee); return NULL; }
         memmove(argv + 1, argv, argc * sizeof(*argv));
         argv[0] = spy_retain(callee);
         c->entering_init = allocate;
@@ -27898,7 +27906,7 @@ static NO_INLINE SPYValue *round_enter(SPYContext *c, Machine *m, SPYValue *conv
     c->entering_kind = CALL_CHECKED;
     SPYValue *digits = machine_pop(m), *x = machine_pop(m), *pair = round_pair(c, x, digits);
     spy_release(machine_pop(m)); spy_release(x);
-    if (machine_push(c, m, spy_string(c, "round", 5)) || machine_push(c, m, pair)) { spy_release(digits); return NULL; }
+    if (machine_push_all(c, m, 2, (SPYValue *[]){spy_string(c, "round", 5), pair})) { spy_release(digits); return NULL; }
     if (!(*env = function_env(c, convert, 1, &digits, NULL, 1))) return NULL;
     c->entering_init = convert;
     return spy_retain(c->types[SPY_STRING]);
@@ -28535,7 +28543,7 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
          * under the pair. */
         size_t end, len = m->len;
         iterator->as.iterator.index = at + 1;
-        if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, iterator) || machine_push(c, m, spy_retain(c->unbound)) ||
+        if (machine_push_all(c, m, 3, (SPYValue *[]){spy_retain(x), iterator, spy_retain(c->unbound)}) ||
             !(function = equal_call(c, m, item, x, python_pair(c, item, x, 0, &end), env)))
             while (m->len > len) spy_release(machine_pop(m));
         return function;
@@ -28545,8 +28553,7 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
     if (!iterator) return NULL;
     iterator->as.iterator.index = at + 1;
     SPYValue *args[] = {spy_retain(left), spy_retain(right)};
-    if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, iterator) || machine_push(c, m, spy_retain(left)) ||
-        machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->unbound))) {
+    if (machine_push_all(c, m, 5, (SPYValue *[]){spy_retain(x), iterator, spy_retain(left), spy_retain(right), spy_retain(c->unbound)})) {
         release_all(2, args); return NULL;
     }
     if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
@@ -29178,8 +29185,8 @@ static SPYValue *chain_step(SPYContext *c, Machine *m, SPYValue *self, SPYValue 
                   (which == 0 || which == 2) && i ? 3 : 0;
     SPYValue *x = which == 4 || which == 6 || which >= CHAIN_DISCARD || !i ? self : r;
     SPYValue *y = which >= CHAIN_DISCARD && i ? r : args->as.seq.items[which >= CHAIN_DISCARD ? 0 : i];
-    if (machine_push(c, m, spy_retain(self)) || machine_push(c, m, spy_retain(args)) || machine_push(c, m, int_value(c, (int64_t)i)) ||
-        machine_push(c, m, int_value(c, which)) || machine_push(c, m, r) || machine_push(c, m, spy_retain(c->chaining))) {
+    if (machine_push_all(c, m, 6, (SPYValue *[]){spy_retain(self), spy_retain(args), int_value(c, (int64_t)i), int_value(c, which), r,
+                                                spy_retain(c->chaining)})) {
         while (m->len > len) spy_release(machine_pop(m));
         return NULL;
     }
@@ -29291,9 +29298,9 @@ static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue 
     SPYValue *searched = op == '|' || discards ? result : walked == x ? y : x;
     spy_retain(walked);
     size_t len = m->len;
-    if (machine_push(c, m, result) || machine_push(c, m, walked) || machine_push(c, m, spy_retain(searched)) ||
-        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op | (inplace == 2 ? SET_UPDATING : 0) | (discards ? SET_DISCARDS : 0))) ||
-        machine_push(c, m, spy_retain(updates ? operand : c->none)) || machine_push(c, m, spy_retain(c->walking))) {
+    if (machine_push_all(c, m, 7, (SPYValue *[]){result, walked, spy_retain(searched), int_value(c, 0),
+                                                int_value(c, op | (inplace == 2 ? SET_UPDATING : 0) | (discards ? SET_DISCARDS : 0)),
+                                                spy_retain(updates ? operand : c->none), spy_retain(c->walking)})) {
         while (m->len > len) spy_release(machine_pop(m));
         return NULL;
     }
@@ -29316,9 +29323,8 @@ static NO_INLINE int merges(SPYValue *x, SPYValue *y) {
  * value is target, or None for an update (SET_UPDATING). */
 static NO_INLINE SPYValue *merge_walk(SPYContext *c, Machine *m, SPYValue *target, SPYValue *source, int flags, SPYValue **env) {
     size_t len = m->len;
-    if (machine_push(c, m, int_value(c, (int64_t)source->as.map.len)) || machine_push(c, m, spy_retain(source)) || machine_push(c, m, target) ||
-        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, '|' | SET_MERGES | flags)) ||
-        machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_retain(c->walking))) {
+    if (machine_push_all(c, m, 7, (SPYValue *[]){int_value(c, (int64_t)source->as.map.len), spy_retain(source), target, int_value(c, 0),
+                                                int_value(c, '|' | SET_MERGES | flags), spy_none(c), spy_retain(c->walking)})) {
         while (m->len > len) spy_release(machine_pop(m));
         return NULL;
     }
@@ -32089,7 +32095,7 @@ static NO_INLINE int next_ended(SPYContext *c, SPYValue *v) {
  * an error. */
 static int convert_call(SPYContext *c, Machine *m, SPYValue *function, SPYValue *item, SPYValue *name, SPYValue *spec, SPYValue **fn, SPYValue **env) {
     SPYValue *args[] = {spy_retain(item), spec};
-    if (machine_push(c, m, spy_retain(item)) || machine_push(c, m, name) || machine_push(c, m, spy_retain(c->converting))) {
+    if (machine_push_all(c, m, 3, (SPYValue *[]){spy_retain(item), name, spy_retain(c->converting)})) {
         spy_release(args[0]); spy_release(spec);
         return -1;
     }
@@ -32150,7 +32156,7 @@ static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *r
 static int hash_convert(SPYContext *c, Machine *m, SPYValue *t, SPYValue **fn, SPYValue **env) {
     int64_t hash;
     SPYValue *name = spy_string(c, "__hash__", 8);
-    if (!name || machine_push(c, m, spy_retain(t)) || machine_push(c, m, name) || machine_push(c, m, spy_retain(c->converting))) return -1;
+    if (!name || machine_push_all(c, m, 3, (SPYValue *[]){spy_retain(t), name, spy_retain(c->converting)})) return -1;
     if (!tuple_push(c, m, t, 0, HASH_SEED) && (*fn = tuple_next(c, m, env, &hash))) return 1;
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     /* A walk that called no Python gives the hash at once. */
@@ -39574,9 +39580,12 @@ static int print_call(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPY
     size_t argc = callee != fn;
     SPYValue *args[] = {argc ? spy_retain(callee->as.method.self) : text, text};
     *function = fn;
-    return machine_push(c, m, spy_retain(state)) || machine_push(c, m, int_value(c, (int64_t)at)) ||
-           machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_string(c, text ? "write" : "flush", 5)) ||
-           machine_push(c, m, callee) || !(*env = function_env(c, fn, argc + !!text, args, NULL, 1)) ? -1 : 1;
+    if (machine_push_all(c, m, 5, (SPYValue *[]){spy_retain(state), int_value(c, (int64_t)at), spy_retain(c->replacing),
+                                                 spy_string(c, text ? "write" : "flush", 5), callee})) {
+        release_all(argc + !!text, args);
+        return -1;
+    }
+    return (*env = function_env(c, fn, argc + !!text, args, NULL, 1)) ? 1 : -1;
 }
 static SPYValue *print_read(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* print's read of file's attribute name for position at: 0 with it in
@@ -39612,9 +39621,9 @@ static int print_unit(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPY
     if (read) return read;
     if (value->type == SPY_INSTANCE && (*function = conversion_method(c, c->types[SPY_STRING], 1, &value, found))) {
         SPYValue *self = spy_retain(value);
-        return machine_push(c, m, writer ? writer : spy_none(c)) || machine_push(c, m, spy_retain(state)) ||
-               machine_push(c, m, int_value(c, (int64_t)at + 1)) || machine_push(c, m, spy_retain(c->replacing)) ||
-               machine_push(c, m, found[0]) || machine_push(c, m, self) || !(*env = function_env(c, *function, 1, &self, NULL, 0)) ? -1 : 1;
+        return machine_push_all(c, m, 6, (SPYValue *[]){writer ? writer : spy_none(c), spy_retain(state), int_value(c, (int64_t)at + 1),
+                                                        spy_retain(c->replacing), found[0], self}) ||
+               !(*env = function_env(c, *function, 1, &self, NULL, 0)) ? -1 : 1;
     }
     if (c->error_type[0]) { spy_release(writer); return -1; }
     if (repr_job(c, c->types[SPY_STRING], value)) {
@@ -40016,9 +40025,7 @@ static NO_INLINE SPYValue *repr_call(SPYContext *c, Machine *m, SPYValue **env) 
 static NO_INLINE SPYValue *ascii_call(SPYContext *c, Machine *m, SPYValue **env) {
     SPYValue *v = machine_pop(m), *text = NULL;
     *env = NULL;
-    if (machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_retain(c->field_calls[0])) || machine_push(c, m, v)) {
-        spy_release(v); return NULL;
-    }
+    if (machine_push_all(c, m, 3, (SPYValue *[]){spy_retain(c->replacing), spy_retain(c->field_calls[0]), v})) return NULL;
     if ((text = repr_call(c, m, env)) && *env) return text;
     spy_release(machine_pop(m)); spy_release(machine_pop(m));
     return text ? ascii_text(c, text, text) : NULL;
