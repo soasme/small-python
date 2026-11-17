@@ -32405,6 +32405,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     static const void *const steps[] = {MACHINE_STEPS(STEP_LABEL)};
 #undef STEP_LABEL
     if (UNLIKELY(!m)) { c->steps = steps; return (Result){FLOW_NORMAL, NULL}; }
+#else
+    if (!m) return (Result){FLOW_NORMAL, NULL};
 #endif
     Frame f = m->frame;
     Result flow = {FLOW_NORMAL, NULL};

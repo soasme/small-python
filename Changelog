@@ -396,6 +396,7 @@ Unreleased (0.10.0):
   with a continuation, so the call can pause and does not nest on the C stack
 - make test-gc-stress runs the specification suite with frequent automatic collections
 - an exception a __release_buffer__ raises is reported as unraisable instead of propagating
+- a compiler without computed goto builds a working engine again
 
 2026-11-10 0.9.0:
 
