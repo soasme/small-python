@@ -419,6 +419,9 @@ Unreleased (0.10.0):
   `in`, `find`, `int.from_bytes` and the rest; `bytes` comparisons and `decode` still read its contents
 - a `bytearray` compares with any bytes-like object, `memoryview` and Python exporters included
 - `int.from_bytes` asks for a buffer before `__bytes__`, and `join` asks a repeated item for its buffer each time
+- a join called as `f(*args)` obtains every buffer before releasing any
+- `startswith`/`endswith` choices, `slice.indices` of a bound method and `int()` or `float()` of an
+  int subclass call their Python methods without nesting on the C stack
 
 2026-11-10 0.9.0:
 

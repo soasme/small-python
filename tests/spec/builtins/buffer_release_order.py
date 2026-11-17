@@ -4,8 +4,9 @@
 # it and releases them all, in the order obtained, once it finishes:
 # bytes.replace, bytes.join and bytearray.join of a list or tuple, and
 # find() and in; startswith() and endswith() given a tuple obtain and
-# release each choice in turn and stop at the first match; a memoryview
-# compared with an exporter releases its buffer. A join reads each item
+# release each choice in turn and stop at the first match, bound or
+# unbound, of a bytearray or a subclass, with bounds or through f(*args);
+# a memoryview compared with an exporter releases its buffer. A join reads each item
 # once, when it reaches it: an exporter that empties the list makes it
 # raise RuntimeError, one that replaces itself or a later item is read as
 # it was or as it now is. Inside functions as at module level.
@@ -25,6 +26,12 @@ class Exporter:
 
 x, y = Exporter("X", b"XY"), Exporter("Y", b"Q")
 
+class Bs(bytes): pass
+
+def star(f, *args):
+    for _ in (): pass
+    return f(*args)
+
 def logged(call):
     del log[:]
     return call(), list(log)
@@ -38,7 +45,14 @@ def orders():
             logged(lambda: b"XYz".startswith((x, y))),
             logged(lambda: b"XYz".startswith((y, x))),
             logged(lambda: b"zXY".endswith((y, b"Y"))),
-            logged(lambda: memoryview(b"XY") == x)]
+            logged(lambda: memoryview(b"XY") == x),
+            logged(lambda: bytes.startswith(b"XYz", (y, x))),
+            logged(lambda: bytes.endswith(b"zXY", (y, x), 1)),
+            logged(lambda: bytearray(b"XYz").startswith((y, x))),
+            logged(lambda: Bs(b"zXY").endswith((y, x), 1)),
+            logged(lambda: star(b"XYz".startswith, (y, x))),
+            logged(lambda: star(b"-".join, [x, y])),
+            logged(lambda: b"XYz".startswith((y, y)))]
 
 expected = [(b"zQz", ["getX", "getY", "relX", "relY"]),
             (b"XY-Q", ["getX", "getY", "relX", "relY"]),
@@ -48,7 +62,14 @@ expected = [(b"zQz", ["getX", "getY", "relX", "relY"]),
             (True, ["getX", "relX"]),
             (True, ["getY", "relY", "getX", "relX"]),
             (True, ["getY", "relY"]),
-            (True, ["getX", "relX"])]
+            (True, ["getX", "relX"]),
+            (True, ["getY", "relY", "getX", "relX"]),
+            (True, ["getY", "relY", "getX", "relX"]),
+            (True, ["getY", "relY", "getX", "relX"]),
+            (True, ["getY", "relY", "getX", "relX"]),
+            (True, ["getY", "relY", "getX", "relX"]),
+            (b"XY-Q", ["getX", "getY", "relX", "relY"]),
+            (False, ["getY", "relY", "getY", "relY"])]
 
 class Mutating:
     def __init__(self, mutate): self.mutate = mutate

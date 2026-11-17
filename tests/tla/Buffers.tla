@@ -36,8 +36,10 @@
 (* b's __index__ logging their names, b returning 1 and a 0, or 5, out of  *)
 (* bounds. A several program has exporters A of b"XY" and B of b"Q",      *)
 (* whose __buffer__ and __release_buffer__ log "getA" and "relA" and loop: *)
-(* b"zXYz".replace(A, B), b"-".join([A, B]), b"XYz".startswith((A, B)) or  *)
-(* startswith((B, A)), or memoryview(b"XY") == A. A subclass program has   *)
+(* b"zXYz".replace(A, B), b"-".join([A, B]) directly or by a starred call *)
+(* of it in a Python function, b"XYz".startswith((A, B)) or                *)
+(* startswith((B, A)), or                                                  *)
+(* memoryview(b"XY") == A. A subclass program has                          *)
 (* a subclass X of bytes or bytearray whose __buffer__ logs "get" and      *)
 (* returns memoryview(b"BUF") and whose __release_buffer__ logs "rel", and *)
 (* x = X(b"own"): it reads memoryview(x) inside `with`, b"a" + x,         *)
@@ -52,7 +54,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
             \cup [part : {"index"}, view : {"plain", "released", "readonly", "zero", "grid"}, store : BOOLEAN]
             \cup [part : {"grid"}, first : {"in", "out"}, store : BOOLEAN]
-            \cup [part : {"several"}, op : {"replace", "join", "first", "second", "compare"}]
+            \cup [part : {"several"}, op : {"replace", "join", "starred", "first", "second", "compare"}]
             \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice"}]
 
 VARIABLES program, outcome
@@ -83,7 +85,7 @@ Grid(p) == IF p.first = "out" THEN "a IndexError" ELSE "a b " \o (IF p.store THE
 \* Several buffers are all obtained, in the order read, before any is
 \* released; startswith takes each choice in turn and stops at a match.
 Several(p) == CASE p.op = "replace" -> "getA getB relA relB b'zQz'"
-                [] p.op = "join" -> "getA getB relA relB b'XY-Q'"
+                [] p.op \in {"join", "starred"} -> "getA getB relA relB b'XY-Q'"
                 [] p.op = "first" -> "getA relA True"
                 [] p.op = "second" -> "getB relB getA relA True"
                 [] p.op = "compare" -> "getA relA True"
@@ -129,7 +131,7 @@ ReleasedUntouched == Done /\ program.part = "reenter" => outcome \in {"ValueErro
 ChecksFirst == Done /\ program.part = "index" /\ program.view \in {"released", "zero"} => outcome \in {"ValueError", "TypeError"}
 
 \* An operation reading several buffers releases none of them before it has them all.
-HeldTogether == Done /\ program.part = "several" /\ program.op \in {"replace", "join"} => outcome \in {"getA getB relA relB b'zQz'", "getA getB relA relB b'XY-Q'"}
+HeldTogether == Done /\ program.part = "several" /\ program.op \in {"replace", "join", "starred"} => outcome \in {"getA getB relA relB b'zQz'", "getA getB relA relB b'XY-Q'"}
 
 \* Every buffer obtained is released, a choice's before the next is obtained.
 ChoicesInTurn == Done /\ program.part = "several" /\ program.op = "second" => outcome = "getB relB getA relA True"

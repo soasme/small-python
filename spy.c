@@ -26299,7 +26299,10 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
         callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR || id == B_ASCII;
-    if ((id == B_FLOAT || id == B_INT) && argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base) { *spec = NULL; return numeric_named(c, id, argc, argv, name); }
+    if ((id == B_FLOAT || id == B_INT) && argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base) {
+        SPYValue *function = numeric_named(c, id, argc, argv, name);
+        if (function || c->error_type[0]) { *spec = NULL; return function; }
+    }
     if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND || id == B_NEXT) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
          id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && id != B_HEX && id != B_OCT && id != B_BIN &&
@@ -26610,7 +26613,9 @@ static ALWAYS_INLINE unsigned index_arguments(SPYContext *c, SPYValue *callee, i
     if (argc > INDEX_MOST) return 0;
     for (size_t i = 0; i < argc; i++)
         if (argv[i]->type == SPY_INSTANCE) return index_arguments_rest(c, callee, method, argc, argv);
-    return method == M_INDICES ? index_arguments_rest(c, callee, method, argc, argv) : 0;
+    /* A slice's indices() may call its parts' __index__, bound too (slice_part). */
+    return method == M_INDICES || (method < 0 && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_INDICES) ?
+           index_arguments_rest(c, callee, method, argc, argv) : 0;
 }
 static int checks_call_rest(SPYContext *, Machine *, int, size_t, SPYValue *const *, SPYValue **);
 /* checks_call_rest of isinstance() or issubclass() of two arguments. */
@@ -27111,6 +27116,16 @@ static int buffer_argument(SPYContext *c, SPYValue *v) {
     for (size_t i = 0; i < v->as.seq.len; i++) if (machine_exporter(c, v->as.seq.items[i])) return 1;
     return 0;
 }
+/* Which argument of a call of callee, method number method of it or -1,
+ * holds the choices of a bytes-like startswith() or endswith(): 1 for an
+ * unbound one, the receiver first, else 0; -1 for another call. */
+static int choices_at(SPYValue *callee, int method) {
+    if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    if (method < 0 && function->type == SPY_NATIVE && function->as.native.call == string_search_method) method = (int)(intptr_t)function->as.native.data & 65535;
+    else if (method < 0) return -1;
+    return method == M_STARTSWITH || method == M_ENDSWITH ? callee->type == SPY_NATIVE : -1;
+}
 /* INDEX_BUFFERS when a call of callee, method number method of it or -1,
  * is a native one, a builtin type's or a method of a builtin receiver,
  * and its receiver is, or one of its argc arguments argv holds, a machine
@@ -27120,13 +27135,17 @@ static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee,
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
     if (method < 0 && function->type != SPY_NATIVE && (function->type != SPY_CLASS || !function->as.map.native)) return 0;
-    /* Only a join reads the exporters a list or tuple holds; startswith()
-     * and endswith() release each choice's buffer before the next
-     * (string_search). */
+    /* Only a join reads the exporters a list or tuple holds, and
+     * startswith() and endswith() their choices', each in turn
+     * (buffered_choice). */
     int joins = argc == 1 + (method < 0 && callee->type == SPY_NATIVE) && (method == M_JOIN || bytes_joining(callee));
+    int choices = choices_at(callee, method);
     if (callee->type == SPY_METHOD && machine_exporter(c, callee->as.method.self)) return INDEX_BUFFERS;
+    /* bytes() prefers __bytes__ (conversion_method). */
+    if (callee == c->types[SPY_BYTES] && argc == 1 && argv[0]->type == SPY_INSTANCE && class_lookup(argv[0]->as.map.parent, "__bytes__")) return 0;
     for (size_t i = 0; i < argc; i++)
-        if (argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE ? joins && buffer_argument(c, argv[i]) : machine_exporter(c, argv[i]) != NULL)
+        if (argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE ? (joins || (int)i == choices) && buffer_argument(c, argv[i]) :
+                                                                      machine_exporter(c, argv[i]) != NULL)
             return INDEX_BUFFERS;
     return 0;
 }
@@ -27420,7 +27439,11 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
                       callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ||
-                      (argc && argv[0]->type == SPY_INSTANCE)) ||
+                      (argc && (argv[0]->type == SPY_INSTANCE ||
+                                /* bytes choices (buffered_choice) */
+                                (argv[0]->type == SPY_TUPLE && (method == M_STARTSWITH || method == M_ENDSWITH) && callee->type != SPY_STRING))) ||
+                      /* a slice's parts (slice_part) */
+                      method == M_INDICES) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR ||
                   argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW)) ||
         /* type.__call__ of a class (unbound_called) */
@@ -27436,12 +27459,14 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        /* a set method given its set (set_call, consumer_of) */
                                                        callee->as.native.kwcall == set_method ||
                                                        (walk_operand(argv[1]) && callee->as.native.kwcall == slot_call) ||
-                                                       /* a bytes join of exporters (buffer_argument) */
+                                                       /* a bytes join of exporters (buffer_argument), or choices (buffered_choice) */
                                                        ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||
+                                                       (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
                                                        (argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
                                         (argc == 3 && ((argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
+                                                       (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
                                                        /* an instance's __index__ or __buffer__ (index_arguments) */
                                                        argv[1]->type == SPY_INSTANCE || argv[2]->type == SPY_INSTANCE)) ||
                                         /* type.__new__ (class_make) */
@@ -28008,7 +28033,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
      * of exporters (indexed_call). */
     if (callee && calls && skip &&
         (((method >= 0 || callee->type == SPY_BOUND_METHOD) && index_arguments(c, callee, method, argc, argv + 1)) ||
-         (argc == 1 && (argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee) && buffer_argument(c, argv[1])))) {
+         (argc <= INDEX_MOST && buffer_arguments(c, callee, method, argc, argv + 1)))) {
         SPYValue *args[INDEX_MOST];
         memcpy(args, argv + 1, argc * sizeof(*argv));
         spy_release(argv[0]);
@@ -28019,8 +28044,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     }
     /* So do a text method's of the object (index_arguments), and a bytes join's. */
     if (callee && calls && !skip && callee->type == SPY_NATIVE &&
-        (index_arguments(c, callee, -1, argc + 1, argv) ||
-         (argc == 1 && (argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee) && buffer_argument(c, argv[1])))) {
+        (index_arguments(c, callee, -1, argc + 1, argv) || (argc < INDEX_MOST && buffer_arguments(c, callee, -1, argc + 1, argv)))) {
         SPYValue *args[INDEX_MOST];
         memcpy(args, argv, (argc + 1) * sizeof(*argv));
         m->len -= argc + 1;
@@ -28289,7 +28313,8 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
     } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
     else if (calls && !keywords->as.map.len && checks_call(c, m, builtin_id(callee), args->as.seq.len, args->as.seq.items, &result)) ;
-    else if (calls && !keywords->as.map.len && index_arguments(c, callee, -1, args->as.seq.len, args->as.seq.items)) {
+    else if (calls && !keywords->as.map.len && (index_arguments(c, callee, -1, args->as.seq.len, args->as.seq.items) ||
+                                                (args->as.seq.len <= INDEX_MOST && buffer_arguments(c, callee, -1, args->as.seq.len, args->as.seq.items)))) {
         SPYValue *argv[INDEX_MOST];
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = indexed_call(c, m, callee, -1, NULL, args->as.seq.len, argv);
@@ -37807,7 +37832,7 @@ static NO_INLINE SPYValue *instance_exporter(SPYContext *c, SPYValue *v) {
     return function && machine_function(c, function) ? function : NULL;
 }
 static void error_unbox(SPYContext *, SPYValue *);
-enum { BUFFERED_CALL, BUFFERED_STEP };
+enum { BUFFERED_CALL, BUFFERED_STEP, BUFFERED_CHOICE };
 /* The number of values of buffered operation op (buffered_go) whose
  * exports it may hold, at most 64: a step's two operands, or a call's
  * receiver and arguments. */
@@ -37970,8 +37995,16 @@ static SPYValue *buffered_run(SPYContext *c, Machine *m, SPYValue *op) {
 /* Buffered operation op ends with value, which it takes, or its error:
  * an operator step that a continuation (stepped) goes on with ends there
  * (operator_finish), the continuation's value c->stepped; else value. */
+static SPYValue *buffered_choice(SPYContext *, Machine *, SPYValue *, int, SPYValue *, SPYValue *, size_t, size_t);
 static SPYValue *buffered_end(SPYContext *c, Machine *m, SPYValue *op, SPYValue *value, int stepped) {
     SPYValue **o = op->as.seq.items;
+    if (o[0]->as.integer_data.small == BUFFERED_CHOICE && value == c->booleans[0]) {
+        /* A choice that did not match, its buffer back, gives way to the next. */
+        size_t at = (size_t)o[7]->as.integer_data.small, next = (size_t)o[6]->as.integer_data.small + 1;
+        if (next == o[5]->as.seq.items[at]->as.seq.len) return value;
+        spy_release(value);
+        return buffered_choice(c, m, o[1], (int)o[2]->as.integer_data.small, o[3], o[5], at, next);
+    }
     if (!stepped || o[0]->as.integer_data.small != BUFFERED_STEP) return value;
     m->pc = operator_finish(c, m, &m->code->items[o[1]->as.integer_data.small], o[3], value, m->pc);
     return c->stepped;
@@ -38077,7 +38110,23 @@ static SPYValue *buffered_start(SPYContext *c, Machine *m, SPYValue *op) {
 /* The call of callee, method number method of it or -1, named name, on
  * the arguments of tuple args (index_from), of which one's Python
  * __buffer__ is a machine function (buffer_arguments), on m. */
+/* startswith() or endswith(), callee, method number method of it or -1,
+ * named name, on tuple args whose at-th holds the choices: the call of
+ * choice i in their place, its buffer released before the next choice is
+ * tried (buffered_end), as string_search does. */
+static SPYValue *buffered_choice(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args, size_t at, size_t i) {
+    SPYValue *item = args->as.seq.items[at]->as.seq.items[i], *needle = needle_buffer(c, item, 1) ? spy_retain(item) : spy_tuple(c, 1, &item);
+    SPYValue *call = needle ? tuple_of(c, args->as.seq.len, args->as.seq.items) : NULL;
+    if (call) { spy_release(call->as.seq.items[at]); call->as.seq.items[at] = needle; needle = NULL; }
+    SPYValue *kind = int_value(c, BUFFERED_CHOICE), *number = int_value(c, method), *index = int_value(c, (int64_t)i), *place = int_value(c, (int64_t)at);
+    SPYValue *op = call && kind && number && index && place ? spy_tuple(c, 8, (SPYValue *[]){kind, callee, number, name, call, args, index, place}) : NULL;
+    release_all(6, (SPYValue *[]){needle, call, kind, number, index, place});
+    return buffered_start(c, m, op);
+}
 static SPYValue *buffered_call(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args) {
+    int at = choices_at(callee, method);
+    if (at >= 0 && (size_t)at < args->as.seq.len && args->as.seq.items[at]->type == SPY_TUPLE && args->as.seq.items[at]->as.seq.len)
+        return buffered_choice(c, m, callee, method, name, args, (size_t)at, 0);
     SPYValue *kind = int_value(c, BUFFERED_CALL), *number = int_value(c, method);
     SPYValue *op = kind && number ? spy_tuple(c, 5, (SPYValue *[]){kind, callee, number, name, args}) : NULL;
     spy_release(kind); spy_release(number);

@@ -132,11 +132,17 @@ class Exporter:
         self.log.append("rel" + self.name)
 
 
+def star(f, *args):
+    for _ in (): pass
+    return f(*args)
+
+
 def several(p, log):
     a, b = Exporter(log, "A", b"XY"), Exporter(log, "B", b"Q")
     op = p["op"]
     if op == "replace": return repr(b"zXYz".replace(a, b))
     if op == "join": return repr(b"-".join([a, b]))
+    if op == "starred": return repr(star(b"-".join, [a, b]))
     if op == "first": return repr(b"XYz".startswith((a, b)))
     if op == "second": return repr(b"XYz".startswith((b, a)))
     return repr(memoryview(b"XY") == a)
