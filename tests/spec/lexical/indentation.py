@@ -54,7 +54,8 @@ assert_eq((error.lineno, error.msg), (3, "unindent does not match any outer inde
 def nested(levels):
     return "".join(" " * i + "if 1:\n" for i in range(levels)) + " " * levels + "pass\n"
 assert_compiles(nested(99))
-error = assert_syntax_error(nested(100))
-assert_eq((error.msg, error.lineno, error.offset, error.end_offset), ("too many levels of indentation", 101, 1, 0))
+error = assert_syntax_error(nested(100), exception=IndentationError)
+assert_eq((type(error), error.msg, error.lineno, error.offset, error.end_offset),
+          (IndentationError, "too many levels of indentation", 101, 1, 0))
 error = assert_syntax_error("(" * 201 + ")" * 201)
 assert_eq((error.msg, error.offset, error.end_offset), ("too many nested parentheses", 201, 201))

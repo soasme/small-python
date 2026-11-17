@@ -4393,7 +4393,7 @@ static const char *field_token_error(Parser *p, const Field *f, const char *at, 
 static const char *scan_field(Parser *p, const char *s, size_t depth, size_t specs, int flags, int quote) {
     Field f = {flags, quote, s - 1, NULL};
     char kind = field_kind(&f);
-    if (depth > 128) { errorf(p->ctx, "SyntaxError", "%c-string nesting too deep", kind); return NULL; }
+    if (depth > 128) { spy_error(p->ctx, "SyntaxError", "too many nested f-strings or t-strings"); return NULL; }
     s = scan_field_expression(p, s, depth, &f);
     if (!s) return NULL;
     const char *expression = s;
@@ -4461,7 +4461,7 @@ fail:
     return NULL;
 }
 static const char *scan_literal(Parser *p, const char *s, size_t depth, const Field *field) {
-    if (depth > 128) { spy_error(p->ctx, "SyntaxError", "string nesting too deep"); return NULL; }
+    if (depth > 128) { spy_error(p->ctx, "SyntaxError", "too many nested f-strings or t-strings"); return NULL; }
     size_t prefix; int flags;
     if (!literal_prefix(s, &prefix, &flags)) return NULL;
     const char *begin = s;
@@ -4784,7 +4784,7 @@ static int lex(Parser *p, const char *s) {
 too_deep:
     p->ctx->line = line; p->lex_stopped = 1;
     p->error_start = line_start; p->error_end = NULL; p->error_end_zero = 1;
-    spy_error(p->ctx, "SyntaxError", "too many levels of indentation"); return -1;
+    spy_error(p->ctx, "IndentationError", "too many levels of indentation"); return -1;
 tab_error:
     p->len = line_tokens;
     p->ctx->line = line; p->lex_stopped = 1;
@@ -5533,7 +5533,7 @@ static int append_source(Parser *p, Buffer *b, const char *s, const char *end) {
 }
 static int string_parts(Parser *p, const char **cursor, const char *end, int flags,
                         int spec, Node ***tail, Buffer *literal, size_t depth) {
-    if (depth > 128) { syntax(p, "f-string nesting too deep"); return -1; }
+    if (depth > 128) { syntax(p, "too many nested f-strings or t-strings"); return -1; }
     const char *s = *cursor;
     while (s < end) {
         if ((flags & L_FORMAT) && (*s == '{' || *s == '}')) {

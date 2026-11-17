@@ -42,7 +42,7 @@ Snippets == {"soft_keywords_as_names", "match_soft", "return_star", "assign_star
              "keyword_as_identifier", "dotted_import_as", "relative_import_star", "import_star_function",
              "pass_semicolons", "double_semicolon", "backslash_continuation", "implicit_continuation",
              "decorated_class", "async_lambda", "star_expression_for", "assert_message", "raise_from",
-             "default_after_star", "kwargs_then_param"}
+             "default_after_star", "kwargs_then_param", "indentation_too_deep", "fstrings_too_deep"}
 Programs == [kind : Kinds, form : Forms] \cup [snippet : Snippets]
 
 VARIABLES program, outcome
@@ -93,6 +93,9 @@ Snippet(s) ==
       [] s = "slice_tuple" -> "'compiled'"
       [] s = "subscript_star" -> "'compiled'"
       [] s = "with_parenthesized" -> "'compiled'"
+      \* 18.2.3: past a nesting limit (100 levels of indentation, 200 nested f-strings).
+      [] s = "indentation_too_deep" -> "IndentationError: too many levels of indentation"
+      [] s = "fstrings_too_deep" -> "SyntaxError: too many nested f-strings or t-strings"
       [] s = "except_star" -> "'compiled'"
       [] s = "except_mixed" -> "SyntaxError: cannot have both 'except' and 'except*' on the same 'try'"
       [] s = "except_unparenthesized" -> "'compiled'"

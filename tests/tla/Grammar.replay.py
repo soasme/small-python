@@ -26,6 +26,8 @@ def source(kind, form):
     return s + "\n"
 
 
+# Two hundred levels of f-strings, each nested in the last.
+QUOTES = ["'", '"', "'''", '"""'] * 50
 SNIPPETS = {
     "soft_keywords_as_names": "match = 1\ncase = 2\ntype = 3\n_ = 4\nlazy = 5\nprint(match, case, type, _, lazy)",
     "match_soft": "match x:\n    case [1, *rest] if rest:\n        pass\n    case {'k': v, **kw}:\n        pass\n    case Point(x=0) | None:\n        pass\n    case _:\n        pass",
@@ -98,7 +100,9 @@ SNIPPETS = {
     "assert_message": "assert x, 'm'",
     "raise_from": "raise E from None",
     "default_after_star": "def f(*, a=1, b): pass",
-    "kwargs_then_param": "def f(**k, a): pass"
+    "kwargs_then_param": "def f(**k, a): pass",
+    "indentation_too_deep": "".join(" " * i + "if 1:\n" for i in range(100)) + " " * 100 + "pass",
+    "fstrings_too_deep": "x = " + "".join("f" + q + "{" for q in QUOTES) + "1" + "".join("}" + q for q in reversed(QUOTES)),
 }
 
 
