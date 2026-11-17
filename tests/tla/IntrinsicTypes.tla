@@ -44,7 +44,7 @@ Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name"
           "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg",
           "classmethod_descr_not_type", "classmethod_descr_not_subtype", "getset_get", "getset_readonly",
           "member_unset", "member_set", "method_descr_wrong_type", "method_descr_objclass",
-          "wrapper_descr_call", "method_wrapper_self", "builtin_self", "generator_no_ctor",
+          "wrapper_descr_call", "method_wrapper_self", "class_slot_bound", "builtin_self", "generator_no_ctor",
           "function_no_subclass", "traceback_fields", "frame_back"}
 Programs == [name : DOMAIN Kind]
             \cup [case : Cases]
@@ -87,6 +87,7 @@ Case(c) ==
       [] c = "method_descr_objclass" -> "(True, 'join', 'str.join')"
       [] c = "wrapper_descr_call" -> "('ab', True)"
       [] c = "method_wrapper_self" -> "(True, '__str__')"
+      [] c = "class_slot_bound" -> "('method-wrapper', 'builtin_function_or_method')"
       [] c = "builtin_self" -> "('builtins', True)"
       [] c = "generator_no_ctor" -> "TypeError: cannot create 'generator' instances"
       [] c = "function_no_subclass" -> "TypeError: type 'function' is not an acceptable base type"

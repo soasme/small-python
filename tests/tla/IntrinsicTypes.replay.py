@@ -119,6 +119,7 @@ SOURCES = {
     "method_descr_objclass": 'result = (str.join.__objclass__ is str, str.join.__name__, str.join.__qualname__)',
     "wrapper_descr_call": "result = (str.__dict__['__add__']('a', 'b'), object.__init__.__objclass__ is object)",
     "method_wrapper_self": 'o = object()\nresult = (o.__str__.__self__ is o, o.__str__.__name__)',
+    "class_slot_bound": 'class C: pass\nresult = (type(C.__call__).__name__, type(C.__subclasses__).__name__)',
     "builtin_self": 'l = []\nresult = (len.__self__.__name__, l.append.__self__ is l)',
     "generator_no_ctor": 'types.GeneratorType()',
     "function_no_subclass": 'class F(types.FunctionType): pass',

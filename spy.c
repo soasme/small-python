@@ -2997,8 +2997,7 @@ static int native_kind(SPYValue *v) {
     if (v->type == SPY_METHOD && v->as.method.plain) return NATIVE_FUNCTION;
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
     if ((v->type != SPY_NATIVE && v->type != SPY_METHOD) || function->type != SPY_NATIVE) return NATIVE_FUNCTION;
-    if (!function->as.native.owner || !function->as.native.method || !function->as.native.name ||
-        (v->type == SPY_METHOD && v->as.method.self->type == SPY_CLASS && !v->as.method.self->as.map.meta))
+    if (!function->as.native.owner || !function->as.native.method || !function->as.native.name)
         return v->type == SPY_METHOD ? NATIVE_BOUND : NATIVE_FUNCTION;
     const char *name = function->as.native.name->as.string.data, *owner = "";
     size_t len = strlen(name);
@@ -3006,7 +3005,8 @@ static int native_kind(SPYValue *v) {
     if (owner_name && owner_name->type == SPY_STRING) owner = owner_name->as.string.data;
     static const char *const methods[] = {"__ceil__", "__floor__", "__round__", "__trunc__", "__format__", "__getnewargs__",
         "__reduce__", "__reduce_ex__", "__sizeof__", "__dir__", "__reversed__", "__complex__", "__getstate__", "__setstate__",
-        "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__", "__length_hint__"};
+        "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__", "__length_hint__", "__instancecheck__",
+        "__subclasscheck__", "__subclasses__"};
     int wrapper = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
     for (size_t i = 0; wrapper && i < sizeof(methods) / sizeof(*methods); i++) if (!strcmp(name, methods[i])) wrapper = 0;
     if (wrapper && !strcmp(name, "__contains__"))
