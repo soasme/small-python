@@ -1841,8 +1841,7 @@ static const char *const programs[] = {
     "        return o == b'k'\n"
     "def be():\n"
     "    return b'k' in [1, BE()], bytearray(b'k') in (BE(),), range(1) not in [BE()], 1j in [BE()]\n"
-    "print(be())\n",
-
+    "print(be())\n"
     "def bv():\n"
     "    return {1} in [1, BE()], slice(1) in (BE(),), len not in [BE()], frozenset() in [BE()]\n"
     "print(bv())\n",
