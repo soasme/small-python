@@ -25002,10 +25002,10 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         if (made) {
             SPYValue *parts[] = {spy_retain(callee), int_value(c, method), spy_retain(name ? name : c->none),
                                  spy_retain(traceback ? traceback : c->none), made}, *args[8];
-            SPYValue *state = spy_tuple(c, 5, parts);
-            release_all(5, parts);
             args[0] = spy_retain(made);
             for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(argv[i]);
+            SPYValue *state = spy_tuple(c, 5, parts);
+            release_all(5, parts);
             if (state) callk(c, m, init, argc + 1, args, throw_inited, state);
             else release_all(argc + 1, args);
             spy_release(generator); spy_release(start); spy_release(awaited);
