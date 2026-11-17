@@ -27045,13 +27045,17 @@ static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* The bounds, as a mask (index_arguments), of search method number method
  * of seq with argc arguments argv: a str's or bytes' start and end, a str's
  * needle a str unless it is startswith() or endswith(), or a list's or
- * tuple's index(); else 0. */
+ * tuple's index(); and a bytes search's needle, a byte by its __index__
+ * when it exports no buffer, unless a bound's __index__ comes first; else 0. */
 static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t argc, SPYValue *const *argv) {
-    if (argc < 2 || argc > 3) return 0;
+    if (argc < 1 || argc > 3) return 0;
+    unsigned needle = seq->type == SPY_BYTES && method >= M_FIND && method <= M_STRING_COUNT && argv[0]->type == SPY_INSTANCE &&
+                      !class_lookup(argv[0]->as.map.parent, "__buffer__") && (argc < 2 || argv[1]->type != SPY_INSTANCE) &&
+                      (argc < 3 || argv[2]->type != SPY_INSTANCE);
     int text = method >= M_STARTSWITH && method <= M_STRING_COUNT && (seq->type == SPY_BYTES ||
         (seq->type == SPY_STRING && (method <= M_ENDSWITH || builtin_value(c, argv[0], SPY_STRING))));
     int items = method == M_INDEX && (seq->type == SPY_LIST || seq->type == SPY_TUPLE);
-    return text || items ? 6u & ((1u << argc) - 1) : 0;
+    return (text || items ? 6u & ((1u << argc) - 1) : 0) | needle;
 }
 /* The arguments that a call of callee, method number method of it or -1,
  * or of a bound method's, with argc arguments argv, converts first by
@@ -28959,6 +28963,7 @@ static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, s
 static NO_INLINE size_t operator_finish(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t);
 static SPYValue *operation(SPYContext *, Instruction *, SPYValue *, SPYValue *);
 static SPYValue *buffered_step(SPYContext *, Machine *, size_t, SPYValue *, SPYValue *);
+static NO_INLINE SPYValue *machine_operand(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *);
 /* Keep key's hash for its step to use once (hash_value), taking the key;
  * whether it was hashed. */
 static int hash_kept(SPYContext *c, SPYValue *key, int hashed, int64_t hash) {
@@ -30047,16 +30052,6 @@ static int set_plain(const Operator *o, int rich, SPYValue *v) {
     return o ? !class_lookup(cls, o->direct) && !class_lookup(cls, o->reflected) && !class_lookup(cls, o->inplace) :
                !class_lookup(cls, rich_names[rich]) && !class_lookup(cls, rich_names[rich_reflected[rich]]);
 }
-/* What a's Python __index__ returned in result for in of bytes b, state
- * (b, a, negated): the test's bool (byte_found), or NULL. */
-static SPYValue *byte_contained(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    (void)m;
-    SPYValue *b = state->as.seq.items[0], *a = state->as.seq.items[1];
-    int found = byte_found(c, b, a, 1, result ? index_result(c, a, result) : NULL);
-    SPYValue *value = found < 0 ? NULL : spy_bool(c, found != (int)state->as.seq.items[2]->as.integer_data.small);
-    spy_release(state);
-    return value;
-}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -30138,15 +30133,6 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             (function = contains_call(c, m, x, y, env))) return function;
         /* in takes the container's __contains__, given the item. */
         if ((function = item_function(c, y, "__contains__")) && (function = last_call(c, m, function, x, y, y, x, env))) return function;
-        /* A bytes object holds the int an instance's Python __index__
-         * returns, searched once it returns (byte_contained). */
-        if (last && y->type == SPY_BYTES && x->type == SPY_INSTANCE && !builtin_value(c, x, SPY_INT) && (function = index_function(c, x))) {
-            SPYValue *negated = spy_int(c, op == O_NOTIN), *state = negated ? spy_tuple(c, 3, (SPYValue *[]){y, x, negated}) : NULL;
-            spy_release(negated);
-            if (!state || !(c->k_env = function_env(c, function, 1, &x, NULL, 0))) { spy_release(state); return NULL; }
-            c->k_fn = spy_retain(function); c->k = byte_contained; c->k_ctx = state;
-            return c->unbound;
-        }
         return last && !c->error_type[0] && contains_step(c, m, op, x, y) ? c->unbound : NULL;
     }
     /* not calls a Python __bool__ (CALL_CHECKED), inverting its truth
@@ -31893,8 +31879,9 @@ static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *
     SPYValue *function = operator_call(c, m, ins, x, y, env);
     if (function || c->error_type[0]) return function;
     if (c->looked) return looked(c);
-    /* An operand's Python __buffer__ is a call on m (buffered_step). */
-    return machine_exporter(c, x) || machine_exporter(c, y) ? buffered_step(c, m, (size_t)(ins - m->code->items), x, y) : operate(c, ins->node, x, y);
+    /* An operand's Python __buffer__ or __index__ is a call on m (machine_operand). */
+    SPYValue *value = machine_operand(c, m, ins, x, y);
+    return value == c->unbound ? operate(c, ins->node, x, y) : value;
 }
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Machine *m, Frame *f, Node *n) { return assign(c, f, n, m); }
@@ -33594,13 +33581,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             special = c->entering_kind;
             goto enter_special;
         }
-        if (!c->error_type[0] && y && ins->op != BC_INDEX && (machine_exporter(c, x) || machine_exporter(c, y))) {
-            /* An operand's Python __buffer__ is a call on m, whose continuation ends the step (buffered_step). */
-            if (!(value = buffered_step(c, m, (size_t)(ins - code), x, y)) && c->k_fn) {
+        if (!c->error_type[0] && y && ins->op != BC_INDEX && (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE)) {
+            /* An operand's Python __buffer__ or __index__ is a call on m, whose continuation ends the step (machine_operand). */
+            if (!(value = machine_operand(c, m, ins, x, y)) && c->k_fn) {
                 if (a) spy_release(a);
                 if (b) spy_release(b);
                 goto enter_k;
             }
+            if (value == c->unbound) value = operation(c, ins, x, y);
         } else value = c->error_type[0] ? NULL : operation(c, ins, x, y);
         pc = operator_finish(c, m, ins, y, value, pc);
         if (a) spy_release(a);
@@ -38139,6 +38127,44 @@ static SPYValue *buffered_step(SPYContext *c, Machine *m, size_t at, SPYValue *x
     SPYValue *op = kind && index ? spy_tuple(c, 4, (SPYValue *[]){kind, index, x, y}) : NULL;
     spy_release(kind); spy_release(index);
     return buffered_start(c, m, op);
+}
+/* What the Python __index__ of x in or not in y, a bytes or bytearray,
+ * that machine_operand called returned in result: the byte searched for,
+ * or with its error discarded, x's buffer (byte_found); the step at index
+ * state[0] then ends (operator_finish). A bytearray stays exported until
+ * the needle is found. */
+static SPYValue *byte_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **s = state->as.seq.items, *x = s[1], *y = s[2], *value = NULL;
+    Instruction *ins = &m->code->items[s[0]->as.integer_data.small];
+    int op = 0;
+    step_operation(ins, &op);
+    SPYValue *integer = result ? index_result(c, x, result) : NULL;
+    SPYValue view = {.ctx = c, .type = SPY_BYTES, .as.string = y->as.string};
+    int found = byte_found(c, &view, x, 1, integer);
+    if (y->type == SPY_BYTEARRAY) y->as.string.exports--;
+    if (found >= 0) value = spy_bool(c, (op == O_IN) == found);
+    m->pc = operator_finish(c, m, ins, y, value, m->pc);
+    spy_release(state);
+    return c->stepped;
+}
+/* Operator step ins on x and y, one an instance, on m: an operand's
+ * __buffer__ that is a machine function (buffered_step), or x's in or not
+ * in a bytes or bytearray y by its Python __index__ (byte_indexed), as a
+ * call on m; else c->unbound. */
+static NO_INLINE SPYValue *machine_operand(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y) {
+    size_t at = (size_t)(ins - m->code->items);
+    int op = 0;
+    step_operation(ins, &op);
+    SPYValue *function = (y->type == SPY_BYTES || y->type == SPY_BYTEARRAY) && (op == O_IN || op == O_NOTIN) ? index_function(c, x) : NULL;
+    if (function) {
+        SPYValue *index = int_value(c, (int64_t)at), *state = index ? spy_tuple(c, 3, (SPYValue *[]){index, x, y}) : NULL;
+        spy_release(index);
+        if (!state) return NULL;
+        if (y->type == SPY_BYTEARRAY) y->as.string.exports++;
+        return callk(c, m, function, 1, (SPYValue *[]){spy_retain(x)}, byte_indexed, state);
+    }
+    if (machine_exporter(c, x) || machine_exporter(c, y)) return buffered_step(c, m, at, x, y);
+    return c->unbound;
 }
 /* bytes() or bytearray() (array) of object, whose __buffer__ returned
  * view: a copy of the view's bytes, the view then released, by a Python

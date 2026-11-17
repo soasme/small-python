@@ -422,6 +422,8 @@ Unreleased (0.10.0):
 - a join called as `f(*args)` obtains every buffer before releasing any
 - `startswith`/`endswith` choices, `slice.indices` of a bound method and `int()` or `float()` of an
   int subclass call their Python methods without nesting on the C stack
+- `x in b` of a bytes or bytearray `b` and a bytes search's needle call a Python `__index__` without
+  nesting on the C stack
 
 2026-11-10 0.9.0:
 

@@ -1,5 +1,5 @@
 # spec: PLS-315 24.3
-# description: in and not in of bytes, given an object whose class
+# description: in and not in of bytes or a bytearray, given an object whose class
 # defines a Python __index__ that may loop, call it once and search for
 # the byte of its int, in a display and a conditional too; an int out of
 # range(0, 256) raises ValueError, and when __index__ raises or returns
@@ -28,17 +28,20 @@ def t(call):
     return out
 
 def results():
-    b = b"abc"
+    b, a = b"abc", bytearray(b"abc")
     return [t(lambda: X(97) in b), t(lambda: X(1) in b), t(lambda: X(97) not in b), t(lambda: X(300) in b),
             t(lambda: X(-1) in b), t(lambda: X(1 << 70) in b), t(lambda: X("s") in b), t(lambda: X("raise") in b),
-            t(lambda: [X(99) in b, 1]), t(lambda: 1 if X(98) in b else 0), t(lambda: X(97) in b in [True])]
+            t(lambda: [X(99) in b, 1]), t(lambda: 1 if X(98) in b else 0), t(lambda: X(97) in b in [True]),
+            t(lambda: X(98) in a), t(lambda: X(120) not in a), t(lambda: X(300) in a), t(lambda: 1 if X(99) in a else 0),
+            t(lambda: X(97) in a in [True]), t(lambda: X("raise") in a)]
 
 expected = [(True, [97]), (False, [1]), (False, [97]), ('ValueError: byte must be in range(0, 256)', [300]),
             ('ValueError: byte must be in range(0, 256)', [-1]),
             ('ValueError: byte must be in range(0, 256)', [1180591620717411303424]),
             ("TypeError: a bytes-like object is required, not 'X'", ['s']),
             ("TypeError: a bytes-like object is required, not 'X'", ['raise']), ([True, 1], [99]), (1, [98]),
-            (False, [97])]
+            (False, [97]), (True, [98]), (True, [120]), ('ValueError: byte must be in range(0, 256)', [300]), (1, [99]),
+            (False, [97]), ("TypeError: a bytes-like object is required, not 'X'", ['raise'])]
 
 def main():
     return results()
