@@ -142,6 +142,27 @@ def several(p, log):
     return repr(memoryview(b"XY") == a)
 
 
+def subclass(p, log):
+    class X(bytes if p["base"] == "bytes" else bytearray):
+        def __buffer__(self, flags):
+            for _ in (): pass
+            log.append("get")
+            return memoryview(b"BUF")
+
+        def __release_buffer__(self, view):
+            for _ in (): pass
+            log.append("rel")
+
+    x, use = X(b"own"), p["use"]
+    if use == "view":
+        with memoryview(x) as m:
+            return repr(bytes(m))
+    if use == "concat": return repr(b"a" + x)
+    if use == "compare": return repr(b"own" == x)
+    if use == "decode": return repr(x.decode())
+    return repr(b"-".join([x, x]))
+
+
 def outcome(p):
     log = []
     try:
@@ -157,6 +178,8 @@ def outcome(p):
             result = grid(p, log)
         elif p["part"] == "several":
             result = several(p, log)
+        elif p["part"] == "subclass":
+            result = subclass(p, log)
         else:
             result = repr(memoryview(object()))
     except (TypeError, BufferError, ValueError, NotImplementedError, IndexError, KeyError) as error:

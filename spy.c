@@ -506,6 +506,8 @@ struct SPYContext {
     /* The name getattr(), setattr(), hasattr() or delattr(), or an object or
      * type attribute method, was given, borrowed, while it runs (attribute_key). */
     SPYValue *attribute_name;
+    /* How many views the running buffered operation has asked for (buffer_held). */
+    size_t buffer_next;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -10122,21 +10124,34 @@ static NO_INLINE SPYValue *operand_error(SPYContext *c, const char *op, SPYValue
                          shown(x, 100), x, shown(y, 100), y, shown(type_name(z), 100), type_name(z));
     return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%.*s' and '%.*s'", op, shown(x, 100), x, shown(y, 100), y);
 }
+static SPYValue *buffer_export(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether v is an instance whose class has a __buffer__ of its own, not
+ * the one bytes and bytearray export their contents by. */
+static int own_buffer(SPYValue *v) {
+    SPYValue *function = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__buffer__") : NULL;
+    return function && !(function->type == SPY_NATIVE && function->as.native.kwcall == buffer_export);
+}
+/* Whether b is what a bytes or bytearray concatenation takes: a value
+ * with a buffer. */
+static int concatenable(SPYValue *b) {
+    return b->type == SPY_BYTES || b->type == SPY_BYTEARRAY || b->type == SPY_MEMORYVIEW ||
+           (b->type == SPY_INSTANCE && class_lookup(b->as.map.parent, "__buffer__"));
+}
+/* a + b of type kind, bytes or bytearray, reading both by their buffers
+ * (buffer_bytes), a's first. */
+static SPYValue *bytes_concat(SPYContext *c, SPYValue *kind, SPYValue *a, SPYValue *b) {
+    SPYValue *left_copy, *right_copy = NULL, *left = buffer_bytes(c, a, &left_copy), *right = left ? buffer_bytes(c, b, &right_copy) : NULL, *v = NULL;
+    Buffer out = {.ctx = c};
+    if (right && !append(&out, left->as.string.data, left->as.string.len) && !append(&out, right->as.string.data, right->as.string.len))
+        v = kind->type == SPY_BYTEARRAY ? bytearray_new(c, out.data, out.len) : spy_bytes(c, out.data, out.len);
+    mem_free(out.data); spy_release(left_copy); spy_release(right_copy);
+    return v;
+}
 static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     SPYValue *left = a, *right = b;
     if (is_set(a) && is_set(b) && (op == '|' || op == '&' || op == '-' || op == '^')) return set_binary(c, op, a, b);
     if (op == '|' && is_dict(a) && is_dict(b)) return dict_union(c, a, b);
-    if (op == '+' && (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) &&
-        (b->type == SPY_BYTES || b->type == SPY_BYTEARRAY || b->type == SPY_MEMORYVIEW ||
-         (b->type == SPY_INSTANCE && class_lookup(b->as.map.parent, "__buffer__")))) {
-        SPYValue *copy, *right = buffer_bytes(c, b, &copy);
-        if (!right) return NULL;
-        Buffer out = {.ctx = c};
-        SPYValue *v = NULL;
-        if (!append(&out, a->as.string.data, a->as.string.len) && !append(&out, right->as.string.data, right->as.string.len))
-            v = a->type == SPY_BYTEARRAY ? bytearray_new(c, out.data, out.len) : spy_bytes(c, out.data, out.len);
-        mem_free(out.data); spy_release(copy); return v;
-    }
+    if (op == '+' && (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && concatenable(b)) return bytes_concat(c, a, a, b);
     int sequence = a->type == SPY_LIST || a->type == SPY_TUPLE;
     int text = a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY;
     if (op == '*' && !sequence && !text) {
@@ -10513,6 +10528,9 @@ static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b
                (op == '*' && repeats(y) && (!right || builtin_base(c, b, o->direct, NULL)));
         if (!kept) return operand_error(c, binary_symbol(op), a, b, NULL);
     }
+    /* A concatenation reads a subclass's buffer by its own __buffer__. */
+    if (op == '+' && (x->type == SPY_BYTES || x->type == SPY_BYTEARRAY) && (own_buffer(a) || own_buffer(b)) && concatenable(y))
+        return bytes_concat(c, x, a, b);
     SPYValue *result = binary(c, op, x, y);
     /* An unsupported operation names the operands' own types; a str, list
      * or tuple concatenation, only the right operand's. A concatenation's
@@ -10711,8 +10729,21 @@ static int unordered_by(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
              op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
     return !strcmp(c->error_type, "TypeError") && !strcmp(c->error_message, expected);
 }
+static SPYValue *bytearray_compare(SPYContext *, int, SPYValue *, SPYValue *);
 /* Rich comparison op of a and b once their special methods declined it. */
 static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    SPYValue *left_array = builtin_value(c, a, SPY_BYTEARRAY), *right_array = builtin_value(c, b, SPY_BYTEARRAY);
+    if (left_array || right_array) {
+        /* A bytearray compares with any buffer, its own first
+         * (bytearray_compare): the right operand's, reflected, when only it
+         * is one or its class is a subclass of the left's. */
+        SPYValue *left = value_class(c, a), *right = value_class(c, b);
+        int reflect = !left_array || (right_array && right != left && subclass(right, left));
+        int flipped = op == '<' ? '>' : op == '>' ? '<' : op == T_LE ? T_GE : op == T_GE ? T_LE : op;
+        SPYValue *result = reflect ? bytearray_compare(c, flipped, b, a) : bytearray_compare(c, op, a, b);
+        if (result != c->not_implemented) return result;
+        spy_release(result);
+    }
     if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base)) {
         static const int tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
         SPYValue *x = a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a;
@@ -13542,10 +13573,9 @@ static SPYValue *memory_slice(SPYContext *, SPYValue *, SPYValue *);
 static int memory_release(SPYContext *, SPYValue *);
 static SPYValue *memory_bytes(SPYContext *, SPYValue *);
 static SPYValue *method_arity(SPYContext *, const char *, const char *, size_t, size_t, size_t);
-/* A memoryview or a Python object exporting a buffer through __buffer__. */
-static int buffer_exporter(SPYContext *c, SPYValue *v) {
-    return v->type == SPY_MEMORYVIEW || (v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) &&
-        !builtin_value(c, v, SPY_BYTEARRAY) && class_lookup(v->as.map.parent, "__buffer__"));
+/* A memoryview or an object exporting a buffer through its own __buffer__. */
+static int buffer_exporter(SPYValue *v) {
+    return v->type == SPY_MEMORYVIEW || own_buffer(v);
 }
 /* _PyEval_SliceIndex: a search bound is an integer, None, or __index__. */
 static int search_bound(SPYContext *c, SPYValue *value, int64_t *result) {
@@ -13557,6 +13587,11 @@ static int search_bound(SPYContext *c, SPYValue *value, int64_t *result) {
     }
     return slice_index(c, value, result);
 }
+/* Whether a search, startswith() or endswith() (tail) reads needle v by
+ * its buffer: tail matching takes a bytes subclass's contents. */
+static int needle_buffer(SPYContext *c, SPYValue *v, int tail) {
+    return buffer_exporter(v) && !(tail && builtin_value(c, v, SPY_BYTES));
+}
 static const char *search_name(int method) {
     return method == M_STARTSWITH ? "startswith" : method == M_ENDSWITH ? "endswith" : method == M_FIND ? "find" :
            method == M_RFIND ? "rfind" : method == M_STRING_INDEX ? "index" : method == M_RINDEX ? "rindex" : "count";
@@ -13565,7 +13600,7 @@ static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t
     const char *name = search_name(method);
     if (argc < 1 || argc > 3) return method_arity(c, type_name(self), name, 1, 3, argc);
     int tail = method == M_STARTSWITH || method == M_ENDSWITH;
-    if (self->type == SPY_BYTES && (buffer_exporter(c, argv[0]) || (tail && argv[0]->type == SPY_TUPLE))) {
+    if (self->type == SPY_BYTES && (needle_buffer(c, argv[0], tail) || (tail && argv[0]->type == SPY_TUPLE))) {
         // Buffer needles search as their bytes.
         SPYValue *needle, *choices = argv[0], *result = NULL;
         if (choices->type != SPY_TUPLE) {
@@ -13575,13 +13610,13 @@ static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t
             spy_release(needle); return result;
         }
         size_t n = choices->as.seq.len, i = 0;
-        for (; i < n && !buffer_exporter(c, choices->as.seq.items[i]); i++) {}
+        for (; i < n && !needle_buffer(c, choices->as.seq.items[i], 1); i++) {}
         if (i == n) goto search;
         /* Each choice in turn, its buffer released before the next, until one matches. */
         for (i = 0; i < n && (!result || result == c->booleans[0]); i++) {
             SPYValue *item = choices->as.seq.items[i];
             spy_release(result);
-            needle = buffer_exporter(c, item) ? (buffer_bytes(c, item, &needle), needle) : spy_tuple(c, 1, &item);
+            needle = needle_buffer(c, item, 1) ? (buffer_bytes(c, item, &needle), needle) : spy_tuple(c, 1, &item);
             SPYValue *args[3] = {needle, argc > 1 ? argv[1] : NULL, argc > 2 ? argv[2] : NULL};
             result = needle ? string_search(c, self, method, argc, args) : NULL;
             spy_release(needle);
@@ -19535,14 +19570,15 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     int kind = base ? base->type : SPY_NONE, set_operator = token == '|' || token == '&' || token == '-' || token == '^';
     if (((kind == SPY_LIST || kind == SPY_BYTEARRAY) && (token == '+' || token == '*')) || (kind == SPY_DICT && token == '|') ||
         (kind == SPY_SET && set_operator && (builtin_value(c, rhs, SPY_SET) || builtin_value(c, rhs, SPY_FROZENSET)))) {
-        SPYValue *other = rhs->type == SPY_INSTANCE && rhs->as.map.base ? rhs->as.map.base : rhs;
+        SPYValue *other = rhs->type == SPY_INSTANCE && rhs->as.map.base && !(kind == SPY_BYTEARRAY && own_buffer(rhs)) ? rhs->as.map.base : rhs;
         result = inplace(c, op, base, other);
         if (!result) return NULL;
         spy_release(result); return spy_retain(old);
     }
-    /* Mutable sets, dicts, and bytearrays update in place. */
-    SPYValue *bytes = old->type == SPY_BYTEARRAY && token == '+' ? builtin_value(c, rhs, SPY_BYTES) : NULL;
-    if (old->type == SPY_BYTEARRAY && token == '+' && !bytes) bytes = builtin_value(c, rhs, SPY_BYTEARRAY);
+    /* Mutable sets, dicts, and bytearrays update in place, by a buffer a
+     * subclass's own __buffer__ gives (sequence_binary). */
+    SPYValue *bytes = old->type == SPY_BYTEARRAY && token == '+' && !own_buffer(rhs) ? builtin_value(c, rhs, SPY_BYTES) : NULL;
+    if (old->type == SPY_BYTEARRAY && token == '+' && !bytes && !own_buffer(rhs)) bytes = builtin_value(c, rhs, SPY_BYTEARRAY);
     if (bytes) {
         /* bytearray_iconcat holds a buffer of the added bytes while it
          * resizes, so old += old is a resize of an exported bytearray. */
@@ -23011,7 +23047,7 @@ static SPYValue *percent_bytes(SPYContext *c, PercentArgs *p, SPYValue *key, SPY
     if (base) v = base;
     if (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY) return spy_bytes(c, v->as.string.data, v->as.string.len);
     SPYValue *method = special_dispatch(v) ? special_method(c, v, "__bytes__") : NULL;
-    if (!method && !c->error_type[0] && buffer_exporter(c, v)) {
+    if (!method && !c->error_type[0] && buffer_exporter(v)) {
         SPYValue *copy;
         buffer_bytes(c, v, &copy);
         return copy;
@@ -24840,7 +24876,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
      * instance neither a bytes source (__bytes__, __buffer__) nor a size
      * (__index__). */
     if ((id == B_BYTES || id == B_BYTEARRAY) && argv[0]->type == SPY_INSTANCE &&
-        (argv[0]->as.map.base || class_lookup(argv[0]->as.map.parent, "__index__") || buffer_exporter(c, argv[0]) ||
+        (argv[0]->as.map.base || class_lookup(argv[0]->as.map.parent, "__index__") || buffer_exporter(argv[0]) ||
          (id == B_BYTES && class_lookup(argv[0]->as.map.parent, "__bytes__")))) return -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN && id != B_BYTES && id != B_BYTEARRAY &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
@@ -26247,10 +26283,10 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
                sequence_next(c, argv[0], found) : NULL;
     if (argc > 2 || (argv[0]->type == SPY_CLASS && !argv[0]->as.map.meta)) return NULL;
     /* memoryview(), bytearray() and bytes() with no __bytes__ of an
-     * instance with no bytes or bytearray base ask its __buffer__ for a
-     * view (memory_exported), the latter two named by their types. */
+     * instance with a Python __buffer__ ask it for a view
+     * (memory_exported), the latter two named by their types. */
     int array = callee == c->types[SPY_BYTEARRAY];
-    if (argc == 1 && argv[0]->type == SPY_INSTANCE && !builtin_value(c, argv[0], SPY_BYTES) && !builtin_value(c, argv[0], SPY_BYTEARRAY) &&
+    if (argc == 1 && argv[0]->type == SPY_INSTANCE &&
         (callee == c->types[SPY_MEMORYVIEW] || array || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")))) {
         SPYValue *function = class_lookup(argv[0]->as.map.parent, "__buffer__");
         const char *made = callee == c->types[SPY_MEMORYVIEW] ? "__buffer__" : array ? "bytearray" : "bytes";
@@ -27077,9 +27113,9 @@ static int buffer_argument(SPYContext *c, SPYValue *v) {
 }
 /* INDEX_BUFFERS when a call of callee, method number method of it or -1,
  * is a native one, a builtin type's or a method of a builtin receiver,
- * and one of its argc arguments argv holds a machine exporter
- * (buffer_argument), for the call to run on the machine (buffered_call);
- * else 0. */
+ * and its receiver is, or one of its argc arguments argv holds, a machine
+ * exporter (buffer_argument), for the call to run on the machine
+ * (buffered_call); else 0. */
 static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
@@ -27088,12 +27124,16 @@ static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee,
      * and endswith() release each choice's buffer before the next
      * (string_search). */
     int joins = argc == 1 + (method < 0 && callee->type == SPY_NATIVE) && (method == M_JOIN || bytes_joining(callee));
+    if (callee->type == SPY_METHOD && machine_exporter(c, callee->as.method.self)) return INDEX_BUFFERS;
     for (size_t i = 0; i < argc; i++)
         if (argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE ? joins && buffer_argument(c, argv[i]) : machine_exporter(c, argv[i]) != NULL)
             return INDEX_BUFFERS;
     return 0;
 }
 static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    /* A builtin subclass's instance's native method, too. */
+    if (callee->type == SPY_METHOD && callee->as.method.self->type == SPY_INSTANCE && callee->as.method.self->as.map.base)
+        return buffer_arguments_rest(c, callee, method, argc, argv);
     for (size_t i = 0; i < argc; i++)
         if (argv[i]->type == SPY_INSTANCE || argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE)
             return buffer_arguments_rest(c, callee, method, argc, argv);
@@ -36487,7 +36527,11 @@ static SPYValue *bytes_decode_method(SPYContext *c, size_t argc, SPYValue *const
     SPYValue *self = method_self(c, argc, argv, (int)(intptr_t)data, "decode"), *args[2];
     if (!self || parse_arguments(c, "decode", argc - 1, argv + 1, keywords, names, 2, 0, 0, args) ||
         codec_argument_types(c, "decode", args[0], args[1])) return NULL;
-    return bytes_decode(c, self->as.string.data, self->as.string.len, args[0], args[1]);
+    /* A bytearray decodes its buffer, a subclass's by its own __buffer__. */
+    SPYValue *copy = NULL, *bytes = (intptr_t)data == SPY_BYTEARRAY ? buffer_bytes(c, argv[0], &copy) : self;
+    SPYValue *text = bytes ? bytes_decode(c, bytes->as.string.data, bytes->as.string.len, args[0], args[1]) : NULL;
+    spy_release(copy);
+    return text;
 }
 static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     static const char *const names[] = {"sep", "bytes_per_sep"};
@@ -36740,7 +36784,7 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
         return result;
     }
     if (c->error_type[0]) return NULL;
-    if (buffer_exporter(c, a)) {
+    if (buffer_exporter(a)) {
         SPYValue *copy;
         buffer_bytes(c, a, &copy);
         return copy;
@@ -36807,8 +36851,9 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
     if (argc - 1 > 2) return errorf(c, "TypeError", "from_bytes() takes at most 2 positional arguments (%zu given)", argc - 1);
     int little, is_signed = args[2] && truthy(args[2]);
     if (byteorder_argument(c, "from_bytes", args[1], &little)) return NULL;
-    SPYValue *source = builtin_value(c, args[0], SPY_BYTES), *owned = NULL;
-    if (!source) source = builtin_value(c, args[0], SPY_BYTEARRAY);
+    /* A buffer comes before __bytes__. */
+    SPYValue *owned, *source = buffer_bytes(c, args[0], &owned);
+    if (!source && c->error_type[0]) return NULL;
     if (!source) {
         owned = bytes_from_object(c, args[0], "bytes");
         if (!owned) return NULL;
@@ -37756,10 +37801,8 @@ static SPYValue *memory_bytes_order(SPYContext *c, SPYValue *m, int fortran) {
 }
 static SPYValue *memory_bytes(SPYContext *c, SPYValue *m) { return memory_bytes_order(c, m, 0); }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
-static int buffer_exporter(SPYContext *, SPYValue *);
 /* machine_exporter of an instance. */
 static NO_INLINE SPYValue *instance_exporter(SPYContext *c, SPYValue *v) {
-    if (builtin_value(c, v, SPY_BYTES) || builtin_value(c, v, SPY_BYTEARRAY)) return NULL;
     SPYValue *function = class_lookup(v->as.map.parent, "__buffer__");
     return function && machine_function(c, function) ? function : NULL;
 }
@@ -37782,19 +37825,21 @@ static SPYValue *buffer_value(SPYValue *op, size_t i) {
            o[1]->type == SPY_METHOD ? o[1]->as.method.self : NULL;
 }
 /* While a buffered operation's native code runs (buffered_go), the view
- * v's __buffer__ gave it, borrowed, or NULL with the error it raised;
- * NULL with an error, v kept as the exporter it needs next, when that
+ * v's __buffer__ gave it for this request, the operation's n-th as it
+ * was when it first ran, borrowed, or NULL with the error it raised; NULL
+ * with an error, v kept as the exporter it needs next, when that
  * __buffer__ is a machine function; else NULL. */
 static SPYValue *buffer_held(SPYContext *c, SPYValue *v) {
-    if (!c->buffer_views || c->buffer_depth != c->py_depth) return NULL;
+    if (!c->buffer_views || c->buffer_depth != c->py_depth || !machine_exporter(c, v)) return NULL;
     SPYValue **items = c->buffer_views->as.seq.items;
-    for (size_t i = 0; i + 1 < c->buffer_views->as.seq.len; i += 2)
-        if (items[i] == v) {
+    for (size_t i = 0, n = 0; i + 1 < c->buffer_views->as.seq.len; i += 2)
+        if (items[i] != c->stepped && items[i] != c->missing && n++ == c->buffer_next) {
+            if (items[i] != v) return spy_error(c, "SystemError", "buffer requests changed order");
+            c->buffer_next++;
             if (items[i + 1]->type == SPY_MEMORYVIEW) return items[i + 1];
             error_unbox(c, items[i + 1]);
             return NULL;
         }
-    if (!machine_exporter(c, v)) return NULL;
     /* A native that went on past the first one it needs still gets that one first. */
     if (c->buffer_wanted) return spy_error(c, "SystemError", "a buffer is needed first");
     c->buffer_wanted = spy_retain(v);
@@ -37838,10 +37883,7 @@ static SPYValue *buffer_item(SPYContext *c, SPYValue *seq, size_t i) {
  * *owned. NULL otherwise. */
 static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
     *owned = NULL;
-    SPYValue *bytes = builtin_value(c, v, SPY_BYTES);
-    if (!bytes) bytes = builtin_value(c, v, SPY_BYTEARRAY);
-    if (bytes) return bytes;
-    if (v->type == SPY_INSTANCE && class_lookup(v->as.map.parent, "__buffer__")) {
+    if (own_buffer(v)) {
         SPYValue *held = buffer_held(c, v);
         if (held) return *owned = memory_check(c, held) ? NULL : memory_bytes(c, held);
         if (c->error_type[0]) return NULL;
@@ -37851,6 +37893,9 @@ static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
         spy_release(view);
         return *owned;
     }
+    SPYValue *bytes = builtin_value(c, v, SPY_BYTES);
+    if (!bytes) bytes = builtin_value(c, v, SPY_BYTEARRAY);
+    if (bytes) return bytes;
     if (v->type != SPY_MEMORYVIEW || memory_check(c, v)) return NULL;
     return *owned = memory_bytes(c, v);
 }
@@ -37874,9 +37919,7 @@ static SPYValue *memory_exported(SPYContext *c, SPYValue *object, SPYValue *view
  * (memory_exported). */
 static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
     if (object->type == SPY_MEMORYVIEW) return memory_check(c, object) ? NULL : memory_copy(c, object, object->as.memory.ndim);
-    SPYValue *source = builtin_value(c, object, SPY_BYTES);
-    if (!source) source = builtin_value(c, object, SPY_BYTEARRAY);
-    if (!source && object->type == SPY_INSTANCE && class_lookup(object->as.map.parent, "__buffer__")) {
+    if (own_buffer(object)) {
         SPYValue *held = buffer_held(c, object);
         if (held) return memory_check(c, held) ? NULL : memory_copy(c, held, held->as.memory.ndim);
         if (c->error_type[0]) return NULL;
@@ -37884,6 +37927,8 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
         spy_release(flags);
         return memory_exported(c, object, view);
     }
+    SPYValue *source = builtin_value(c, object, SPY_BYTES);
+    if (!source) source = builtin_value(c, object, SPY_BYTEARRAY);
     if (!source) return errorf(c, "TypeError", "memoryview: a bytes-like object is required, not '%s'", type_name(object));
     SPYValue *m = memory_new(c, object, source, "B", 1, 1, source->type == SPY_BYTES);
     if (m) { memory_shape(m)[0] = (ptrdiff_t)source->as.string.len; memory_strides(m)[0] = 1; }
@@ -38003,14 +38048,14 @@ static SPYValue *buffer_acquired(SPYContext *c, Machine *m, SPYValue *state, SPY
  * back (views_release). stepped when a continuation runs it. */
 static SPYValue *buffered_go(SPYContext *c, Machine *m, SPYValue *op, SPYValue *views, int stepped) {
     SPYValue *held = c->buffer_views, *running = c->buffer_op;
-    size_t depth = c->buffer_depth, *base = c->buffer_base, exports[64];
+    size_t depth = c->buffer_depth, *base = c->buffer_base, next = c->buffer_next, exports[64];
     for (size_t i = 0, n = buffer_values(op); i < n; i++) {
         SPYValue *value = buffer_value(op, i);
         exports[i] = value && value->type == SPY_BYTEARRAY ? value->as.string.exports : 0;
     }
-    c->buffer_views = views; c->buffer_depth = c->py_depth; c->buffer_op = op; c->buffer_base = exports;
+    c->buffer_views = views; c->buffer_depth = c->py_depth; c->buffer_op = op; c->buffer_base = exports; c->buffer_next = 0;
     SPYValue *value = buffered_run(c, m, op), *wanted = c->buffer_wanted;
-    c->buffer_views = held; c->buffer_depth = depth; c->buffer_op = running; c->buffer_base = base;
+    c->buffer_views = held; c->buffer_depth = depth; c->buffer_op = running; c->buffer_base = base; c->buffer_next = next;
     if (!wanted) return views_release(c, m, op, views, 0, value, stepped);
     c->buffer_wanted = NULL;
     spy_release(value); spy_clear_error(c);
@@ -39811,7 +39856,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc > 1) {
             if (codec_argument_types(c, "str", argv[1], argc > 2 ? argv[2] : NULL)) return NULL;
             if (builtin_value(c, a, SPY_STRING)) return spy_error(c, "TypeError", "decoding str is not supported");
-            SPYValue *copy, *bytes = buffer_bytes(c, a, &copy);
+            /* A bytes subclass's contents, its own __buffer__ unasked. */
+            SPYValue *copy = NULL, *bytes = builtin_value(c, a, SPY_BYTES);
+            if (!bytes) bytes = buffer_bytes(c, a, &copy);
             if (!bytes) return c->error_type[0] ? NULL : errorf(c, "TypeError", "decoding to str: need a bytes-like object, %s found", type_name(a));
             SPYValue *text = bytes_decode(c, bytes->as.string.data, bytes->as.string.len, argv[1], argc > 2 ? argv[2] : NULL);
             spy_release(copy); return text;
@@ -41513,6 +41560,24 @@ static NO_INLINE SPYValue *text_mod_slot(SPYContext *c, int reflected, int type,
     SPYValue *format = builtin_value(c, other, type);
     return format ? percent_format(c, format, self) : spy_retain(c->not_implemented);
 }
+/* bytearray_richcompare: a, a bytearray, compared by rich comparison
+ * token with b by their buffers (buffer_bytes), a's first; NotImplemented
+ * when either has none. */
+static SPYValue *bytearray_compare(SPYContext *c, int token, SPYValue *a, SPYValue *b) {
+    SPYValue *left_copy, *right_copy = NULL, *left = buffer_bytes(c, a, &left_copy), *right = left ? buffer_bytes(c, b, &right_copy) : NULL;
+    SPYValue *result = NULL;
+    if (right) {
+        size_t m = left->as.string.len, n = right->as.string.len;
+        int order = memcmp(left->as.string.data, right->as.string.data, m < n ? m : n);
+        if (!order) order = m < n ? -1 : m > n;
+        if ((m < n ? m : n) < 4096 || !spend(c, (m < n ? m : n) / 64)) result = spy_bool(c, COMPARE(token, order, 0));
+    } else {
+        spy_clear_error(c);
+        result = spy_retain(c->not_implemented);
+    }
+    spy_release(left_copy); spy_release(right_copy);
+    return result;
+}
 static int slot_accepts(SPYContext *c, int type, SPYValue *other) {
     if (other->type == SPY_INSTANCE && !other->as.map.base) return 0;
     if (type == SPY_INT) return builtin_value(c, other, SPY_INT) != NULL;
@@ -41608,7 +41673,10 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     }
     switch (kind) {
     case SLOT_BINARY: case SLOT_RBINARY:
-        /* An sq_concat wrapper raises for an operand it cannot concatenate. */
+        /* An sq_concat wrapper raises for an operand it cannot concatenate;
+         * bytes and bytearray read their operands' buffers (bytes_concat). */
+        if (op == '+' && (type == SPY_BYTES || type == SPY_BYTEARRAY) && (own_buffer(self) || own_buffer(argv[0])) && concatenable(argv[0]))
+            return bytes_concat(c, value, self, argv[0]);
         if (op == '+' && (type == SPY_LIST || type == SPY_TUPLE || type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY))
             return binary_builtin(c, '+', value, other);
         if (op == '%' && (type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY))
@@ -41631,7 +41699,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
          * is extend: their errors propagate. */
         int extends = type == SPY_DICT || type == SPY_LIST || type == SPY_BYTEARRAY;
         if (!extends && !slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
-        SPYValue *result = inplace(c, op, value, other);
+        SPYValue *result = inplace(c, op, value, type == SPY_BYTEARRAY && own_buffer(argv[0]) ? argv[0] : other);
         if (!extends) result = slot_result(c, result);
         if (result && result == value && value != self) { spy_release(result); result = spy_retain(self); }
         return result;
@@ -41650,6 +41718,10 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
                 return c->error_type[0] ? NULL : spy_bool(c, !truth);
             }
             return spy_retain(c->not_implemented);
+        }
+        if (type == SPY_BYTEARRAY) {
+            static const int tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
+            return bytearray_compare(c, tokens[op], self, argv[0]);
         }
         if (!slot_accepts(c, type, argv[0]) || (type != SPY_FLOAT && type != SPY_COMPLEX && type != SPY_INT &&
             builtin_type_id(c, value_class(c, other)) != type && type != SPY_SET && type != SPY_FROZENSET && type != SPY_BYTES && type != SPY_BYTEARRAY))

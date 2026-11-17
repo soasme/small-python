@@ -415,6 +415,10 @@ Unreleased (0.10.0):
 - `getattr`, `hasattr`, `setattr` and `delattr` given a `str` subclass's instance pass it to the
   attribute hooks, name the `AttributeError` by it and bind an instance's new attribute under it
 - `setattr` and `delattr` call a Python `__setattr__` or `__delattr__` without nesting on the C stack
+- a `bytes` or `bytearray` subclass's own `__buffer__` exports its buffer to `memoryview`, `+`, `join`,
+  `in`, `find`, `int.from_bytes` and the rest; `bytes` comparisons and `decode` still read its contents
+- a `bytearray` compares with any bytes-like object, `memoryview` and Python exporters included
+- `int.from_bytes` asks for a buffer before `__bytes__`, and `join` asks a repeated item for its buffer each time
 
 2026-11-10 0.9.0:
 

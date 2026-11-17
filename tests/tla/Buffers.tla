@@ -37,7 +37,11 @@
 (* bounds. A several program has exporters A of b"XY" and B of b"Q",      *)
 (* whose __buffer__ and __release_buffer__ log "getA" and "relA" and loop: *)
 (* b"zXYz".replace(A, B), b"-".join([A, B]), b"XYz".startswith((A, B)) or  *)
-(* startswith((B, A)), or memoryview(b"XY") == A. The outcome is the log   *)
+(* startswith((B, A)), or memoryview(b"XY") == A. A subclass program has   *)
+(* a subclass X of bytes or bytearray whose __buffer__ logs "get" and      *)
+(* returns memoryview(b"BUF") and whose __release_buffer__ logs "rel", and *)
+(* x = X(b"own"): it reads memoryview(x) inside `with`, b"a" + x,         *)
+(* b"own" == x, x.decode(), or b"-".join([x, x]). The outcome is the log   *)
 (* and the result or the exception.                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
@@ -49,6 +53,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"index"}, view : {"plain", "released", "readonly", "zero", "grid"}, store : BOOLEAN]
             \cup [part : {"grid"}, first : {"in", "out"}, store : BOOLEAN]
             \cup [part : {"several"}, op : {"replace", "join", "first", "second", "compare"}]
+            \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -83,7 +88,17 @@ Several(p) == CASE p.op = "replace" -> "getA getB relA relB b'zQz'"
                 [] p.op = "second" -> "getB relB getA relA True"
                 [] p.op = "compare" -> "getA relA True"
 
+\* A subclass's own __buffer__ exports its buffer; a bytes comparison and
+\* bytes.decode read a bytes subclass's contents, and a join asks for each
+\* item's buffer, the same object twice.
+Subclass(p) == CASE p.use = "view" -> "get rel b'BUF'"
+                 [] p.use = "concat" -> "get rel b'aBUF'"
+                 [] p.use = "twice" -> "get get rel rel b'BUF-BUF'"
+                 [] p.base = "bytes" -> IF p.use = "compare" THEN "True" ELSE "'own'"
+                 [] OTHER -> IF p.use = "compare" THEN "get rel False" ELSE "get rel 'BUF'"
+
 Run(p) == CASE p.part = "export" -> Export(p)
+            [] p.part = "subclass" -> Subclass(p)
             [] p.part = "several" -> Several(p)
             [] p.part = "index" -> Index(p)
             [] p.part = "grid" -> Grid(p)
@@ -118,6 +133,13 @@ HeldTogether == Done /\ program.part = "several" /\ program.op \in {"replace", "
 
 \* Every buffer obtained is released, a choice's before the next is obtained.
 ChoicesInTurn == Done /\ program.part = "several" /\ program.op = "second" => outcome = "getB relB getA relA True"
+
+\* A bytes subclass's contents are what a bytes comparison and decode read.
+ContentsRead == Done /\ program.part = "subclass" /\ program.base = "bytes" /\ program.use \in {"compare", "decode"} =>
+    outcome \in {"True", "'own'"}
+
+\* A join asks for the buffer of each item it reads, however often an object recurs.
+EachAsked == Done /\ program.part = "subclass" /\ program.use = "twice" => outcome = "get get rel rel b'BUF-BUF'"
 
 \* A dimension out of bounds stops the key before its next item's __index__.
 DimensionsInOrder == Done /\ program.part = "grid" /\ program.first = "out" => outcome = "a IndexError"
