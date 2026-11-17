@@ -412,6 +412,9 @@ Unreleased (0.10.0):
   before its text, and name text they reject by its own `__repr__`
 - bytes methods, `in`, `+` and `==` call a Python `__buffer__` and `__release_buffer__` without
   nesting on the C stack, releasing their buffers once all are read, as `replace` and `join` do
+- `getattr`, `hasattr`, `setattr` and `delattr` given a `str` subclass's instance pass it to the
+  attribute hooks, name the `AttributeError` by it and bind an instance's new attribute under it
+- `setattr` and `delattr` call a Python `__setattr__` or `__delattr__` without nesting on the C stack
 
 2026-11-10 0.9.0:
 

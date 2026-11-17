@@ -503,6 +503,9 @@ struct SPYContext {
     uint64_t buffer_mask;
     /* What a continuation returns that ended its operator step itself (buffered_end). */
     SPYValue *stepped;
+    /* The name getattr(), setattr(), hasattr() or delattr(), or an object or
+     * type attribute method, was given, borrowed, while it runs (attribute_key). */
+    SPYValue *attribute_name;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -3360,6 +3363,7 @@ static SPYValue *name_key(SPYContext *c, Name name, Symbol *symbol) {
     if (!symbol->key) symbol->key = spy_string(c, name.text, name.len);
     return spy_retain(symbol->key);
 }
+static SPYValue *attribute_key(SPYContext *, const char *, size_t);
 static int name_bind(SPYContext *c, SPYValue *env, Name name, SPYValue *v) {
     if (env->type == SPY_CLASS && class_slot_name(name)) {
         if (!env->as.map.class_cell && !(env->as.map.class_cell = value_new(c, SPY_DICT))) return -1;
@@ -3386,7 +3390,8 @@ static int name_bind(SPYContext *c, SPYValue *env, Name name, SPYValue *v) {
         spy_release(old);
         return 0;
     }
-    SPYValue *key = name_key(c, name, symbol);
+    /* An instance binds the str subclass's instance naming it (attribute_key). */
+    SPYValue *key = env->type == SPY_INSTANCE && c->attribute_name ? attribute_key(c, name.text, name.len) : name_key(c, name, symbol);
     if (!key) return -1;
     int status = own ? map_set_hash(c, env, key, v, name.hash) : set_index(c, namespace, key, v);
     spy_release(key);
@@ -12405,9 +12410,22 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
 }
 static void attribute_details(SPYContext *, SPYValue *, SPYValue *, const char *);
 static SPYValue *attribute_lookup(SPYContext *, SPYValue *, const char *);
-/* A failed lookup's AttributeError names the attribute and object. */
+/* The str naming attribute name, of len bytes: c->attribute_name when name
+ * is its text, as a str subclass's instance names an attribute, else a new
+ * str. */
+static SPYValue *attribute_key(SPYContext *c, const char *name, size_t len) {
+    SPYValue *key = c->attribute_name, *text = key ? builtin_value(c, key, SPY_STRING) : NULL;
+    return text && text->as.string.data == name ? spy_retain(key) : spy_string(c, name, len);
+}
+/* Whether v, a str or a str subclass's instance, can name an attribute. */
+static ALWAYS_INLINE int attribute_named(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_STRING || (v->type == SPY_INSTANCE && builtin_value(c, v, SPY_STRING));
+}
+/* A failed lookup's AttributeError names the attribute and object; one
+ * named by c->attribute_name is made at once to hold it. */
 static SPYValue *attribute_failed(SPYContext *c, SPYValue *v, const char *name) {
     if (!error_is(c, "AttributeError")) return NULL;
+    if (c->attribute_name && !c->error_object) materialize_error(c);
     if (c->exception) attribute_details(c, c->exception, v, name);
     else if (!c->error_object) {
         c->error_object = spy_retain(v);
@@ -12681,7 +12699,7 @@ static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) 
     SPYValue *result;
     if (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
         SPYValue *method = descriptor_get(c, definition, v, owner);
-        SPYValue *key = method ? spy_string(c, name, strlen(name)) : NULL;
+        SPYValue *key = method ? attribute_key(c, name, strlen(name)) : NULL;
         result = key ? call(c, method, 1, &key) : NULL;
         spy_release(method); spy_release(key);
     } else result = attribute_value(c, v, name);
@@ -12694,7 +12712,7 @@ static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) 
     if (result || !fallback || !error_is(c, "AttributeError")) { spy_release(fallback); return result; }
     spy_clear_error(c);
     SPYValue *method = descriptor_get(c, fallback, v, owner);
-    SPYValue *key = method ? spy_string(c, name, strlen(name)) : NULL;
+    SPYValue *key = method ? attribute_key(c, name, strlen(name)) : NULL;
     if (key) result = call(c, method, 1, &key);
     spy_release(method); spy_release(key); spy_release(fallback);
     return result;
@@ -14596,7 +14614,7 @@ static int attribute_write_hook(SPYContext *c, SPYValue *object, const char *nam
     if (!definition || (value ? default_hook(definition, B_OBJECT_SETATTR, B_TYPE_SETATTR) :
                         default_hook(definition, B_OBJECT_DELATTR, B_TYPE_DELATTR))) return 0;
     SPYValue *method = descriptor_get(c, definition, object, owner);
-    SPYValue *key = method ? spy_string(c, name, strlen(name)) : NULL;
+    SPYValue *key = method ? attribute_key(c, name, strlen(name)) : NULL;
     SPYValue *args[] = {key, value};
     SPYValue *result = key ? call(c, method, value ? 2 : 1, args) : NULL;
     spy_release(result); spy_release(key); spy_release(method);
@@ -21182,7 +21200,7 @@ static void attribute_details(SPYContext *c, SPYValue *error, SPYValue *object, 
     if (error->type != SPY_INSTANCE || !subclass(error->as.map.parent, name_local(c->classes, "AttributeError"))) return;
     SPYValue *current = hidden_field(error, "name");
     if (current && current->type != SPY_NONE) return;
-    SPYValue *text = spy_string(c, name, strlen(name));
+    SPYValue *text = attribute_key(c, name, strlen(name));
     if (text && !set_hidden_field(c, error, "name", text)) set_hidden_field(c, error, "obj", object);
     spy_release(text);
 }
@@ -26436,6 +26454,7 @@ static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *c
     return function;
 }
 static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
+static SPYValue *setattr_call(SPYContext *, Machine *, size_t, SPYValue **);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 /* Whether v is a class whose metaclass is not type, whose methods may convert it (conversion_method). */
 /* A list of round()'s number x and ndigits, whose __index__ it calls
@@ -26606,12 +26625,20 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
      * and a default, or hasattr() of them, as a stack call's (getattr_call). */
     int getter = method < 0 && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER ||
                                                             argv[0]->type == SPY_MODULE) &&
-        argv[1]->type == SPY_STRING ? builtin_id(callee) : -1;
+        attribute_named(c, argv[1]) ? builtin_id(callee) : -1;
     if (getter == B_GETATTR || (getter == B_HASATTR && argc == 2)) {
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
         m->stack[m->len++] = callee; m->stack[m->len++] = argv[0]; m->stack[m->len++] = argv[1];
         if (argc == 3 || getter == B_HASATTR) m->stack[m->len++] = argc == 3 ? argv[2] : spy_retain(c->defaulting);
         return getattr_call(c, m, argc == 3 || getter == B_HASATTR, env);
+    }
+    /* So do setattr() and delattr() of an instance and a str (setattr_call). */
+    if (method < 0 && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && attribute_named(c, argv[1]) &&
+        builtin_id(callee) == (argc == 3 ? B_SETATTR : B_DELATTR)) {
+        if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
+        m->stack[m->len++] = callee;
+        for (size_t i = 0; i < argc; i++) m->stack[m->len++] = argv[i];
+        return setattr_call(c, m, argc, env);
     }
     if (method < 0 && format_reached(c, callee, method, argc, argv)) {
         result = format_job(c, m, callee, method, argc, argv, NULL, env);
@@ -27604,7 +27631,6 @@ static NO_INLINE SPYValue *fold_begin(SPYContext *c, Machine *m, size_t argc, SP
     spy_release(seq);
     return function ? spy_retain(c->types[SPY_STRING]) : value;
 }
-static SPYValue *setattr_call(SPYContext *, Machine *, size_t, SPYValue **);
 static ALWAYS_INLINE SPYValue *searched(SPYValue *, int, size_t, SPYValue *const *, int *);
 static void search_span(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, size_t *, int64_t *);
 static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, int64_t, SPYValue **, SPYValue **);
@@ -27724,8 +27750,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     if (calls && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER ||
                   argv[0]->type == SPY_MODULE) &&
-        argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
-        callee->as.native.call == builtin) {
+        attribute_named(c, argv[1]) &&
+        callee->type == SPY_NATIVE && callee->as.native.call == builtin) {
         if (callee->as.native.data == (void *)(intptr_t)B_GETATTR) return getattr_call(c, m, argc == 3, env);
         if (argc == 2 && callee->as.native.data == (void *)(intptr_t)B_HASATTR)
             return machine_push(c, m, spy_retain(c->defaulting)) ? NULL : getattr_call(c, m, 1, env);
@@ -27758,8 +27784,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         (callee->as.native.data == (void *)(intptr_t)B_MIN || callee->as.native.data == (void *)(intptr_t)B_MAX) &&
         (argc > 1 || (argc && (argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) && argv[0]->as.seq.len)))
         return fold_begin(c, m, argc, env);
-    if (calls && argc > 1 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
-        callee->as.native.data == (void *)(intptr_t)(argc == 3 ? B_SETATTR : argc == 2 ? B_DELATTR : -1))
+    if (calls && argc > 1 && argv[0]->type == SPY_INSTANCE && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
+        callee->as.native.data == (void *)(intptr_t)(argc == 3 ? B_SETATTR : argc == 2 ? B_DELATTR : -1) &&
+        attribute_named(c, argv[1]))
         return setattr_call(c, m, argc, env);
     if (!convert && argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta)) && (convert = check_method(c, callee, argv, found))) {
         /* So does isinstance() or issubclass() with a Python check (check_method),
@@ -31023,7 +31050,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
     SPYValue *get = NULL;
     *argc = 1;
     if (v->type == SPY_MODULE) {
-        if (!(argv[0] = spy_string(c, name, strlen(name)))) { spy_release(function); return NULL; }
+        if (!(argv[0] = attribute_key(c, name, strlen(name)))) { spy_release(function); return NULL; }
         return function;
     }
     if (v->type == SPY_SUPER) {
@@ -31043,7 +31070,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
         argv[0] = function; *argc = 3;
         getter_args(c, v, name, argv);
         return spy_retain(get_function(c, function->as.map.parent));
-    } else if (!(argv[1] = spy_string(c, name, strlen(name)))) { spy_release(function); return NULL; }
+    } else if (!(argv[1] = attribute_key(c, name, strlen(name)))) { spy_release(function); return NULL; }
     else { *argc = 2; get = function; function = NULL; }
     spy_release(function);
     argv[0] = spy_retain(v);
@@ -31100,17 +31127,17 @@ static SPYValue *getattr_returned(SPYContext *c, SPYValue *fallback, SPYValue *r
     spy_release(result);
     return spy_bool(c, !!result);
 }
-static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted, SPYValue **env) {
+static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulted, SPYValue **env, const char *text) {
     size_t n = 3 + (size_t)defaulted;
     SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, NULL, NULL}, *fallback = NULL;
     size_t argc = 1;
-    int kind = plain_instance(v) ? instance_access(c, v->as.map.parent, name->as.string.data, &method) & ATTR_READ : ATTR_SLOW;
-    SPYValue *own = kind == ATTR_OWN ? name_local(v, name->as.string.data) : NULL;
+    int kind = plain_instance(v) ? instance_access(c, v->as.map.parent, text, &method) & ATTR_READ : ATTR_SLOW;
+    SPYValue *own = kind == ATTR_OWN ? name_local(v, text) : NULL;
     if (kind == ATTR_PROPERTY && machine_function(c, method->as.property.get)) { function = spy_retain(method->as.property.get); spy_retain(v); }
     else {
         /* An own entry, or its miss with a default, is read without an
          * AttributeError (ATTR_OWN). */
-        SPYValue *result = own ? spy_retain(own) : defaulted && kind == ATTR_OWN ? NULL : attribute_step(c, v, name->as.string.data);
+        SPYValue *result = own ? spy_retain(own) : defaulted && kind == ATTR_OWN ? NULL : attribute_step(c, v, text);
         if (result || c->error_type[0] || !c->fallback) {
             result = getattr_returned(c, defaulted ? slots[3] : NULL, result);
             if (!result) return NULL;
@@ -31121,7 +31148,7 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
         function = c->fallback;
         c->fallback = NULL;
         fallback = getter_fallback(v, function);
-        if (!(function = getter_function(c, v, name->as.string.data, function, argv, &argc))) return NULL;
+        if (!(function = getter_function(c, v, text, function, argv, &argc))) return NULL;
     }
     spy_release(slots[0]);
     slots[0] = name;
@@ -31134,6 +31161,15 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
     spy_release(function);
     return *env ? spy_retain(c->types[SPY_STRING]) : NULL;
 }
+/* getattr_named of the name on m's stack, a str or a str subclass's
+ * instance, which names the attribute (attribute_key). */
+static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted, SPYValue **env) {
+    SPYValue *name = m->stack[m->len - 1 - (size_t)defaulted], *saved = c->attribute_name, *result;
+    c->attribute_name = name;
+    result = getattr_named(c, m, defaulted, env, builtin_value(c, name, SPY_STRING)->as.string.data);
+    c->attribute_name = saved;
+    return result;
+}
 /* setattr() of an instance, a str and a value, or delattr() of an
  * instance and a str (argc 2), the step of a call with its callee and
  * operands on m's stack: the Python __setattr__, property setter or
@@ -31142,8 +31178,9 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
  * None the call's value on the stack; else the store or deletion at
  * once, its None or NULL. */
 static NO_INLINE SPYValue *setattr_call(SPYContext *c, Machine *m, size_t argc, SPYValue **env) {
-    SPYValue **slots = &m->stack[m->len - argc - 1], *descriptor;
-    const char *name = slots[2]->as.string.data;
+    SPYValue **slots = &m->stack[m->len - argc - 1], *descriptor, *saved = c->attribute_name;
+    const char *name = builtin_value(c, slots[2], SPY_STRING)->as.string.data;
+    c->attribute_name = slots[2];
     SPYValue *function = setter_function(c, slots[1], name, &descriptor, argc == 2);
     if (function) {
         /* __setattr__ and __delattr__ take the name, a property's setter
@@ -31156,6 +31193,7 @@ static NO_INLINE SPYValue *setattr_call(SPYContext *c, Machine *m, size_t argc, 
         c->entering_init = function; c->entering_kind = CALL_STORE;
     }
     int status = function ? !*env : argc == 2 ? delete_attribute(c, slots[1], name) : set_attribute(c, slots[1], name, slots[3]);
+    c->attribute_name = saved;
     m->len -= argc + 1;
     release_all(argc + 1, slots);
     if (status) return NULL;
@@ -31670,10 +31708,9 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         else {
             /* getattr()'s slots: the name, v, and c->unbound, or the default and c->defaulting. */
             size_t at = m->len - (below == c->defaulting ? 3 : 2);
-            const char *name = getattr ? m->stack[at - 1]->as.string.data : ins->node->b->text;
             spy_clear_error(c);
             args[0] = spy_retain(m->stack[getattr ? at : m->len - 1]);
-            args[1] = spy_string(c, name, strlen(name));
+            args[1] = getattr ? spy_retain(m->stack[at - 1]) : spy_string(c, ins->node->b->text, strlen(ins->node->b->text));
             SPYValue *env = args[1] ? function_env(c, fallback, 2, args, NULL, 1) : NULL;
             if (!args[1]) spy_release(args[0]);
             Call *call = env ? call_enter(c, fallback, env, m) : (spy_release(fallback), NULL);
@@ -31704,7 +31741,12 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         /* As attribute: an AttributeError names the attribute and object. */
         if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], ins->node->b->text);
         /* So does getattr() (getattr_call). */
-        else if (m->stack[m->len - 1] == c->unbound) attribute_failed(c, m->stack[m->len - 2], m->stack[m->len - 3]->as.string.data);
+        else if (m->stack[m->len - 1] == c->unbound) {
+            SPYValue *saved = c->attribute_name;
+            c->attribute_name = m->stack[m->len - 3];
+            attribute_failed(c, m->stack[m->len - 2], builtin_value(c, c->attribute_name, SPY_STRING)->as.string.data);
+            c->attribute_name = saved;
+        }
         /* A repr job's item failed: the job ends. */
         else if (m->len > 3) repr_failed(c, m, m->len - 3);
         return m;
@@ -39255,6 +39297,27 @@ static SPYValue *power_slots(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue *
     }
     return operand_error(c, "** or pow()", a, b, modulus);
 }
+/* getattr(), setattr(), hasattr() or delattr() (id) of a and the
+ * attribute name, text of argv[1] (attribute_key), with argc arguments. */
+static SPYValue *attribute_builtin(SPYContext *c, intptr_t id, SPYValue *a, const char *name, size_t argc, SPYValue *const *argv) {
+    if (id == B_DELATTR) return delete_attribute(c, a, name) ? NULL : spy_none(c);
+    if (id == B_SETATTR) return set_attribute(c, a, name, argv[2]) ? NULL : spy_none(c);
+    /* A plain instance whose class answers name from its own entries
+     * alone (ATTR_OWN) misses without an AttributeError. */
+    SPYValue *method;
+    if ((argc == 3 || id == B_HASATTR) && plain_instance(a) && (instance_access(c, a->as.map.parent, name, &method) & ATTR_READ) == ATTR_OWN) {
+        SPYValue *own = name_local(a, name);
+        if (id == B_HASATTR) return spy_bool(c, !!own);
+        return spy_retain(own ? own : argv[2]);
+    }
+    SPYValue *value = attribute(c, a, name);
+    if (!value && error_is(c, "AttributeError") && (argc == 3 || id == B_HASATTR)) {
+        spy_clear_error(c);
+        return id == B_HASATTR ? spy_bool(c, 0) : spy_retain(argv[2]);
+    }
+    if (value && id == B_HASATTR) { spy_release(value); return spy_bool(c, 1); }
+    return value;
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -39320,14 +39383,16 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         const char *name = attribute_slot_name(c, "object", id == B_OBJECT_SETATTR ? "__setattr__" : id == B_OBJECT_DELATTR ? "__delattr__" :
                                                "__getattribute__", argc, argv);
         if (!name) return NULL;
-        if (id == B_OBJECT_GETATTRIBUTE) {
-            SPYValue *result = attribute_value(c, argv[0], name);
-            return result ? result : attribute_failed(c, argv[0], name);
-        }
-        if (argv[0]->type == SPY_CLASS)
+        if (id != B_OBJECT_GETATTRIBUTE && argv[0]->type == SPY_CLASS)
             return errorf(c, "TypeError", "can't apply this %s to type object", id == B_OBJECT_SETATTR ? "__setattr__" : "__delattr__");
-        int status = id == B_OBJECT_SETATTR ? set_attribute_default(c, argv[0], name, argv[2]) : delete_attribute_default(c, argv[0], name);
-        return status ? NULL : spy_none(c);
+        SPYValue *saved = c->attribute_name, *result;
+        c->attribute_name = argv[1];
+        if (id == B_OBJECT_GETATTRIBUTE) {
+            if (!(result = attribute_value(c, argv[0], name))) attribute_failed(c, argv[0], name);
+        } else if (id == B_OBJECT_SETATTR ? set_attribute_default(c, argv[0], name, argv[2]) : delete_attribute_default(c, argv[0], name)) result = NULL;
+        else result = spy_none(c);
+        c->attribute_name = saved;
+        return result;
     }
     case B_TYPE_GETATTRIBUTE: case B_TYPE_SETATTR: case B_TYPE_DELATTR: {
         const char *method = id == B_TYPE_GETATTRIBUTE ? "__getattribute__" : id == B_TYPE_SETATTR ? "__setattr__" : "__delattr__";
@@ -39454,29 +39519,12 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     case B_GETATTR: case B_SETATTR: case B_HASATTR: case B_DELATTR: {
         if (argc < 2 || argc > 3 || (id == B_SETATTR && argc != 3) || ((id == B_HASATTR || id == B_DELATTR) && argc != 2)) goto arity;
-        /* A str subclass names the attribute by its string value. */
-        SPYValue *text = builtin_value(c, argv[1], SPY_STRING);
+        SPYValue *text = builtin_value(c, argv[1], SPY_STRING), *saved = c->attribute_name, *result;
         if (!text) return errorf(c, "TypeError", "attribute name must be string, not '%s'", type_name(argv[1]));
-        if (id == B_DELATTR) return delete_attribute(c, a, text->as.string.data) ? NULL : spy_none(c);
-        const char *name = text->as.string.data;
-        if (id == B_SETATTR) {
-            return set_attribute(c, a, name, argv[2]) ? NULL : spy_none(c);
-        }
-        /* A plain instance whose class answers name from its own entries
-         * alone (ATTR_OWN) misses without an AttributeError. */
-        SPYValue *method;
-        if ((argc == 3 || id == B_HASATTR) && plain_instance(a) && (instance_access(c, a->as.map.parent, name, &method) & ATTR_READ) == ATTR_OWN) {
-            SPYValue *own = name_local(a, name);
-            if (id == B_HASATTR) return spy_bool(c, !!own);
-            return spy_retain(own ? own : argv[2]);
-        }
-        SPYValue *value = attribute(c, a, name);
-        if (!value && error_is(c, "AttributeError") && (argc == 3 || id == B_HASATTR)) {
-            spy_clear_error(c);
-            return id == B_HASATTR ? spy_bool(c, 0) : spy_retain(argv[2]);
-        }
-        if (value && id == B_HASATTR) { spy_release(value); return spy_bool(c, 1); }
-        return value;
+        c->attribute_name = argv[1];
+        result = attribute_builtin(c, id, a, text->as.string.data, argc, argv);
+        c->attribute_name = saved;
+        return result;
     }
     case B_CALLABLE: {
         if (argc != 1) goto arity;

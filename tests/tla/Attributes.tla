@@ -21,7 +21,11 @@
 (* or one raising AttributeError (refuse). The steps are o.a,             *)
 (* o.a() (each value is callable, returning itself), o.a = v (v is 'v1'   *)
 (* or 'v2'), and del o.a; `stored` is what o's                             *)
-(* __dict__ or slot holds for a.                                           *)
+(* __dict__ or slot holds for a. Each is spelled with the attribute        *)
+(* (spelling "attr") or by getattr, setattr and delattr given an instance  *)
+(* n of a str subclass (spelling "named"), which answers alike: n itself   *)
+(* is the name __getattribute__ and __getattr__ receive, the name of       *)
+(* getattr's AttributeError, and the key o.__dict__ binds.                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -33,8 +37,10 @@ Missing == "missing"
 
 Hooks == {"none", "pass", "refuse"}
 
-VARIABLES kind, getattr, hook, stored, op, result
-vars == <<kind, getattr, hook, stored, op, result>>
+Spellings == {"attr", "named"}
+
+VARIABLES kind, getattr, hook, spelling, stored, op, result
+vars == <<kind, getattr, hook, spelling, stored, op, result>>
 
 DataDescriptor == kind \in {"data", "slot"} \cup Getters
 
@@ -52,19 +58,19 @@ Lookup ==
 Read == IF hook # "refuse" /\ Lookup # Missing THEN Lookup ELSE IF getattr THEN "ga" ELSE "AttributeError"
 Get == /\ op' = "get"
        /\ result' = Read
-       /\ UNCHANGED <<kind, getattr, hook, stored>>
+       /\ UNCHANGED <<kind, getattr, hook, spelling, stored>>
 
 \* o.a(): the method call reads o.a as Get does, then calls what it read.
 Call == /\ op' = "call"
         /\ result' = Read
-        /\ UNCHANGED <<kind, getattr, hook, stored>>
+        /\ UNCHANGED <<kind, getattr, hook, spelling, stored>>
 
 \* o.a = v: a data descriptor's __set__, otherwise the instance's __dict__.
 Set(v) == /\ op' = "set " \o v
           /\ IF kind \in Getters
              THEN result' = "AttributeError" /\ UNCHANGED stored
              ELSE result' = "ok" /\ stored' = v
-          /\ UNCHANGED <<kind, getattr, hook>>
+          /\ UNCHANGED <<kind, getattr, hook, spelling>>
 
 \* del o.a: a data descriptor's __delete__, otherwise the instance's own.
 Del == /\ op' = "del"
@@ -72,14 +78,14 @@ Del == /\ op' = "del"
             [] kind = "data" -> result' = "ok" /\ stored' = Missing
             [] stored # Missing -> result' = "ok" /\ stored' = Missing
             [] OTHER -> result' = "AttributeError" /\ UNCHANGED stored
-       /\ UNCHANGED <<kind, getattr, hook>>
+       /\ UNCHANGED <<kind, getattr, hook, spelling>>
 
-Init == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ stored = Missing /\ op = "new" /\ result = "ok"
+Init == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ spelling \in Spellings /\ stored = Missing /\ op = "new" /\ result = "ok"
 Next == Get \/ Call \/ Del \/ \E v \in Values : Set(v)
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
-TypeOK == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ stored \in Values \cup {Missing}
+TypeOK == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ spelling \in Spellings /\ stored \in Values \cup {Missing}
 
 \* A data descriptor's __get__ answers whatever the instance holds, unless
 \* __getattribute__ refuses before it.
