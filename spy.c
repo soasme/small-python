@@ -3006,7 +3006,7 @@ static int native_kind(SPYValue *v) {
     static const char *const methods[] = {"__ceil__", "__floor__", "__round__", "__trunc__", "__format__", "__getnewargs__",
         "__reduce__", "__reduce_ex__", "__sizeof__", "__dir__", "__reversed__", "__complex__", "__getstate__", "__setstate__",
         "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__", "__length_hint__", "__instancecheck__",
-        "__subclasscheck__", "__subclasses__", "__replace__"};
+        "__subclasscheck__", "__subclasses__", "__replace__", "__bytes__"};
     int wrapper = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
     for (size_t i = 0; wrapper && i < sizeof(methods) / sizeof(*methods); i++) if (!strcmp(name, methods[i])) wrapper = 0;
     if (wrapper && !strcmp(name, "__contains__"))
@@ -41761,10 +41761,10 @@ static int register_value_fields(SPYContext *c) {
         {SPY_SUPER, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__thisclass__ __self__ __self_class__"},
         {SPY_GENERATOR, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
          "gi_code gi_frame gi_running gi_state gi_suspended gi_yieldfrom"},
-        {SPY_COROUTINE, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
-         "cr_await cr_code cr_frame cr_origin cr_running cr_state cr_suspended"},
-        {SPY_ASYNC_GENERATOR, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
-         "ag_await ag_code ag_frame ag_running ag_state ag_suspended"},
+        {SPY_COROUTINE, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "cr_await cr_code cr_frame cr_running cr_state cr_suspended"},
+        {SPY_COROUTINE, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "cr_origin"},
+        {SPY_ASYNC_GENERATOR, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "ag_await ag_code ag_frame ag_state ag_suspended"},
+        {SPY_ASYNC_GENERATOR, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "ag_running"},
         {SPY_CODE, SPY_MEMBER_DESCRIPTOR, DESC_READONLY,
          "co_argcount co_posonlyargcount co_kwonlyargcount co_stacksize co_flags co_nlocals co_consts co_names "
          "co_filename co_name co_qualname co_firstlineno co_linetable co_exceptiontable"},

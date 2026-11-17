@@ -406,6 +406,7 @@ Unreleased (0.10.0):
   "too many nested f-strings or t-strings"
 - code objects' `replace`, `__replace__`, `co_lines` and `co_positions` are in the code type's
   `__dict__` and `dir()`
+- `bytes.__bytes__` is a method descriptor, and `cr_origin` and `ag_running` member descriptors
 
 2026-11-10 0.9.0:
 
