@@ -24399,10 +24399,10 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     if (m->delegate->type == SPY_ITERATOR) return 1;
     const char *name = subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw";
     SPYValue *function = method_function(c, m->delegate, name);
-    /* One without the method passes the exception on, an instance or a
-     * class made without Python code, at the yield from (iterator_send). */
-    return function ? machine_function(c, function) : method_absent(m->delegate, name) &&
-                                                      (!exception || exception->type != SPY_CLASS || made_natively(k));
+    /* One without the method passes the exception on at the yield from
+     * (iterator_send), a class made first, as no Python asked for the
+     * method. */
+    return function ? machine_function(c, function) : method_absent(m->delegate, name);
 }
 /* The Python __next__ on the machine of instance v's class, borrowed;
  * else NULL. */
@@ -25052,13 +25052,15 @@ static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(state);
     return NULL;
 }
-/* Whether a class thrown into generator g reaches, as given, the
- * instance its yield from, or its delegates', waits on (throws_in). */
-static NO_INLINE int thrown_raw(SPYValue *g) {
+/* Whether class k thrown into generator g reaches, as given, the
+ * instance its yield from, or its delegates', waits on (throws_in): one
+ * with its close, for a GeneratorExit, or throw method. */
+static NO_INLINE int thrown_raw(SPYContext *c, SPYValue *g, SPYValue *k) {
     if (g->type == SPY_BOUND_METHOD) g = g->as.bound.self;
     if (g->type == SPY_COROUTINE_ITERATOR) g = g->as.iterator.source;
     Machine *m = (g->type == SPY_GENERATOR || g->type == SPY_COROUTINE) && g->as.generator.machine ? innermost(g->as.generator.machine) : NULL;
-    return m && m->awaiting == AWAIT_DELEGATE && !m->operation && m->delegate->type == SPY_INSTANCE;
+    return m && m->awaiting == AWAIT_DELEGATE && !m->operation && m->delegate->type == SPY_INSTANCE &&
+           !method_absent(m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
 }
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
@@ -25090,7 +25092,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     }
     SPYValue *init = NULL, *made = NULL, *built = method < 0 ? built_type(c, callee) : NULL, *wrap = built ? spy_retain(callee) : NULL;
     if (built) callee = built;
-    int raw = id == B_THROW && generator->type == SPY_CLASS && thrown_raw(callee);
+    int raw = id == B_THROW && generator->type == SPY_CLASS && thrown_raw(c, callee, generator);
     if (id == B_THROW && generator->type == SPY_CLASS && !raw) {
         /* The value is the instance, the tuple of arguments, none, or the
          * one argument (thrown_exception). */
