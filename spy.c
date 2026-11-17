@@ -11917,8 +11917,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_code") || !strcmp(name, "co_linetable") || !strcmp(name, "co_exceptiontable")) return spy_bytes(c, "", 0);
         if (!strcmp(name, "co_stacksize")) return spy_int(c, 1); /* positive; the depth is implementation-defined */
         if (!strcmp(name, "co_consts")) {
-            /* The docstring comes first. */
-            Node *body = def && def->kind == N_DEF ? def->b : NULL;
+            /* A function's or module's docstring comes first. */
+            Node *body = def ? (def->kind == N_DEF ? def->b : NULL) : unit->as.unit.expression ? NULL : unit->as.unit.body;
             SPYValue *consts = value_new(c, SPY_TUPLE);
             SPYValue *doc = consts ? docstring(c, body) : NULL;
             if (c->error_type[0] || (doc && sequence_append(c, consts, doc))) { spy_release(consts); consts = NULL; }

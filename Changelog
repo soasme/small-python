@@ -401,6 +401,7 @@ Unreleased (0.10.0):
   they cannot concatenate instead of returning NotImplemented
 - a class's `__call__`, `__or__` and `__ror__` are method-wrappers, and `__instancecheck__`,
   `__subclasscheck__` and `__subclasses__` builtin methods, with a metaclass or without
+- a module's code object lists its docstring first in `co_consts`
 
 2026-11-10 0.9.0:
 

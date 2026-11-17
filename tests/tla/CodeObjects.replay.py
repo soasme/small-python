@@ -21,6 +21,9 @@ def source(p):
 
 
 def outcome(p):
+    if p["op"] == "module":
+        co = compile(('"doc"\n' if p["doc"] else "") + "v = 1\n", "m", "exec")
+        return ("'doc'" if co.co_consts[:1] == ("doc",) else "no docstring") + " " + str(co.co_flags & 0x4000000)
     namespace = {}
     exec(source(p), namespace)
     co = namespace["f"].__code__
