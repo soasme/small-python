@@ -24910,6 +24910,16 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                       builtin_value(c, argv[1], SPY_BYTEARRAY))) return -1;
     return id;
 }
+static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether callee is a generator's or coroutine's method from its type,
+ * send, throw, close or __next__, given v, one of them, first: the
+ * machine resumes it as v's bound method (slot_call binds it in C). */
+static int generator_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
+    if (callee->type != SPY_NATIVE || callee->as.native.kwcall != slot_call || (v->type != SPY_GENERATOR && v->type != SPY_COROUTINE) ||
+        callee->as.native.owner != c->types[v->type]) return 0;
+    const char *name = callee->as.native.name->as.string.data;
+    return !strcmp(name, "send") || !strcmp(name, "throw") || !strcmp(name, "close") || !strcmp(name, "__next__");
+}
 static ALWAYS_INLINE int consumer_of(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 /* dict(), a class built on it (built_type), or a dict's update of one
  * source that the machine takes (consumer_of) with keywords, a dict of
@@ -26764,6 +26774,14 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
                  (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed)))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
+    /* So does a generator's method from its type given the generator
+     * first (generator_slot). */
+    if (method < 0 && argc && generator_slot(c, callee, argv[0])) {
+        SPYValue *bound = attribute_value(c, argv[0], callee->as.native.name->as.string.data);
+        if (!bound) { release_all(argc, argv); spy_release(callee); return NULL; }
+        spy_release(callee); spy_release(argv[0]);
+        callee = bound; argv++; argc--;
+    }
     /* A set's method given its set first, as a method call's operands
      * give it, consumes its source as the bound method does. */
     if (method < 0 && argc == 2 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method && set_like(argv[0])) {
@@ -27821,6 +27839,16 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return NULL;
     }
     if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->error_type[0])) return result;
+    if (calls && argc && generator_slot(c, callee, argv[0])) {
+        /* A generator's method from its type given the generator is its
+         * bound method (generator_slot), in the callee's place. */
+        SPYValue *bound = attribute_value(c, argv[0], callee->as.native.name->as.string.data);
+        if (!bound) return NULL;
+        spy_release(callee); spy_release(argv[0]);
+        argv[-1] = callee = bound;
+        memmove(argv, argv + 1, --argc * sizeof(*argv));
+        m->len--;
+    }
     if (calls && index_arguments(c, callee, -1, argc, argv)) {
         SPYValue *args[INDEX_MOST];
         memcpy(args, argv, argc * sizeof(*argv));
@@ -28034,6 +28062,17 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         if ((*env = function_env(c, callee, argc + !skip, argv + skip, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
+    }
+    if (callee && method < 0 && calls && skip && argc && generator_slot(c, callee, argv[1])) {
+        /* A generator's method from its type given the generator is its
+         * bound method (generator_slot), in the type's place. */
+        SPYValue *bound = attribute_value(c, argv[1], callee->as.native.name->as.string.data);
+        spy_release(callee);
+        if (!bound) { for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m)); return NULL; }
+        spy_release(object);
+        memmove(argv, argv + 1, argc * sizeof(*argv));
+        m->len--; argc--;
+        callee = bound; object = argv[0];
     }
     if (callee && method < 0 && calls && !skip && argc == 1 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method &&
         set_like(argv[0]) && !walk_operand(argv[1])) {

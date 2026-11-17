@@ -434,6 +434,8 @@ Unreleased (0.10.0):
   subclass's consumer, runs without nesting on the C stack
 - a metaclass property named `__name__`, `__bases__`, `__mro__`, `__base__` or `__class__` answers a read
   of its class's attribute, as any other metaclass data descriptor does
+- `type(g).send(g, v)` and a generator's or coroutine's other methods read from its type resume it
+  without nesting on the C stack
 
 2026-11-10 0.9.0:
 
