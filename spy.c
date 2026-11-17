@@ -27148,7 +27148,7 @@ static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee,
     /* Only a join reads the exporters a list or tuple holds, and
      * startswith() and endswith() their choices', each in turn
      * (buffered_choice). */
-    int joins = argc == 1 + (method < 0 && callee->type == SPY_NATIVE) && (method == M_JOIN || bytes_joining(callee));
+    int joins = argc == 1 + (size_t)(method < 0 && callee->type == SPY_NATIVE) && (method == M_JOIN || bytes_joining(callee));
     int choices = choices_at(callee, method);
     if (callee->type == SPY_METHOD && machine_exporter(c, callee->as.method.self)) return INDEX_BUFFERS;
     /* bytes() prefers __bytes__ (conversion_method). */
