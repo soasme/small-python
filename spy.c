@@ -24432,12 +24432,19 @@ static NO_INLINE int delegating(Machine *m) {
     }
     return 0;
 }
+static SPYValue *getitem_function(SPYContext *, SPYValue *);
 /* Whether an adapter's iterable s may give its next item by a call
- * (adapts): a map, a callable iterator of a Python function, or an
- * instance whose __next__ is on the machine now. */
+ * (adapts): a map, a callable iterator of a Python function, a
+ * __getitem__ or reversed iterator over a Python __getitem__
+ * (getitem_call), or an instance whose __next__ is on the machine now. */
 static int adapted_source(SPYContext *c, SPYValue *s) {
-    if (s->type == SPY_ITERATOR && s->as.iterator.kind == I_CALLABLE) return !s->as.iterator.done && machine_function(c, s->as.iterator.source);
-    return (s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) || next_function(c, s);
+    if (s->type != SPY_ITERATOR) return s->type == SPY_INSTANCE && next_function(c, s);
+    switch (s->as.iterator.kind) {
+    case I_MAP: return 1;
+    case I_CALLABLE: return !s->as.iterator.done && machine_function(c, s->as.iterator.source);
+    case I_GETITEM: case I_REVERSED: return getitem_function(c, s->as.iterator.source) != NULL;
+    default: return 0;
+    }
 }
 /* The zip, map, enumerate or filter of id over its collected iterables
  * source, an enumerate's count counter; both are consumed. */
@@ -32645,13 +32652,14 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         int status = next_call_of(c, m, inner, fn, env);
         if (status == 1) return 1;
         spy_release(machine_pop(m)); spy_release(machine_pop(m));
-        if (status == 2 || status == 0) {
-            /* A map of a generator or of a host function gives its item here. */
-            if (status == 2 || !(item = iterator_next(c, inner))) return status == 2 ? 0 : -1;
-        } else if (status < 0) {
+        if (status == 2) return 0;
+        /* A map of a host function, or an ended iterable, gives its item here. */
+        if (status == 0 && !(item = iterator_next(c, inner))) status = -1;
+        if (status < 0) {
             spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL;
             return -1;
-        } else item = *fn;
+        }
+        if (status) item = *fn;
         if ((*fn = adapted_item(c, v, item))) return 3;
         if (c->error_type[0]) return -1;
     }
@@ -32676,6 +32684,9 @@ static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue 
         inner = source->as.seq.items[(v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0)];
     if (!tested && inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE &&
         !(result = sentinel_returned(c, m, inner, result, kind)) && c->k_fn) return NULL;
+    /* A __getitem__'s IndexError ends its iterator, which then gives none (next_ended). */
+    if (!result && inner->type == SPY_ITERATOR && (inner->as.iterator.kind == I_GETITEM || inner->as.iterator.kind == I_REVERSED))
+        next_ended(c, inner);
     spy_release(machine_pop(m)); machine_pop(m);
     SPYValue *item = result ? adapted_item(c, v, result) : NULL;
     if (!item && !c->error_type[0]) *again = 1;

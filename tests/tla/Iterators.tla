@@ -26,7 +26,9 @@
 (* dict() as pairs too. A map's or filter's __next__, bound, given it by   *)
 (* its type, stored or reached by super(), is next() of it; another type's *)
 (* raises TypeError. A class whose metaclass defines __getitem__ iterates  *)
-(* by it, and reverses by it and the metaclass's __len__.                  *)
+(* by it, and reverses by it and the metaclass's __len__. An adapter over  *)
+(* a __getitem__ sequence reads its items as it goes; a zip that took the  *)
+(* items of some iterables when another ended drops them.                  *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -76,7 +78,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
-          "iterator_subclass_next", "next_method", "metaclass_getitem"}
+          "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -143,6 +145,10 @@ Case(c) ==
       [] c = "next_method" -> "(1, 4, 9, 3, 'TypeError', [1, 2, 3, 3, 2, 3, 4, 9])"
       \* A class iterates and reverses by its metaclass's __getitem__ and __len__.
       [] c = "metaclass_getitem" -> "([0, 10], [10, 0], 10, [10, 0], 'LookupError', [0, 1, 2, 1, 0, 0, 1, 2, 0, 1, 2, 0])"
+      \* zip, dict and enumerate read a __getitem__ sequence's items as they go, an
+      \* IndexError ending it, another error read again; a zip drops the items
+      \* it took when another iterable ends, asking them again next time.
+      [] c = "adapter_getitem" -> "(((0, 'b1'), 'KeyError'), [(10, 'b0')], [], {'a': 0, 'b': 10}, [], [(0, 'b1'), (10, 'b0')], [], [0, 1, 1, 2, 3, 0, 1, 0, 0, 1, 2, 3])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

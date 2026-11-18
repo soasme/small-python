@@ -177,6 +177,7 @@ SOURCES = {
                               "class E(enumerate):\n    def __next__(self): i, v = super().__next__(); return v * i\n"
                               "result = (list(M(abs, [-1, -2])), sorted(F(None, [0, 1, 2])), sum(Z([1], [2]), ()), list(E('ab')),\n"
                               "          [*M(abs, [1, 2])] and log, dict(Z([1], 'k')))",
+    "adapter_getitem": "class S:\n    def __init__(s, n, flaky=False): s.n = n; s.failed = not flaky\n    def __getitem__(s, i):\n        for _ in range(2): pass\n        log.append(i)\n        if i == 1 and not s.failed:\n            s.failed = True\n            raise KeyError(i)\n        if i >= s.n: raise IndexError(i)\n        return i * 10\nclass B:\n    def __len__(s): return 2\n    def __getitem__(s, i): return 'b%d' % i\nlog = []\nz = zip(S(3, True), reversed(B()))\nfirst = next(z)\ntry: next(z)\nexcept KeyError as e: first = (first, 'KeyError')\nagain = zip(S(3), reversed(B()))\nresult = (first, list(z), list(z), dict(zip('ab', S(9))), list(enumerate(S(0))), list(again), list(again), log)",
     "metaclass_getitem": "log = []\nclass Meta(type):\n    def __len__(cls): return 2\n    def __getitem__(cls, i):\n"
                          "        log.append(i)\n        if i == cls.bad: raise LookupError(i)\n        if i > 1: raise IndexError(i)\n"
                          "        return i * 10\nclass S(metaclass=Meta): bad = -1\nclass B(metaclass=Meta): bad = 0\n"
