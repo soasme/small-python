@@ -33018,7 +33018,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
                         spy_release(result);
                     } else if (kind == CALL_ITER) {
-                        if (result) pc -= iter_returned(c, m, &code[pc - 1], result);
+                        if (code[pc - 1].op == BC_NEXT) {
+                            /* An async for's __anext__ returned its awaitable, or
+                             * raising StopAsyncIteration ends the loop. */
+                            if (result && !machine_push(c, m, result) && !machine_push(c, m, spy_retain(c->unbound))) pc--;
+                            else if (!result && error_is(c, "StopAsyncIteration")) { spy_clear_error(c); pc = code[pc - 1].target; }
+                        } else if (result) pc -= iter_returned(c, m, &code[pc - 1], result);
                     } else if (kind == CALL_HASH) {
                         m = hash_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
@@ -33598,7 +33603,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_NEXT)
             if (ins->arg) {
-                a = call_special(c, m->blocks[m->block_len - 1].value, "__anext__", 0, NULL);
+                /* A Python __anext__ is a call that returns into this step
+                 * again, its awaitable under c->unbound (CALL_ITER). */
+                SPYValue *iterator = m->blocks[m->block_len - 1].value, *next;
+                if (m->len && m->stack[m->len - 1] == c->unbound) { spy_release(machine_pop(m)); a = machine_pop(m); }
+                else if (iterator->type == SPY_INSTANCE && (next = item_function(c, iterator, "__anext__"))) {
+                    SPYValue *self = spy_retain(iterator);
+                    if (!(callee_env = function_env(c, next, 1, &self, NULL, 1))) break;
+                    value = spy_retain(next); special = CALL_ITER; goto enter_special;
+                } else a = call_special(c, iterator, "__anext__", 0, NULL);
                 m->awaiting = AWAIT_NEXT; m->await_target = ins->target; m->drop = 0;
                 if (a) m->delegate = await_iterator(c, a, "__anext__");
                 if (m->delegate && (delegable(m->delegate) || (m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(c, m)))) {

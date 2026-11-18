@@ -18,7 +18,9 @@
 (* awaits a step (which passes out "tick") before yielding 0 and 1, an     *)
 (* async generator that yields each of its items by a yield statement      *)
 (* inside its own async for over it, a class whose __anext__ returns 1     *)
-(* and 2, a class whose __anext__ awaits a step before returning 1 and     *)
+(* and 2, a class whose plain-function __anext__ returns coroutines of 1   *)
+(* and 2 and then raises StopAsyncIteration itself, a class whose          *)
+(* __anext__ awaits a step before returning 1 and                          *)
 (* 2 and before raising StopAsyncIteration, a class without __aiter__,     *)
 (* a class whose __anext__ returns 5, or a class whose __aiter__           *)
 (* returns 5; and BODY appends x and then completes, breaks, or raises     *)
@@ -33,7 +35,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"loop"}, source : {"agen", "relay", "class", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
+Programs == [part : {"loop"}, source : {"agen", "relay", "class", "plain", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
             \cup [part : {"comprehension"}, kind : {"list", "set", "dict", "class", "element"}]
             \cup [part : {"syntax"}, construct : {"for", "with", "await", "comprehension"}]
 

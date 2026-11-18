@@ -465,6 +465,7 @@ Unreleased (0.10.0):
 - a class attribute store or deletion calls a data descriptor or property its metaclass defines; a metaclass's
   Python `__setattr__` and `__delattr__` run without nesting on the C stack
 - `await` of an async generator's `athrow()` or `aclose()` resumes the generator without nesting on the C stack
+- `async for` calls an iterator's plain Python `__anext__` without nesting on the C stack
 
 2026-11-10 0.9.0:
 

@@ -62,6 +62,18 @@ class Awaiting(Counter):
         return self.i
 
 
+class Plain(Counter):
+    def __anext__(self):
+        self.i += 1
+        if self.i > 2:
+            raise StopAsyncIteration
+        return given(self.i)
+
+
+async def given(value):
+    return value
+
+
 class NoAiter:
     pass
 
@@ -79,7 +91,7 @@ class NoAnext:
         return 5
 
 
-SOURCES = {"agen": agen, "relay": relay, "class": Counter, "awaiting": Awaiting, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
+SOURCES = {"agen": agen, "relay": relay, "class": Counter, "plain": Plain, "awaiting": Awaiting, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
 SYNTAX = {"for": "def f():\n    async for x in y: pass", "with": "def f():\n    async with x: pass",
           "await": "def f():\n    await x", "comprehension": "def f():\n    return [x async for x in y]"}
 
