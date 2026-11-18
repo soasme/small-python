@@ -8808,9 +8808,15 @@ static ALWAYS_INLINE int iterator_fast(SPYContext *c, SPYValue *v, SPYValue **it
     *item = NULL;
     return 1;
 }
-/* The next items of zip or map iterator v's iterables, as a tuple, after
- * those pending in its counter (zip_fill); NULL at their end or on an
- * error. */
+/* The ValueError of strict zip or map v whose iterable at i, counting
+ * from the first, is shorter or longer than those before it; it ends v's
+ * check (zip_checked). */
+static SPYValue *zip_unequal(SPYContext *c, SPYValue *v, size_t i, const char *which) {
+    size_t k = i - (v->as.iterator.kind == I_MAP);
+    v->as.iterator.index = 0;
+    return errorf(c, "ValueError", "%s() argument %zu is %s than argument%s%zu", v->as.iterator.kind == I_MAP ? "map" : "zip", k + 1, which,
+                  k == 1 ? " " : "s 1-", k);
+}
 /* The items zip_fill left pending in zip or map v, taken; none when the
  * generator they wait for has ended since, which dropped them. */
 static NO_INLINE SPYValue *zip_pending(SPYValue *v) {
@@ -8823,11 +8829,14 @@ static NO_INLINE SPYValue *zip_pending(SPYValue *v) {
     }
     return pending;
 }
+/* The next items of zip or map iterator v's iterables, as a tuple, after
+ * those pending in its counter (zip_fill); NULL at their end or on an
+ * error. */
 static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
     SPYValue *source = v->as.iterator.source, *result = v->as.iterator.counter ? zip_pending(v) : NULL;
+    v->as.iterator.index = 0;
     if (!source->as.seq.len || (!result && !(result = value_new(c, SPY_TUPLE)))) return NULL;
     size_t first = v->as.iterator.kind == I_MAP;
-    const char *name = first ? "map" : "zip";
     for (size_t i = first + result->as.seq.len; i < source->as.seq.len; i++) {
         SPYValue *item = iterator_next(c, source->as.seq.items[i]);
         if (!item || sequence_append(c, result, item)) {
@@ -8836,15 +8845,10 @@ static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
              * short argument after the first, or a longer one once the
              * first is exhausted. Arguments count from the first iterable. */
             if (!item && !c->error_type[0] && v->as.iterator.size) {
-                size_t k = i - first;
-                if (k) { errorf(c, "ValueError", "%s() argument %zu is shorter than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k); break; }
+                if (i > first) { zip_unequal(c, v, i, "shorter"); break; }
                 for (size_t j = first + 1; j < source->as.seq.len && !c->error_type[0]; j++) {
                     SPYValue *extra = iterator_next(c, source->as.seq.items[j]);
-                    if (extra) {
-                        spy_release(extra);
-                        k = j - first;
-                        errorf(c, "ValueError", "%s() argument %zu is longer than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k);
-                    }
+                    if (extra) { spy_release(extra); zip_unequal(c, v, j, "longer"); }
                 }
             }
             break;
@@ -8859,7 +8863,9 @@ static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
  * or map does, keeping it pending, or with an error. */
 static NO_INLINE SPYValue *adapted_item(SPYContext *c, SPYValue *v, SPYValue *item) {
     if (v->as.iterator.kind != I_ENUMERATE && v->as.iterator.kind != I_FILTER) {
-        /* A zip's or map's generator's item waits with the others (zip_fill). */
+        /* A zip's or map's generator's item waits with the others (zip_fill);
+         * a strict one's checked after the first ended is longer (zip_checked). */
+        if (v->as.iterator.index) { spy_release(item); return zip_unequal(c, v, v->as.iterator.index, "longer"); }
         SPYValue *pending = v->as.iterator.counter ? v->as.iterator.counter : (v->as.iterator.counter = value_new(c, SPY_TUPLE));
         if (pending) sequence_append(c, pending, item);
         spy_release(item);
@@ -24507,12 +24513,12 @@ static NO_INLINE SPYValue *adapter_new(SPYContext *c, int id, SPYValue *source, 
     v->as.iterator.counter = counter;
     return v;
 }
-/* Whether v is a zip or map, not strict, of a generator the machine
- * resumes (zip_fill), one made with a generator (its removed count's
- * first bit). */
+/* Whether v is a zip or map of a generator the machine resumes
+ * (zip_fill), one made with a generator (its removed count's first bit). */
 static int zip_of_generator(SPYValue *v) {
-    if (v->type != SPY_ITERATOR || (v->as.iterator.kind != I_ZIP && v->as.iterator.kind != I_MAP) || v->as.iterator.size ||
-        !(v->as.iterator.removed & 1)) return 0;
+    if (v->type != SPY_ITERATOR || (v->as.iterator.kind != I_ZIP && v->as.iterator.kind != I_MAP) || !(v->as.iterator.removed & 1)) return 0;
+    /* A strict one checking its others end goes on (zip_checked). */
+    if (v->as.iterator.index) return 1;
     SPYValue *source = v->as.iterator.source;
     for (size_t i = 0; i < source->as.seq.len; i++) if (resumable(source->as.seq.items[i])) return 1;
     return 0;
@@ -32244,13 +32250,39 @@ static NO_INLINE Result adapted_flow(SPYContext *c, SPYValue *v, Result flow) {
 static int plain_next(SPYValue *v) {
     return v->type == SPY_ITERATOR && (v->as.iterator.kind == I_RANGE || (v->as.iterator.kind == I_SEQUENCE && v->as.iterator.source->type != SPY_INSTANCE));
 }
-/* For zip or map v, not strict, the generator the machine resumes, *g,
- * borrowed, for the next of its pending items (iterator counter), the
- * items of the native iterators before it taken (plain_next): 1 then;
- * else 0, for zip_items to go on; -1 on an error. */
+/* Strict zip or map v, its first iterable ended, checks that the others
+ * from its index on end too: the generator the machine resumes, *g, for
+ * that (zip_left), the native iterators before it asked: 1 then; else -1,
+ * with a ValueError when one gives an item. */
+static NO_INLINE int zip_checked(SPYContext *c, SPYValue *v, SPYValue **g) {
+    SPYValue *source = v->as.iterator.source, *item;
+    for (size_t i = v->as.iterator.index; i < source->as.seq.len; i++) {
+        SPYValue *s = source->as.seq.items[i];
+        if (resumable(s)) { v->as.iterator.index = i; *g = s; return 1; }
+        if (!iterator_fast(c, s, &item)) item = iterator_next(c, s);
+        if (item) { spy_release(item); zip_unequal(c, v, i, "longer"); return -1; }
+        if (c->error_type[0]) break;
+    }
+    v->as.iterator.index = 0;
+    return -1;
+}
+/* Strict zip or map v's iterable at i ended: one after the first is
+ * shorter; after the first, the others are checked from i + 1 on, at
+ * once by zip_checked or as v is asked again (zip_left). */
+static int zip_ended(SPYContext *c, SPYValue *v, size_t i) {
+    spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL;
+    if (i > (size_t)(v->as.iterator.kind == I_MAP)) { zip_unequal(c, v, i, "shorter"); return -1; }
+    v->as.iterator.index = i + 1;
+    return 0;
+}
+/* For zip or map v the generator the machine resumes, *g, borrowed, for
+ * the next of its pending items (iterator counter), the items of the
+ * native iterators before it taken (plain_next): 1 then; else 0, for
+ * zip_items to go on; -1 on an error or a strict one's end. */
 static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     SPYValue *source = v->as.iterator.source, *item;
     size_t first = v->as.iterator.kind == I_MAP;
+    if (v->as.iterator.index && v->as.iterator.size) return zip_checked(c, v, g);
     if (v->as.iterator.counter) v->as.iterator.counter = zip_pending(v);
     for (size_t i = first + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0); i < source->as.seq.len; i++) {
         SPYValue *s = source->as.seq.items[i];
@@ -32259,6 +32291,7 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
             if (!plain_next(s)) return 0;
             item = iterator_next(c, s);
         }
+        if (!item && !c->error_type[0] && v->as.iterator.size) return zip_ended(c, v, i) ? -1 : zip_checked(c, v, g);
         if (!item) return c->error_type[0] ? -1 : 0;
         int failed = (!v->as.iterator.counter && !(v->as.iterator.counter = value_new(c, SPY_TUPLE))) ||
                      sequence_append(c, v->as.iterator.counter, item);
@@ -32266,6 +32299,23 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
         if (failed) return -1;
     }
     return 0;
+}
+/* Whether v is a strict zip or map of a generator (zip_left). */
+static ALWAYS_INLINE int zip_strict(SPYValue *v) {
+    return v->type == SPY_ITERATOR && v->as.iterator.size && (v->as.iterator.kind == I_ZIP || v->as.iterator.kind == I_MAP) &&
+           (v->as.iterator.removed & 1);
+}
+/* The end of the generator that strict zip or map v, top's value,
+ * resumed for an item (zip_fill) or to check it ends (zip_checked): a
+ * ValueError, or a yield of no item, to ask v again; an error ends the
+ * check. next() drops the generator's return value. */
+static NO_INLINE Result zip_left(SPYContext *c, Block *top) {
+    SPYValue *v = top->value, *pending = v->as.iterator.counter;
+    if (top->kind == BLOCK_CONSUME && top->consumer->id == B_NEXT) { spy_release(top->consumer->sent); top->consumer->sent = NULL; }
+    if (c->error_type[0]) { v->as.iterator.index = 0; return (Result){FLOW_NORMAL, NULL}; }
+    if (v->as.iterator.index) v->as.iterator.index++;
+    else if (zip_ended(c, v, (v->as.iterator.kind == I_MAP) + (pending ? pending->as.seq.len : 0))) return (Result){FLOW_NORMAL, NULL};
+    return (Result){FLOW_YIELD, NULL};
 }
 static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **, SPYValue **);
 /* Whether filter v's iterator is an instance whose Python __next__ gives
@@ -33809,6 +33859,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
          * (adapted_step); one the filter drops, a yield of no item,
          * resumes it again. */
         if (flow.value && top->value != g) flow = adapted_flow(c, top->value, flow);
+        else if (UNLIKELY(top->value != g && flow.flow != FLOW_YIELD && zip_strict(top->value))) flow = zip_left(c, top);
         if (top->kind == BLOCK_CONSUME) {
             a = flow.flow == FLOW_YIELD ? flow.value : NULL;
             int dropped = flow.flow == FLOW_YIELD && !a;

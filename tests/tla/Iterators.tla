@@ -35,6 +35,9 @@
 (* StopIteration from the map's function gives the yield from its value.   *)
 (* next() of a zip, map, enumerate or filter over a generator that returns *)
 (* a value raises StopIteration with that value, then a bare one.          *)
+(* A strict zip or map of generators resumes each for its item; when the   *)
+(* first ends, each later one must end too, else it is longer; a later     *)
+(* one ending first is shorter.                                            *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -86,7 +89,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
           "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem",
           "adapter_nested", "adapter_delegate",
-          "next_generator_value"}
+          "next_generator_value", "zip_strict_generators"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -163,6 +166,8 @@ Case(c) ==
       [] c = "adapter_delegate" -> "([(10, 'a'), ('ret', 33)], [(0, 'k'), ('ret', None)], 'ValueError', [1, 1, ('ret', None)], [1, 3, 'str', 4, 'str', 'str'])"
       \* next() of an adapter over a generator: the StopIteration carries its value.
       [] c = "next_generator_value" -> "((1, 'x'), ('StopIteration', (5,)), ('StopIteration', ()), 1, ('StopIteration', (7,)), (0, 1), ('StopIteration', (8,)), 'd', 1, ('StopIteration', (4,)))"
+      \* A strict zip or map of generators checks its iterables end together.
+      [] c = "zip_strict_generators" -> "(('ValueError', 'zip() argument 2 is shorter than argument 1'), ('ValueError', 'zip() argument 2 is longer than argument 1'), [0], (1, 3), ('StopIteration', ''), [('a', 1), ('b', 3), ('a', 2), 'b', ('a', 1), ('b', 3), 'a', ('b', 4), ('a', 2), ('c', 1), 'a', 'c', ('a', 1), ('b', 3), 'a', 'b'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 
