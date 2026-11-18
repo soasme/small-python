@@ -24473,14 +24473,16 @@ static NO_INLINE int delegating(Machine *m) {
     return 0;
 }
 static SPYValue *getitem_function(SPYContext *, SPYValue *);
+static ALWAYS_INLINE int adapts(SPYValue *);
 /* Whether an adapter's iterable s may give its next item by a call
- * (adapts): a map, a callable iterator of a Python function, a
+ * (adapts): a map, a zip or enumerate that adapts, a callable iterator of a Python function, a
  * __getitem__ or reversed iterator over a Python __getitem__
  * (getitem_call), or an instance whose __next__ is on the machine now. */
 static int adapted_source(SPYContext *c, SPYValue *s) {
     if (s->type != SPY_ITERATOR) return s->type == SPY_INSTANCE && next_function(c, s);
     switch (s->as.iterator.kind) {
     case I_MAP: return 1;
+    case I_ZIP: case I_ENUMERATE: return adapts(s);
     case I_CALLABLE: return !s->as.iterator.done && machine_function(c, s->as.iterator.source);
     case I_GETITEM: case I_REVERSED: return getitem_function(c, s->as.iterator.source) != NULL;
     default: return 0;
@@ -24662,7 +24664,6 @@ static int getitem_iterated(SPYContext *c, SPYValue *v) {
 /* Whether a call gives iterator v's next items (next_call_of): a map's,
  * a filter's, a __getitem__ or reversed one's over an instance, or one
  * that adapts a map's (adapts). */
-static ALWAYS_INLINE int adapts(SPYValue *);
 static int called_iterator(SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
@@ -32741,6 +32742,18 @@ static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue 
     spy_release(v);
     return item;
 }
+/* adapted_returned through each adapter under c->adapting on m's stack,
+ * an adapter's item the next one's result (adapted_source); one that
+ * goes on to take more leaves those above it, for the step to ask the
+ * outermost again. */
+static NO_INLINE SPYValue *adapted_chain(SPYContext *c, Machine *m, SPYValue *result, int *again, int tested, int kind) {
+    do {
+        result = adapted_returned(c, m, result, again, tested, kind);
+        tested = 1;
+    } while (!*again && !c->k_fn && m->len && m->stack[m->len - 1] == c->adapting);
+    while (*again && m->len && m->stack[m->len - 1] == c->adapting) { machine_pop(m); spy_release(machine_pop(m)); }
+    return result;
+}
 static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function, *args;
     if ((*fn = adapted_generator(v))) return 2;
@@ -32952,7 +32965,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             goto enter_k;
                         if (m->len && m->stack[m->len - 1] == c->adapting) {
                             int again = 0;
-                            result = adapted_returned(c, m, result, &again, tested, CALL_ITEM);
+                            result = adapted_chain(c, m, result, &again, tested, CALL_ITEM);
                             if (again) goto consume_generator;
                             if (!result && c->k_fn) goto enter_k;
                         }
@@ -32993,7 +33006,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             if (!(result = sentinel_compared(c, m, result, CALL_NEXT)) && c->k_fn) goto enter_k;
                         } else if (m->len && m->stack[m->len - 1] == c->converting && !(result = item_converted(c, m, result, CALL_NEXT)) && c->k_fn)
                             goto enter_k;
-                        if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_returned(c, m, result, &again, tested, CALL_NEXT);
+                        if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_chain(c, m, result, &again, tested, CALL_NEXT);
                         if (filtering(iterator)) result = filter_returned(c, m, iterator, result, &again, CALL_NEXT);
                         if (again) pc--;
                         else if (!result && c->k_fn) ;

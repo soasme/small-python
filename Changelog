@@ -451,6 +451,7 @@ Unreleased (0.10.0):
   nesting on the C stack; when pausing, a zip whose iterable ended asks the others again on its next call
 - `1.5 + I(2)`, `1.5 < I(2)` and the like, for an int or float subclass `I`, use the left number's method
   and never call `I`'s reflected one; a number subclass's declining method raises `TypeError` as CPython does
+- `zip()` and `enumerate()` over another zip or enumerate of a `map()` take its items without nesting on the C stack
 
 2026-11-10 0.9.0:
 

@@ -28,7 +28,9 @@
 (* raises TypeError. A class whose metaclass defines __getitem__ iterates  *)
 (* by it, and reverses by it and the metaclass's __len__. An adapter over  *)
 (* a __getitem__ sequence reads its items as it goes; a zip that took the  *)
-(* items of some iterables when another ended drops them.                  *)
+(* items of some iterables when another ended drops them. A zip or         *)
+(* enumerate over another adapter of a map takes each item as that one     *)
+(* makes it; an error from the map's function drops what each zip took.    *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -78,7 +80,8 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
-          "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem"}
+          "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem",
+          "adapter_nested"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -149,6 +152,8 @@ Case(c) ==
       \* IndexError ending it, another error read again; a zip drops the items
       \* it took when another iterable ends, asking them again next time.
       [] c = "adapter_getitem" -> "(((0, 'b1'), 'KeyError'), [(10, 'b0')], [], {'a': 0, 'b': 10}, [], [(0, 'b1'), (10, 'b0')], [], [0, 1, 1, 2, 3, 0, 1, 0, 0, 1, 2, 3])"
+      \* An adapter of an adapter of a map: the error drops both zips' items.
+      [] c = "adapter_nested" -> "(((('a', 10), 'u'), 'ValueError'), [], [(0, (30, 'x')), (1, (50, 'y'))], [(0, (0, 60))], [1, 4, 3, 5, 6])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 
