@@ -90,6 +90,7 @@ SOURCES = {
     "min_no_args": 'result = min()',
     "min_first_of_equal": "result = (min([(1, 'a'), (1, 'b')], key=lambda t: t[0]), max([(1, 'a'), (1, 'b')], key=lambda t: t[0]))",
     "max_mixed": "result = max(1, 'a')",
+    "minmax_sources": "log = []\nclass V:\n    def __init__(self, n): self.n = n\n    def __gt__(self, o): log.append(('>', self.n, o.n)); return self.n > o.n\n    def __lt__(self, o): log.append(('<', self.n, o.n)); return self.n < o.n\nclass It:\n    def __iter__(self): log.append('iter'); return iter([V(2), V(5), V(1)])\ndef gen(*xs):\n    for x in xs: log.append('g'); yield V(x)\nresult = (max(gen(1, 3, 2)).n, min(It()).n, max(map(V, [4, 9])).n, log)",
     "bin_index": 'result = (bin(I()), oct(I()), hex(I()), hex(-255))',
     "int_index_calls": 'class K:\n    calls = 0\n    def __index__(self):\n        for _ in (): pass\n        K.calls += 1\n        return 65\n'
                        'result = (int(K()), float(K()), K.calls)',

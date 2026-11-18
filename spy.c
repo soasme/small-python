@@ -25134,6 +25134,11 @@ static NO_INLINE int thrown_raw(SPYContext *c, SPYValue *g, SPYValue *k) {
     return m && m->awaiting == AWAIT_DELEGATE && !m->operation && m->delegate->type == SPY_INSTANCE &&
            !method_absent(m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
 }
+/* An unkeyed min or max compares each item with the best on the machine,
+ * as a key_consumer's own keys (key_took). */
+static void min_max_fed(Consumer *s) {
+    if (s->id == B_MIN || s->id == B_MAX) { s->keyed = s->id == B_MAX ? KEY_MAX : KEY_MIN; s->fed = 1; }
+}
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
  * owned. A throw of an exception class, with start its value if given,
@@ -25263,6 +25268,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
                            .searched = searched, .wrap = wrap, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
                            .phase = id == B_SET_TOGGLE, .awaited = awaited};
+    if (!keyed) min_max_fed(consumer);
     spy_release(bound);
     block->value = generator; block->consumer = consumer;
     /* The operation runs its generator until the send ends (pop_block). */
@@ -26179,6 +26185,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         SPYValue *iterator = iterator_returned(c, top->value, key, "__iter__"), *source = top->value;
         if (!iterator) return -1;
         top->value = iterator; s->keyed = 0;
+        min_max_fed(s);
         if (s->hints) length_hint(c, m, source);
         else {
             spy_release(source);
@@ -39423,15 +39430,6 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         int status = sum_compensated(c, s, item);
         if (status) return status < 0 ? -1 : 0;
     }
-    if (s->id == B_MIN || s->id == B_MAX) {
-        /* The best item so far, replaced by one that compares beyond it. */
-        SPYValue *test = s->best ? comparison(c, s->id == B_MAX ? '>' : '<', item, s->best) : NULL;
-        int better = !s->best || (test && truthy(test));
-        spy_release(test);
-        if (better && !c->error_type[0]) { spy_release(s->best); s->best = item; }
-        else spy_release(item);
-        return c->error_type[0] ? -1 : 0;
-    }
     consumer_settle(c, s);
     if (s->id == B_ALL || s->id == B_ANY) {
         int length = 0;
@@ -39513,11 +39511,6 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         SPYValue *items = s->result;
         s->result = NULL;
         return unpack_settle(c, NULL, items, s->count, s->star);
-    }
-    if ((s->id == B_MIN || s->id == B_MAX) && !c->error_type[0]) {
-        SPYValue *best = s->best;
-        s->best = NULL;
-        return best ? best : errorf(c, "ValueError", "%s() iterable argument is empty", s->id == B_MAX ? "max" : "min");
     }
     if (!c->error_type[0]) consumer_settle(c, s);
     SPYValue *result = s->result;

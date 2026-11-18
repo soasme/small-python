@@ -57,7 +57,7 @@ Cases == {"round_half_even", "round_float_digits", "round_none", "round_keyword_
           "divmod_complex", "divmod_zero_float", "pow_float", "pow_mod_float", "pow_keywords",
           "pow_zero_zero", "sum_floats", "sum_compensated", "sum_stages", "sum_add", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
           "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
-          "min_first_of_equal", "max_mixed", "bin_index", "index_calls", "int_index_calls", "round_index_calls", "round_index_bad", "bin_float", "hex_float_method", "complex_forms",
+          "min_first_of_equal", "max_mixed", "minmax_sources", "bin_index", "index_calls", "int_index_calls", "round_index_calls", "round_index_bad", "bin_float", "hex_float_method", "complex_forms",
           "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "text_repr", "text_index", "int_forms",
           "int_bad_base", "int_base_first", "complex_fallbacks", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
 Programs == [op : Ops, a : {-25, -15, -7, -1, 0, 3, 8, 25, 35}, b : {-3, -1, 0, 2, 5}]
@@ -120,6 +120,8 @@ Case(c) ==
       [] c = "min_no_args" -> "TypeError: min expected at least 1 argument, got 0"
       [] c = "min_first_of_equal" -> "((1, 'a'), (1, 'a'))"
       [] c = "max_mixed" -> "TypeError: '>' not supported between instances of 'str' and 'int'"
+      \* min and max of a generator, an __iter__ instance or a map compare each item as it comes.
+      [] c = "minmax_sources" -> "(3, 1, 9, ['g', 'g', ('>', 3, 1), 'g', ('>', 2, 3), 'iter', ('<', 5, 2), ('<', 1, 2), ('>', 9, 4)])"
       [] c = "bin_index" -> "('0b1010', '0o12', '0xa', '-0xff')"
       \* int() and float() of an instance with only __index__ call it, once each
       [] c = "int_index_calls" -> "(65, 65.0, 2)"
