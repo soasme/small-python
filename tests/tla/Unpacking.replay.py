@@ -14,8 +14,20 @@ def token(value):
     return ("t" if len(value) == 2 else "u") + str(value[0])
 
 
+class Items:
+    def __init__(self, items): self.items = items
+    def __getitem__(self, i):
+        for _ in range(2): pass
+        return self.items[i]
+
+
+def same(x):
+    for _ in range(2): pass
+    return x
+
+
 def outcome(p):
-    targets, kinds = p
+    targets, kinds, source = p
     parts, names = [], []
     for i, target in enumerate(targets, 1):
         if target == "name":
@@ -25,6 +37,7 @@ def outcome(p):
         else:
             parts.append(f"(u{i}, v{i})"); names += [[f"u{i}"], [f"v{i}"]]
     value = tuple(item(kind, k) for k, kind in enumerate(kinds, 1))
+    value = value if source == "tuple" else Items(value) if source == "getitem" else map(same, value)
     try:
         code = compile(", ".join(parts) + ", = value", "<program>", "exec")
     except SyntaxError:

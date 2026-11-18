@@ -8,14 +8,18 @@
 (*                                                                         *)
 (*     t1, *s, (u3, v3), = (1, (2, 12), (3, 13, 23))                       *)
 (*                                                                         *)
-(* Item k is k, (k, k + 10), or (k, k + 10, k + 20); the outcome is what   *)
-(* each name is bound to, in order, or the exception.                      *)
+(* Item k is k, (k, k + 10), or (k, k + 10, k + 20). The items come as    *)
+(* that tuple, from an instance with only a Python __getitem__ (raising    *)
+(* IndexError past them), or from a map() of a Python function over them,  *)
+(* which unpack alike; the outcome is what each name is bound to, in       *)
+(* order, or the exception.                                                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 Targets == {"name", "star", "pair"}
 Items == {"int", "pair", "triple"}
-Programs == (UNION {[1..n -> Targets] : n \in 1..3}) \X (UNION {[1..n -> Items] : n \in 0..4})
+Sources == {"tuple", "getitem", "map"}
+Programs == (UNION {[1..n -> Targets] : n \in 1..3}) \X (UNION {[1..n -> Items] : n \in 0..4}) \X Sources
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

@@ -25240,13 +25240,18 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         consumer->count = (size_t)g->drop + 1; g->drop = 0;
     }
 }
+/* Whether the machine takes v's items, a source whose items call Python
+ * (machine_source), but a map or filter of a native function. */
+static int machine_items(SPYContext *c, SPYValue *v) {
+    return machine_source(c, v) && (!called_iterator(v) || sequence_iterator(v) || next_calls(c, v));
+}
 /* BC_UNPACK of target list n, the value atop m's stack: its items, owned,
- * or, for a generator the machine can resume or an instance with a Python
- * __iter__ (iter_function), NULL, its items to be taken on the machine
- * (BLOCK_CONSUME) as an unpacking (UNPACK_ITEMS). */
+ * or, for a source whose items the machine takes (machine_items), NULL,
+ * its items to be taken on the machine (BLOCK_CONSUME) as an unpacking
+ * (UNPACK_ITEMS). */
 static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node *n) {
     SPYValue *value = m->stack[m->len - 1];
-    if (!resumable(value) && !iter_function(c, value)) return unpack_target(c, f, n, value);
+    if (!machine_items(c, value)) return unpack_target(c, f, n, value);
     Consumer *s = allocate(c, sizeof(*s));
     SPYValue *items = s ? spy_list(c) : NULL, *source = items ? spy_retain(value) : NULL;
     int keyed = source ? consumer_source(c, &source) : 0;
@@ -25268,7 +25273,7 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
 static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg, int hints) {
     SPYValue *keys = a->type == SPY_INSTANCE && display->type == SPY_DICT ? keys_function(c, a, &(int){0}) : NULL;
     int merging = keys && (machine_function(c, keys) || getitem_function(c, a));
-    if (!merging && ((!(machine_source(c, a) && (!called_iterator(a) || sequence_iterator(a) || next_calls(c, a))) &&
+    if (!merging && ((!machine_items(c, a) &&
                       !(is_set(display) && hashed_items(c, a))) || is_dict(display))) {
         (hints ? extend_list : extend_display)(c, display, a);
         if (arg) seal_tuple(c, display);
