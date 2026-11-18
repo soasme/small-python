@@ -1,4 +1,4 @@
-# spec: PLS-315 7.7.1 13.2.6
+# spec: PLS-315 7.7.1, 13.2.6
 # description: GetIterator calls the Python __iter__ of a builtin's
 # subclass that overrides it: a for loop, a comprehension, a generator
 # expression's source, yield from and an unpacking over a list, tuple,
