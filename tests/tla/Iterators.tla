@@ -33,6 +33,8 @@
 (* makes it; an error from the map's function drops what each zip took.    *)
 (* As a yield from's delegate, such an adapter yields those items, and a   *)
 (* StopIteration from the map's function gives the yield from its value.   *)
+(* next() of a zip, map, enumerate or filter over a generator that returns *)
+(* a value raises StopIteration with that value, then a bare one.          *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -83,7 +85,8 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
           "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem",
-          "adapter_nested", "adapter_delegate"}
+          "adapter_nested", "adapter_delegate",
+          "next_generator_value"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -158,6 +161,8 @@ Case(c) ==
       [] c = "adapter_nested" -> "(((('a', 10), 'u'), 'ValueError'), [], [(0, (30, 'x')), (1, (50, 'y'))], [(0, (0, 60))], [1, 4, 3, 5, 6])"
       \* yield from an adapter of a map: a StopIteration's value is the result.
       [] c = "adapter_delegate" -> "([(10, 'a'), ('ret', 33)], [(0, 'k'), ('ret', None)], 'ValueError', [1, 1, ('ret', None)], [1, 3, 'str', 4, 'str', 'str'])"
+      \* next() of an adapter over a generator: the StopIteration carries its value.
+      [] c = "next_generator_value" -> "((1, 'x'), ('StopIteration', (5,)), ('StopIteration', ()), 1, ('StopIteration', (7,)), (0, 1), ('StopIteration', (8,)), 'd', 1, ('StopIteration', (4,)))"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

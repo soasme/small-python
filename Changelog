@@ -454,6 +454,8 @@ Unreleased (0.10.0):
 - `zip()` and `enumerate()` over another zip or enumerate of a `map()` take its items without nesting on the C stack
 - `yield from` a zip, enumerate or map of a `map()` takes its items without nesting on the C stack, and a
   `StopIteration` from the map's function gives the `yield from` its value
+- `next()` of a zip, map, enumerate or filter over a generator resumes it without nesting on the C stack, and the
+  `StopIteration` that ends it carries the generator's return value
 
 2026-11-10 0.9.0:
 

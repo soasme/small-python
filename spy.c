@@ -24951,7 +24951,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
          (id == B_BYTES && class_lookup(argv[0]->as.map.parent, "__bytes__")))) return -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN && id != B_BYTES && id != B_BYTEARRAY &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
-        (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0])))) return -1;
+        (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0]) || zip_of_generator(argv[0]) || adapted_generator(argv[0])))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
@@ -32242,6 +32242,7 @@ static int plain_next(SPYValue *v) {
 static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     SPYValue *source = v->as.iterator.source, *item;
     size_t first = v->as.iterator.kind == I_MAP;
+    if (v->as.iterator.counter) v->as.iterator.counter = zip_pending(v);
     for (size_t i = first + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0); i < source->as.seq.len; i++) {
         SPYValue *s = source->as.seq.items[i];
         if (resumable(s)) { *g = s; return 1; }
