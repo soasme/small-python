@@ -66,7 +66,7 @@ Cases == {"iter_sequence_protocol", "enumerate_start_first", "reversed_hook", "r
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
-          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "sort_truth", "max_key_truth", "len_negative", "len_big",
+          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_list_ties", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "sort_truth", "max_key_truth", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
           "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
 Programs == [op : Ops, l : Lists]
@@ -189,6 +189,7 @@ Case(c) ==
       [] c = "key_sources" -> "([1, 0], 0, 'd', [0, 1, 'k0', 'k1', 0, 'k0', 1, 'k1'])"
       [] c = "sort_lt_only" -> "[1, 2, 3]"
       [] c = "sort_tuple_ties" -> "([0, 1, 2], True)"
+      [] c = "sort_list_ties" -> "([0, 1, 2], True, True)"
       [] c = "sort_gt_reflected" -> "[1, 2]"
       [] c = "sort_lt_declined" -> "([1, 2, 3], [0, 1], 'KeyError')"
       \* min() and max() call the best's reflected method after an item's

@@ -190,6 +190,11 @@ SOURCES = {
     "sort_tuple_ties": 'class T:\n    def __init__(self, v): self.v = v\n    def __eq__(self, o): log.append(1); return self.v == o.v\n'
                        '    def __lt__(self, o): return self.v < o.v\nlog = []\n'
                        'result = ([t[1].v for t in sorted([(0, T(2)), (0, T(1)), (0, T(0))])], bool(log))',
+    "sort_list_ties": 'class T:\n    def __init__(self, v, home=None): self.v = v; self.home = home\n'
+                      '    def __eq__(self, o):\n        log.append(1)\n        if self.home is not None: self.home.clear()\n        return self.v == o.v\n'
+                      '    def __lt__(self, o): return self.v < o.v\nlog = []\n'
+                      'def homed(v):\n    l = []\n    l.append(T(v, l)); l.append(v)\n    return l\nls = [homed(1), homed(1), homed(1)]\n'
+                      'result = ([l[1].v for l in sorted([[0, T(2)], [0, T(1)], [0, T(0)]])], bool(log), sorted(map(id, sorted(ls))) == sorted(map(id, ls)))',
     "filter_generator": "log = []\ndef g(n):\n    for i in range(n):\n        log.append(i)\n        yield i\n"
                         "def odd(x):\n    log.append(-x)\n    return x % 2\nresult = (list(filter(odd, g(4))), log)",
     "zip_native_generator": "log = []\ndef g(n):\n    for i in range(n):\n        log.append(i)\n        yield i\n"

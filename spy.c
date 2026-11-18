@@ -14817,8 +14817,9 @@ enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, K
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
 /* A sort that stops at each comparison (sort_step). The comparison of
- * two tuple keys stops at each Python one of their items (sorter_call):
- * the pair at item, cx and cy, borrowed, compared by rich; unequal once an
+ * two tuple or list keys stops at each Python one of their items
+ * (sorter_call): the pair at item, cx and cy, borrowed, a list's kept
+ * in the consumer's pair, compared by rich; unequal once an
  * item differs, open while the keys' comparison goes on; reflected while
  * cy's reflected method is due after cx's NotImplemented; truth while a
  * result's Python __bool__, or __len__ when 2, is due, the result in the
@@ -14837,6 +14838,7 @@ typedef struct {
     SPYValue *call; /* A call's ** merge: the callee a duplicate keyword's error names (merge_keyword). */
     SPYValue *awaited; /* An asend or __anext__ awaitable's send or __next__ (asend_resumes): the operation. */
     SPYValue *instance; /* A class call's instance whose list's or set's __init__ extends it (constructed): the value. */
+    SPYValue *pair; /* A sort's comparison of two lists' items, which its call may remove (sorter_call): the two. */
     int updating, subset, rehash;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -14929,6 +14931,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->call) visit(b->consumer->call, data);
         if (b->consumer && b->consumer->awaited) visit(b->consumer->awaited, data);
         if (b->consumer && b->consumer->instance) visit(b->consumer->instance, data);
+        if (b->consumer && b->consumer->pair) visit(b->consumer->pair, data);
         if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
         if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
         if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
@@ -24119,7 +24122,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee); spy_release(b.consumer->wrap);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords); spy_release(b.consumer->call);
-        spy_release(b.consumer->awaited); spy_release(b.consumer->instance);
+        spy_release(b.consumer->awaited); spy_release(b.consumer->instance); spy_release(b.consumer->pair);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
@@ -25602,7 +25605,7 @@ static NO_INLINE int keys_sort(SPYContext *c, SPYValue *source) {
         Entry *keys = map_items(source);
         a = keys[at + 1].key; b = keys[at].key;
     } else return 0;
-    return (a->type == SPY_INSTANCE || a->type == SPY_TUPLE) && sort_calls(c, a, b);
+    return (a->type == SPY_INSTANCE || a->type == SPY_TUPLE || a->type == SPY_LIST) && sort_calls(c, a, b);
 }
 static int instance_sort(SPYContext *c, SPYValue *source) {
     if (source->type != SPY_LIST && source->type != SPY_TUPLE) return keys_sort(c, source);
@@ -25881,6 +25884,11 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
             /* The pair's comparison, or after its NotImplemented cy's
              * reflected one, returning into key_took. */
             if ((function = t->reflected ? reflected_function(c, t->cy, t->rich) : sorter_call(c, t))) {
+                /* Two lists' items, which the call may remove, are kept. */
+                if (t->x->type == SPY_LIST && !t->reflected) {
+                    spy_release(s->pair);
+                    if (!(s->pair = tuple_of(c, 2, (SPYValue *[]){t->cx, t->cy}))) return NULL;
+                }
                 SPYValue *args[] = {spy_retain(t->reflected ? t->cy : t->cx), spy_retain(t->reflected ? t->cx : t->cy)};
                 return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
             }
@@ -34764,33 +34772,36 @@ static int sort_step(struct Sorter *s) {
     return 0;
 }
 #undef ASK
-/* Whether a and b are tuples, whose comparison goes item by item. */
-static int tuple_pair(SPYValue *a, SPYValue *b) { return a->type == SPY_TUPLE && b->type == SPY_TUPLE; }
+/* Whether a and b are two tuples or two lists, whose comparison goes item
+ * by item. */
+static int ordered_pair(SPYValue *a, SPYValue *b) { return (a->type == SPY_TUPLE || a->type == SPY_LIST) && b->type == a->type; }
 /* The Python rich comparison s's question s->x < s->y calls next, with
  * its pair in cx and cy, to enter on the machine; else NULL, s->less
  * answered natively. Two tuples compare as sequence_order does: each pair
  * of items, but one item twice, by __eq__ until one is unequal, which then
- * decides by __lt__, else the lengths do. */
+ * decides by __lt__, else the lengths do; so do two lists. */
 static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
     SPYValue *a = s->x, *b = s->y, *function;
     if (!s->open) s->at_item = 0, s->unequal = 0;
     s->open = 0;
-    if (!tuple_pair(a, b)) {
+    if (!ordered_pair(a, b)) {
         if ((function = rich_function(c, a, b, R_LT))) { s->cx = a; s->cy = b; s->rich = R_LT; return function; }
         s->less = sort_less(c, a, b);
         return NULL;
     }
-    size_t n = a->as.seq.len < b->as.seq.len ? a->as.seq.len : b->as.seq.len;
-    for (; !s->unequal && s->at_item < n; s->at_item++) {
+    /* A list's length is read again after each comparison, which may change it. */
+    for (; !s->unequal && s->at_item < a->as.seq.len && s->at_item < b->as.seq.len; s->at_item++) {
         SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
         if (x == y) continue;
         if ((function = rich_function(c, x, y, R_EQ))) { s->cx = x; s->cy = y; s->rich = R_EQ; return function; }
+        spy_retain(x); spy_retain(y);
         int same = equal(x, y);
+        spy_release(x); spy_release(y);
         if (c->error_type[0]) return NULL;
         s->unequal = !same;
         if (s->unequal) break;
     }
-    if (!s->unequal) { s->less = a->as.seq.len < b->as.seq.len; return NULL; }
+    if (s->at_item >= a->as.seq.len || s->at_item >= b->as.seq.len) { s->less = a->as.seq.len < b->as.seq.len; return NULL; }
     SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
     if ((function = rich_function(c, x, y, R_LT))) { s->cx = x; s->cy = y; s->rich = R_LT; return function; }
     s->less = sort_less(c, x, y);
@@ -34800,7 +34811,7 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
  * __lt__ (rich_function), or for two tuples the __eq__ of a pair of their
  * items, which ties before it reach. */
 static int sort_calls(SPYContext *c, SPYValue *a, SPYValue *b) {
-    if (!tuple_pair(a, b)) return rich_function(c, a, b, R_LT) != NULL;
+    if (!ordered_pair(a, b)) return rich_function(c, a, b, R_LT) != NULL;
     for (size_t i = 0; i < a->as.seq.len && i < b->as.seq.len; i++)
         if (rich_function(c, a->as.seq.items[i], b->as.seq.items[i], R_EQ)) return 1;
     return 0;
