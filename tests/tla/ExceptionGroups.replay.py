@@ -1,10 +1,17 @@
 # Replays ExceptionGroups.tla: each case runs the spec's source in a fresh
 # namespace and compares the repr of its result (or the exception and its
-# message, a SyntaxError's without the location) with the model's.
+# message, a SyntaxError's without the location) with the model's. The
+# generated groups derive by a Python method, and split as a method and
+# unbound, which agree.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 class MyEG(ExceptionGroup):
     def derive(self, excs): return MyEG(self.message + "!", excs)
+class Looping(ExceptionGroup):
+    """Derives as the default does, by a Python derive that loops."""
+    def derive(self, excs):
+        for _ in range(2): pass
+        return ExceptionGroup(self.message, excs)
 ITEMS = ["V", "T", "GVT", "GT"]
 SHAPES = [(a,) for a in ITEMS] + [(a, b) for a in ITEMS for b in ITEMS] + [(a, b, c) for a in ITEMS for b in ITEMS for c in ITEMS]
 
@@ -12,8 +19,8 @@ SHAPES = [(a,) for a in ITEMS] + [(a, b) for a in ITEMS for b in ITEMS] + [(a, b
 def build(item):
     if item == "V": return ValueError(1)
     if item == "T": return TypeError(2)
-    if item == "GVT": return ExceptionGroup("inner", [ValueError(3), TypeError(4)])
-    return ExceptionGroup("only", [TypeError(5)])
+    if item == "GVT": return Looping("inner", [ValueError(3), TypeError(4)])
+    return Looping("only", [TypeError(5)])
 
 
 def shape(e):
@@ -22,13 +29,23 @@ def shape(e):
     return type(e).__name__[0]
 
 
+def inner(e):
+    for _ in range(2): pass
+    return isinstance(e, ExceptionGroup) and e.message == "inner"
+
+
 def grouped(op, items):
-    g = ExceptionGroup("top", [build(i) for i in items])
-    if op == "split_value": m, r = g.split(ValueError); return shape(m) + " " + shape(r)
-    if op == "split_type": m, r = g.split(TypeError); return shape(m) + " " + shape(r)
-    if op == "subgroup_value": return shape(g.subgroup(ValueError))
-    if op == "split_pred": m, r = g.split(lambda e: isinstance(e, ExceptionGroup) and e.message == "inner"); return shape(m) + " " + shape(r)
+    g = Looping("top", [build(i) for i in items])
     if op == "str": return str(g)
+    # As a method and unbound from the class: one outcome.
+    method, cond = {"split_value": ("split", ValueError), "split_type": ("split", TypeError),
+                    "subgroup_value": ("subgroup", ValueError), "split_pred": ("split", inner)}[op]
+    outcomes = {parts(getattr(g, method)(cond)), parts(getattr(ExceptionGroup, method)(g, cond))}
+    return outcomes.pop() if len(outcomes) == 1 else "mismatch"
+
+
+def parts(result):
+    return " ".join(map(shape, result)) if type(result) is tuple else shape(result)
 
 SOURCES = {
     "base_to_exception": "result = (type(BaseExceptionGroup('m', [ValueError()])).__name__, type(BaseExceptionGroup('m', [KeyboardInterrupt()])).__name__)",

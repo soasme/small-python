@@ -687,6 +687,9 @@ static SPYValue *name_error(SPYContext *c, const char *name, int free) {
     error_name_set(c, name, strlen(name));
     return NULL;
 }
+/* The stack budget a level of nesting that a walk on the machine keeps
+ * on the heap charges, as a level of native recursion would use. */
+enum { NESTED_LEVEL = 128 };
 /* As CPython's _Py_CheckRecursiveCall, bound native recursion by the stack
  * actually used rather than a count; the first entry records the top. */
 static NO_INLINE int stack_overflow(SPYContext *c, size_t used, const char *where) {
@@ -22303,12 +22306,9 @@ static SPYValue *group_exceptions(SPYValue *group) {
     SPYValue *items = hidden_field(group, "exceptions");
     return items && items->type == SPY_TUPLE ? items : NULL;
 }
-/* A derived group keeps the original's traceback, cause, context, and a copy of its notes. */
-static SPYValue *group_derive(SPYContext *c, SPYValue *group, SPYValue *items) {
-    SPYValue *derive = attribute(c, group, "derive");
-    SPYValue *result = derive ? call(c, derive, 1, &items) : NULL;
-    spy_release(derive);
-    if (!result) return NULL;
+/* A derived group, result, taken, keeps group's traceback, cause, context,
+ * and a copy of its notes. */
+static SPYValue *group_derived(SPYContext *c, SPYValue *group, SPYValue *result) {
     if (!is_group(c, result)) { spy_release(result); return spy_error(c, "TypeError", "derive must return an instance of BaseExceptionGroup"); }
     static const char *const fields[] = {"__traceback__", "__cause__", "__context__"};
     for (size_t i = 0; i < 3; i++) {
@@ -22324,37 +22324,129 @@ static SPYValue *group_derive(SPYContext *c, SPYValue *group, SPYValue *items) {
     }
     return result;
 }
-typedef int (*GroupTest)(SPYContext *, SPYValue *, void *);
-/* Split a group by a test into matching and remaining parts, either may be NULL. */
-static int group_split(SPYContext *c, SPYValue *exception, GroupTest test, void *data, int want_rest, SPYValue **match, SPYValue **rest) {
-    *match = *rest = NULL;
-    if (deeper(c, "")) return -1;
-    int matched = test(c, exception, data), status = -1;
-    SPYValue *matches = NULL, *remaining = NULL;
-    if (matched < 0) goto done;
-    if (matched || !is_group(c, exception) || !group_exceptions(exception)) {
-        if (matched) *match = spy_retain(exception);
-        else if (want_rest) *rest = spy_retain(exception);
-        status = 0; goto done;
+/* A split's flags: the rest is kept, and the test is membership in the
+ * leaves its data holds, not a condition; above them its phase, the call
+ * it waits for: the test's, derive's of the matches or of the rest, or
+ * none, the split done. */
+enum { SPLIT_REST = 1, SPLIT_MEMBER = 2 };
+enum { SPLIT_TEST, SPLIT_MATCH, SPLIT_OTHER, SPLIT_DONE };
+static int split_set(SPYContext *c, SPYValue *list, size_t i, SPYValue *value) {
+    (void)c;
+    if (!value) return -1;
+    spy_release(list->as.seq.items[i]); list->as.seq.items[i] = value;
+    return 0;
+}
+static int split_flags(SPYValue *job) { return (int)job->as.seq.items[1]->as.integer_data.small; }
+/* The parts mx and rx of an exception or group, borrowed or NULL, given
+ * to the open level of split job, or at the root its result. */
+static int split_deliver(SPYContext *c, SPYValue *job, SPYValue *mx, SPYValue *rx) {
+    if (job->as.seq.len == 3) {
+        SPYValue *pair[] = {mx ? mx : c->none, rx ? rx : c->none};
+        return split_set(c, job, 2, split_flags(job) & SPLIT_REST ? tuple_of(c, 2, pair) : spy_retain(pair[0])) ||
+               split_set(c, job, 1, spy_int(c, (split_flags(job) & 3) | SPLIT_DONE << 2));
     }
-    SPYValue *items = group_exceptions(exception);
-    matches = spy_list(c); remaining = spy_list(c);
-    if (!matches || !remaining) goto done;
-    for (size_t i = 0; i < items->as.seq.len; i++) {
-        SPYValue *part, *other;
-        if (group_split(c, items->as.seq.items[i], test, data, want_rest, &part, &other)) goto done;
-        int failed = (part && sequence_append(c, matches, part)) || (other && sequence_append(c, remaining, other));
-        spy_release(part); spy_release(other);
-        if (failed) goto done;
-    }
-    if (matches->as.seq.len && !(*match = group_derive(c, exception, matches))) goto done;
-    if (want_rest && remaining->as.seq.len && !(*rest = group_derive(c, exception, remaining))) goto done;
-    status = 0;
-done:
-    spy_release(matches); spy_release(remaining);
-    if (status) { spy_release(*match); spy_release(*rest); *match = *rest = NULL; }
-    c->depth--;
+    SPYValue *level = job->as.seq.items[job->as.seq.len - 1], **slots = level->as.seq.items;
+    return (mx && sequence_append(c, slots[2], mx)) || (rx && sequence_append(c, slots[3], rx)) ||
+           split_set(c, level, 1, spy_int(c, slots[1]->as.integer_data.small + 1));
+}
+/* Exception x, which matched or not, goes to its part; a group that did
+ * not opens a level, which charges NESTED_LEVEL bytes of the stack budget. */
+static int split_place(SPYContext *c, SPYValue *job, SPYValue *x, int matched) {
+    if (matched || !is_group(c, x) || !group_exceptions(x))
+        return split_deliver(c, job, matched ? x : NULL, !matched && split_flags(job) & SPLIT_REST ? x : NULL);
+    size_t depth = job->as.seq.len - 2;
+    if (depth > c->stack_size / NESTED_LEVEL) { errorf(c, "RecursionError", "Stack overflow (used %zu kB)", depth * NESTED_LEVEL / 1024); return -1; }
+    SPYValue *matches = spy_list(c), *rest = spy_list(c), *index = spy_int(c, 0), *level = spy_list(c);
+    int status = !matches || !rest || !index || !level || sequence_append(c, level, x) || sequence_append(c, level, index) ||
+                 sequence_append(c, level, matches) || sequence_append(c, level, rest) || sequence_append(c, level, c->none) ||
+                 sequence_append(c, job, level);
+    spy_release(matches); spy_release(rest); spy_release(index); spy_release(level);
+    return status ? -1 : 0;
+}
+/* The open level of job ends, its derived parts mg and rg, borrowed or NULL, given to its parent. */
+static int split_close(SPYContext *c, SPYValue *job, SPYValue *mg, SPYValue *rg) {
+    SPYValue *level = job->as.seq.items[--job->as.seq.len];
+    int status = split_deliver(c, job, mg, rg);
+    spy_release(level);
     return status;
+}
+static SPYValue *bound_function(SPYContext *, SPYValue *);
+static SPYValue *split_run(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *split_resumed(SPYContext *c, Machine *m, SPYValue *job, SPYValue *result) {
+    if (!result) { spy_release(job); return NULL; }
+    return split_run(c, m, job, result);
+}
+/* Split job's call of fn with arg, awaited in phase: m's (callk), which
+ * takes job, 1; else called here into *result, 0, or -1 on an error. */
+static int split_call(SPYContext *c, Machine *m, SPYValue *job, SPYValue *fn, SPYValue *arg, int phase, SPYValue **result) {
+    if (split_set(c, job, 1, spy_int(c, (split_flags(job) & 3) | phase << 2))) return -1;
+    if (m && (machine_function(c, fn) || bound_function(c, fn))) {
+        callk(c, m, fn, 1, (SPYValue *[]){spy_retain(arg)}, split_resumed, job);
+        return 1;
+    }
+    return (*result = call(c, fn, 1, &arg)) ? 0 : -1;
+}
+/* Whether seq holds v itself. */
+static int sequence_holds(SPYValue *seq, SPYValue *v) {
+    for (size_t i = 0; i < seq->as.seq.len; i++) if (seq->as.seq.items[i] == v) return 1;
+    return 0;
+}
+/* SplitGroup (PLS-315 21.4.3) of job's root, without recursion on the C
+ * stack. Job, a list, holds the test's data, a condition or for except*
+ * the leaves to keep, then the flags, then the root, and for each group
+ * being split a level: the group, the index of its next exception, the
+ * matches and the rest so far, and the matches derived or None. A Python
+ * condition or derive is m's call (split_call), its result resuming the
+ * split (split_resumed); result is a pending call's, NULL at first. The
+ * match and the rest when the rest is kept, else the match, None when
+ * absent; NULL with c->k_fn set while a call is m's. Job taken. */
+static SPYValue *split_run(SPYContext *c, Machine *m, SPYValue *job, SPYValue *result) {
+    for (;;) {
+        SPYValue **items = job->as.seq.items, *level = job->as.seq.len > 3 ? items[job->as.seq.len - 1] : NULL;
+        SPYValue **slots = level ? level->as.seq.items : NULL, *exceptions = level ? group_exceptions(slots[0]) : NULL, *function;
+        size_t at = level ? (size_t)slots[1]->as.integer_data.small : 0;
+        SPYValue *x = !level ? items[2] : at < exceptions->as.seq.len ? exceptions->as.seq.items[at] : NULL;
+        int phase = split_flags(job) >> 2, status;
+        if (phase == SPLIT_DONE) {
+            SPYValue *value = spy_retain(items[2]);
+            spy_release(job);
+            return value;
+        }
+        if (result && phase == SPLIT_TEST) {
+            int matched = truthy(result);
+            spy_release(result); result = NULL;
+            status = c->error_type[0] ? -1 : split_place(c, job, x, matched);
+        } else if (result) {
+            SPYValue *derived = group_derived(c, slots[0], result);
+            result = NULL;
+            status = !derived ? -1 : phase == SPLIT_MATCH ? split_set(c, level, 4, derived) : split_close(c, job, slots[4] == c->none ? NULL : slots[4], derived);
+            if (derived && phase != SPLIT_MATCH) spy_release(derived);
+        } else if (x) {
+            /* A condition that is a class or a tuple of them tests natively. */
+            SPYValue *data = items[0];
+            int matched = split_flags(job) & SPLIT_MEMBER ? sequence_holds(data, x) :
+                          data->type == SPY_CLASS || data->type == SPY_TUPLE ? exception_matches(c, x, data) : 2;
+            status = matched == 2 ? split_call(c, m, job, data, x, SPLIT_TEST, &result) : matched < 0 ? -1 : split_place(c, job, x, matched);
+        } else if ((slots[2]->as.seq.len && slots[4] == c->none) || (split_flags(job) & SPLIT_REST && slots[3]->as.seq.len)) {
+            /* The level's matches, then its rest, derive a group each. */
+            int matches = slots[2]->as.seq.len && slots[4] == c->none;
+            status = !(function = attribute(c, slots[0], "derive")) ? -1 :
+                     split_call(c, m, job, function, slots[matches ? 2 : 3], matches ? SPLIT_MATCH : SPLIT_OTHER, &result);
+            spy_release(function);
+        } else status = split_close(c, job, slots[4] == c->none ? NULL : slots[4], NULL);
+        if (status) {
+            if (status < 0) spy_release(job);
+            return NULL;
+        }
+    }
+}
+/* split_run of a new job for group by data with flags. */
+static SPYValue *split_begin(SPYContext *c, Machine *m, SPYValue *group, SPYValue *data, int flags) {
+    SPYValue *job = spy_list(c), *bits = spy_int(c, flags);
+    int status = !job || !bits || sequence_append(c, job, data) || sequence_append(c, job, bits) || sequence_append(c, job, group);
+    spy_release(bits);
+    if (status) { spy_release(job); return NULL; }
+    return split_run(c, m, job, NULL);
 }
 static int valid_exception_types(SPYContext *c, SPYValue *type) {
     size_t count = type->type == SPY_TUPLE ? type->as.seq.len : 1;
@@ -22362,20 +22454,6 @@ static int valid_exception_types(SPYContext *c, SPYValue *type) {
     for (size_t i = 0; i < count; i++)
         if (classes[i]->type != SPY_CLASS || !subclass(classes[i], c->exceptions[X_BASE_EXCEPTION])) return 0;
     return 1;
-}
-static int group_condition(SPYContext *c, SPYValue *exception, void *data) {
-    SPYValue *condition = data;
-    if (condition->type == SPY_CLASS || condition->type == SPY_TUPLE) return exception_matches(c, exception, condition);
-    SPYValue *result = call(c, condition, 1, &exception);
-    int truth = result ? truthy(result) : -1;
-    spy_release(result);
-    return c->error_type[0] ? -1 : truth;
-}
-static int group_member(SPYContext *c, SPYValue *exception, void *data) {
-    (void)c;
-    SPYValue *leaves = data;
-    for (size_t i = 0; i < leaves->as.seq.len; i++) if (leaves->as.seq.items[i] == exception) return 1;
-    return 0;
 }
 static int group_leaves(SPYContext *c, SPYValue *exception, SPYValue *leaves) {
     SPYValue *items = is_group(c, exception) ? group_exceptions(exception) : NULL;
@@ -22439,6 +22517,10 @@ static SPYValue *group_repr(SPYContext *c, SPYValue *self, SPYValue *message, SP
     SPYValue *result = status || puts_buffer(&out, ")") ? NULL : spy_string(c, out.data, out.len);
     spy_release(shown); mem_free(out.data); return result;
 }
+/* Whether condition is one split() and subgroup() take (MatcherFor). */
+static int split_condition(SPYContext *c, SPYValue *condition) {
+    return condition->type == SPY_CLASS || condition->type == SPY_TUPLE ? valid_exception_types(c, condition) : callable_value(c, condition);
+}
 /* BaseExceptionGroup methods; data selects __new__, __str__, __repr__, derive, split, or subgroup. */
 static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int which = (int)(intptr_t)data;
@@ -22486,15 +22568,9 @@ static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv,
         return call(c, base, 2, args);
     }
     SPYValue *condition = argv[1];
-    if ((condition->type == SPY_CLASS || condition->type == SPY_TUPLE) ? !valid_exception_types(c, condition) : !callable_value(c, condition))
+    if (!split_condition(c, condition))
         return spy_error(c, "TypeError", "expected an exception type, a tuple of exception types, or a callable (other than a class)");
-    SPYValue *match, *rest;
-    if (group_split(c, self, group_condition, condition, which == 3, &match, &rest)) return NULL;
-    if (which == 4) return match ? match : spy_none(c);
-    SPYValue *pair = value_new(c, SPY_TUPLE);
-    if (pair && (sequence_append(c, pair, match ? match : c->none) || sequence_append(c, pair, rest ? rest : c->none))) { spy_release(pair); pair = NULL; }
-    spy_release(match); spy_release(rest);
-    return pair;
+    return split_begin(c, NULL, self, condition, which == 3 ? SPLIT_REST : 0);
 }
 /* except* matching: a full match wraps a naked exception in a group. */
 static int star_match(SPYContext *c, SPYValue *exception, SPYValue *type, SPYValue **match, SPYValue **rest) {
@@ -22547,19 +22623,20 @@ static int same_metadata(SPYValue *a, SPYValue *b) {
 static SPYValue *reraise_star(SPYContext *c, SPYValue *original, SPYValue *raised) {
     if (!raised->as.seq.len) return NULL;
     if (!is_group(c, original)) return spy_retain(raised->as.seq.items[0]);
-    SPYValue *fresh = spy_list(c), *reraised = spy_list(c), *leaves = spy_list(c), *keep = NULL, *rest = NULL, *result = NULL;
+    SPYValue *fresh = spy_list(c), *reraised = spy_list(c), *leaves = spy_list(c), *keep = NULL, *result = NULL;
     if (!fresh || !reraised || !leaves) goto done;
     for (size_t i = 0; i < raised->as.seq.len; i++) {
         SPYValue *item = raised->as.seq.items[i];
         if (sequence_append(c, same_metadata(item, original) ? reraised : fresh, item)) goto done;
     }
     for (size_t i = 0; i < reraised->as.seq.len; i++) if (group_leaves(c, reraised->as.seq.items[i], leaves)) goto done;
-    if (leaves->as.seq.len && group_split(c, original, group_member, leaves, 0, &keep, &rest)) goto done;
+    if (leaves->as.seq.len && !(keep = split_begin(c, NULL, original, leaves, SPLIT_MEMBER))) goto done;
+    if (keep == c->none) { spy_release(keep); keep = NULL; }
     if (!fresh->as.seq.len) { result = keep; keep = NULL; goto done; }
     if (keep && sequence_append(c, fresh, keep)) goto done;
     result = fresh->as.seq.len > 1 ? new_group(c, "", fresh) : spy_retain(fresh->as.seq.items[0]);
 done:
-    spy_release(fresh); spy_release(reraised); spy_release(leaves); spy_release(keep); spy_release(rest);
+    spy_release(fresh); spy_release(reraised); spy_release(leaves); spy_release(keep);
     return result;
 }
 /* Raise a computed exception as CPython's RERAISE does: not chained to the
@@ -26982,7 +27059,6 @@ static SPYValue *check_next(SPYContext *, Machine *, SPYValue *, SPYValue *);
  * instance_check's. A nested tuple's items are walked in a frame
  * (unbound, items, choices, next, depth) before going on with the rest,
  * each level charging NESTED_LEVEL bytes of the stack budget. */
-enum { NESTED_LEVEL = 128 };
 static SPYValue *check_from(SPYContext *c, Machine *m, int sub, SPYValue *a, SPYValue *choices, size_t i) {
     SPYValue *result = NULL;
     spy_retain(choices);
@@ -27676,8 +27752,11 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||
                                                        (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
                                                        (argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
-                                                       /* next() with a default (next_builtin_call) */
-                                                       (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
+                                                       /* next() with a default (next_builtin_call), an unbound
+                                                        * split(), subgroup() or __reduce_ex__() (native_entered) */
+                                                       (argv[0]->type == SPY_INSTANCE && (callee->as.native.data == (void *)(intptr_t)B_NEXT ||
+                                                                                         callee->as.native.kwcall == group_method ||
+                                                                                         is_builtin(callee, B_OBJECT_REDUCE_EX))))) ||
                                         (argc == 3 && ((argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                                        (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
                                                        /* an instance's __index__ or __buffer__ (index_arguments) */
@@ -41933,7 +42012,8 @@ static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYV
  * view's release() or __exit__() whose exporter's __release_buffer__ is
  * Python, or object's __reduce__(), __reduce_ex__() or __getstate__(),
  * leaves its call on m (memory_released, object_reduce): NULL, c->k_fn
- * set. */
+ * set. A group's split() or subgroup() leaves its call so, or gives the
+ * call's value, *env unset (split_run). */
 static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     SPYValue *self = NULL, *function;
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
@@ -41953,6 +42033,11 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
             !native_absent(c, base, argv[0])) return NULL;
         return missing_env(c, function, self, argv[0], env);
     }
+    intptr_t which = (intptr_t)callee->as.native.data;
+    if (callee->as.native.kwcall == group_method && (which == 3 || which == 4) && argc == 1 && is_group(c, self) &&
+        hidden_field(self, "message") && group_exceptions(self) && split_condition(c, argv[0]))
+        /* A group's split() or subgroup() goes on on m (split_run), or gives its value. */
+        return split_begin(c, m, self, argv[0], which == 3 ? SPLIT_REST : 0);
     intptr_t reduce = callee->as.native.call == builtin ? (intptr_t)callee->as.native.data : -1;
     if (reduce == B_OBJECT_REDUCE || reduce == B_OBJECT_REDUCE_EX || reduce == B_OBJECT_GETSTATE) {
         /* So does object's reduction, its intrinsic's call or an error (object_reduce). */

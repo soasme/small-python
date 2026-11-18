@@ -469,6 +469,7 @@ Unreleased (0.10.0):
 - sorting lists of lists calls the items' Python comparisons without nesting on the C stack
 - `object.__reduce__()`, `__reduce_ex__()` and `__getstate__()` call Python methods without nesting on the C stack
 - a builtin method or slot wrapper called without its object raises CPython's message for its kind; `property.__set_name__` and memoryview's `__enter__` and `__exit__` are method descriptors
+- exception groups' `split()` and `subgroup()` call a Python condition or `derive` without nesting on the C stack
 
 2026-11-10 0.9.0:
 

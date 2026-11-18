@@ -1750,7 +1750,9 @@ Recursion follows CPython's two limits:
   hashing, check the remaining machine stack against a 4 MiB budget. They
   raise CPython's "Stack overflow" `RecursionError` instead of crashing.
 - A nested tuple that `isinstance()` or `issubclass()` walks on the
-  machine charges 128 bytes of that budget for each level of nesting.
+  machine, and a nested exception group that `split()`, `subgroup()` or
+  `except*` walks, charges 128 bytes of that budget for each level of
+  nesting.
 
 ### 4.4 Garbage collection
 
