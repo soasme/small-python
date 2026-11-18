@@ -35,7 +35,9 @@
 (* number: the float 1.5 with R(int) (relation "wider"), whose own        *)
 (* method takes y's int, so R's methods are never called; or the int 1    *)
 (* with R(float) (relation "narrower"), whose own method does not, so     *)
-(* y's reflected method, R's or float's, is the last call.                *)
+(* y's reflected method, R's or float's, is the last call. Or x may be    *)
+(* the class L itself, with no metaclass, and y of R plain (relation       *)
+(* "class"): type defines no + for an instance, so y's __radd__ is last.   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -70,6 +72,8 @@ Programs == (UNION {
     {[op |-> op, rel |-> rel, holder |-> "number", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
         l \in [{} -> Kinds], r \in [UsesR(op) -> Kinds], rel \in {"wider", "narrower"}}
     : op \in {"+", "<"}})
+    \cup {[op |-> "+", rel |-> "class", holder |-> "type", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
+           l \in [{} -> Kinds], r \in [UsesR("+") -> Kinds]}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -133,7 +137,8 @@ Number(p, m, value) ==
     ELSE IF p.R[m] = NI THEN "TypeError" ELSE "R." \o m \o ":y"
 
 Run(p) ==
-    CASE p.rel \in {"wider", "narrower"} ->
+    CASE p.rel = "class" -> IF p.R.radd = "value" THEN "R.radd:y" ELSE "TypeError"
+      [] p.rel \in {"wider", "narrower"} ->
            IF p.op = "<" THEN Number(p, "gt", "True") ELSE Number(p, "radd", IF p.rel = "wider" THEN "3.5" ELSE "3.0")
       [] p.op = "+" -> Add(p)
       [] p.op = "+=" -> IF Call(p, "x", "iadd") # NI THEN Call(p, "x", "iadd") ELSE Add(p)
@@ -172,6 +177,9 @@ ConcatenationRaises == Done /\ program.rel = "plain" /\ program.L.add = "none" /
 
 \* A plain left operand without __add__ leaves the right one's __radd__ last.
 ReflectedLast == Done /\ program.rel = "right" /\ program.L.add # "value" /\ program.R.radd = "value" => outcome = "R.radd:y"
+
+\* A class on the left leaves a plain instance's __radd__ the last call.
+ClassLeft == Done /\ program.rel = "class" => outcome \in {"R.radd:y", "TypeError"}
 
 \* A number that takes the other operand's number never calls its reflected method.
 NumberFirst == Done /\ program.rel = "wider" => outcome \in {"3.5", "True"}

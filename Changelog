@@ -456,6 +456,8 @@ Unreleased (0.10.0):
   `StopIteration` from the map's function gives the `yield from` its value
 - `next()` of a zip, map, enumerate or filter over a generator resumes it without nesting on the C stack, and the
   `StopIteration` that ends it carries the generator's return value
+- a class on the left of a binary operator, as in `int | T` for a TypeVar `T`, calls the right operand's
+  reflected Python method without nesting on the C stack
 
 2026-11-10 0.9.0:
 

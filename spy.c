@@ -30387,10 +30387,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     SPYValue *self = x, *other = y;
     int phase = OPERATOR_FIRST, negated = 0;
     if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT || x->type == SPY_COMPLEX ||
+        (o && x->type == SPY_CLASS && !metaclassed(x) && y->type == SPY_INSTANCE) ||
         (rich >= 0 && (y->type == SPY_INSTANCE || metaclassed(y)) && rich_declines(c, x, rich))) {
-        /* A number declines an operator or comparison with a plain
-         * instance, whose reflected method is the last call; it takes a
-         * narrower number's subclass instance itself (number_takes). */
+        /* A number, or a class by type's | (a union of no instance),
+         * declines an operator or comparison with a plain instance, whose
+         * reflected method is the last call; a number takes a narrower
+         * number's subclass instance itself (number_takes). */
         if (!reflected || number_takes(c, o, rich, x, y) ||
             !(function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
         self = y; other = x; phase = OPERATOR_LAST;
