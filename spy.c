@@ -18122,7 +18122,7 @@ static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *a
 }
 /* A call of class cls whose plain __init__ (plain_init) is init:
  * object.__new__, then init called directly. */
-static SPYValue *plain_construct(SPYContext *c, SPYValue *cls, SPYValue *init, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+static ALWAYS_INLINE SPYValue *plain_construct(SPYContext *c, SPYValue *cls, SPYValue *init, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     SPYValue *result = new_instance(c, cls);
     SPYValue *value = result ? call_with_self(c, init, result, argc, argv, keywords) : NULL;
     if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
@@ -24914,11 +24914,20 @@ static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, 
 /* Whether callee is a generator's or coroutine's method from its type,
  * send, throw, close or __next__, given v, one of them, first: the
  * machine resumes it as v's bound method (slot_call binds it in C). */
-static int generator_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
-    if (callee->type != SPY_NATIVE || callee->as.native.kwcall != slot_call || (v->type != SPY_GENERATOR && v->type != SPY_COROUTINE) ||
-        callee->as.native.owner != c->types[v->type]) return 0;
+static NO_INLINE int generator_method_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
+    if (callee->type != SPY_NATIVE || callee->as.native.kwcall != slot_call || callee->as.native.owner != c->types[v->type]) return 0;
     const char *name = callee->as.native.name->as.string.data;
     return !strcmp(name, "send") || !strcmp(name, "throw") || !strcmp(name, "close") || !strcmp(name, "__next__");
+}
+static ALWAYS_INLINE int generator_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
+    return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) && generator_method_slot(c, callee, v);
+}
+/* Generator method callee, which it takes, from its type, bound to g,
+ * which it takes too: the bound method; else NULL. */
+static NO_INLINE SPYValue *generator_bound(SPYContext *c, SPYValue *callee, SPYValue *g) {
+    SPYValue *bound = attribute_value(c, g, callee->as.native.name->as.string.data);
+    spy_release(callee); spy_release(g);
+    return bound;
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 /* dict(), a class built on it (built_type), or a dict's update of one
@@ -26774,14 +26783,6 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
                  (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed)))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
-    /* So does a generator's method from its type given the generator
-     * first (generator_slot). */
-    if (method < 0 && argc && generator_slot(c, callee, argv[0])) {
-        SPYValue *bound = attribute_value(c, argv[0], callee->as.native.name->as.string.data);
-        if (!bound) { release_all(argc, argv); spy_release(callee); return NULL; }
-        spy_release(callee); spy_release(argv[0]);
-        callee = bound; argv++; argc--;
-    }
     /* A set's method given its set first, as a method call's operands
      * give it, consumes its source as the bound method does. */
     if (method < 0 && argc == 2 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method && set_like(argv[0])) {
@@ -26791,6 +26792,13 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         callee = bound; argv++; argc--;
     }
     int id = consumer_of(c, callee, method, argc, argv);
+    /* So does a generator's method from its type given the generator
+     * first (generator_slot). */
+    if (id < 0 && method < 0 && argc && generator_slot(c, callee, argv[0])) {
+        if (!(callee = generator_bound(c, callee, argv[0]))) { release_all(argc, argv); return NULL; }
+        argv++; argc--;
+        id = consumer_of(c, callee, method, argc, argv);
+    }
     if (id >= 0)
         consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
                        argc > 1 ? spy_retain(argv[1]) : NULL, argc > 2 ? argv[2] : NULL);
@@ -27841,8 +27849,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->error_type[0])) return result;
     if (calls && argc && generator_slot(c, callee, argv[0])) {
         /* A generator's method from its type given the generator is its
-         * bound method (generator_slot), in the callee's place. */
-        SPYValue *bound = attribute_value(c, argv[0], callee->as.native.name->as.string.data);
+         * bound method (generator_slot), in the callee's place; the stack
+         * keeps its references until the binding succeeds. */
+        SPYValue *bound = generator_bound(c, spy_retain(callee), spy_retain(argv[0]));
         if (!bound) return NULL;
         spy_release(callee); spy_release(argv[0]);
         argv[-1] = callee = bound;
