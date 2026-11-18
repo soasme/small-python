@@ -18,8 +18,22 @@ jobs:
           python-version: '3.15'
       - run: make CC=${{ matrix.compiler }} CFLAGS='-O2 -std=c11 -Wall -Wextra -Wpedantic -Werror' test
       - run: make docs
+
+  # The same tests under AddressSanitizer and UndefinedBehaviorSanitizer, in
+  # their own job so they run alongside the plain ones.
+  sanitize:
+    strategy:
+      matrix:
+        compiler: [clang, gcc]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.15'
       - run: make CC=${{ matrix.compiler }} sanitize
-        if: runner.os == 'Linux'
 
   # Every line of the engine must run under the tests (tools/coverage.py).
   coverage:
