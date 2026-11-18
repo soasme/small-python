@@ -532,6 +532,32 @@ benchmark at least as fast as before. The plan and its measurements are in
 
 Expected gain: two to three times on interpreter-bound programs.
 
+The end of this road is code that owns no syntax tree, compiled from source
+in one pass. Today every instruction points at the node it came from, and a
+source unit keeps its whole tree for as long as any of its functions lives:
+312 bytes a node, lookup caches included. Once the intrinsics have loaded,
+their trees hold 2.9 MB of the context's 4.7 MB (9,448 nodes, 64-bit macOS,
+`-O1`). Code that points into a tree cannot be saved in a snapshot or copied
+in from a prebuilt image either. In order, each step useful alone:
+
+1. The walker evaluates no body (above), so nothing needs a tree to run.
+2. A code object holds everything it runs on: instructions, constants,
+   names, slots, a line and column table, and no node pointers. The tree is
+   freed once its unit is compiled.
+3. The parser emits instructions as it reads, as QuickJS does, instead of
+   building a tree. Python decides a name's scope from assignments that may
+   follow its use, and from `global` and `nonlocal`, so each function's names
+   are emitted unresolved and a pass over that function's instructions at
+   its end resolves them to slots, cells, globals or namespace lookups.
+   Assignment targets are read as expressions and rewritten; deferred
+   annotations compile as their own function. The spec suite, its
+   `SyntaxError` messages included, decides each step.
+4. Snapshots and prebuilt images ([Resumable execution](#resumable-execution))
+   save code as it is, with no tree to rebuild.
+
+Each step reports the memory a loaded module keeps and the start-up time
+against the step before.
+
 ### Benchmark suite
 
 [docs/benchmark.md](docs/benchmark.md) measures ten core-language programs.
