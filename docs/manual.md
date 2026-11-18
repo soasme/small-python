@@ -278,7 +278,8 @@ make sanitize
 exactly that allocation failing, then once per allocation with it and every
 later one failing, as SQLite's tests do. An allocation is a `malloc`, or a
 value or block the context reuses. Every run must end in a result or an
-exception, and free everything it allocated.
+exception, and free everything it allocated. A program's runs are dealt out
+to one process per processor.
 
 #### 2.4.2 Conformance
 

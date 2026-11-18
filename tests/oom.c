@@ -3,7 +3,8 @@
  * it and every later one failing, as when memory stays exhausted. Every run
  * must end cleanly, in a result or an exception, and free everything it
  * allocated: the engine frees through this counter, so a leak is seen per
- * run, not only at exit.
+ * run, not only at exit. The runs of a program are dealt out to one
+ * process per processor.
  * Run it under make sanitize so a bad cleanup path is also reported.
  *
  * usage: tests/oom [--native LIBRARY] [FILE...]
@@ -17,6 +18,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 void *oom_malloc(size_t);
 void *oom_calloc(size_t, size_t);
@@ -3415,12 +3418,32 @@ static size_t check(const char *source, const char *name, size_t from, size_t up
     size_t total = run(source, name, &status), failed[2] = {0, 0};
     if (upto && upto < total) total = upto;
     const char *ends = status ? "an exception" : "a result";
-    for (lasting = 0; lasting < 2; lasting++)
-        for (fail = from + 1; fail <= total; fail++) {
-            run(source, name, &status);
-            failed[lasting] += status != 0;
+    long workers = sysconf(_SC_NPROCESSORS_ONLN);
+    int counts[2];
+    if (workers < 1) workers = 1;
+    if (pipe(counts)) { perror("pipe"); exit(2); }
+    fflush(stdout);
+    fflush(stderr);
+    for (long w = 0; w < workers; w++) {
+        pid_t pid = fork();
+        if (pid < 0) { perror("fork"); exit(2); }
+        if (pid) continue;
+        size_t mine[2] = {0, 0};
+        for (lasting = 0; lasting < 2; lasting++)
+            for (fail = from + 1 + (size_t)w; fail <= total; fail += (size_t)workers) {
+                run(source, name, &status);
+                mine[lasting] += status != 0;
+            }
+        exit(write(counts[1], mine, sizeof mine) == sizeof mine ? 0 : 2);
+    }
+    close(counts[1]);
+    for (size_t got[2]; read(counts[0], got, sizeof got) == sizeof got;) failed[0] += got[0], failed[1] += got[1];
+    close(counts[0]);
+    for (long w = 0; w < workers; w++)
+        if (wait(&status) < 0 || !WIFEXITED(status) || WEXITSTATUS(status)) {
+            fprintf(stderr, "%s: a run failed\n", name);
+            exit(1);
         }
-    lasting = 0;
     printf("%s (ends in %s): allocations %zu to %zu failed; exceptions: %zu failing once, %zu failing from there on\n",
            name, ends, from + 1, total, failed[0], failed[1]);
     return total;

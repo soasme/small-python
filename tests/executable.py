@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def build(*sources, binary):
-    """The sources with the engine, under the build's flags (a sanitizer build's included)."""
+    """The sources with the engine's libspy.a, under the build's flags (a sanitizer build's included)."""
     flags = shlex.split(os.environ.get("CFLAGS", "-O2 -std=c11 -Wall -Wextra -Wpedantic"))
-    subprocess.run([*shlex.split(os.environ.get("CC", "cc")), *flags, "-I", str(ROOT), *map(str, sources), str(ROOT / "spy.c"),
+    subprocess.run([*shlex.split(os.environ.get("CC", "cc")), *flags, "-I", str(ROOT), *map(str, sources), str(ROOT / "libspy.a"),
                     *shlex.split(os.environ.get("LDFLAGS", "")), "-lm", "-o", str(binary)], check=True)
 
 
@@ -25,7 +25,7 @@ def build(*sources, binary):
 BARE = "print('standalone', sum(range(10)), 'sys' in globals())\n"
 STANDARD = "import sys\nprint('standalone', sum(range(10)), sys.modules['sys'] is sys)\n"
 for program, extra, expected in [(BARE, [], "standalone 45 False\n"),
-                                 (STANDARD, [str(ROOT / "spy-std.c")], "standalone 45 True\n")]:
+                                 (STANDARD, [str(ROOT / "libspy-std.a")], "standalone 45 True\n")]:
     with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
         directory = Path(temp)
         source = directory / "hello source.py"
