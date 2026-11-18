@@ -24350,17 +24350,32 @@ static void finish_delegate(SPYContext *c, Machine *m) {
     }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE; m->throwing = 0; m->await_target = 0;
 }
+/* Whether athrow or aclose awaitable op throws one exception, a class or
+ * an instance, which resumed_with raises at its generator's yield. */
+static int throws_one(SPYContext *c, SPYValue *op) {
+    if (op->as.async_operation.method == M_ACLOSE) return 1;
+    SPYValue *args = op->as.async_operation.args, *e = args->as.seq.items[0];
+    return (args->as.seq.len == 1 && (e->type == SPY_CLASS ? subclass(e, c->exceptions[X_BASE_EXCEPTION]) :
+                                      e->type == SPY_INSTANCE && subclass(e->as.map.parent, c->exceptions[X_BASE_EXCEPTION])));
+}
 /* Whether the await of op on machine m resumes its async generator there:
  * op an asend or __anext__ not yet awaited, of a generator at a yield, or
- * not started and sent None. The generator becomes m's delegate, op its
- * operation, which delegate_left ends at its next yield or its end. */
-static NO_INLINE int operation_entered(Machine *m) {
+ * not started and sent None; or an athrow or aclose not yet awaited of one
+ * (throws_one) at a yield and not closed. The generator becomes m's
+ * delegate, op its operation, which delegate_left ends at its next yield
+ * or its end. */
+static NO_INLINE int operation_entered(SPYContext *c, Machine *m) {
     SPYValue *op = m->delegate, *g = op->as.async_operation.generator;
-    if (op->type != SPY_ASYNC_GENERATOR_ASEND || op->as.async_operation.state || g->as.generator.async_running ||
+    int throws = op->type == SPY_ASYNC_GENERATOR_ATHROW;
+    if (op->as.async_operation.state || g->as.generator.async_running ||
         g->as.generator.running || g->as.generator.done || !g->as.generator.machine ||
-        (g->as.generator.machine->awaiting != AWAIT_YIELD && (g->as.generator.started ||
+        (throws ? g->as.generator.machine->awaiting != AWAIT_YIELD || g->as.generator.async_closed || !throws_one(c, op) :
+         g->as.generator.machine->awaiting != AWAIT_YIELD && (g->as.generator.started ||
          (op->as.async_operation.method == M_ASEND && op->as.async_operation.args->as.seq.items[0]->type != SPY_NONE))))
         return 0;
+    if (op->as.async_operation.method == M_ACLOSE) g->as.generator.async_closed = 1;
+    /* A throw is raised at the yield even where its value is dropped. */
+    if (throws) g->as.generator.machine->drop = 0;
     op->as.async_operation.state = 1; g->as.generator.async_running = 1;
     m->operation = op; m->delegate = spy_retain(g); m->await_target = 0;
     return 1;
@@ -32197,10 +32212,18 @@ static ALWAYS_INLINE Consumer *resuming(Machine *resumer) {
     return top->kind == BLOCK_CONSUME ? top->consumer : NULL;
 }
 static NO_INLINE SPYValue *resumed_with(SPYContext *c, Machine *resumer) {
-    /* An async generator an operation resumes at its yield takes what asend sends. */
+    /* An async generator an operation resumes at its yield takes what asend
+     * sends, or raises what athrow or aclose throws. */
     SPYValue *op = resumer->operation;
-    if (UNLIKELY(op) && resumer->delegate->as.generator.machine->awaiting == AWAIT_YIELD)
+    if (UNLIKELY(op) && resumer->delegate->as.generator.machine->awaiting == AWAIT_YIELD) {
+        if (op->type == SPY_ASYNC_GENERATOR_ATHROW) {
+            size_t argc;
+            SPYValue *const *argv = athrow_args(c, op, &argc), *thrown = thrown_exception(c, argc, argv);
+            if (thrown) { raise_thrown(c, thrown, c->handled); spy_release(thrown); }
+            return spy_none(c);
+        }
         return spy_retain(op->as.async_operation.method == M_ASEND ? op->as.async_operation.args->as.seq.items[0] : c->none);
+    }
     Consumer *s = resuming(resumer);
     SPYValue *sent = s ? s->sent : NULL;
     if (!sent) return spy_none(c);
@@ -33523,7 +33546,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 /* A generator this yield from may resume yields or ends
                  * into this machine (generator_left). */
                 if (delegable(m->delegate) ||
-                    (ins->arg == DELEGATE_AWAITABLE && m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(m))) {
+                    (ins->arg == DELEGATE_AWAITABLE && (m->delegate->type == SPY_ASYNC_GENERATOR_ASEND || m->delegate->type == SPY_ASYNC_GENERATOR_ATHROW) &&
+                     operation_entered(c, m))) {
                     spy_release(a); a = NULL; value = m->delegate; goto resume_generator;
                 }
                 spy_release(a); a = NULL; value = NULL;
@@ -33577,7 +33601,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 a = call_special(c, m->blocks[m->block_len - 1].value, "__anext__", 0, NULL);
                 m->awaiting = AWAIT_NEXT; m->await_target = ins->target; m->drop = 0;
                 if (a) m->delegate = await_iterator(c, a, "__anext__");
-                if (m->delegate && (delegable(m->delegate) || (m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(m)))) {
+                if (m->delegate && (delegable(m->delegate) || (m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(c, m)))) {
                     m->awaiting = AWAIT_DELEGATE; m->await_target = ins->target;
                     spy_release(a); a = NULL; value = m->delegate; goto resume_generator;
                 }
@@ -34162,8 +34186,14 @@ static NO_INLINE Machine *delegate_left(SPYContext *c, Machine *m, SPYValue **g,
         /* An operation's generator yields the await's value, or ends it
          * raising StopAsyncIteration, which ends an async for. */
         if (UNLIKELY(m->operation) && (flow->flow != FLOW_YIELD || m->delegate->as.generator.machine->awaiting == AWAIT_YIELD)) {
-            if (flow->flow == FLOW_YIELD) machine_push(c, m, flow->value);
-            else generator_end(c, m->delegate, *flow);
+            /* An aclose's generator must not yield, and its end gives None. */
+            int closing = m->operation->as.async_operation.method == M_ACLOSE;
+            if (flow->flow == FLOW_YIELD && closing) { spy_release(flow->value); spy_error(c, "RuntimeError", "async generator ignored GeneratorExit"); }
+            else if (flow->flow == FLOW_YIELD) machine_push(c, m, flow->value);
+            else {
+                generator_end(c, m->delegate, *flow);
+                if (closing && (error_is(c, "StopAsyncIteration") || error_is(c, "GeneratorExit"))) { spy_clear_error(c); machine_push(c, m, spy_none(c)); }
+            }
             finish_delegate(c, m);
             *flow = (Result){FLOW_NORMAL, NULL};
             return m;

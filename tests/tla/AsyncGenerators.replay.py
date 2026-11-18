@@ -2,8 +2,8 @@
 # the spec's body and performs the spec's steps on it, running each
 # awaitable to completion, an asend() through an await or, in every other
 # walk, sent to directly, a throw() into an asend() awaitable directly, an
-# athrow() or aclose() sent to or, in every other walk, stepped by next(),
-# and comparing its result with the model's.
+# athrow() or aclose() sent to, stepped by next() or awaited, in turn by
+# walk, and comparing its result with the model's.
 FIELDS = ("variant", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -35,7 +35,8 @@ async def awaiting(awaitable):
     return await awaitable
 
 
-def perform(target, op, direct):
+def perform(target, op, mode):
+    direct = mode % 2
     if op[0] == "asend":
         # Awaited, as an async for or await runs it, resuming the body there.
         awaitable = target.asend(None if op[1] == "None" else op[1])
@@ -46,11 +47,13 @@ def perform(target, op, direct):
         awaitable = target.athrow(error) if op[0] == "athrow" else target.asend(None)
     else:
         awaitable = target.aclose()
+    if op[0] in ("athrow", "aclose") and mode == 2:
+        awaitable = awaiting(awaitable)
     try:
         if op[0] == "thrown":
             # Thrown into the asend() awaitable, which throws it into the body.
             awaitable.throw(error)
-        elif op[0] == "asend" or direct:
+        elif op[0] == "asend" or direct or mode == 2:
             awaitable.send(None)
         else:
             next(awaitable)
@@ -73,7 +76,7 @@ for walk in walks():
     target = make(start["variant"])
     recent = []
     for state in steps:
-        actual = perform(target, state["op"], count % 2)
+        actual = perform(target, state["op"], count % 3)
         recent = (recent + [state["op"]])[-8:]
         if actual != state["result"]:
             failures += 1
