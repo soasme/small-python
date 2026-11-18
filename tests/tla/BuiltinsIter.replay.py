@@ -190,6 +190,10 @@ SOURCES = {
     "sort_tuple_ties": 'class T:\n    def __init__(self, v): self.v = v\n    def __eq__(self, o): log.append(1); return self.v == o.v\n'
                        '    def __lt__(self, o): return self.v < o.v\nlog = []\n'
                        'result = ([t[1].v for t in sorted([(0, T(2)), (0, T(1)), (0, T(0))])], bool(log))',
+    "sort_tuple_lt_only": 'class L:\n    def __init__(self, v): self.v = v\n'
+                          '    def __lt__(self, o):\n        for _ in (): pass\n        log.append(1)\n        return self.v < o.v\nlog = []\n'
+                          'ts = [(L(2), 0), (L(0), 1), (L(1), 2)]\nts.sort()\n'
+                          'result = ([t[0].v for t in ts], [t[0].v for t in sorted(ts, reverse=True)], bool(log))',
     "sort_list_ties": 'class T:\n    def __init__(self, v, home=None): self.v = v; self.home = home\n'
                       '    def __eq__(self, o):\n        log.append(1)\n        if self.home is not None: self.home.clear()\n        return self.v == o.v\n'
                       '    def __lt__(self, o): return self.v < o.v\nlog = []\n'

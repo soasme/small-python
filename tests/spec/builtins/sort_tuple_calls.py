@@ -5,7 +5,9 @@
 # of the items is called with them, an item compared with itself is not,
 # a NotImplemented falls back to the reflected method and then identity,
 # and an exception from either propagates out of the sort, with or
-# without a key and reversed, inside functions as at module level.
+# without a key and reversed, inside functions as at module level. Items
+# with object's __eq__ and a Python __lt__ alone compare by identity, then
+# by that __lt__.
 from harness import *
 
 log = []
@@ -33,6 +35,13 @@ class Lazy:
         return NotImplemented
     def __lt__(self, other): return self.v < other.v
 
+class Less:
+    def __init__(self, v): self.v = v
+    def __lt__(self, other):
+        spin()
+        log.append("less")
+        return self.v < other.v
+
 def error(f):
     try:
         return f()
@@ -55,12 +64,17 @@ def results():
     ys.sort()
     lazy = sorted([(Lazy(2), 0), (Lazy(1), 1)])
     out += [values(ys), [t[1] for t in lazy], "eq" in log, "lt" in log, "lazy" in log]
+    del log[:]
+    q = [Less(i) for i in range(3)]
+    zs = [(q[2], 0), (q[0], 1), (q[1], 2), (q[0], 0)]
+    zs.sort()
+    out += [[(a.v, b) for a, b in zs], [(a.v, b) for a, b in sorted(zs, reverse=True)], "less" in log]
     return out
 
 expected = [[(0, 0), (0, 2), (1, 1), (1, 3)], [(1, 3), (1, 1), (1, 1)], [1, 2, 2], [2, 1, 3],
             ("KeyError", "9"), ("AttributeError", "'int' object has no attribute 'v'"),
             ("TypeError", "'<' not supported between instances of 'int' and 'P'"), [(0, 1), (0, 2)], [1, 0],
-            True, True, True]
+            True, True, True, [(0, 0), (0, 1), (1, 2), (2, 0)], [(2, 0), (1, 2), (0, 1), (0, 0)], True]
 
 def main():
     return results()

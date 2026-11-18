@@ -34923,12 +34923,14 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
     return NULL;
 }
 /* Whether sorting keys like a and b calls a Python rich comparison: a's
- * __lt__ (rich_function), or for two tuples the __eq__ of a pair of their
- * items, which ties before it reach. */
+ * __lt__ (rich_function), or for two tuples or lists the __eq__ or
+ * __lt__ of a pair of their items. */
 static int sort_calls(SPYContext *c, SPYValue *a, SPYValue *b) {
     if (!ordered_pair(a, b)) return rich_function(c, a, b, R_LT) != NULL;
-    for (size_t i = 0; i < a->as.seq.len && i < b->as.seq.len; i++)
-        if (rich_function(c, a->as.seq.items[i], b->as.seq.items[i], R_EQ)) return 1;
+    for (size_t i = 0; i < a->as.seq.len && i < b->as.seq.len; i++) {
+        SPYValue *x = a->as.seq.items[i], *y = b->as.seq.items[i];
+        if (rich_function(c, x, y, R_EQ) || rich_function(c, x, y, R_LT)) return 1;
+    }
     return 0;
 }
 /* The sorter of items by keys, reversed first when descending, when their

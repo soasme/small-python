@@ -466,7 +466,7 @@ Unreleased (0.10.0):
   Python `__setattr__` and `__delattr__` run without nesting on the C stack
 - `await` of an async generator's `athrow()` or `aclose()` resumes the generator without nesting on the C stack
 - `async for` calls an iterator's plain Python `__anext__` without nesting on the C stack
-- sorting lists of lists calls the items' Python comparisons without nesting on the C stack
+- sorting tuples or lists calls the items' Python comparisons, `__lt__` alone included, without nesting on the C stack
 - `object.__reduce__()`, `__reduce_ex__()` and `__getstate__()` call Python methods without nesting on the C stack
 - a builtin method or slot wrapper called without its object raises CPython's message for its kind; `property.__set_name__` and memoryview's `__enter__` and `__exit__` are method descriptors
 - exception groups' `split()` and `subgroup()` call a Python condition or `derive` without nesting on the C stack
