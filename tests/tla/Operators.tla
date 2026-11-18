@@ -28,7 +28,9 @@
 (* subclassing str with y of an unrelated plain class R (relation          *)
 (* "plain"): str's __add__ is the concatenation and raises TypeError for   *)
 (* y rather than returning NotImplemented, so once L defines __radd__ y's  *)
-(* __radd__ is never reached.                                              *)
+(* __radd__ is never reached. Or x may be of a plain class L with y of R  *)
+(* subclassing str (relation "right"): with no __add__ answering, y's      *)
+(* __radd__ is the last call, str's __add__ never consulted.               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -57,8 +59,8 @@ Programs == (UNION {
     : rel \in Rels \cup {"exact"}})
     \cup {[op |-> "+", rel |-> "left", holder |-> "str", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
            l \in [{} -> Kinds], r \in [UsesR("+") -> Kinds]}
-    \cup {[op |-> "+", rel |-> "plain", holder |-> "str", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
-           l \in [UsesL("+") -> Kinds], r \in [UsesR("+") -> Kinds]}
+    \cup {[op |-> "+", rel |-> rel, holder |-> "str", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
+           l \in [UsesL("+") -> Kinds], r \in [UsesR("+") -> Kinds], rel \in {"plain", "right"}}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -76,7 +78,8 @@ Builtin(p, m) == IF (p.holder = "int" /\ m \in {"add", "radd"}) \/ (p.holder = "
 Definer(p, who, m) ==
     CASE who = "y" /\ p.rel = "exact" -> Builtin(p, m)
       [] who = "y" /\ p.rel = "plain" -> IF p.R[m] # "none" THEN "R" ELSE "none"
-      [] who = "x" \/ p.rel = "same" -> IF p.L[m] # "none" THEN "L" ELSE Builtin(p, m)
+      [] p.rel = "right" -> IF (IF who = "x" THEN p.L[m] ELSE p.R[m]) # "none" THEN (IF who = "x" THEN "L" ELSE "R") ELSE "none"
+      [] (who = "x" /\ p.rel # "right") \/ p.rel = "same" -> IF p.L[m] # "none" THEN "L" ELSE Builtin(p, m)
       [] p.rel = "other" -> IF p.R[m] # "none" THEN "R" ELSE Builtin(p, m)
       [] OTHER -> IF p.R[m] # "none" THEN "R" ELSE IF p.L[m] # "none" THEN "L" ELSE Builtin(p, m)
 
@@ -106,7 +109,7 @@ Add(p) ==
     LET first == p.rel = "sub" /\ p.R.radd # "none"
         calls == IF first THEN <<Call(p, "y", "radd"), Call(p, "x", "add")>>
                  ELSE <<Call(p, "x", "add")>> \o (IF p.rel = "same" THEN <<>> ELSE <<Call(p, "y", "radd")>>)
-    IN  First(calls, IF p.holder = "str" /\ p.L.add = "none" /\ p.rel \notin {"left", "plain"} THEN "ab" ELSE "TypeError")
+    IN  First(calls, IF p.holder = "str" /\ p.L.add = "none" /\ p.rel \notin {"left", "plain", "right"} THEN "ab" ELSE "TypeError")
 
 \* A comparison tries the reflected method of y first when R is a proper
 \* subclass of L, otherwise after x's; then falls back to identity.
@@ -148,6 +151,9 @@ EqualityTotal == Done /\ program.op \in {"==", "!="} => outcome # "TypeError"
 \* which raises for a y that is no str before y's __radd__ is tried.
 ConcatenationRaises == Done /\ program.rel = "plain" /\ program.L.add = "none" /\ program.L.radd # "none" =>
     outcome = "TypeError"
+
+\* A plain left operand without __add__ leaves the right one's __radd__ last.
+ReflectedLast == Done /\ program.rel = "right" /\ program.L.add # "value" /\ program.R.radd = "value" => outcome = "R.radd:y"
 
 \* An in-place method returning a value is used as is.
 InPlaceFirst == Done /\ program.op = "+=" /\ program.L.iadd = "value" => outcome = "L.iadd:x"

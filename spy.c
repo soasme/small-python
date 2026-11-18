@@ -30414,6 +30414,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             /* A builtin sequence's operator is no number method: y's reflected one comes first. */
             self = y; other = x; phase = OPERATOR_REFLECTED;
         } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_entry(c, x, rich, &negated);
+        /* A plain instance without the method leaves another class's
+         * reflected one as the last call. */
+        if (!function && o && x->type == SPY_INSTANCE && !x->as.map.base && right != cls && (function = item_function(c, y, reflected))) {
+            self = y; other = x; phase = OPERATOR_LAST;
+        }
     }
 found:
     /* A builtin's operator (builtin_operator) goes with the phase. */
@@ -39192,6 +39197,11 @@ static SPYValue *add_function(SPYContext *c, SPYValue *x, SPYValue *y, int *phas
     }
     *phase = OPERATOR_FIRST;
     function = class_lookup(cls, "__add__");
+    if (!function && x->type == SPY_INSTANCE && !x->as.map.base && right != cls) {
+        /* A plain instance without __add__ leaves another class's __radd__ last. */
+        *phase = OPERATOR_LAST;
+        return item_function(c, y, "__radd__");
+    }
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Neumaier's compensated addition of x to the sum *total, whose lost low

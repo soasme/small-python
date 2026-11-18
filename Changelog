@@ -445,6 +445,8 @@ Unreleased (0.10.0):
 - calling a staticmethod object runs its Python function without nesting on the C stack
 - unpacking an instance with a Python `__getitem__`, or a `map()` or `filter()` of a Python function,
   takes its items without nesting on the C stack
+- A binary operator or `sum()` whose left operand's class has no method calls the right operand's Python
+  reflected method without nesting on the C stack
 - `zip()`, `map()` and `enumerate()` over an instance with a Python `__getitem__` read its items without
   nesting on the C stack; when pausing, a zip whose iterable ended asks the others again on its next call
 

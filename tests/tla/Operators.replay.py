@@ -5,13 +5,13 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
-def body(cls, methods):
+def body(cls, methods, loop=""):
     lines = []
     for m, kind in sorted(methods.items()):
         if kind == "value":
-            lines.append(f"    def __{m}__(self, other): return '{cls}.{m}:' + self.name")
+            lines.append(f"    def __{m}__(self, other):{loop} return '{cls}.{m}:' + self.name")
         elif kind == "NI":
-            lines.append(f"    def __{m}__(self, other): return NotImplemented")
+            lines.append(f"    def __{m}__(self, other):{loop} return NotImplemented")
     return "\n".join(lines) or "    pass"
 
 
@@ -19,6 +19,17 @@ def outcome(p):
     meta = p["holder"] == "class"
     base = p["holder"] if p["holder"] in ("int", "str") else None
     source = ("class L(type):\n" if meta else f"class L({base}):\n" if base else "class L:\n") + body("L", p["L"]) + "\n"
+    if p["rel"] == "right":
+        # Looping methods, as a Python function that runs as a call of its own.
+        loop = "\n        for _ in range(2): pass\n       "
+        source = ("class L:\n" + body("L", p["L"], loop) + "\nclass R(str):\n" + body("R", p["R"], loop) +
+                  "\nx = L(); x.name = 'x'\ny = R('b'); y.name = 'y'\nresult = x + y\n")
+        namespace = {}
+        try:
+            exec(source, namespace)
+        except TypeError:
+            return "TypeError"
+        return str(namespace["result"])
     if p["rel"] == "left":
         source = "class R:\n" + body("R", p["R"]) + "\nx = 'a'\ny = R(); y.name = 'y'\nresult = x + y\n"
         namespace = {}
