@@ -30,13 +30,14 @@ def calls():
     del log[:]
     args, kwargs = (5, 6, 7), {"z": 8}
     out = [sm(1), sm(1, 9), sm(*args), sm(4, z=0), sm(*args, **kwargs), sm(x=2), [sm(i)[0] for i in range(2)]]
-    out += [error(lambda: sm("bad")), error(lambda: sm()), length("abc"), sm.__func__ is pair, (lambda: sm)()(3)]
+    out += [error(lambda: sm("bad")), error(lambda: sm()), length("abc"), sm.__func__ is pair, (lambda: sm)()(3), error(lambda: (lambda: sm)()())]
     out.append(list(log))
     return out
 
 expected = [(1, 2, (), 3), (1, 9, (), 3), (5, 6, (7,), 3), (4, 2, (), 0), (5, 6, (7,), 8), (2, 2, (), 3), [0, 1],
             ("ValueError", "bad"), ("TypeError", "pair() missing 1 required positional argument: 'x'"), 3, True,
-            (3, 2, (), 3), [1, 1, 5, 4, 5, 2, 0, 1, "bad", 3]]
+            (3, 2, (), 3), ("TypeError", "pair() missing 1 required positional argument: 'x'"),
+            [1, 1, 5, 4, 5, 2, 0, 1, "bad", 3]]
 
 def main():
     return calls()
