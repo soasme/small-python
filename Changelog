@@ -452,6 +452,8 @@ Unreleased (0.10.0):
 - `1.5 + I(2)`, `1.5 < I(2)` and the like, for an int or float subclass `I`, use the left number's method
   and never call `I`'s reflected one; a number subclass's declining method raises `TypeError` as CPython does
 - `zip()` and `enumerate()` over another zip or enumerate of a `map()` take its items without nesting on the C stack
+- `yield from` a zip, enumerate or map of a `map()` takes its items without nesting on the C stack, and a
+  `StopIteration` from the map's function gives the `yield from` its value
 
 2026-11-10 0.9.0:
 

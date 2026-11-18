@@ -31,6 +31,8 @@
 (* items of some iterables when another ended drops them. A zip or         *)
 (* enumerate over another adapter of a map takes each item as that one     *)
 (* makes it; an error from the map's function drops what each zip took.    *)
+(* As a yield from's delegate, such an adapter yields those items, and a   *)
+(* StopIteration from the map's function gives the yield from its value.   *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -81,7 +83,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
           "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem",
-          "adapter_nested"}
+          "adapter_nested", "adapter_delegate"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -154,6 +156,8 @@ Case(c) ==
       [] c = "adapter_getitem" -> "(((0, 'b1'), 'KeyError'), [(10, 'b0')], [], {'a': 0, 'b': 10}, [], [(0, 'b1'), (10, 'b0')], [], [0, 1, 1, 2, 3, 0, 1, 0, 0, 1, 2, 3])"
       \* An adapter of an adapter of a map: the error drops both zips' items.
       [] c = "adapter_nested" -> "(((('a', 10), 'u'), 'ValueError'), [], [(0, (30, 'x')), (1, (50, 'y'))], [(0, (0, 60))], [1, 4, 3, 5, 6])"
+      \* yield from an adapter of a map: a StopIteration's value is the result.
+      [] c = "adapter_delegate" -> "([(10, 'a'), ('ret', 33)], [(0, 'k'), ('ret', None)], 'ValueError', [1, 1, ('ret', None)], [1, 3, 'str', 4, 'str', 'str'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

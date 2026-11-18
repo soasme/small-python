@@ -32816,6 +32816,14 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
     if (function && machine_function(c, function) && !(closing && machine_push(c, m, spy_retain(thrown)))) {
         SPYValue *args[] = {spy_retain(d), next || closing ? NULL : spy_retain(thrown ? thrown : sent)};
         if ((*env = function_env(c, function, next || closing ? 1 : 2, args, NULL, 1))) call = spy_retain(function);
+    } else if (next && d->type == SPY_ITERATOR && !(d->as.iterator.removed & 1) && adapts(d)) {
+        /* An adapter's next call, as a loop's (adapted_call), or its item;
+         * one that ended raises StopIteration. */
+        int status = next_call_of(c, m, d, &call, env);
+        if (status == 3) *item = call;
+        if (status != 1) call = NULL;
+        if (status == 0 && !c->error_type[0]) *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
+        else if (status < 0 && !c->error_type[0]) spy_error(c, "StopIteration", "");
     } else if (!(next && map_calls(c, d) && next_call_of(c, m, d, &call, env) > 0) && !c->error_type[0])
         /* An ended map raises StopIteration here. */
         *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
@@ -32932,6 +32940,29 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (matched == 2) goto enter_k;
                         if (!matched) pc = code[pc - 1].target;
                     } else if (kind >= CALL_DELEGATE && kind <= CALL_CLOSED) {
+                        if (kind == CALL_DELEGATE && m->delegate && m->delegate->type == SPY_ITERATOR && adapts(m->delegate)) {
+                            /* An adapter's call gives its item as to a loop (CALL_NEXT). */
+                            int again = 0;
+                            if (m->len && m->stack[m->len - 1] == c->tupling) {
+                                Machine *walk = tuple_returned(c, m, CALL_DELEGATE, &result);
+                                if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
+                            }
+                            int tested = sentineling(c, m);
+                            if (tested) {
+                                if (!(result = sentinel_compared(c, m, result, CALL_DELEGATE)) && c->k_fn) goto enter_k;
+                            } else if (m->len && m->stack[m->len - 1] == c->converting &&
+                                       !(result = item_converted(c, m, result, CALL_DELEGATE)) && c->k_fn) goto enter_k;
+                            if (m->len && m->stack[m->len - 1] == c->adapting) result = adapted_chain(c, m, result, &again, tested, CALL_DELEGATE);
+                            if (again) {
+                                /* It takes more: its next call, entered as delegate_step's, or its item. */
+                                SPYValue *item, *env = NULL, *call = delegate_next(c, m, 0, &again, &env, &item);
+                                if (call) { c->k_fn = call; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = again; goto enter_k; }
+                                if (item) YIELD(item);
+                                pc = m->pc;
+                                continue;
+                            }
+                            if (!result && c->k_fn) goto enter_k;
+                        }
                         /* An iterator's method gives a yield from's item. */
                         if ((result = delegate_returned(c, m, kind, result))) YIELD(result);
                         pc = m->pc;
