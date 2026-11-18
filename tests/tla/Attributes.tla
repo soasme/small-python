@@ -18,7 +18,8 @@
 (*                                                                         *)
 (* with or without a __getattr__ returning 'ga', and with no Python       *)
 (* __getattribute__ (hook none), one passing the name to object's (pass), *)
-(* or one raising AttributeError (refuse). The steps are o.a,             *)
+(* or to super()'s (super), or one raising AttributeError (refuse). The   *)
+(* steps are o.a,                                                          *)
 (* o.a() (each value is callable, returning itself), o.a = v (v is 'v1'   *)
 (* or 'v2'), and del o.a; `stored` is what o's                             *)
 (* __dict__ or slot holds for a. Each is spelled with the attribute        *)
@@ -35,7 +36,7 @@ Getters == {"property", "raising", "subproperty", "subraising"}
 Values == {"v1", "v2"}
 Missing == "missing"
 
-Hooks == {"none", "pass", "refuse"}
+Hooks == {"none", "pass", "super", "refuse"}
 
 Spellings == {"attr", "named"}
 

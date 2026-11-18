@@ -51,6 +51,10 @@ def passing(self, n):
     return object.__getattribute__(self, n) if given(n) else Value("wrong name")
 
 
+def supering(self, n):
+    return super(type(self), self).__getattribute__(n) if given(n) else Value("wrong name")
+
+
 def refusing(self, n):
     raise AttributeError(str(n) if given(n) else "wrong name")
 
@@ -76,7 +80,7 @@ def make(kind, getattr, hook):
     if getattr:
         namespace["__getattr__"] = lambda self, n: Value("ga" if given(n) else "wrong name")
     if hook != "none":
-        namespace["__getattribute__"] = passing if hook == "pass" else refusing
+        namespace["__getattribute__"] = passing if hook == "pass" else supering if hook == "super" else refusing
     return type("C", (), namespace)()
 
 

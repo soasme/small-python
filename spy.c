@@ -41633,6 +41633,27 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
 static int native_absent(SPYContext *, SPYValue *, SPYValue *);
 static int memory_released(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* object.__getattribute__ of instance v, or type.__getattribute__ of
+ * class v (type), and name, whose default lookup calls a Python getter
+ * (instance_getter, class_getter): that getter, owned, with *env, to enter
+ * as the call; else NULL. An instance __dict__ holding keys other than
+ * str, whose search may call Python, is left to the native call. */
+static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYValue *name, int type, SPYValue **env) {
+    SPYValue *text = builtin_value(c, name, SPY_STRING), *own = NULL, *descriptor, *argv[3] = {v, NULL, NULL}, *dict;
+    size_t argc = 1;
+    if (!text || v->type != (type ? SPY_CLASS : SPY_INSTANCE)) return NULL;
+    if (type) descriptor = spy_retain(class_getter(c, v, text->as.string.data));
+    else {
+        dict = v->as.map.namespace ? dictionary_value(c, v->as.map.namespace) : NULL;
+        if (dict && !string_keys(c, dict)) return NULL;
+        descriptor = instance_getter(c, v, v->as.map.parent, text->as.string.data, &own);
+        spy_release(own);
+    }
+    SPYValue *function = descriptor ? getter_function(c, v, text->as.string.data, descriptor, argv, &argc) : NULL;
+    if (!function) return NULL;
+    if (!(*env = function_env(c, function, argc, argv, NULL, 1))) { spy_release(function); return NULL; }
+    return function;
+}
 /* A call of callee with argc arguments argv, bound or not, that is
  * property.__get__ of an object whose property's getter is Python, or
  * dict.__getitem__ of a dict subclass's instance whose class has a Python
@@ -41659,6 +41680,8 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
             !native_absent(c, base, argv[0])) return NULL;
         return missing_env(c, function, self, argv[0], env);
     }
+    if (argc == 1 && (is_builtin(callee, B_OBJECT_GETATTRIBUTE) || is_builtin(callee, B_TYPE_GETATTRIBUTE)))
+        return getattribute_entered(c, self, argv[0], is_builtin(callee, B_TYPE_GETATTRIBUTE), env);
     if (callee->as.native.kwcall != descriptor_method || callee->as.native.data != (void *)((intptr_t)SPY_PROPERTY << 8 | DESCR_GET)) return NULL;
     SPYValue *p = builtin_value(c, self, SPY_PROPERTY);
     if (!p || argc < 1 || argc > 2 || argv[0]->type == SPY_NONE || !machine_function(c, p->as.property.get)) return NULL;
