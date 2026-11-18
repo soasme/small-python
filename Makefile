@@ -451,7 +451,8 @@ test-gc-stress:
 # path is compiled in, since the test runners clear the environment, and
 # mapped at startup (%c), before the worker's sandbox forbids opening it.
 # Threads and the processes sharing a profile file count atomically: a lost
-# increment can make a count llvm-cov derives by subtraction zero.
+# increment can make a count llvm-cov derives by subtraction zero. tests/oom
+# runs in one process, since its workers would contend for those counters.
 COVERAGE_DIR = $(abspath $(OBJDIR))/coverage
 COVERAGE_PROFILE = -fprofile-instr-generate=$(COVERAGE_DIR)/%c%4m.profraw -fprofile-update=atomic
 LLVM_PROFDATA ?= llvm-profdata
@@ -459,7 +460,7 @@ LLVM_COV ?= llvm-cov
 coverage:
 	$(MAKE) clean
 	mkdir -p $(COVERAGE_DIR)
-	SPY_TEST_TIMEOUT=600 $(MAKE) CC=clang CFLAGS='-O1 -g -std=c11 $(COVERAGE_PROFILE) -fcoverage-mapping -mllvm -runtime-counter-relocation' \
+	SPY_OOM_JOBS=1 SPY_TEST_TIMEOUT=600 $(MAKE) CC=clang CFLAGS='-O1 -g -std=c11 $(COVERAGE_PROFILE) -fcoverage-mapping -mllvm -runtime-counter-relocation' \
 		LDFLAGS='$(COVERAGE_PROFILE)' test test-binding
 	$(LLVM_PROFDATA) merge -o $(COVERAGE_DIR)/all.profdata $(COVERAGE_DIR)/*.profraw
 	$(LLVM_COV) report -instr-profile=$(COVERAGE_DIR)/all.profdata ./bin/spy -object ./bin/spyc -object ./tests/run-spec \

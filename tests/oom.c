@@ -4,7 +4,7 @@
  * must end cleanly, in a result or an exception, and free everything it
  * allocated: the engine frees through this counter, so a leak is seen per
  * run, not only at exit. The runs of a program are dealt out to one
- * process per processor.
+ * process per processor, or to SPY_OOM_JOBS processes when it is set.
  * Run it under make sanitize so a bad cleanup path is also reported.
  *
  * usage: tests/oom [--native LIBRARY] [FILE...]
@@ -3418,7 +3418,8 @@ static size_t check(const char *source, const char *name, size_t from, size_t up
     size_t total = run(source, name, &status), failed[2] = {0, 0};
     if (upto && upto < total) total = upto;
     const char *ends = status ? "an exception" : "a result";
-    long workers = sysconf(_SC_NPROCESSORS_ONLN);
+    const char *jobs = getenv("SPY_OOM_JOBS");
+    long workers = jobs ? atol(jobs) : sysconf(_SC_NPROCESSORS_ONLN);
     int counts[2];
     if (workers < 1) workers = 1;
     if (pipe(counts)) { perror("pipe"); exit(2); }
