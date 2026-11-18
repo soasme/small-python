@@ -1,6 +1,7 @@
 # Replays ClassAttributeHooks.tla: each case makes a metaclass with the
-# spec's hooks and a class of it, performs the steps, and compares the log,
-# the results, and whether the attribute remains with the model's.
+# spec's hooks, and a data descriptor for a when descr, and a class of it,
+# performs the steps, and compares the log, the results, and whether the
+# attribute remains in the class's namespace with the model's.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -27,6 +28,20 @@ def metaclass(p, log):
             log.append("del")
             raise AttributeError(name)
         namespace["__delattr__"] = __delattr__
+    if p["descr"]:
+        class Descriptor:
+            def __get__(self, cls, owner=None):
+                return held[0]
+            def __set__(self, cls, value):
+                log.append("dset")
+                held[:] = [value]
+            def __delete__(self, cls):
+                log.append("ddel")
+                if not held:
+                    raise AttributeError("a")
+                held.clear()
+        held = []
+        namespace["a"] = Descriptor()
     M = type("M", (type,), namespace)
     return M
 

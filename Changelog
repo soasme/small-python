@@ -462,6 +462,8 @@ Unreleased (0.10.0):
   nesting on the C stack
 - `zip(strict=True)` and `map(strict=True)` over generators resume them, and check their lengths, without
   nesting on the C stack
+- a class attribute store or deletion calls a data descriptor or property its metaclass defines; a metaclass's
+  Python `__setattr__` and `__delattr__` run without nesting on the C stack
 
 2026-11-10 0.9.0:
 

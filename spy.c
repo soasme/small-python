@@ -534,6 +534,9 @@ static SPYValue *class_lookup(SPYValue *, const char *);
 static SPYValue *value_class(SPYContext *, SPYValue *);
 /* A class with a metaclass, whose special methods the metaclass supplies. */
 static ALWAYS_INLINE int metaclassed(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
+/* Whether stores to v's attributes may call a Python setter (setter_function):
+ * an instance's class's, or a class's metaclass's. */
+static ALWAYS_INLINE int setter_object(SPYValue *v) { return v->type == SPY_INSTANCE || metaclassed(v); }
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static SPYValue *contained_base(SPYContext *, SPYValue *);
 static int special_dispatch(SPYValue *);
@@ -11439,6 +11442,13 @@ static SPYValue *member_method(SPYContext *c, size_t argc, SPYValue *const *argv
     if (argc != expected) return errorf(c, "TypeError", "expected %zu argument%s, got %zu", expected, expected == 1 ? "" : "s", argc);
     return member_set(c, self, argv[0], which == 1 ? argv[1] : NULL) ? NULL : spy_none(c);
 }
+static int data_descriptor(SPYValue *);
+/* The data descriptor class v's metaclass, not type, defines for
+ * attribute name, which its stores and deletions call; else NULL. */
+static SPYValue *meta_data_descriptor(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *descriptor = metaclassed(v) ? instance_lookup(v->as.map.meta, name) : NULL;
+    return data_descriptor(descriptor) && descriptor != class_lookup(c->types[SPY_CLASS], name) ? descriptor : NULL;
+}
 static int data_descriptor(SPYValue *value) {
     return value && (value->type == SPY_PROPERTY || is_member(value) || (value->type == SPY_INSTANCE &&
         (class_lookup(value->as.map.parent, "__set__") || class_lookup(value->as.map.parent, "__delete__"))));
@@ -14680,6 +14690,8 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         if (!*attributes) *attributes = value_new(c, SPY_DICT);
         return *attributes ? name_set(c, *attributes, name, value) : -1;
     }
+    SPYValue *meta_descriptor = meta_data_descriptor(c, object, name);
+    if (meta_descriptor) return descriptor_set(c, meta_descriptor, object, value);
     if (object->type == SPY_INSTANCE) {
         SPYValue *descriptor = instance_lookup(object->as.map.parent, name);
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, value);
@@ -19411,12 +19423,12 @@ static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 static int store_hooked(SPYContext *, SPYValue *, SPYValue *);
 /* The Python function a store to, or with deleting a deletion of,
- * attribute name of instance object calls (SetAttr): its class's
- * __setattr__ or __delattr__, a property's setter or deleter, or a data
+ * attribute name of object, an instance or a class with a metaclass,
+ * calls (SetAttr): its class's or metaclass's __setattr__ or __delattr__, a property's setter or deleter, or a data
  * descriptor's __set__ or __delete__, *descriptor that descriptor; else
  * NULL. */
 static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, const char *name, SPYValue **descriptor, int deleting) {
-    SPYValue *owner = object->as.map.parent, *hook = class_lookup(owner, deleting ? "__delattr__" : "__setattr__"), *function = NULL;
+    SPYValue *owner = object->type == SPY_INSTANCE ? object->as.map.parent : object->as.map.meta, *hook = class_lookup(owner, deleting ? "__delattr__" : "__setattr__"), *function = NULL;
     *descriptor = NULL;
     if (hook && !(deleting ? default_hook(hook, B_OBJECT_DELATTR, B_TYPE_DELATTR) : default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR)))
         function = hook;
@@ -19429,7 +19441,7 @@ static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, cons
  * would not store at once, calls a Python setter on the machine: then
  * store_call enters c->entering_init with the descriptor c->fallback. */
 static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
-    SPYValue *descriptor, *function = object->type == SPY_INSTANCE ? setter_function(c, object, n->b->text, &descriptor, 0) : NULL;
+    SPYValue *descriptor, *function = setter_object(object) ? setter_function(c, object, n->b->text, &descriptor, 0) : NULL;
     if (!function) return 0;
     c->entering_init = function; c->fallback = spy_retain(descriptor);
     return 1;
@@ -22053,7 +22065,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
         if (!strcmp(name, "__dict__")) { spy_error(c, "TypeError", "cannot delete __dict__"); return -1; }
         object = object->as.wrapper.attributes;
     } else {
-        SPYValue *descriptor = object->type == SPY_INSTANCE ? instance_lookup(object->as.map.parent, name) : NULL;
+        SPYValue *descriptor = object->type == SPY_INSTANCE ? instance_lookup(object->as.map.parent, name) : meta_data_descriptor(c, object, name);
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, NULL);
         if (object->type == SPY_INSTANCE && !instance_has_dict(object)) {
             if (descriptor || !strcmp(name, "__doc__")) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
@@ -26794,8 +26806,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         if (argc == 3 || getter == B_HASATTR) m->stack[m->len++] = argc == 3 ? argv[2] : spy_retain(c->defaulting);
         return getattr_call(c, m, argc == 3 || getter == B_HASATTR, env);
     }
-    /* So do setattr() and delattr() of an instance and a str (setattr_call). */
-    if (method < 0 && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && attribute_named(c, argv[1]) &&
+    /* So do setattr() and delattr() of an instance or a class with a
+     * metaclass and a str (setattr_call). */
+    if (method < 0 && (argc == 2 || argc == 3) && setter_object(argv[0]) && attribute_named(c, argv[1]) &&
         builtin_id(callee) == (argc == 3 ? B_SETATTR : B_DELATTR)) {
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
         m->stack[m->len++] = callee;
@@ -28010,7 +28023,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         (callee->as.native.data == (void *)(intptr_t)B_MIN || callee->as.native.data == (void *)(intptr_t)B_MAX) &&
         (argc > 1 || (argc && (argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) && argv[0]->as.seq.len)))
         return fold_begin(c, m, argc, env);
-    if (calls && argc > 1 && argv[0]->type == SPY_INSTANCE && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
+    if (calls && argc > 1 && setter_object(argv[0]) && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
         callee->as.native.data == (void *)(intptr_t)(argc == 3 ? B_SETATTR : argc == 2 ? B_DELATTR : -1) &&
         attribute_named(c, argv[1]))
         return setattr_call(c, m, argc, env);
@@ -31105,7 +31118,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         int deleting = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = ins->op == BC_SAVE_TARGET ? machine_pop(m) : NULL, *object = machine_pop(m), *function, *descriptor;
         if (deleting) {
-            function = object->type == SPY_INSTANCE ? setter_function(c, object, n->b->text, &descriptor, 1) : NULL;
+            function = setter_object(object) ? setter_function(c, object, n->b->text, &descriptor, 1) : NULL;
             spy_retain(function ? descriptor : NULL);
         } else { function = c->entering_init; descriptor = c->fallback; c->fallback = NULL; }
         relocate(c, n);
@@ -31462,8 +31475,8 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
     c->attribute_name = saved;
     return result;
 }
-/* setattr() of an instance, a str and a value, or delattr() of an
- * instance and a str (argc 2), the step of a call with its callee and
+/* setattr() of an instance or a class with a metaclass, a str and a
+ * value, or delattr() of one and a str (argc 2), the step of a call with its callee and
  * operands on m's stack: the Python __setattr__, property setter or
  * __set__ a store calls, or the __delattr__, deleter or __delete__ a
  * deletion calls (setter_function), is the call to enter (CALL_STORE),
