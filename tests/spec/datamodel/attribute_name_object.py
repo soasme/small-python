@@ -2,8 +2,8 @@
 # description: getattr, hasattr, setattr and delattr given a str subclass's
 # instance pass that object itself as the name: to __getattribute__,
 # __getattr__, __setattr__ and __delattr__, as an AttributeError's name,
-# and as the key a plain instance's namespace binds. Inside functions as at
-# module level.
+# and as the key a plain instance's namespace binds, also when a map calls
+# getattr or hasattr. Inside functions as at module level.
 from harness import *
 
 class N(str): pass
@@ -45,9 +45,10 @@ def names(n):
     return [getattr(h, n) is n, hasattr(h, n), getattr(Intercepted(), n) is n,
             getattr(Missing(), n, 3), log[0] is n, log[1] is n,
             list(p.__dict__)[0] is n, type(list(p.__dict__)[0]) is N, p.zz,
-            error.name is n, ga.name is n, getattr(p, n) == 2]
+            error.name is n, ga.name is n, getattr(p, n) == 2,
+            list(map(getattr, [p, Plain()], [n, n], [0, 4])), list(map(hasattr, [p, Plain()], [n, n]))]
 
-expected = [True, True, True, 3, True, True, True, True, 2, True, True, True]
+expected = [True, True, True, 3, True, True, True, True, 2, True, True, True, [2, 4], [True, False]]
 
 def main():
     return names(N("zz"))
