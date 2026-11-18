@@ -16,8 +16,9 @@
 (* merge into an empty dict comparing no keys, and into one with keys      *)
 (* a colliding key by its Python __eq__, before its value replaces an      *)
 (* equal key's, a change of the merged dict's size raising                 *)
-(* RuntimeError, reversed(), and __missing__ in subclasses, which          *)
-(* dict.__getitem__ called on an instance also calls, its methods          *)
+(* RuntimeError, reversed(), and __missing__ in subclasses, also a        *)
+(* staticmethod's or classmethod's, which dict.__getitem__ called on an   *)
+(* instance also calls, as starred, its methods                            *)
 (* bound to it, behave as documented, a missing key raising KeyError,      *)
 (* a present key of the same hash compared by its Python __eq__ (which     *)
 (* loops) in get, setdefault, pop and a set's add, discard and remove,     *)
@@ -78,7 +79,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_own_keys_calls", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_slot", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
-          "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "subclass_equal_key_methods", "subclass_missing_equal_keys", "subclass_hashed", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
+          "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "subclass_equal_key_methods", "subclass_missing_equal_keys", "getitem_key_calls", "subclass_hashed", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "merge_equal_keys", "merge_mutated", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
           "view_live", "view_mapping", "view_contains", "view_set_ops_iterable", "view_set_ops_return_set",
@@ -140,6 +141,9 @@ Case(c) ==
       \* So is a key of a builtin type's subclass, by a subscript and in too.
       [] c = "subclass_equal_key_methods" -> "(2, True, False, 2, 1, 2, 1, ['a1b1', 'a1b2', 'b1b2', 'a1a3', 'a1x1', 'b1x1', 'a1b4', 'b1b4', 'a1a5', 'a1b6', 'b1b6'])"
       [] c = "subclass_missing_equal_keys" -> "([1, 'b1'], ['a1'], [2], ['a1a2', 'a1b1', 'missing b1', 'a1a3', 'a1c1', 'a1c2', 'c1c2'])"
+      \* dict.__getitem__ hashes and compares a key on the machine, also
+      \* starred, calling a staticmethod's or classmethod's __missing__.
+      [] c = "getitem_key_calls" -> "([1, 'sb2', 2, 'Cc1', 'sc2', 'KeyError'], ['ha3', 'a1a3', 'hb2', 'a2b2', 'ha4', 'a2a4', 'hc1', 'hc2', 'a2c2', 'hc3', 'b1c3'])"
       [] c = "subclass_hashed" -> "(2, 0, 0, [4, 4, 4, 4, 5, 4])"
       [] c = "subclass_key_methods" -> "(1, True, None, 1, ['b1'], ['b1b2', 'b1c1', 'a1a2', 'a1a3', 'a1x1'])"
       \* A builtin key is compared by a stored key's Python __eq__, which stays.

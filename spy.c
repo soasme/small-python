@@ -27521,7 +27521,8 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        /* a set method given its set (set_call, consumer_of), or its tuple key (hashing_call) */
                                                        callee->as.native.kwcall == set_method ||
                                                        (argv[1]->type == SPY_TUPLE && argv[1]->listed && callee->as.native.kwcall == set_item_method) ||
-                                                       (walk_operand(argv[1]) && callee->as.native.kwcall == slot_call) ||
+                                                       /* dict.__getitem__ of a subclass's instance (native_entered) */
+                                                       ((walk_operand(argv[1]) || argv[0]->type == SPY_INSTANCE) && callee->as.native.kwcall == slot_call) ||
                                                        /* a bytes join of exporters (buffer_argument), or choices (buffered_choice) */
                                                        ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||
                                                        (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
@@ -28431,8 +28432,9 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
             int status = print_call_step(c, m, argc, argc, keywords->as.map.len ? keywords : NULL, &printing, env);
             result = status == 1 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
         }
-    } else if (calls && !keywords->as.map.len && args->as.seq.len <= 9 && (callee->type == SPY_NATIVE || callee->type == SPY_CLASS) &&
-             !c->error_type[0]) {
+    } else if (calls && !keywords->as.map.len && args->as.seq.len <= 9 &&
+               (callee->type == SPY_NATIVE || callee->type == SPY_CLASS || callee->type == SPY_METHOD || callee->type == SPY_BOUND_METHOD) &&
+               !c->error_type[0]) {
         SPYValue *argv[9];
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = operand_dispatch(c, m, n, spy_retain(callee), -1, args->as.seq.len, argv, env);
@@ -29088,6 +29090,21 @@ static int eq_reaches(SPYValue *key) {
 static int machine_lookup(SPYValue *map, SPYValue *key, int contains) {
     return hashes_key(map, contains) && (lookup_key(key) || eq_keyed(map));
 }
+/* Whether function, a dict subclass's __missing__, calls Python on the
+ * machine: a function, or a staticmethod or classmethod of one. */
+static int machine_missing(SPYContext *c, SPYValue *function) {
+    if (function->type == SPY_STATICMETHOD || function->type == SPY_CLASSMETHOD) function = function->as.wrapper.function;
+    return machine_function(c, function);
+}
+/* The call of function, x's class's __missing__ (machine_missing), on
+ * key, bound to x or to its class, or not: its function, owned, with
+ * *env; else NULL. */
+static SPYValue *missing_env(SPYContext *c, SPYValue *function, SPYValue *x, SPYValue *key, SPYValue **env) {
+    SPYValue *args[] = {function->type == SPY_CLASSMETHOD ? x->as.map.parent : x, key};
+    int plain = function->type == SPY_STATICMETHOD;
+    if (plain || function->type == SPY_CLASSMETHOD) function = function->as.wrapper.function;
+    return (*env = function_env(c, function, 2 - plain, args + plain, NULL, 0)) ? spy_retain(function) : NULL;
+}
 /* The map a subscript, or an in when contains, of object looks a key up
  * in: object, or the dict of a dict subclass's instance whose class's
  * __contains__, or __getitem__ with no __missing__ or a Python one
@@ -29096,7 +29113,7 @@ static SPYValue *lookup_storage(SPYContext *c, SPYValue *object, int contains) {
     if (object->type != SPY_INSTANCE || !object->as.map.base) return object;
     SPYValue *base = builtin_base(c, object, contains ? "__contains__" : "__getitem__", NULL), *missing;
     return base && is_dict(base) && (contains || !(missing = class_lookup(object->as.map.parent, "__missing__")) ||
-                                     machine_function(c, missing)) ? base : object;
+                                     machine_missing(c, missing)) ? base : object;
 }
 /* Before a subscript of x looks up in map, its storage (lookup_storage),
  * x and c->missing on m's stack when x's class has a __missing__ the
@@ -29215,6 +29232,8 @@ fail:
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
 }
+/* Whether step ins is a call, whose key a hash_call_step hashes. */
+static int hashing_step(Instruction *ins) { return ins->op == BC_CALLF || ins->op == BC_CALLN || ins->op == BC_CALL; }
 /* Lookup step ins of key, of hash, in map ends on m with entry found, or
  * -1, or the error pending: a subscript with the entry's value or a
  * KeyError, in with its truth (operator_finish); a store with the value
@@ -29225,26 +29244,47 @@ static Machine *walk_found(SPYContext *, Machine *, Instruction *, SPYValue *, i
  * remove (hashed_map), its callee, arguments, method number and their
  * count on m's stack (hash_call_step), runs with key's hash, taking key,
  * unless it was not hashed; its value pushed. */
+static int native_absent(SPYContext *, SPYValue *, SPYValue *);
+static int dict_getitem(SPYValue *);
+/* For call_hashed, with key's hash kept: dict.__getitem__ (hashed_map)
+ * of a dict subclass's instance whose class's __missing__ is on the
+ * machine (machine_missing), of a key it lacks, found so on the machine
+ * or without calling Python (native_absent): that __missing__'s call
+ * (missing_env), owned, with *env, the hash dropped; else NULL. */
+static NO_INLINE SPYValue *missing_found(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *args, SPYValue *key, SPYValue **env) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee, *missing;
+    SPYValue *self = callee->type == SPY_METHOD ? callee->as.method.self : argc == 2 ? args[0] : NULL;
+    if (!self || self->type != SPY_INSTANCE || !dict_getitem(function) || !(missing = class_lookup(self->as.map.parent, "__missing__")) ||
+        !machine_missing(c, missing)) return NULL;
+    SPYValue *map = storage(self);
+    if (c->found_key == key && c->found_map == map) {
+        if (c->found_index >= 0) return NULL;
+        if (c->hashed == key) { c->hashed = NULL; spy_release(key); }
+    } else if (!native_absent(c, map, key)) return NULL;
+    return missing_env(c, missing, self, key, env);
+}
 static Machine *call_hashed(SPYContext *c, Machine *m, Instruction *ins, SPYValue *key, int hashed, int64_t hash) {
     SPYValue *count = machine_pop(m), *number = machine_pop(m), *args[3];
     size_t argc = (size_t)count->as.integer_data.small;
     int method = (int)number->as.integer_data.small;
     spy_release(count); spy_release(number);
     for (size_t i = argc; i; i--) args[i - 1] = machine_pop(m);
-    SPYValue *callee = machine_pop(m);
+    SPYValue *callee = machine_pop(m), *function = NULL, *env;
+    Call *call = NULL;
     if (hash_kept(c, key, hashed, hash)) {
         relocate(c, ins->node);
-        SPYValue *result = call_plain(c, callee, method, ins->node, argc, args);
+        if (method < 0 && (function = missing_found(c, callee, argc, args, key, &env))) call = call_enter(c, function, env, m);
+        SPYValue *result = function ? NULL : call_plain(c, callee, method, ins->node, argc, args);
         if (result) machine_push(c, m, result);
     }
     c->found_key = NULL;
     release_all(argc, args); spy_release(callee);
-    return m;
+    return call ? &call->m : m;
 }
 static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash, ptrdiff_t found,
                               size_t pc) {
     if (m->len && m->stack[m->len - 1] == c->walking) return walk_found(c, m, ins, key, hash, found, pc);
-    if (ins->op == BC_CALLF || ins->op == BC_CALLN) {
+    if (hashing_step(ins)) {
         /* The call's search ends at entry found. */
         m->pc = pc;
         c->found_map = map; c->found_key = key; c->found_index = found;
@@ -29279,8 +29319,8 @@ static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYVa
         Call *call = NULL;
         m->pc = pc;
         if (!c->error_type[0] && found < 0 && !operator_push(c, m, x, key, OPERATOR_FIRST)) {
-            if ((env = function_env(c, function, 2, (SPYValue *[]){spy_retain(x), spy_retain(key)}, NULL, 1)) &&
-                (call = call_enter(c, spy_retain(function), env, m))) call->m.outermost = CALL_OPERATOR;
+            if ((function = missing_env(c, function, x, key, &env)) && !(call = call_enter(c, function, env, m))) function = NULL;
+            if (call) call->m.outermost = CALL_OPERATOR;
             if (!call) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
         }
         spy_release(x);
@@ -29782,7 +29822,7 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         if (hash_kept(c, key, hashed, hash)) m->pc--;
         return m;
     }
-    if (ins->op == BC_CALLF || ins->op == BC_CALLN) {
+    if (hashing_step(ins)) {
         /* A call's callee, arguments, method number and their count (hash_call_step). */
         size_t argc = (size_t)m->stack[m->len - 1]->as.integer_data.small, at;
         SPYValue **operands = &m->stack[m->len - 3 - argc];
@@ -30035,10 +30075,9 @@ static int native_absent(SPYContext *c, SPYValue *dict, SPYValue *key) {
  * phase pushed on m's stack; else NULL. */
 static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *base = builtin_base(c, x, "__getitem__", NULL), *function = class_lookup(x->as.map.parent, base ? "__missing__" : "__getitem__");
-    if (!function || !machine_function(c, function) || (base && (!is_dict(base) || !native_absent(c, base, y))) ||
-        operator_push(c, m, x, y, OPERATOR_FIRST)) return NULL;
-    SPYValue *args[] = {spy_retain(x), spy_retain(y)};
-    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+    if (!function || !(base ? machine_missing(c, function) : machine_function(c, function)) ||
+        (base && (!is_dict(base) || !native_absent(c, base, y))) || operator_push(c, m, x, y, OPERATOR_FIRST)) return NULL;
+    if ((function = missing_env(c, function, x, y, env))) return function;
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     return NULL;
 }
@@ -37506,20 +37545,28 @@ static int frozen_drop(SPYContext *c, SPYValue *callee, SPYValue *set, SPYValue 
 }
 static const char *const set_item_names[] = {"add", "discard", "remove", "pop", "clear", "copy", "__reduce__"};
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether function is dict.__getitem__. */
+static int dict_getitem(SPYValue *function) {
+    return function->type == SPY_NATIVE && function->as.native.kwcall == slot_call && function->as.native.owner == function->ctx->types[SPY_DICT] &&
+           !strcmp(function->as.native.name->as.string.data, "__getitem__");
+}
 /* The dict or set a call of callee, method number method of it or -1,
  * with argc arguments argv looks argv[*at] up in: a dict's get,
- * setdefault or pop, a dict subclass's instance's its storage, or a set's
- * add, discard or remove, bound or given the set first; borrowed, else
- * NULL. */
+ * setdefault or pop, a dict subclass's instance's its storage, a set's
+ * add, discard or remove, or dict.__getitem__ of a dict or a dict
+ * subclass's instance, bound or given the set or dict first; borrowed,
+ * else NULL. */
 static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue *const *argv, size_t *at) {
     *at = 0;
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     if (method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP) return argc && argc <= 2 ? storage(callee) : NULL;
     SPYValue *function = callee, *self = NULL;
     if (method < 0 && callee->type == SPY_METHOD) { function = callee->as.method.function; self = callee->as.method.self; }
-    else if (method < 0 && argc == 2 && (argv[0]->type == SPY_SET || argv[0]->type == SPY_FROZENSET)) { self = argv[0]; *at = 1; }
-    return self && function->type == SPY_NATIVE && function->as.native.kwcall == set_item_method && argc == 1 + *at &&
-           ((intptr_t)function->as.native.data & 255) <= SET_REMOVE ? self : NULL;
+    else if (method < 0 && argc == 2) { self = argv[0]; *at = 1; }
+    if (!self || function->type != SPY_NATIVE || argc != 1 + *at) return NULL;
+    if (dict_getitem(function)) return storage(self) && storage(self)->type == SPY_DICT ? storage(self) : NULL;
+    return function->as.native.kwcall == set_item_method && ((intptr_t)function->as.native.data & 255) <= SET_REMOVE &&
+           (self->type == SPY_SET || self->type == SPY_FROZENSET || callee->type == SPY_METHOD) ? self : NULL;
 }
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv hashes a key that enters a Python __hash__ (hash_calls)
@@ -41608,9 +41655,9 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     if (callee->as.native.kwcall == slot_call) {
         SPYValue *base = self->type == SPY_INSTANCE && argc == 1 && callee->as.native.owner == c->types[SPY_DICT] &&
                          !strcmp(callee->as.native.name->as.string.data, "__getitem__") ? builtin_value(c, self, SPY_DICT) : NULL;
-        if (!base || !(function = class_lookup(self->as.map.parent, "__missing__")) || !machine_function(c, function) ||
+        if (!base || !(function = class_lookup(self->as.map.parent, "__missing__")) || !machine_missing(c, function) ||
             !native_absent(c, base, argv[0])) return NULL;
-        return (*env = function_env(c, function, 2, (SPYValue *[]){self, argv[0]}, NULL, 0)) ? spy_retain(function) : NULL;
+        return missing_env(c, function, self, argv[0], env);
     }
     if (callee->as.native.kwcall != descriptor_method || callee->as.native.data != (void *)((intptr_t)SPY_PROPERTY << 8 | DESCR_GET)) return NULL;
     SPYValue *p = builtin_value(c, self, SPY_PROPERTY);

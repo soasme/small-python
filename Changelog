@@ -436,6 +436,10 @@ Unreleased (0.10.0):
   of its class's attribute, as any other metaclass data descriptor does
 - `type(g).send(g, v)` and a generator's or coroutine's other methods read from its type resume it
   without nesting on the C stack
+- a set's `remove` or `discard` called with unpacked arguments raises the `KeyError` of a key whose
+  Python `__eq__` finds no match, instead of returning `False`
+- a staticmethod or classmethod `__missing__` of a dict subclass is called bound as `x[k]` binds it;
+  `dict.__getitem__` with a Python key `__hash__`, `__eq__` or `__missing__` runs without nesting
 
 2026-11-10 0.9.0:
 
