@@ -3016,27 +3016,35 @@ static SPYValue **builtin_module_slot(SPYValue *v) {
         native_kind(v) == NATIVE_BOUND) return &v->as.method.module;
     return NULL;
 }
+static int slot_wrapper(const char *, const char *);
 static int native_kind(SPYValue *v) {
     if (v->type == SPY_METHOD && v->as.method.plain) return NATIVE_FUNCTION;
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
     if ((v->type != SPY_NATIVE && v->type != SPY_METHOD) || function->type != SPY_NATIVE) return NATIVE_FUNCTION;
     if (!function->as.native.owner || !function->as.native.method || !function->as.native.name)
         return v->type == SPY_METHOD ? NATIVE_BOUND : NATIVE_FUNCTION;
-    const char *name = function->as.native.name->as.string.data, *owner = "";
-    size_t len = strlen(name);
+    const char *owner = "";
     SPYValue *owner_name = name_text(function->as.native.owner, "__name__");
     if (owner_name && owner_name->type == SPY_STRING) owner = owner_name->as.string.data;
+    int wrapper = slot_wrapper(owner, function->as.native.name->as.string.data);
+    if (v->type == SPY_METHOD) return wrapper ? NATIVE_METHOD_WRAPPER : NATIVE_BOUND;
+    return wrapper ? NATIVE_WRAPPER_DESCRIPTOR : NATIVE_METHOD_DESCRIPTOR;
+}
+/* Whether builtin class owner's method name is a slot wrapper, not a
+ * method descriptor, as CPython's is. */
+static int slot_wrapper(const char *owner, const char *name) {
+    size_t len = strlen(name);
     static const char *const methods[] = {"__ceil__", "__floor__", "__round__", "__trunc__", "__format__", "__getnewargs__",
         "__reduce__", "__reduce_ex__", "__sizeof__", "__dir__", "__reversed__", "__complex__", "__getstate__", "__setstate__",
         "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__", "__length_hint__", "__instancecheck__",
-        "__subclasscheck__", "__subclasses__", "__replace__", "__bytes__"};
+        "__subclasscheck__", "__subclasses__", "__replace__", "__bytes__", "__enter__", "__exit__", "__set_name__", "__copy__",
+        "__deepcopy__"};
     int wrapper = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
     for (size_t i = 0; wrapper && i < sizeof(methods) / sizeof(*methods); i++) if (!strcmp(name, methods[i])) wrapper = 0;
     if (wrapper && !strcmp(name, "__contains__"))
         wrapper = strcmp(owner, "dict") && strcmp(owner, "frozendict") && strcmp(owner, "set") && strcmp(owner, "frozenset");
     if (wrapper && !strcmp(name, "__getitem__")) wrapper = strcmp(owner, "list") && strcmp(owner, "dict") && strcmp(owner, "frozendict");
-    if (v->type == SPY_METHOD) return wrapper ? NATIVE_METHOD_WRAPPER : NATIVE_BOUND;
-    return wrapper ? NATIVE_WRAPPER_DESCRIPTOR : NATIVE_METHOD_DESCRIPTOR;
+    return wrapper;
 }
 /* The classes, intrinsic or of the library modules, that stand in for
  * CPython's C types outside builtins; tname (PLS-315 5.2) prefixes their
@@ -3079,8 +3087,11 @@ static const char *type_name(SPYValue *value) {
     return value->type <= SPY_LAST_TYPE ? names[value->type] : "object";
 }
 /* owner.name called without an owner object first: CPython's method
- * descriptor messages. */
+ * descriptor or slot wrapper messages. */
 static SPYValue *misapplied(SPYContext *c, const char *owner, const char *name, size_t argc, SPYValue *const *argv) {
+    if (slot_wrapper(owner, name))
+        return !argc ? errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", name, owner) :
+               errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, owner, type_name(argv[0]));
     if (!argc) return errorf(c, "TypeError", "unbound method %s.%s() needs an argument", owner, name);
     return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", name, owner, type_name(argv[0]));
 }
@@ -21922,6 +21933,31 @@ enter:
     c->entering_init = function; c->entering_kind = CALL_CHECKED;
     return spy_retain(function);
 }
+/* object.__reduce__(), __reduce_ex__() or __getstate__() (id) of argc
+ * arguments argv: the protocol itself is Python code in the intrinsics
+ * module, on m when given (callk), the call then m's. */
+static SPYValue *object_reduce(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv) {
+    size_t expected = id == B_OBJECT_REDUCE_EX ? 2 : 1;
+    const char *method = id == B_OBJECT_REDUCE ? "__reduce__" : id == B_OBJECT_REDUCE_EX ? "__reduce_ex__" : "__getstate__";
+    if (argc != expected) {
+        if (!argc) return errorf(c, "TypeError", "unbound method object.%s() needs an argument", method);
+        if (expected == 1) return errorf(c, "TypeError", "object.%s() takes no arguments (%zu given)", method, argc - 1);
+        return errorf(c, "TypeError", "object.__reduce_ex__() takes exactly one argument (%zu given)", argc - 1);
+    }
+    /* Protocols 0 and 1 reconstruct from the first class of the
+     * Standard in the MRO (CPython: the first non-heap type). */
+    SPYValue *base = c->object, *mro = value_class(c, argv[0])->as.map.mro;
+    for (size_t i = 0; mro && i < mro->as.seq.len; i++)
+        if (static_type(c, mro->as.seq.items[i])) { base = mro->as.seq.items[i]; break; }
+    int64_t protocol;
+    if (id == B_OBJECT_REDUCE_EX && !is_int(argv[1])) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(argv[1]));
+    if (id == B_OBJECT_REDUCE_EX && spy_as_int(c, argv[1], &protocol)) return NULL;
+    SPYValue *function = intrinsic(c, id == B_OBJECT_REDUCE_EX ? "_object_reduce_ex" : id == B_OBJECT_REDUCE ? "_object_common_reduce" : "_object_getstate_default");
+    SPYValue *second = id == B_OBJECT_REDUCE_EX ? spy_retain(argv[1]) : id == B_OBJECT_REDUCE ? spy_int(c, 0) : spy_retain(c->booleans[0]);
+    if (!function || !second) { spy_release(second); return NULL; }
+    SPYValue *args[] = {spy_retain(argv[0]), second, spy_retain(base)};
+    return callk(c, m, function, 3 - (id == B_OBJECT_GETSTATE), args, method_called, NULL);
+}
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *native_entered_rest(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* native_entered_rest of a native callee or a method of one. */
@@ -39868,37 +39904,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (list) list->type = SPY_LIST;
         return list;
     }
-    case B_OBJECT_REDUCE: case B_OBJECT_REDUCE_EX: case B_OBJECT_GETSTATE: {
-        /* The protocol itself is Python code in the intrinsics module. */
-        size_t expected = id == B_OBJECT_REDUCE_EX ? 2 : 1;
-        const char *method = id == B_OBJECT_REDUCE ? "__reduce__" : id == B_OBJECT_REDUCE_EX ? "__reduce_ex__" : "__getstate__";
-        if (argc != expected) {
-            if (!argc) return errorf(c, "TypeError", "descriptor '%s' of 'object' object needs an argument", method);
-            if (expected == 1) return errorf(c, "TypeError", "object.%s() takes no arguments (%zu given)", method, argc - 1);
-            return errorf(c, "TypeError", "object.__reduce_ex__() takes exactly one argument (%zu given)", argc - 1);
-        }
-        /* Protocols 0 and 1 reconstruct from the first class of the
-         * Standard in the MRO (CPython: the first non-heap type). */
-        SPYValue *base = c->object, *mro = value_class(c, argv[0])->as.map.mro;
-        for (size_t i = 0; mro && i < mro->as.seq.len; i++)
-            if (static_type(c, mro->as.seq.items[i])) { base = mro->as.seq.items[i]; break; }
-        if (id == B_OBJECT_REDUCE_EX) {
-            int64_t protocol;
-            if (!is_int(argv[1])) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(argv[1]));
-            if (spy_as_int(c, argv[1], &protocol)) return NULL;
-            SPYValue *args[] = {argv[0], argv[1], base};
-            return call_intrinsic(c, "_object_reduce_ex", 3, args);
-        }
-        SPYValue *args[] = {argv[0], id == B_OBJECT_REDUCE ? NULL : c->booleans[0], base};
-        if (id == B_OBJECT_REDUCE) {
-            SPYValue *protocol = spy_int(c, 0);
-            if (!protocol) return NULL;
-            args[1] = protocol;
-            SPYValue *result = call_intrinsic(c, "_object_common_reduce", 3, args);
-            spy_release(protocol); return result;
-        }
-        return call_intrinsic(c, "_object_getstate_default", 2, args);
-    }
+    case B_OBJECT_REDUCE: case B_OBJECT_REDUCE_EX: case B_OBJECT_GETSTATE: return object_reduce(c, NULL, id, argc, argv);
     case B_OBJECT_GETATTRIBUTE: case B_OBJECT_SETATTR: case B_OBJECT_DELATTR: {
         const char *name = attribute_slot_name(c, "object", id == B_OBJECT_SETATTR ? "__setattr__" : id == B_OBJECT_DELATTR ? "__delattr__" :
                                                "__getattribute__", argc, argv);
@@ -41461,8 +41467,11 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         return round_value(c, args[0], args[1]);
     }
     case B_HASH: case B_OBJECT_HASH: {
-        if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "hash() takes no keyword arguments");
-        if (argc != 1) return errorf(c, "TypeError", "hash() takes exactly one argument (%zu given)", argc);
+        /* object.__hash__ is a slot wrapper (PLS-315 28.7). */
+        if (id == B_OBJECT_HASH && !argc) return misapplied(c, "object", "__hash__", 0, argv);
+        if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", id == B_HASH ? "hash() takes no keyword arguments" : "wrapper __hash__() takes no keyword arguments");
+        if (argc != 1) return id == B_HASH ? errorf(c, "TypeError", "hash() takes exactly one argument (%zu given)", argc) :
+                              errorf(c, "TypeError", "expected 0 arguments, got %zu", argc - 1);
         int64_t hash;
         if (id == B_OBJECT_HASH) hash = hash_pointer(argv[0]);
         else if (hash_value(c, argv[0], &hash)) return NULL;
@@ -41922,7 +41931,9 @@ static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYV
  * __missing__, with a native key it lacks (native_absent): that getter or
  * __missing__, owned, with *env, to enter as the call; else NULL. A
  * view's release() or __exit__() whose exporter's __release_buffer__ is
- * Python leaves that call on m (memory_released): NULL, c->k_fn set. */
+ * Python, or object's __reduce__(), __reduce_ex__() or __getstate__(),
+ * leaves its call on m (memory_released, object_reduce): NULL, c->k_fn
+ * set. */
 static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     SPYValue *self = NULL, *function;
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
@@ -41941,6 +41952,13 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         if (!base || !(function = class_lookup(self->as.map.parent, "__missing__")) || !machine_missing(c, function) ||
             !native_absent(c, base, argv[0])) return NULL;
         return missing_env(c, function, self, argv[0], env);
+    }
+    intptr_t reduce = callee->as.native.call == builtin ? (intptr_t)callee->as.native.data : -1;
+    if (reduce == B_OBJECT_REDUCE || reduce == B_OBJECT_REDUCE_EX || reduce == B_OBJECT_GETSTATE) {
+        /* So does object's reduction, its intrinsic's call or an error (object_reduce). */
+        SPYValue *args[] = {self, argc ? argv[0] : NULL};
+        if (argc < 2) object_reduce(c, m, (int)reduce, argc + 1, args);
+        return NULL;
     }
     if (argc == 1 && (is_builtin(callee, B_OBJECT_GETATTRIBUTE) || is_builtin(callee, B_TYPE_GETATTRIBUTE)))
         return getattribute_entered(c, self, argv[0], is_builtin(callee, B_TYPE_GETATTRIBUTE), env);
@@ -42117,10 +42135,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     const char *owner_name = name_text(owner, "__name__")->as.string.data;
     int type = builtin_type_id(c, owner);
     int index = slot_index(name);
-    if (!argc) {
-        if (index < 0) return errorf(c, "TypeError", "unbound method %s.%s() needs an argument", owner_name, name);
-        return errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", name, owner_name);
-    }
+    if (!argc) return misapplied(c, owner_name, name, 0, argv);
     SPYValue *self = argv[0], *value = type == 63 ? self : builtin_value(c, self, type);
     /* A bound builtin method is a builtin_function_or_method too. */
     if (!value && type == SPY_NATIVE && self->type == SPY_BOUND_METHOD) value = self;

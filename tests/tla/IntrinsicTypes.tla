@@ -43,7 +43,8 @@ Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name"
           "classmethod_descr_repr", "classmethod_descr_call", "classmethod_descr_get",
           "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg",
           "classmethod_descr_not_type", "classmethod_descr_not_subtype", "getset_get", "getset_readonly",
-          "member_unset", "member_set", "method_descr_wrong_type", "method_descr_objclass",
+          "member_unset", "member_set", "method_descr_wrong_type", "method_descr_objclass", "method_descr_no_arg",
+          "wrapper_descr_no_arg", "nonslot_dunder_kinds",
           "wrapper_descr_call", "method_wrapper_self", "class_slot_bound", "descriptor_kinds", "builtin_self", "generator_no_ctor",
           "function_no_subclass", "traceback_fields", "frame_back"}
 Programs == [name : DOMAIN Kind]
@@ -85,6 +86,9 @@ Case(c) ==
       [] c = "member_set" -> "(7, 'a', True)"
       [] c = "method_descr_wrong_type" -> "TypeError: descriptor 'join' for 'str' objects doesn't apply to a 'int' object"
       [] c = "method_descr_objclass" -> "(True, 'join', 'str.join')"
+      [] c = "method_descr_no_arg" -> "TypeError: unbound method object.__format__() needs an argument"
+      [] c = "wrapper_descr_no_arg" -> "TypeError: descriptor '__index__' of 'int' object needs an argument"
+      [] c = "nonslot_dunder_kinds" -> "('method_descriptor', 'method_descriptor', 'method_descriptor', 'wrapper_descriptor')"
       [] c = "wrapper_descr_call" -> "('ab', True)"
       [] c = "method_wrapper_self" -> "(True, '__str__')"
       [] c = "class_slot_bound" -> "('method-wrapper', 'builtin_function_or_method')"

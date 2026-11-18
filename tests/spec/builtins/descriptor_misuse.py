@@ -1,4 +1,4 @@
-# spec: PLS-315 7.4.4, 21.1.2, 21.1.4, 21.1.5, 20.1
+# spec: PLS-315 7.4.4, 21.1.2, 21.1.4, 21.1.5, 20.1, 28.7
 # description: Built-in methods and constructors called through their class with a missing or foreign first argument.
 from harness import *
 
@@ -83,3 +83,21 @@ check("type.__new__() takes exactly 3 arguments (1 given)", type.__new__, Meta, 
 check("descriptor '__call__' of 'type' object needs an argument", type.__call__)
 check("descriptor '__call__' requires a 'type' object but received a 'int'", type.__call__, 1)
 assert_eq(type.__call__(int, "5"), 5)
+
+# A method descriptor's call without arguments names an unbound method, a
+# slot wrapper's its descriptor; a slot wrapper's foreign object is required
+# to be of its class.
+for cls, name in ((object, "__format__"), (str, "__format__"), (int, "__format__"), (object, "__reduce__"),
+                  (object, "__reduce_ex__"), (object, "__getstate__"), (float, "__round__"), (int, "__trunc__")):
+    check(f"unbound method {cls.__name__}.{name}() needs an argument", getattr(cls, name))
+for cls, name in ((object, "__hash__"), (object, "__init__"), (object, "__eq__"), (int, "__index__"), (int, "__add__"),
+                  (memoryview, "__len__"), (str, "__len__"), (BaseException, "__str__")):
+    check(f"descriptor '{name}' of '{cls.__name__}' object needs an argument", getattr(cls, name))
+check("descriptor '__index__' requires a 'int' object but received a 'str'", int.__index__, "a")
+check("descriptor '__len__' requires a 'memoryview' object but received a 'int'", memoryview.__len__, 1)
+check("descriptor '__round__' for 'float' objects doesn't apply to a 'str' object", float.__round__, "a")
+check("expected 0 arguments, got 1", object.__hash__, 1, 2)
+check("expected 0 arguments, got 1", object().__hash__, 1)
+check("wrapper __hash__() takes no keyword arguments", lambda: object().__hash__(x=1))
+check("hash() takes exactly one argument (0 given)", hash)
+check("hash() takes no keyword arguments", lambda: hash(1, x=2))

@@ -116,6 +116,10 @@ SOURCES = {
     "member_unset": "class S:\n    __slots__ = ('a',)\nS.a.__get__(S())",
     "member_set": "class S:\n    __slots__ = ('a',)\ns = S()\nS.a.__set__(s, 7)\nresult = (s.a, S.a.__name__, S.a.__objclass__ is S)",
     "method_descr_wrong_type": 'str.join(1, [])',
+    "method_descr_no_arg": 'object.__format__()',
+    "wrapper_descr_no_arg": 'int.__index__()',
+    "nonslot_dunder_kinds": "k = lambda t, n: type(vars(t)[n]).__name__\n"
+                            "result = (k(property, '__set_name__'), k(memoryview, '__enter__'), k(memoryview, '__exit__'), k(memoryview, '__len__'))",
     "method_descr_objclass": 'result = (str.join.__objclass__ is str, str.join.__name__, str.join.__qualname__)',
     "wrapper_descr_call": "result = (str.__dict__['__add__']('a', 'b'), object.__init__.__objclass__ is object)",
     "method_wrapper_self": 'o = object()\nresult = (o.__str__.__self__ is o, o.__str__.__name__)',

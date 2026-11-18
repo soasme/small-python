@@ -1,5 +1,6 @@
 # Replays Reduction.tla: each case builds the program's class and instance,
-# calls __reduce_ex__, and writes the result as the model does.
+# calls __reduce_ex__ as a method, unbound and bound, which agree, and
+# writes the result as the model does.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -28,7 +29,10 @@ def outcome(p):
     if p["slots"]:
         namespace["__slots__"] = ("s",)
     if p["getstate"]:
-        namespace["__getstate__"] = lambda self: "S"
+        def getstate(self):
+            for _ in range(2): pass
+            return "S"
+        namespace["__getstate__"] = getstate
     if p["newargs"] in NEWARGS:
         name, method = NEWARGS[p["newargs"]]
         namespace[name] = method
@@ -39,12 +43,19 @@ def outcome(p):
             o.s = 2
         else:
             o.x = 1
+    bound = o.__reduce_ex__
+    # As a method, unbound from object, and bound then called later: one outcome.
+    outcomes = {reduced(call, cls) for call in (lambda: o.__reduce_ex__(p["protocol"]), lambda: object.__reduce_ex__(o, p["protocol"]),
+                                                lambda: bound(p["protocol"]))}
+    return outcomes.pop() if len(outcomes) == 1 else ("Mismatch", "absent", "absent", "absent", "absent")
+
+
+def reduced(call, cls):
     try:
-        result = o.__reduce_ex__(p["protocol"])
+        result = call()
     except TypeError:
         return ("TypeError", "absent", "absent", "absent", "absent")
     items = [encode(item, cls) for item in result[1:]]
     return (NAMES[result[0].__name__], *items, *["absent"] * (4 - len(items)))
-
 
 check_programs(outcome)
