@@ -23,7 +23,9 @@
 (*     c = C(); c.attr = plain                                             *)
 (*                                                                         *)
 (* and reads one of c.f, C.f, c.cm, C.cm, c.sm, c.attr, [].append, len,    *)
-(* [].__len__, then its type, __self__, __func__, __name__, __qualname__,  *)
+(* [].__len__, or the staticmethod object C.__dict__['sm'], which carries  *)
+(* its function's name, qualified name, documentation and module and is  *)
+(* callable, calling its function; then its type, __self__, __func__, __name__, __qualname__,  *)
 (* __doc__, __module__, or tag, sets an attribute on it, or calls it with  *)
 (* 1 ([1] for len, nothing for __len__).                                   *)
 (*                                                                         *)
@@ -31,7 +33,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Accesses == {"c.f", "C.f", "c.cm", "C.cm", "c.sm", "c.attr", "[].append", "len", "[].__len__"}
+Accesses == {"c.f", "C.f", "c.cm", "C.cm", "c.sm", "c.attr", "[].append", "len", "[].__len__", "C.__dict__[sm]"}
 Ops == {"type", "__self__", "__func__", "__name__", "__qualname__", "__doc__", "__module__", "tag", "set", "call"}
 Programs == [access : Accesses, op : Ops]
 
@@ -44,8 +46,9 @@ Pending == "pending"
 Kind(a) == CASE a = "c.f" -> "bound" [] a \in {"c.cm", "C.cm"} -> "class bound"
              [] a \in {"C.f", "c.sm", "c.attr"} -> "function"
              [] a = "[].append" -> "builtin method" [] a = "len" -> "builtin function" [] a = "[].__len__" -> "wrapper"
+             [] a = "C.__dict__[sm]" -> "staticmethod"
 \* The underlying function or builtin.
-Underlying(a) == CASE a \in {"c.f", "C.f"} -> "f" [] a \in {"c.cm", "C.cm"} -> "cm" [] a = "c.sm" -> "sm"
+Underlying(a) == CASE a \in {"c.f", "C.f"} -> "f" [] a \in {"c.cm", "C.cm"} -> "cm" [] a \in {"c.sm", "C.__dict__[sm]"} -> "sm"
                    [] a = "c.attr" -> "plain" [] a = "[].append" -> "append" [] a = "len" -> "len" [] a = "[].__len__" -> "__len__"
 Qualname(u) == CASE u \in {"f", "cm", "sm"} -> "C." \o u [] u \in {"append", "__len__"} -> "list." \o u [] OTHER -> u
 Builtin(a) == Kind(a) \in {"builtin method", "builtin function", "wrapper"}
@@ -53,10 +56,11 @@ Builtin(a) == Kind(a) \in {"builtin method", "builtin function", "wrapper"}
 Run(p) ==
     LET a == p.access  k == Kind(a)  u == Underlying(a)
     IN  CASE p.op = "type" -> CASE k \in {"bound", "class bound"} -> "method" [] k = "function" -> "function"
-                                 [] k = "wrapper" -> "method-wrapper" [] OTHER -> "builtin_function_or_method"
+                                 [] k = "wrapper" -> "method-wrapper" [] k = "staticmethod" -> "staticmethod"
+                                 [] OTHER -> "builtin_function_or_method"
           [] p.op = "__self__" -> CASE k = "bound" -> "c" [] k = "class bound" -> "C" [] k = "builtin function" -> "builtins"
                                      [] k \in {"builtin method", "wrapper"} -> "the list" [] OTHER -> "AttributeError"
-          [] p.op = "__func__" -> IF k \in {"bound", "class bound"} THEN Qualname(u) ELSE "AttributeError"
+          [] p.op = "__func__" -> IF k \in {"bound", "class bound", "staticmethod"} THEN Qualname(u) ELSE "AttributeError"
           [] p.op = "__name__" -> "'" \o u \o "'"
           [] p.op = "__qualname__" -> "'" \o Qualname(u) \o "'"
           [] p.op = "__doc__" -> CASE u = "f" -> "'f doc'" [] u = "plain" -> "'plain doc'" [] Builtin(a) -> "a str or None"
@@ -65,10 +69,10 @@ Run(p) ==
                                        [] k = "builtin method" -> "None" [] OTHER -> "AttributeError"
           \* A function's attributes, read through a method.
           [] p.op = "tag" -> IF u \in {"f", "plain"} THEN "'T'" ELSE "AttributeError"
-          [] p.op = "set" -> IF k = "function" THEN "ok" ELSE "AttributeError"
+          [] p.op = "set" -> IF k \in {"function", "staticmethod"} THEN "ok" ELSE "AttributeError"
           [] p.op = "call" -> CASE k \in {"bound", "class bound"} -> "(1,)"     \* self or cls comes first
                                  [] a = "C.f" -> "()"                           \* 1 is self
-                                 [] k = "function" -> "(1,)"
+                                 [] k \in {"function", "staticmethod"} -> "(1,)"
                                  [] k = "builtin method" -> "None"
                                  [] OTHER -> IF a = "len" THEN "1" ELSE "0"
 
@@ -79,10 +83,11 @@ Spec == Init /\ [][Execute]_vars
 -----------------------------------------------------------------------------
 Done == outcome # Pending
 
-\* A method has __self__ exactly when it has __func__ (user-defined).
+\* A method has __self__ exactly when it has __func__ (user-defined); a
+\* staticmethod has __func__ alone.
 SelfAndFunc == Done /\ program.op = "__func__" /\ outcome # "AttributeError" =>
-    Run([access |-> program.access, op |-> "__self__"]) # "AttributeError"
+    (Run([access |-> program.access, op |-> "__self__"]) # "AttributeError") = (Kind(program.access) # "staticmethod")
 
-\* Only plain functions take new attributes.
-Settable == Done /\ program.op = "set" /\ outcome = "ok" => Run([access |-> program.access, op |-> "type"]) = "function"
+\* Only plain functions and staticmethods take new attributes.
+Settable == Done /\ program.op = "set" /\ outcome = "ok" => Run([access |-> program.access, op |-> "type"]) \in {"function", "staticmethod"}
 =============================================================================

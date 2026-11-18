@@ -24,7 +24,7 @@ c.attr = plain
 the_list = []
 '''
 ACCESS = {"c.f": "c.f", "C.f": "C.f", "c.cm": "c.cm", "C.cm": "C.cm", "c.sm": "c.sm", "c.attr": "c.attr",
-          "[].append": "the_list.append", "len": "len", "[].__len__": "the_list.__len__"}
+          "[].append": "the_list.append", "len": "len", "[].__len__": "the_list.__len__", "C.__dict__[sm]": "C.__dict__['sm']"}
 
 
 def outcome(p):

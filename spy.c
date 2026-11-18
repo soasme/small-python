@@ -26227,6 +26227,10 @@ static SPYValue *bound_function(SPYContext *c, SPYValue *v) {
                          metaclassed(v) ? class_lookup(v->as.map.meta, "__call__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
+/* The function on the machine that calling staticmethod v calls; borrowed, or NULL. */
+static ALWAYS_INLINE SPYValue *static_function(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_STATICMETHOD && machine_function(c, v->as.wrapper.function) ? v->as.wrapper.function : NULL;
+}
 /* Whether callee calls a function on the machine with its self
  * (bound_function); then the function, owned, replaces it, and the self
  * goes before the argc arguments argv, which have room for it. */
@@ -26673,6 +26677,13 @@ static int buffer_argument(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && (result = static_function(c, callee))) {
+        /* A staticmethod calls its function. */
+        spy_retain(result); spy_release(callee);
+        if ((*env = function_env(c, result, argc, argv, NULL, 1))) return result;
+        spy_release(result);
+        return NULL;
+    }
     if (method < 0 && (result = native_entered(c, m, callee, argc, argv, env))) {
         /* property.__get__ enters its getter, dict.__getitem__ a __missing__ (native_entered). */
         release_all(argc, argv); spy_release(callee);
@@ -27496,7 +27507,7 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
         return NULL;
     }
     if ((method < 0 ? UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_METHOD | UINT64_C(1) << SPY_CLASS |
-                      UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
+                      UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD | UINT64_C(1) << SPY_STATICMETHOD) :
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
                       callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ||
                       (argc && (argv[0]->type == SPY_INSTANCE ||
@@ -27848,6 +27859,15 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return NULL;
     }
     if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->error_type[0])) return result;
+    if (calls && (function = static_function(c, callee))) {
+        /* A staticmethod calls its function. */
+        spy_retain(function);
+        m->len -= argc + 1;
+        spy_release(callee);
+        if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
+        spy_release(function);
+        return NULL;
+    }
     if (calls && argc && generator_slot(c, callee, argv[0])) {
         /* A generator's method from its type given the generator is its
          * bound method (generator_slot), in the callee's place; the stack
@@ -28220,6 +28240,17 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         kw[kwc] = (Entry){a->global_key, argv[positional + kwc], name.hash};
         kwc++;
     }
+    SPYValue *wrapped = calls ? static_function(c, callee) : NULL;
+    if (wrapped) {
+        /* A staticmethod calls its function. */
+        SPYValue *callee_env = keyword_env(c, wrapped, positional, argv, kw, kwc, NULL, 0);
+        if (!callee_env) goto done;
+        spy_retain(wrapped);
+        m->len -= argc + 1;
+        release_all(argc + 1, argv - 1);
+        *env = callee_env;
+        return wrapped;
+    }
     /* A bound method's self, or a plain class's new instance, takes the
      * callee's place before the arguments, entering the function or the
      * __init__ with it; the instance stays there as the call's value. */
@@ -28377,6 +28408,11 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         spy_retain(first); spy_release(callee); spy_release(args);
         callee = first; args = rest; called = 1;
         if (!rest) { spy_release(keywords); spy_release(callee); return NULL; }
+    }
+    if (calls && static_function(c, callee)) {
+        /* A staticmethod calls its function. */
+        SPYValue *wrapped = spy_retain(static_function(c, callee));
+        spy_release(callee); callee = wrapped;
     }
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = step_env(c, m, callee, args->as.seq.len, args->as.seq.items, keywords)) ? spy_retain(callee) : NULL;

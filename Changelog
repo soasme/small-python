@@ -442,6 +442,7 @@ Unreleased (0.10.0):
   `dict.__getitem__` with a Python key `__hash__`, `__eq__` or `__missing__` runs without nesting
 - `object.__getattribute__(o, name)`, `super().__getattribute__(name)` and `type.__getattribute__(cls, name)`
   call a property's getter or a descriptor's `__get__` without nesting on the C stack
+- calling a staticmethod object runs its Python function without nesting on the C stack
 
 2026-11-10 0.9.0:
 
