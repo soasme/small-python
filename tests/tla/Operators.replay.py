@@ -30,6 +30,16 @@ def outcome(p):
         except TypeError:
             return "TypeError"
         return str(namespace["result"])
+    if p["rel"] in ("wider", "narrower"):
+        loop = "\n        for _ in range(2): pass\n       "
+        base, x = ("int", "1.5") if p["rel"] == "wider" else ("float", "1")
+        source = f"class R({base}):\n" + body("R", p["R"], loop) + f"\nx = {x}\ny = R(2); y.name = 'y'\nresult = x {p['op']} y\n"
+        namespace = {}
+        try:
+            exec(source, namespace)
+        except TypeError:
+            return "TypeError"
+        return str(namespace["result"])
     if p["rel"] == "left":
         source = "class R:\n" + body("R", p["R"]) + "\nx = 'a'\ny = R(); y.name = 'y'\nresult = x + y\n"
         namespace = {}

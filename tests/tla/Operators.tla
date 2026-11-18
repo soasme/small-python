@@ -30,7 +30,12 @@
 (* y rather than returning NotImplemented, so once L defines __radd__ y's  *)
 (* __radd__ is never reached. Or x may be of a plain class L with y of R  *)
 (* subclassing str (relation "right"): with no __add__ answering, y's      *)
-(* __radd__ is the last call, str's __add__ never consulted.               *)
+(* __radd__ is the last call, str's __add__ never consulted. For x + y    *)
+(* and x < y, x may also be an exact number with y of R subclassing a     *)
+(* number: the float 1.5 with R(int) (relation "wider"), whose own        *)
+(* method takes y's int, so R's methods are never called; or the int 1    *)
+(* with R(float) (relation "narrower"), whose own method does not, so     *)
+(* y's reflected method, R's or float's, is the last call.                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -61,6 +66,10 @@ Programs == (UNION {
            l \in [{} -> Kinds], r \in [UsesR("+") -> Kinds]}
     \cup {[op |-> "+", rel |-> rel, holder |-> "str", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
            l \in [UsesL("+") -> Kinds], r \in [UsesR("+") -> Kinds], rel \in {"plain", "right"}}
+    \cup (UNION {
+    {[op |-> op, rel |-> rel, holder |-> "number", L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
+        l \in [{} -> Kinds], r \in [UsesR(op) -> Kinds], rel \in {"wider", "narrower"}}
+    : op \in {"+", "<"}})
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -116,8 +125,17 @@ Add(p) ==
 Compare(p, mine, theirs, otherwise) ==
     IF p.rel = "sub" THEN First(<<theirs, mine>>, otherwise) ELSE First(<<mine, theirs>>, otherwise)
 
+\* An exact number x with y of R subclassing a number (Table 22-1): x's
+\* own method gives value when it takes y's number, "wider"; otherwise y's
+\* reflected method m, R's if R defines it, else its float base's, value.
+Number(p, m, value) ==
+    IF p.rel = "wider" \/ p.R[m] = "none" THEN value
+    ELSE IF p.R[m] = NI THEN "TypeError" ELSE "R." \o m \o ":y"
+
 Run(p) ==
-    CASE p.op = "+" -> Add(p)
+    CASE p.rel \in {"wider", "narrower"} ->
+           IF p.op = "<" THEN Number(p, "gt", "True") ELSE Number(p, "radd", IF p.rel = "wider" THEN "3.5" ELSE "3.0")
+      [] p.op = "+" -> Add(p)
       [] p.op = "+=" -> IF Call(p, "x", "iadd") # NI THEN Call(p, "x", "iadd") ELSE Add(p)
       [] p.op = "==" -> Compare(p, Call(p, "x", "eq"), Call(p, "y", "eq"), "False")
       [] p.op = "!=" -> Compare(p, CallNe(p, "x"), CallNe(p, "y"), "True")
@@ -154,6 +172,9 @@ ConcatenationRaises == Done /\ program.rel = "plain" /\ program.L.add = "none" /
 
 \* A plain left operand without __add__ leaves the right one's __radd__ last.
 ReflectedLast == Done /\ program.rel = "right" /\ program.L.add # "value" /\ program.R.radd = "value" => outcome = "R.radd:y"
+
+\* A number that takes the other operand's number never calls its reflected method.
+NumberFirst == Done /\ program.rel = "wider" => outcome \in {"3.5", "True"}
 
 \* An in-place method returning a value is used as is.
 InPlaceFirst == Done /\ program.op = "+=" /\ program.L.iadd = "value" => outcome = "L.iadd:x"

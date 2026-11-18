@@ -10508,6 +10508,8 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
 }
 static SPYValue *divmod_declined(SPYContext *, SPYValue *, SPYValue *);
 static int repeats(SPYValue *);
+static int number_rank(SPYValue *);
+static int number_kept(SPYContext *, const Operator *, int, SPYValue *, SPYValue *);
 /* Binary op on a and b once their special methods declined it. */
 static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (op == O_DIVMOD) return divmod_declined(c, a, b);
@@ -10524,7 +10526,7 @@ static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b
      * class defines the direct method. */
     if ((left && (!builtin_base(c, a, o->direct, NULL) || !builtin_base(c, a, o->reflected, NULL))) ||
         (right && (!builtin_base(c, b, o->direct, NULL) || !builtin_base(c, b, o->reflected, NULL)))) {
-        int kept = (is_number(x) || x->type == SPY_COMPLEX) && (is_number(y) || y->type == SPY_COMPLEX) && (!left || !right);
+        int kept = number_kept(c, o, 0, a, b);
         kept = kept || ((op == '+' || op == '*') && repeats(x) && (!left || builtin_base(c, a, o->direct, NULL))) ||
                (op == '*' && repeats(y) && (!right || builtin_base(c, b, o->direct, NULL)));
         if (!kept) return operand_error(c, binary_symbol(op), a, b, NULL);
@@ -10754,6 +10756,9 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
         int reflected = rich_reflected[rich_kind(op)];
         SPYValue *left = value_class(c, a), *right = value_class(c, b);
         int swapped = y != b && right != left && subclass(right, left) && !class_lookup(right, rich_names[reflected]);
+        /* Numbers compare by a method their classes left (number_kept). */
+        if (number_rank(x) < 3 && number_rank(y) < 3 && !number_kept(c, NULL, rich_kind(op), a, b))
+            return op == T_EQ || op == T_NE ? spy_bool(c, op == T_EQ ? a == b : a != b) : unordered(c, op, a, b);
         SPYValue *result = swapped ? comparison(c, tokens[reflected], y, x) : comparison(c, op, x, y);
         /* Builtin values that do not order name the operands' own types. */
         if (!result && unordered_by(c, swapped ? tokens[reflected] : op, swapped ? y : x, swapped ? x : y)) {
@@ -11525,6 +11530,40 @@ static SPYValue *rich_method(SPYContext *c, int op, SPYValue *self, SPYValue *ot
     if (result == c->not_implemented) { spy_release(result); return NULL; }
     return result;
 }
+/* A number's width: an int's or bool's 0, a float's 1, a complex's 2; else 3. */
+static int number_rank(SPYValue *v) {
+    return v->type == SPY_INT || v->type == SPY_BOOL ? 0 : v->type == SPY_FLOAT ? 1 : v->type == SPY_COMPLEX ? 2 : 3;
+}
+/* Whether the method of operator o, or of comparison rich when o is NULL,
+ * of number x's type, int, float or complex, takes number y (Table 22-1):
+ * y's type is no wider, and x's has the operation (a float no bitwise
+ * one, a complex no ordering, %, // or divmod). */
+static int number_accepts(const Operator *o, int rich, SPYValue *x, SPYValue *y) {
+    int rank = number_rank(x), token = o ? o->token : 0;
+    if (rank > 2 || number_rank(y) > rank) return 0;
+    if (!o) return rank < 2 || rich == R_EQ || rich == R_NE;
+    return token != '@' && (rank == 0 || (token != T_LSHIFT && token != T_RSHIFT && token != '&' && token != '|' && token != '^' &&
+                                          (rank == 1 || (token != '%' && token != T_FLOORDIV && token != O_DIVMOD))));
+}
+/* Whether exact number x takes y, an instance of a number's subclass not
+ * x's, by its own method of o or rich (number_accepts), which then
+ * answers before y's reflected one. */
+static int number_takes(SPYContext *c, const Operator *o, int rich, SPYValue *x, SPYValue *y) {
+    return y->type == SPY_INSTANCE && y->as.map.base && number_accepts(o, rich, x, y->as.map.base) &&
+           !subclass(y->as.map.parent, value_class(c, x));
+}
+/* Whether a and b, numbers or instances of a number's subclass, have a
+ * number's method of o or rich left once their Python methods declined:
+ * a's own, unless a's class defines it, taking b's number, or b's
+ * reflected one, unless b's class defines it or is a's for an operator,
+ * taking a's. */
+static int number_kept(SPYContext *c, const Operator *o, int rich, SPYValue *a, SPYValue *b) {
+    SPYValue *x = a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a, *y = b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b;
+    int reflected = o ? 0 : rich_reflected[rich];
+    return ((x == a || builtin_base(c, a, o ? o->direct : rich_names[rich], NULL)) && number_accepts(o, rich, x, y)) ||
+           ((!o || value_class(c, a) != value_class(c, b)) && (y == b || builtin_base(c, b, o ? o->reflected : rich_names[reflected], NULL)) &&
+            number_accepts(o, reflected, y, x));
+}
 static SPYValue *rich_compare(SPYContext *c, int op, SPYValue *left, SPYValue *right) {
     const int *reflected = rich_reflected;
     spy_retain(left); spy_retain(right);
@@ -11532,7 +11571,7 @@ static SPYValue *rich_compare(SPYContext *c, int op, SPYValue *left, SPYValue *r
     int first = a != b && subclass(b, a);
     SPYValue *result = first ? rich_method(c, reflected[op], right, left) : NULL;
     if (!result && !c->error_type[0]) result = rich_method(c, op, left, right);
-    if (!first && !result && !c->error_type[0]) result = rich_method(c, reflected[op], right, left);
+    if (!first && !result && !c->error_type[0] && !number_takes(c, NULL, op, left, right)) result = rich_method(c, reflected[op], right, left);
     spy_release(left); spy_release(right); return result;
 }
 static int repeats(SPYValue *);
@@ -11569,7 +11608,8 @@ static SPYValue *binary_special(SPYContext *c, const Operator *op, SPYValue *lef
     if (result || c->error_type[0]) return result;
     result = try_operator(c, left, op->direct, right, modulus, 0);
     if (result || c->error_type[0]) return result;
-    if (a != b && !reflected_first) result = try_operator(c, right, op->reflected, left, modulus, 0);
+    if (a != b && !reflected_first && (modulus || !number_takes(c, op, 0, left, right)))
+        result = try_operator(c, right, op->reflected, left, modulus, 0);
     return result;
 }
 static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size_t argc, SPYValue *const *argv) {
@@ -30345,11 +30385,13 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;
     int phase = OPERATOR_FIRST, negated = 0;
-    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT ||
+    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT || x->type == SPY_COMPLEX ||
         (rich >= 0 && (y->type == SPY_INSTANCE || metaclassed(y)) && rich_declines(c, x, rich))) {
         /* A number declines an operator or comparison with a plain
-         * instance, whose reflected method is the last call. */
-        if (!reflected || !(function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
+         * instance, whose reflected method is the last call; it takes a
+         * narrower number's subclass instance itself (number_takes). */
+        if (!reflected || number_takes(c, o, rich, x, y) ||
+            !(function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
         self = y; other = x; phase = OPERATOR_LAST;
     } else {
         if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, x, y, env);
@@ -39188,7 +39230,7 @@ static const char *attribute_slot_name(SPYContext *c, const char *owner, const c
  * a function on the machine, borrowed, its phase in *phase; or NULL. */
 static SPYValue *add_function(SPYContext *c, SPYValue *x, SPYValue *y, int *phase) {
     *phase = OPERATOR_LAST;
-    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT) return item_function(c, y, "__radd__");
+    if (number_rank(x) < 3) return number_takes(c, operators, 0, x, y) ? NULL : item_function(c, y, "__radd__");
     if (x->type != SPY_INSTANCE && !metaclassed(x)) return NULL;
     SPYValue *cls = value_class(c, x), *right = value_class(c, y), *function;
     if (right != cls && subclass(right, cls) && class_lookup(right, "__radd__") != class_lookup(cls, "__radd__")) {
