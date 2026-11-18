@@ -2,8 +2,8 @@
 # description: yield from a zip, enumerate or map that takes the items of
 # a map, of a callable iterator or of a __getitem__ sequence yields each
 # item as the adapter makes it, its calls, which may loop, in order: a
-# map's function, an item's __str__ or __init__ conversion, a sentinel's
-# __eq__. A StopIteration from a map's function ends the adapter, its
+# map's function, an item's __str__ or __init__ conversion, the items'
+# __hash__ of a tuple that hash() maps, a sentinel's __eq__. A StopIteration from a map's function ends the adapter, its
 # value the yield from's; another error propagates at the yield from; a
 # throw or close into the generator leaves the adapter's next items. Inside
 # functions as at module level.
@@ -31,6 +31,10 @@ class G:
         spin(); log.append(("g", i))
         if i >= self.n: raise IndexError
         return i
+
+class H:
+    def __init__(self, n): self.n = n
+    def __hash__(self): spin(); log.append(("h", self.n)); return self.n
 
 class P:
     def __init__(self, a): spin(); log.append(("P", a)); self.a = a
@@ -79,6 +83,8 @@ def results():
             run(lambda: [(p.a, s) for p, s in list(gen(zip(map(P, [1, 2]), "xy")))[:-1]]),
             run(lambda: list(gen(enumerate(zip(map(f, [1, 2]), map(str, [K(8), K(9)])))))),
             run(lambda: list(gen(zip("abc", map(f, [1, 2]), G(5))))),
+            run(lambda: list(gen(zip(map(hash, [(H(1), H(2)), (H(3), (H(4), H(5)))]), "ab"))) ==
+                        [(hash((1, 2)), "a"), (hash((3, (4, 5))), "b"), "end"]),
             run(thrown), run(closed)]
 
 expected = [([("q", "k2"), "end"], [2, ("ret", None)]),
@@ -91,6 +97,7 @@ expected = [([("q", "k2"), "end"], [2, ("ret", None)]),
             ([(1, "x"), (2, "y")], [("P", 1), ("P", 2), ("ret", None)]),
             ([(0, (10, "k8")), (1, (20, "k9")), "end"], [("f", 1), 8, ("f", 2), 9, ("ret", None)]),
             ([("a", 10, 0), ("b", 20, 1), "end"], [("f", 1), ("g", 0), ("f", 2), ("g", 1), ("ret", None)]),
+            (True, [("h", 1), ("h", 2), ("h", 3), ("h", 4), ("h", 5), ("ret", None)]),
             ([(10, "a"), "'k'", []], [("f", 1)]),
             ([(0, 10)], [("f", 1)])]
 
