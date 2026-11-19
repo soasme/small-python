@@ -1,6 +1,6 @@
 # Replays OperationThrow.tla: each case suspends a coroutine in an await of
 # anext(g), g suspended in an await of its own, throws the program's
-# exception into the coroutine, and writes what the throw did.
+# exception into the coroutine or closes it, and writes what that did.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -16,7 +16,7 @@ def outcome(p):
     async def body():
         try:
             await Pause()
-        except KeyError:
+        except (KeyError, GeneratorExit):
             # A loop puts the handler on the machine, as a pausing throw runs it.
             for _ in (): pass
             caught.append(True)
@@ -33,13 +33,17 @@ def outcome(p):
 
     co = driver(body())
     co.send(None)
-    thrown = {"instance": KeyError("k"), "class": KeyError, "other": ValueError("v")}[p["thrown"]]
+    thrown = {"instance": KeyError("k"), "class": KeyError, "other": ValueError("v"), "close": None}[p["thrown"]]
     try:
-        co.throw(thrown)
-        result = "suspended"
+        if thrown is None:
+            co.close()
+            result = "closed"
+        else:
+            co.throw(thrown)
+            result = "suspended"
     except StopIteration as e:
         result = "value " + e.value
-    except (StopAsyncIteration, ValueError) as e:
+    except (StopAsyncIteration, ValueError, RuntimeError) as e:
         result = "raised " + type(e).__name__
     return "%s caught=%s" % (result, bool(caught))
 

@@ -24705,11 +24705,12 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     /* A yield from passes on a throw of what is no exception, which
      * raises there (generator_throw). */
     if (g->as.generator.machine->awaiting == AWAIT_DELEGATE && !(k && subclass(k, c->exceptions[X_BASE_EXCEPTION]))) return 0;
-    /* A throw into an asend's or athrow's generator raises as one into
-     * that generator does (throws_in), the operation ending as an await
-     * of it does (delegate_left); an operation takes a close in C
-     * (awaitable_method). */
-    if (m->operation) return exception && m->operation->as.async_operation.state == 1 && throws_in(c, m->delegate, exception);
+    /* A throw into an asend's or athrow's generator, or a close as a
+     * throw of GeneratorExit, raises as one into that generator does
+     * (throws_in), the operation ending as an await of it does
+     * (delegate_left), or as its close (operation_closed). */
+    if (m->operation)
+        return m->operation->as.async_operation.state == 1 && throws_in(c, m->delegate, exception ? exception : c->exceptions[X_GENERATOR_EXIT]);
     if (m->awaiting != AWAIT_DELEGATE) return m->awaiting == AWAIT_YIELD;
     /* Or at a yield from of a builtin iterator, which has neither close
      * nor throw, or of an instance with a Python close, or throw, which
@@ -34853,11 +34854,14 @@ static SPYValue *generator_end(SPYContext *c, SPYValue *g, Result result) {
  * first, left with flow: a new GeneratorExit raises at the yield from,
  * or a RuntimeError when the delegate yielded; its other exceptions raise
  * there, chained again to the exception m handles (13.16.3). */
+static void operation_closed(SPYContext *, Machine *, SPYValue *, Result);
 static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     SPYValue *d = m->delegate;
+    int ignored = flow.flow == FLOW_YIELD;
     m->delegate = NULL; m->awaiting = AWAIT_NONE;
-    if (flow.flow == FLOW_RETURN) { d->as.generator.returned = 1; generator_close(d); }
-    else if (flow.flow != FLOW_YIELD) { generator_end(c, d, flow); flow.value = NULL; }
+    if (UNLIKELY(m->operation)) { operation_closed(c, m, d, flow); ignored = 0; flow.value = NULL; }
+    else if (flow.flow == FLOW_RETURN) { d->as.generator.returned = 1; generator_close(d); }
+    else if (!ignored) { generator_end(c, d, flow); flow.value = NULL; }
     spy_release(flow.value);
     if (error_is(c, "GeneratorExit")) spy_clear_error(c);
     else if (c->handled) delegate_raised(c);
@@ -34871,7 +34875,7 @@ static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     Consumer *s = top == m && top->resumer ? top->resumer->blocks[top->resumer->block_len - 1].consumer : NULL;
     SPYValue *thrown = s && s->id == B_THROW ? s->made : NULL;
     if (thrown) s->made = NULL;
-    if (flow.flow == FLOW_YIELD) {
+    if (ignored) {
         spy_error(c, "RuntimeError", d->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
         materialize_error(c);
     } else if (thrown && !c->error_type[0]) raise_thrown(c, thrown, c->handled);
@@ -34882,6 +34886,28 @@ static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     spy_release(thrown);
     c->inherited_exception = inherited;
     spy_release(d);
+}
+/* The asend or athrow awaitable m awaits, whose close threw GeneratorExit
+ * into its generator g at an await (delegate_closed), g leaving with flow,
+ * ends as its close() does (awaitable_method): an await yielded raises a
+ * RuntimeError, the operation left running; a value yielded ends it, but
+ * an aclose's raises a RuntimeError; g's end ends it, raising its
+ * exception but StopIteration, StopAsyncIteration or GeneratorExit. */
+static void operation_closed(SPYContext *c, Machine *m, SPYValue *g, Result flow) {
+    SPYValue *op = m->operation;
+    int awaits = flow.flow == FLOW_YIELD && g->as.generator.machine->awaiting != AWAIT_YIELD;
+    m->operation = NULL;
+    if (flow.flow == FLOW_YIELD) {
+        spy_release(flow.value);
+        if (awaits) spy_error(c, "RuntimeError", "coroutine ignored GeneratorExit");
+        else if (op->as.async_operation.method == M_ACLOSE) spy_error(c, "RuntimeError", "async generator ignored GeneratorExit");
+    } else {
+        generator_end(c, g, flow);
+        if (error_is(c, "StopIteration") || error_is(c, "StopAsyncIteration") || error_is(c, "GeneratorExit")) spy_clear_error(c);
+    }
+    if (c->error_type[0]) materialize_error(c);
+    if (!awaits) { op->as.async_operation.state = 2; g->as.generator.async_running = 0; }
+    spy_release(op);
 }
 /* Generator machine m's yield from's delegate left with *flow: a return
  * gives the yield from its value, and an error raises there, chained again
