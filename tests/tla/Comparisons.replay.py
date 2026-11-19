@@ -114,6 +114,11 @@ SOURCES = {
     "seq_order_chain": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"
                        "    def __lt__(s, o): return t(s.n + '<' + o.n)\n"
                        "result = [E('a')] < [E('b')] < [E('c')]",
+    "seq_sub_reflected_order": "class E:\n    def __init__(s, n): s.n = n\n"
+                               "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + o.n); return s.n == o.n\n"
+                               "    def __gt__(s, o): return t(s.n + '>' + o.n)\n"
+                               "class L(list): pass\n"
+                               "result = ([E('a'), E('b')] < L([E('a'), E('c')]), [E('x')] < L([E('x'), E('y')]))",
     "builtin_declines": "class E:\n    def __init__(s, n): s.n = n\n"
                         "    def __eq__(s, o): return t(s.n + '==' + type(o).__name__)\n"
                         "    def __gt__(s, o): return t(s.n + '>' + type(o).__name__)\n"

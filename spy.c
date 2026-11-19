@@ -522,6 +522,9 @@ struct SPYContext {
     /* Whether weak_calls, which a collection began, goes ahead of the
      * finalizers until it empties (weak_next). */
     int weak_first;
+    /* Under an ordering's operands on a machine's stack: a list's or tuple's subclass instance, the right operand,
+     * compares first, by the reflected operator (reflected_order). */
+    SPYValue *reflecting;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -29765,6 +29768,37 @@ fail:
     return NULL;
 }
 static SPYValue *operator_call(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
+static NO_INLINE SPYValue *order_decide(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t, int, SPYValue **, SPYValue **);
+static void operator_keep(SPYContext *, Machine *, Instruction *, SPYValue *);
+/* The reflected ordering ins, a node-less step of op's reflected
+ * operator, whose method operator_call keeps with its phase. */
+static Instruction reflected_step(Instruction *ins) {
+    static const int tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
+    int op = 0;
+    step_operation(ins, &op);
+    return (Instruction){.op = BC_BINARY, .arg = tokens[rich_reflected[rich_kind(op)]]};
+}
+/* Ordering step ins of x and y (kept, its right operand), a's and b's
+ * lists or tuples, y's class a subclass of x's: as b's reflected ordering
+ * of a, by the items' __eq__ from pair at (equal_call), then the first
+ * unequal pair's reflected method (order_decide), c->reflecting under
+ * them telling the returns the operator (pair_returned,
+ * operator_returned). The Python method entered first, or NULL for the
+ * step to compare in C. */
+static NO_INLINE SPYValue *reflected_order(SPYContext *c, Machine *m, Instruction *ins, SPYValue *y, SPYValue *b, SPYValue *a, size_t at,
+                                           size_t end, SPYValue **env) {
+    Instruction reflected = reflected_step(ins);
+    if (!order_python(c, reflected.arg, b, a)) return NULL;
+    size_t len = m->len;
+    operator_keep(c, m, ins, y);
+    if (c->error_type[0] || machine_push(c, m, spy_retain(c->reflecting))) goto fail;
+    SPYValue *value = NULL, *entered = at != SIZE_MAX ? equal_call(c, m, b, a, at, env) : order_decide(c, m, &reflected, b, a, end, 1, env, &value);
+    spy_release(value);
+    if (entered) return entered;
+fail:
+    while (m->len > len) spy_release(machine_pop(m));
+    return NULL;
+}
 /* For an ordering step ins of x and y, two lists or two tuples whose items
  * before at are equal, at itself unequal when known: the Python method
  * that comparing the first unequal pair from at on calls first, owned,
@@ -31453,11 +31487,13 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
      * comparison_declined): by its items' Python __eq__ (equal_call),
      * or, unreflected, their ordering. */
     SPYValue *a = sequence_base(x), *b = sequence_base(y);
-    if (rich >= 0 && (a != x || b != y) && sequence_pair(a, b) && set_plain(NULL, rich, x) && set_plain(NULL, rich, y)) {
+    int ordering = rich != R_EQ && rich != R_NE;
+    if (rich >= 0 && (a != x || b != y) && (sequence_pair(a, b) || (ordering && a->type == SPY_LIST && b->type == SPY_LIST)) &&
+        set_plain(NULL, rich, x) && set_plain(NULL, rich, y)) {
         SPYValue *left = value_class(c, x), *right = value_class(c, y);
         int swapped = b != y && right != left && subclass(right, left);
         size_t end, at = python_pair(c, swapped ? b : a, swapped ? a : b, 0, &end);
-        if ((rich == R_EQ || rich == R_NE) && at != SIZE_MAX) return equal_call(c, m, swapped ? b : a, swapped ? a : b, at, env);
+        if (!ordering && at != SIZE_MAX) return equal_call(c, m, swapped ? b : a, swapped ? a : b, at, env);
         if (!swapped && order_python(c, op, a, b)) {
             operator_keep(c, m, ins, y);
             if (at != SIZE_MAX) return equal_call(c, m, a, b, at, env);
@@ -31465,6 +31501,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             spy_release(value);
             return entered;
         }
+        if (swapped && ordering) return reflected_order(c, m, ins, y, b, a, at, end, env);
     }
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
@@ -31922,8 +31959,12 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
             spy_release(x); spy_release(y);
             return lookup_returned(c, m, ins, same < 0 ? NULL : spy_bool(c, same), pc);
         }
+        /* A subclass instance's reflected ordering decides by its operator (reflected_order). */
+        Instruction reflected;
+        int reflecting = ordered && m->len && m->stack[m->len - 1] == c->reflecting;
+        if (reflecting) reflected = reflected_step(ins);
         if (ordered && same >= 0) {
-            function = order_decide(c, m, ins, x, y, found ? end : at - 1, !found, &env, &value);
+            function = order_decide(c, m, reflecting ? &reflected : ins, x, y, found ? end : at - 1, !found, &env, &value);
             call = function ? call_enter(c, function, env, m) : NULL;
             if (call) {
                 spy_release(x); spy_release(y);
@@ -31932,6 +31973,7 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
             }
             while (m->len > len) spy_release(machine_pop(m));
         } else if (same >= 0) value = spy_bool(c, (op == T_EQ) == same);
+        if (reflecting) spy_release(machine_pop(m));
         m->pc = operator_finish(c, m, ins, y, value, pc);
         spy_release(x); spy_release(y);
         return m;
@@ -32000,8 +32042,9 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
     int phase = (int)marker->as.integer_data.small, called = phase & ~3;
     spy_release(marker);
-    /* divmod() and pow() keep their operator with the phase (operator_call). */
-    if (called) { op = phase >> 2; kind = OPERATE_BINARY; phase &= 3; }
+    /* divmod() and pow() keep their operator with the phase (operator_call),
+     * as does a reflected ordering (reflected_order). */
+    if (called) { op = phase >> 2; kind = rich_kind(op) < 0 ? OPERATE_BINARY : OPERATE_COMPARE; phase &= 3; }
     if (phase == OPERATOR_INDEX) {
         /* A slice's part takes its int, and the next part's __index__ is
          * the next call (slice_part). */
@@ -32090,6 +32133,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         spy_release(machine_pop(m));
         if (!result) augmented_error(c, op, x, y);
     }
+    if (called && kind == OPERATE_COMPARE && m->len && m->stack[m->len - 1] == c->reflecting) spy_release(machine_pop(m));
     m->pc = operator_finish(c, m, ins, y, result, pc);
     spy_release(x); spy_release(y);
     return m;
@@ -44601,9 +44645,10 @@ SPYContext *spy_context_new(void) {
     c->missing = value_new(c, V_UNBOUND);
     c->stepped = value_new(c, V_UNBOUND);
     c->descripting = value_new(c, V_UNBOUND);
+    c->reflecting = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->missing || !c->stepped || !c->descripting || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->missing || !c->stepped || !c->descripting || !c->reflecting || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

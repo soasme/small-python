@@ -41,7 +41,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_int_sub_iter", "contains_list_sub_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
+          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected",
           "builtin_sub_unordered"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
@@ -168,6 +168,9 @@ Case(c) ==
       [] c = "seq_order_calls" -> <<"('b<c', 'y<x')", <<"'aa'", "'bc'", "'b<c'", "'xy'", "'y<x'">>>>
       \* so does each link of a chain, whose next link orders its right operand
       [] c = "seq_order_chain" -> <<"'b<c'", <<"'ab'", "'a<b'", "'bc'", "'b<c'">>>>
+      \* a list's subclass on the right orders first by its own items' __eq__
+      \* and the reflected method, equal pairs leaving the lengths to decide
+      [] c = "seq_sub_reflected_order" -> <<"('c>b', True)", <<"'aa'", "'cb'", "'c>b'", "'xx'">>>>
       \* None, a str, a tuple, and an instance comparing as object does decline
       \* an instance of another class, whose reflected method decides
       [] c = "builtin_declines" -> <<"('a==NoneType', 'b>str', 'c==P', 'd==tuple')",

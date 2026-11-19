@@ -517,6 +517,7 @@ Unreleased (0.10.0):
 - `co_cellvars` lists the names a nested definition's annotations read
 - a set's `union()`, `intersection()`, `difference()` and their updates of any number of iterables call items' Python `__hash__` and `__eq__` without nesting on the C stack
 - `open()` given keyword arguments as a program's first call loads its intrinsics without nesting on the C stack
+- an ordering of a list or tuple and its subclass's instance on the right calls the items' Python methods without nesting on the C stack
 
 2026-11-10 0.9.0:
 
