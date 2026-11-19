@@ -37106,6 +37106,12 @@ static int keys_items_reach(SPYValue *x, SPYValue *y) {
     SPYValue *a = sequence_base(x), *b = sequence_base(y);
     return ordered_pair(a, b) && (sort_reaches(a, 64) || sort_reaches(b, 64));
 }
+/* Whether a sort compares items x and y on the machine as a whole: an
+ * instance among them, or two tuples or lists whose items may call Python
+ * (keys_items_reach). */
+static int items_compare(SPYValue *x, SPYValue *y) {
+    return x->type == SPY_INSTANCE || y->type == SPY_INSTANCE || keys_items_reach(x, y);
+}
 /* The Python rich comparison s's question s->x < s->y calls next, with
  * its pair in cx and cy, to enter on the machine; else NULL, s->less
  * answered natively. Two tuples compare as sequence_order does: each pair
@@ -37117,7 +37123,7 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
     s->open = 0;
     if (!ordered_pair(a, b)) {
         if ((function = rich_function(c, a, b, R_LT))) { s->cx = a; s->cy = b; s->rich = R_LT; return function; }
-        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) { s->cx = a; s->cy = b; s->rich = R_LT; return c->unbound; }
+        if (items_compare(a, b)) { s->cx = a; s->cy = b; s->rich = R_LT; return c->unbound; }
         s->less = sort_less(c, a, b);
         return NULL;
     }
@@ -37126,8 +37132,9 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
         SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
         if (x == y) continue;
         if ((function = rich_function(c, x, y, R_EQ))) { s->cx = x; s->cy = y; s->rich = R_EQ; return function; }
-        /* Two nested tuples or lists compare on the machine (compare_enter, key_call). */
-        if (keys_items_reach(x, y)) { s->cx = x; s->cy = y; s->rich = R_EQ; return c->unbound; }
+        /* Two nested tuples or lists, or an instance's reflected method,
+         * compare on the machine (compare_enter, key_call). */
+        if (items_compare(x, y)) { s->cx = x; s->cy = y; s->rich = R_EQ; return c->unbound; }
         spy_retain(x); spy_retain(y);
         int same = equal(x, y);
         spy_release(x); spy_release(y);
@@ -37138,7 +37145,7 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
     if (s->at_item >= a->as.seq.len || s->at_item >= b->as.seq.len) { s->less = a->as.seq.len < b->as.seq.len; return NULL; }
     SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
     if ((function = rich_function(c, x, y, R_LT))) { s->cx = x; s->cy = y; s->rich = R_LT; return function; }
-    if (keys_items_reach(x, y)) { s->cx = x; s->cy = y; s->rich = R_LT; return c->unbound; }
+    if (items_compare(x, y)) { s->cx = x; s->cy = y; s->rich = R_LT; return c->unbound; }
     s->less = sort_less(c, x, y);
     return NULL;
 }
