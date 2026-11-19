@@ -125,6 +125,20 @@ SOURCES = {
                          "    try: complex(*a)\n"
                          "    except TypeError as e: return str(e)\n"
                          "result = (complex(F()), complex(I()), bad(F(), N()), bad(F(), '1'), complex(I(), F()), log)",
+    "complex_parts": "log = []\n"
+                     "class C:\n"
+                     "    def __complex__(self):\n"
+                     "        for _ in range(2): pass\n"
+                     "        log.append('complex')\n"
+                     "        return 1+2j\n"
+                     "    def __float__(self):\n"
+                     "        for _ in range(2): pass\n"
+                     "        log.append('float')\n"
+                     "        return 3.0\n"
+                     "def g():\n"
+                     "    yield complex(C(), C())\n"
+                     "    yield complex(imag=C(), real=C())\n"
+                     "result = (list(g()), log)",
     "int_base_first": "log = []\nclass B:\n    def __index__(self):\n        log.append(2)\n        return 2\n"
                       "def bad(*a):\n    try: return int(*a)\n    except (TypeError, ValueError) as e: return type(e).__name__\n"
                       "result = (int('100', B()), bad(5, B()), bad(5, 99), len(log) + int('1', B()))",

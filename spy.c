@@ -26888,6 +26888,8 @@ static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue
 static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, int, SPYValue **);
 static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static int buffer_argument(SPYContext *, SPYValue *);
+static SPYValue *complex_construct(SPYContext *, Machine *, SPYValue *, SPYValue *, int);
+static SPYValue *complex_keywords(SPYContext *, Machine *, size_t, SPYValue *const *, SPYValue *);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -26920,6 +26922,12 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return result;
     }
     if (method < 0 && checks_call(c, m, builtin_id(callee), argc, argv, &result)) {
+        release_all(argc, argv); spy_release(callee);
+        return result;
+    }
+    if (method < 0 && argc == 2 && callee == c->types[SPY_COMPLEX]) {
+        /* complex(real, imag) converts its parts on m (complex_go). */
+        result = complex_construct(c, m, argv[0], argv[1], 1);
         release_all(argc, argv); spy_release(callee);
         return result;
     }
@@ -28075,6 +28083,12 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(function);
         return NULL;
     }
+    if (calls && argc == 2 && callee == c->types[SPY_COMPLEX]) {
+        /* So does complex(real, imag), the callee and arguments leaving the stack. */
+        result = complex_construct(c, m, argv[0], argv[1], 1);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return result;
+    }
     if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->error_type[0])) return result;
     if (calls && (function = static_function(c, callee))) {
         /* A staticmethod calls its function. */
@@ -28512,6 +28526,13 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         *env = callee_env;
         return callee;
     }
+    if (calls && callee == c->types[SPY_COMPLEX]) {
+        /* complex() naming its parts converts them on m (complex_go). */
+        SPYValue *keywords = entries_dict(c, kw, kwc);
+        result = keywords ? complex_keywords(c, m, positional, argv, keywords) : NULL;
+        spy_release(keywords);
+        goto done;
+    }
     if (calls && print_instances(c, callee, positional, argv, entries_file(kw, kwc))) {
         /* As a plain call's step (stack_call), with its keywords. */
         SPYValue *keywords = entries_dict(c, kw, kwc);
@@ -28631,7 +28652,10 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         SPYValue *wrapped = spy_retain(static_function(c, callee));
         spy_release(callee); callee = wrapped;
     }
-    if (calls && machine_function(c, callee) && string_keys(c, keywords))
+    if (calls && callee == c->types[SPY_COMPLEX] && keywords->as.map.len)
+        /* complex() naming its parts converts them on m (complex_go). */
+        result = complex_keywords(c, m, args->as.seq.len, args->as.seq.items, keywords);
+    else if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = step_env(c, m, callee, args->as.seq.len, args->as.seq.items, keywords)) ? spy_retain(callee) : NULL;
     else if (calls && !called && (function = bound_function(c, callee)) && string_keys(c, keywords))
         self = spy_retain(callee->type == SPY_METHOD ? callee->as.method.self : callee);
@@ -35680,6 +35704,8 @@ static SPYValue *parse_complex_ascii(SPYContext *c, const char *data, size_t dat
 invalid:
     mem_free(source); return spy_error(c, "ValueError", "complex() arg is a malformed string");
 }
+/* The methods complex() converts by, in order. */
+static const char *const complex_kinds[] = {"__complex__", "__float__", "__index__"};
 /* role names the argument of complex(real, imag), or is NULL for complex(x). */
 /* The number value converts by, with its kind: itself or its builtin
  * value (NULL), or the method of its __complex__ (allow_complex), its
@@ -35689,13 +35715,30 @@ static int complex_method(SPYContext *c, SPYValue **value, int allow_complex, co
     if (base && (base->type == SPY_COMPLEX || is_number(base))) v = *value = base;
     *method = NULL;
     if (v->type == SPY_COMPLEX || is_number(v)) return 0;
-    static const char *const kinds[] = {"__complex__", "__float__", "__index__"};
-    for (int i = !allow_complex; i < 3 && !*method && !c->error_type[0]; i++) *method = special_method(c, v, *kind = kinds[i]);
+    for (int i = !allow_complex; i < 3 && !*method && !c->error_type[0]; i++) *method = special_method(c, v, *kind = complex_kinds[i]);
     if (*method || c->error_type[0]) return *method ? 0 : -1;
     char fq[256];
     if (role) errorf(c, "TypeError", "complex() argument '%s' must be a real number, not %s", role, type_fqname(v, fq, sizeof(fq)));
     else errorf(c, "TypeError", "complex() argument must be a string or a number, not %s", type_fqname(v, fq, sizeof(fq)));
     return -1;
+}
+/* What value's method of kind, its __complex__, __float__ or __index__,
+ * returned, converted, which it takes: the number, a complex for a
+ * complex, else a float; NULL with an error. */
+static SPYValue *complex_result(SPYContext *c, SPYValue *value, const char *kind, SPYValue *converted) {
+    if (!strcmp(kind, "__index__") && !(converted = index_result(c, value, converted))) return NULL;
+    SPYValue *exact = builtin_value(c, converted, !strcmp(kind, "__complex__") ? SPY_COMPLEX : !strcmp(kind, "__float__") ? SPY_FLOAT : SPY_INT);
+    if (!exact) {
+        char fq[256];
+        errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(value, fq, sizeof(fq)), kind,
+               !strcmp(kind, "__complex__") ? "a complex" : "a float", type_name(converted));
+        spy_release(converted); return NULL;
+    }
+    double complex number = numeric_complex(c, exact);
+    int was_complex = exact->type == SPY_COMPLEX;
+    spy_release(converted);
+    if (c->error_type[0]) return NULL;
+    return was_complex ? complex_new(c, number) : spy_float(c, creal(number));
 }
 static int as_complex(SPYContext *c, SPYValue *value, double complex *number, int *was_complex, int allow_complex, const char *role) {
     SPYValue *method;
@@ -35703,48 +35746,110 @@ static int as_complex(SPYContext *c, SPYValue *value, double complex *number, in
     if (complex_method(c, &value, allow_complex, role, &method, &kind)) return -1;
     *was_complex = value->type == SPY_COMPLEX;
     if (!method) { *number = numeric_complex(c, value); return c->error_type[0] ? -1 : 0; }
-    SPYValue *converted;
-    if (!strcmp(kind, "__index__")) { spy_release(method); converted = index_object(c, value); }
-    else { converted = call(c, method, 0, NULL); spy_release(method); }
-    if (!converted) return -1;
-    SPYValue *exact = builtin_value(c, converted, !strcmp(kind, "__complex__") ? SPY_COMPLEX :
-                                    !strcmp(kind, "__float__") ? SPY_FLOAT : SPY_INT);
-    if (exact) { *number = numeric_complex(c, exact); *was_complex = exact->type == SPY_COMPLEX; }
-    else {
-        char fq[256];
-        errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(value, fq, sizeof(fq)), kind,
-               !strcmp(kind, "__complex__") ? "a complex" : "a float", type_name(converted));
-    }
-    spy_release(converted); return exact && !c->error_type[0] ? 0 : -1;
+    SPYValue *converted = call(c, method, 0, NULL);
+    spy_release(method);
+    SPYValue *part = converted ? complex_result(c, value, kind, converted) : NULL;
+    if (!part) return -1;
+    *number = numeric_complex(c, part); *was_complex = part->type == SPY_COMPLEX;
+    spy_release(part);
+    return 0;
 }
-/* complex(x) parses a string or converts a number; complex(real, imag), or
- * either given by keyword, takes numbers only, as actual_complex_new and
- * complex_new_impl do. */
-static SPYValue *complex_construct(SPYContext *c, SPYValue *real_value, SPYValue *imag_value, int pair) {
+/* A complex job's phase, the low bits of its flags: the real part's
+ * __complex__ looked up first, then called, then the imaginary part
+ * checked, then each part converted, then the result made. Above them
+ * the kind of method called, as complex_kinds, and whether the parts are
+ * named, and the imaginary part given. */
+enum { CX_START, CX_EARLY, CX_CHECK, CX_REAL, CX_IMAG, CX_DONE };
+enum { CX_PAIR = 1 << 5, CX_IMAGINED = 1 << 6 };
+static SPYValue *complex_go(SPYContext *, Machine *, SPYValue *);
+/* What job's part's method returned, result: its number, the job going on. */
+static SPYValue *complex_called(SPYContext *c, Machine *m, SPYValue *job, SPYValue *result) {
+    SPYValue **items = job->as.seq.items;
+    int bits = (int)items[2]->as.integer_data.small, phase = bits & 7;
+    SPYValue *part = result ? complex_result(c, items[phase == CX_IMAG], complex_kinds[bits >> 3 & 3], result) : NULL;
+    if (!part || split_set(c, job, 3 + (phase == CX_IMAG), part) ||
+        split_set(c, job, 2, spy_int(c, (bits & ~31) | (phase == CX_EARLY ? CX_CHECK : phase + 1)))) { spy_release(job); return NULL; }
+    return complex_go(c, m, job);
+}
+/* complex(real, imag), or complex(x) or a form naming either part, of
+ * job, a list of the real and imaginary arguments (None when absent),
+ * the flags, and the parts converted so far, a complex or float each, or
+ * None; as actual_complex_new and complex_new_impl do. A part's method
+ * is m's call when m is given (callk), its result resuming the job
+ * (complex_called): NULL with c->k_fn set then. Job taken. */
+static SPYValue *complex_go(SPYContext *c, Machine *m, SPYValue *job) {
+    for (;;) {
+        SPYValue **items = job->as.seq.items, *real = items[0], *imag = items[1], *method = NULL, *value;
+        int bits = (int)items[2]->as.integer_data.small, phase = bits & 7, next = phase + 1;
+        const char *kind = NULL;
+        if (phase == CX_DONE) {
+            SPYValue *result = NULL;
+            double complex x = numeric_complex(c, items[3]), y = items[4] == c->none ? 0 : numeric_complex(c, items[4]);
+            if (!(bits & CX_IMAGINED)) result = complex_new(c, x);
+            else {
+                double re = creal(x), im = creal(y);
+                if (items[4]->type == SPY_COMPLEX) re -= cimag(y);
+                if (items[3]->type == SPY_COMPLEX) im += cimag(x);
+                result = complex_new(c, complex_parts(re, im));
+            }
+            spy_release(job);
+            return result;
+        }
+        if ((phase == CX_START || phase == CX_IMAG) && !(bits & CX_IMAGINED)) next = phase == CX_START ? CX_REAL : CX_DONE;
+        else if (phase == CX_REAL && items[3] != c->none) ;
+        else {
+            /* The real part's __complex__ comes first; then both parts
+             * must be numbers before either converts. */
+            int real_part = phase != CX_CHECK && phase != CX_IMAG;
+            value = real_part ? real : imag;
+            if (complex_method(c, &value, real_part, real_part ? bits & CX_PAIR ? "real" : NULL : "imag", &method, &kind)) {
+                spy_release(job); return NULL;
+            }
+            if (phase == CX_START && method && kind == complex_kinds[0]) next = CX_EARLY;
+            else if (phase == CX_START || phase == CX_CHECK) { spy_release(method); method = NULL; next = phase == CX_START ? CX_CHECK : CX_REAL; }
+            else if (!method) {
+                double complex number = numeric_complex(c, value);
+                SPYValue *part = c->error_type[0] ? NULL : value->type == SPY_COMPLEX ? complex_new(c, number) : spy_float(c, creal(number));
+                if (!part || split_set(c, job, 3 + (phase == CX_IMAG), part)) { spy_release(job); return NULL; }
+            }
+        }
+        int k = 0;
+        while (kind && k < 2 && kind != complex_kinds[k]) k++;
+        if (split_set(c, job, 2, spy_int(c, (bits & ~31) | (method ? phase == CX_START ? CX_EARLY : phase : next) | k << 3))) {
+            spy_release(method); spy_release(job); return NULL;
+        }
+        if (method) {
+            SPYValue *result = callk(c, m, method, 0, NULL, complex_called, job);
+            spy_release(method);
+            return result;
+        }
+    }
+}
+/* complex() of real and imag, which may be NULL, the parts named for pair
+ * (complex_go). */
+static SPYValue *complex_construct(SPYContext *c, Machine *m, SPYValue *real_value, SPYValue *imag_value, int pair) {
     SPYValue *text = pair ? NULL : builtin_value(c, real_value, SPY_STRING);
     if (text) return parse_complex(c, text);
     if (!pair && real_value->type == SPY_COMPLEX) return spy_retain(real_value);
-    double complex real, imag = complex_parts(0, 0);
-    int real_complex, imag_complex = 0, early = 0;
-    if (imag_value) {
-        /* The real part's __complex__ comes first; then both parts must be
-         * numbers before either converts. */
-        SPYValue *method, *checked = real_value;
-        const char *kind;
-        int failed = complex_method(c, &checked, 1, "real", &method, &kind);
-        spy_release(method);
-        if (!failed && method && !strcmp(kind, "__complex__")) failed = as_complex(c, real_value, &real, &real_complex, 1, "real"), early = 1;
-        checked = imag_value;
-        if (failed || complex_method(c, &checked, 0, "imag", &method, &kind)) return NULL;
-        spy_release(method);
-    }
-    if ((!early && as_complex(c, real_value, &real, &real_complex, 1, pair ? "real" : NULL)) ||
-        (imag_value && as_complex(c, imag_value, &imag, &imag_complex, 0, "imag"))) return NULL;
-    if (!imag_value) return complex_new(c, real);
-    double x = creal(real), y = creal(imag);
-    if (imag_complex) x -= cimag(imag);
-    if (real_complex) y += cimag(real);
-    return complex_new(c, complex_parts(x, y));
+    SPYValue *job = spy_list(c), *bits = spy_int(c, (pair ? CX_PAIR : 0) | (imag_value ? CX_IMAGINED : 0));
+    int failed = !job || !bits || sequence_append(c, job, real_value) || sequence_append(c, job, imag_value ? imag_value : c->none) ||
+                 sequence_append(c, job, bits) || sequence_append(c, job, c->none) || sequence_append(c, job, c->none);
+    spy_release(bits);
+    if (failed) { spy_release(job); return NULL; }
+    return complex_go(c, m, job);
+}
+/* complex() of argc arguments argv and keywords, which name its parts
+ * (complex_construct). */
+static SPYValue *complex_keywords(SPYContext *c, Machine *m, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    static const char *const names[] = {"real", "imag"};
+    SPYValue *args[2];
+    if (parse_arguments(c, "complex", argc, argv, keywords, names, 2, 0, 0, args)) return NULL;
+    if (!args[0] && !args[1]) return complex_new(c, complex_parts(0, 0));
+    SPYValue *zero = args[0] ? NULL : spy_int(c, 0);
+    if (!args[0] && !zero) return NULL;
+    SPYValue *result = complex_construct(c, m, args[0] ? args[0] : zero, args[1], 1);
+    spy_release(zero);
+    return result;
 }
 /* The submodules of a package that fromlist names, as CPython's
  * _handle_fromlist: "*" names those of its __all__, where "*" is ignored. */
@@ -40327,7 +40432,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     case B_COMPLEX: {
         if (argc > 2) goto arity;
         if (!argc) return complex_new(c, complex_parts(0, 0));
-        return complex_construct(c, a, argc == 2 ? argv[1] : NULL, argc == 2);
+        return complex_construct(c, NULL, a, argc == 2 ? argv[1] : NULL, argc == 2);
     }
     case B_ASCII: {
         if (argc != 1) goto arity;
@@ -41636,17 +41741,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             for (size_t i = 1; i < 4; i++) if (!args[i]) args[i] = c->none;
             return builtin(c, id == B_EXEC && args[3] != c->none ? 4 : 3, args, (void *)(intptr_t)(id == B_EXEC ? B_EXEC_CLOSURE : id));
         }
-        case B_COMPLEX: {
-            static const char *const names[] = {"real", "imag"};
-            SPYValue *args[2];
-            if (parse_arguments(c, "complex", argc, argv, keywords, names, 2, 0, 0, args)) return NULL;
-            if (!args[0] && !args[1]) return builtin(c, 0, args, (void *)(intptr_t)id);
-            SPYValue *zero = args[0] ? NULL : spy_int(c, 0);
-            if (!args[0]) { if (!zero) return NULL; args[0] = zero; }
-            SPYValue *result = complex_construct(c, args[0], args[1], 1);
-            spy_release(zero);
-            return result;
-        }
+        case B_COMPLEX: return complex_keywords(c, NULL, argc, argv, keywords);
         case B_SUM: case B_STR: case B_BYTES: case B_BYTEARRAY: {
             static const char *const sum_names[] = {"iterable", "start"}, *const str_names[] = {"object", "encoding", "errors"},
                                      *const bytes_names[] = {"source", "encoding", "errors"};
