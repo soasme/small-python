@@ -32192,24 +32192,25 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
     spy_release(x); spy_release(y);
     return result;
 }
-/* The Python __bool__ or __len__ (truth_function) that a test, or a
- * comparison in a chain whose right operand y goes on, calls on its
- * result v, which it takes: the call left on m (CALL_CHECKED), y, v and
- * whether it is __bool__ on m's stack for truth_returned, 1, or 1 with an
- * error; else 0, v kept. */
+/* The Python __bool__ or __len__ (truth_function), or a descriptor
+ * __bool__'s Python read, its result then called (special_env), that a
+ * test, or a comparison in a chain whose right operand y goes on, calls
+ * on its result v, which it takes: the call left on m (CALL_CHECKED), y,
+ * v and whether it is __bool__ on m's stack for truth_returned, 1, or 1
+ * with an error; else 0, v kept. A read's AttributeError makes v true. */
 static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue *y) {
     int length = 0;
-    SPYValue *function = v->type == SPY_INSTANCE || metaclassed(v) ? truth_function(c, v, &length) : NULL, *self, *env = NULL;
+    SPYValue *function = v->type == SPY_INSTANCE || metaclassed(v) ? truth_special(c, v, &length) : NULL, *entered = NULL, *env = NULL;
     if (!function) return 0;
     size_t depth = m->len;
     if (y && machine_push(c, m, spy_retain(y))) spy_release(v);
     else if (!machine_push(c, m, v) && !machine_push(c, m, spy_retain(c->booleans[!length])))
-        env = function_env(c, function, 1, (self = spy_retain(v), &self), NULL, 1);
-    if (!env) {
+        entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : c->booleans[1], &env);
+    if (!entered) {
         while (m->len > depth) spy_release(machine_pop(m));
         return 1;
     }
-    c->k_fn = spy_retain(function); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
+    c->k_fn = entered; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
     return 1;
 }
 /* The truth a test's or a chained comparison's call (truth_call) returned
@@ -32950,15 +32951,33 @@ static NO_INLINE int iter_returned(SPYContext *c, Machine *m, Instruction *ins, 
     else spy_release(iterator);
     return 0;
 }
+/* What a step's read of v's __iter__, __aiter__ or __anext__, or
+ * __await__, as name, gives when its AttributeError makes the method
+ * absent (special_env): the TypeError's message, or the AttributeError
+ * an async method's raises (async_absence), in a tuple. */
+static SPYValue *iter_absence(SPYContext *c, SPYValue *v, const char *name) {
+    if (strcmp(name, "__iter__")) return async_absence(c, v, name);
+    char text[160];
+    snprintf(text, sizeof text, "'%.50s' object is not iterable", type_name(v));
+    return parts_tuple(c, 1, (SPYValue *[]){spy_string(c, text, strlen(text))});
+}
 /* The Python method name, __iter__, __aiter__ or __await__, of the
  * instance atop m's stack that step ins, a loop, an async for, a yield
  * from or an await, calls on it, owned, with its env, the instance left
- * there; or c->unbound when it is a generator function, called at once,
- * whose generator the step takes (iter_returned); else NULL. */
+ * there, or a descriptor's Python read, its result then called as the
+ * step's (special_env); or c->unbound when it is a generator function,
+ * called at once, whose generator the step takes (iter_returned); else
+ * NULL. */
 static NO_INLINE SPYValue *iter_call(SPYContext *c, Machine *m, Instruction *ins, const char *name, SPYValue **env) {
     SPYValue *v = m->stack[m->len - 1];
     SPYValue *function = builtin_base(c, v, name, NULL) ? NULL : class_lookup(v->as.map.parent, name);
-    if (!function || (!machine_function(c, function) && !generator_function(c, function))) return NULL;
+    if (!function) return NULL;
+    if (!machine_function(c, function) && !generator_function(c, function)) {
+        if (!descriptor_getter(c, function)) return NULL;
+        SPYValue *absent = iter_absence(c, v, name), *entered = absent ? special_env(c, m, function, v, NULL, absent, env) : NULL;
+        spy_release(absent);
+        return entered;
+    }
     SPYValue *self = spy_retain(v);
     if (machine_function(c, function)) return (*env = function_env(c, function, 1, &self, NULL, 1)) ? spy_retain(function) : NULL;
     SPYValue *result = call(c, function, 1, &self);
@@ -33341,15 +33360,16 @@ static NO_INLINE int intrinsics_returned(SPYContext *c, Machine *m, SPYValue *re
     return result != NULL;
 }
 /* The Python __bool__ or __len__ of instance v's class that a test calls
- * on v (truth_function), owned, with its env, v on m's stack under it, and
- * for __len__ False above v; else NULL. */
+ * on v (truth_function), or a descriptor __bool__'s Python read, its
+ * result then called, an AttributeError making v true (special_env),
+ * owned, with its env, v on m's stack under it, and for __len__ False
+ * above v; else NULL. */
 static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **env) {
     int length = 0;
-    SPYValue *function = truth_function(c, v, &length);
+    SPYValue *function = truth_special(c, v, &length), *entered;
     if (!function || machine_push(c, m, spy_retain(v))) return NULL;
     if (length && machine_push(c, m, spy_retain(c->booleans[0]))) { spy_release(machine_pop(m)); return NULL; }
-    SPYValue *self = spy_retain(v);
-    if ((*env = function_env(c, function, 1, &self, NULL, 1))) return spy_retain(function);
+    if ((entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : c->booleans[1], env))) return entered;
     for (int i = 0; i <= length; i++) spy_release(machine_pop(m));
     return NULL;
 }
@@ -35826,10 +35846,13 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                  * again, its awaitable under c->unbound (CALL_ITER). */
                 SPYValue *iterator = m->blocks[m->block_len - 1].value, *next;
                 if (m->len && m->stack[m->len - 1] == c->unbound) { spy_release(machine_pop(m)); a = machine_pop(m); }
-                else if (iterator->type == SPY_INSTANCE && (next = item_function(c, iterator, "__anext__"))) {
-                    SPYValue *self = spy_retain(iterator);
-                    if (!(callee_env = function_env(c, next, 1, &self, NULL, 1))) break;
-                    value = spy_retain(next); special = CALL_ITER; goto enter_special;
+                else if (iterator->type == SPY_INSTANCE && (next = item_special(c, iterator, "__anext__"))) {
+                    /* Or a descriptor's Python read, what it gives then called (special_env). */
+                    SPYValue *absent = machine_function(c, next) ? NULL : iter_absence(c, iterator, "__anext__");
+                    value = machine_function(c, next) || absent ? special_env(c, m, next, iterator, NULL, absent, &callee_env) : NULL;
+                    spy_release(absent);
+                    if (!value) break;
+                    special = CALL_ITER; goto enter_special;
                 } else a = call_special(c, iterator, "__anext__", 0, NULL);
                 m->awaiting = AWAIT_NEXT; m->await_target = ins->target; m->drop = 0;
                 if (a) m->delegate = await_iterator(c, a, "__anext__");

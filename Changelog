@@ -536,6 +536,7 @@ Unreleased (0.10.0):
 - A format field's `.attr` and `[key]` call a Python property getter, `__getattr__`, `__getitem__` or `__missing__` without nesting on the C stack
 - `send()`, `throw()` and `close()` through a `yield from` of an object whose `send`, `throw` or `close` comes from its Python `__getattr__` run without nesting on the C stack
 - Sorting tuples or lists whose items pair a builtin value with an instance calls the instance's reflected Python comparison without nesting on the C stack
+- `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
 
