@@ -3,7 +3,8 @@
 # awaitable to completion, an asend() through an await or, in every other
 # walk, sent to directly, a throw() into an asend() awaitable directly, an
 # athrow() or aclose() sent to, stepped by next() or awaited, in turn by
-# walk, and comparing its result with the model's.
+# walk, every fourth walk through the awaitable's type, and comparing its
+# result with the model's.
 FIELDS = ("variant", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -49,12 +50,13 @@ def perform(target, op, mode):
         awaitable = target.aclose()
     if op[0] in ("athrow", "aclose") and mode == 2:
         awaitable = awaiting(awaitable)
+    kind = type(awaitable)
     try:
         if op[0] == "thrown":
             # Thrown into the asend() awaitable, which throws it into the body.
-            awaitable.throw(error)
+            kind.throw(awaitable, error) if mode == 3 else awaitable.throw(error)
         elif op[0] == "asend" or direct or mode == 2:
-            awaitable.send(None)
+            kind.send(awaitable, None) if mode == 3 else awaitable.send(None)
         else:
             next(awaitable)
         return ("suspended",)
@@ -76,7 +78,7 @@ for walk in walks():
     target = make(start["variant"])
     recent = []
     for state in steps:
-        actual = perform(target, state["op"], count % 3)
+        actual = perform(target, state["op"], count % 4)
         recent = (recent + [state["op"]])[-8:]
         if actual != state["result"]:
             failures += 1

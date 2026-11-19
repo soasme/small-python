@@ -25237,7 +25237,8 @@ static NO_INLINE int generator_method_slot(SPYContext *c, SPYValue *callee, SPYV
     return !strcmp(name, "send") || !strcmp(name, "throw") || !strcmp(name, "close") || !strcmp(name, "__next__");
 }
 static ALWAYS_INLINE int generator_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
-    return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) && generator_method_slot(c, callee, v);
+    return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR_ASEND ||
+            v->type == SPY_ASYNC_GENERATOR_ATHROW) && generator_method_slot(c, callee, v);
 }
 /* Generator method callee, which it takes, from its type, bound to g,
  * which it takes too: the bound method; else NULL. */
