@@ -110,6 +110,8 @@ SOURCES = {
     "map_strict": 'result = list(map(pow, [1, 2], [3], strict=True))',
     "map_shortest": 'result = list(map(pow, [2, 3, 4], [1, 2]))',
     "map_none": 'result = list(map(None, [1]))',
+    "map_repr": "log = []\nclass R:\n    def __repr__(s):\n        for _ in (): pass\n        log.append(1)\n        return 'r'\n"
+                "result = (list(map(repr, [[R()], (R(),)])), list(map(ascii, [[R()]])), len(log))",
     "map_generator": "log = []\ndef g():\n    try:\n        x = yield 0\n        log.append((x, 0))\n        yield x\n    finally:\n        log.append('fin')\n"
                      "gs = [g(), g()]\nh = g()\nnext(h)\n"
                      "result = (list(map(next, gs)), list(map(type(h).send, gs, 'ab')), list(map(type(h).close, [h])), log)",

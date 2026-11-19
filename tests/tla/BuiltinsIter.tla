@@ -62,7 +62,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 Cases == {"iter_sequence_protocol", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
-          "map_shortest", "map_none", "map_bound", "map_generator", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next",
+          "map_shortest", "map_none", "map_bound", "map_generator", "map_repr", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
@@ -141,6 +141,8 @@ Case(c) ==
       \* next() and a generator's own send and close resume each generator,
       \* close running its cleanup
       [] c = "map_generator" -> "([0, 0], ['a', 'b'], [None], [('a', 0), ('b', 0), 'fin'])"
+      \* repr() and ascii() of containers call each item's Python __repr__
+      [] c = "map_repr" -> "(['[r]', '(r,)'], ['[r]'], 3)"
       \* map() of str, repr or format calls each item's method as it takes it
       [] c = "map_convert" -> "(['k1', 'k2'], ['K1', '7'], 'k1,k2', ['F'], ['s1', 's2', 'r1', 's1', 's2', 'f'])"
       [] c = "map_convert_bad" -> "TypeError: W.__str__() must return a str, not int"

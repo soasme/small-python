@@ -35325,7 +35325,9 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         return status;
     }
     if (!c->error_type[0] && items->as.seq.len <= COMPARE_ARGS && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] &&
-        (map_steps(callee) || is_builtin(callee, B_NEXT) || (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])))) {
+        (map_steps(callee) || is_builtin(callee, B_NEXT) ||
+         (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) ||
+         (items->as.seq.len == 1 && repr_job(c, is_builtin(callee, B_ASCII) ? c->field_calls[0] : callee, items->as.seq.items[0])))) {
         /* A builtin whose call may go on on the machine is a call step of
          * its own (compare_enter), sorted()'s a keyword call's (key_consumer),
          * the call of c->unbound left in c->k_fn. */
