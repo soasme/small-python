@@ -2282,6 +2282,17 @@ static int truth_result(SPYContext *c, SPYValue *v, int boolean, SPYValue *resul
     spy_release(result);
     return !c->error_type[0] && length != 0;
 }
+/* The truth of v whose class defines a __bool__ that is absent
+ * (slot_nb_bool): that of what its __len__ returns, or true with none. */
+static int length_fallback(SPYContext *c, SPYValue *v) {
+    SPYValue *method = special_method_maybe(c, v, "__len__");
+    if (!method) return !c->error_type[0];
+    SPYValue *result = call(c, method, 0, NULL);
+    spy_release(method);
+    int truth = result && truthy(result);
+    spy_release(result);
+    return truth;
+}
 /* Python truth; a failing __bool__ or __len__ yields 0 with the error set. */
 static int truthy(SPYValue *v) {
     switch (v->type == SPY_CLASS && v->as.map.meta ? SPY_INSTANCE : v->type) {
@@ -2305,9 +2316,9 @@ static int truthy(SPYValue *v) {
         if (!method && number && (number->type == SPY_INT || number->type == SPY_BOOL || number->type == SPY_FLOAT || number->type == SPY_COMPLEX))
             return c->error_type[0] ? 0 : truthy(number);
         int boolean = method != NULL;
-        /* __len__ is optional only behind a defined __bool__ (slot_nb_bool). */
-        if (!method && !c->error_type[0])
-            method = class_lookup(value_class(c, v), "__bool__") ? special_method_maybe(c, v, "__len__") : special_method(c, v, "__len__");
+        /* Behind a defined __bool__, __len__ is optional and its result's truth v's (slot_nb_bool). */
+        if (!method && !c->error_type[0] && class_lookup(value_class(c, v), "__bool__")) return length_fallback(c, v);
+        if (!method && !c->error_type[0]) method = special_method(c, v, "__len__");
         if (!method) return !c->error_type[0];
         if (boolean && method->type == SPY_NONE) {
             spy_release(method);
@@ -31935,13 +31946,34 @@ static NO_INLINE Machine *descripted(SPYContext *c, Machine *m, int kind, SPYVal
 /* Whether special method function is one a step calls: on the machine,
  * or a descriptor whose read is (descriptor_getter). */
 static int special_function(SPYContext *c, SPYValue *function) { return machine_function(c, function) || descriptor_getter(c, function); }
-/* truth_function, or a descriptor __bool__, of a class with no __len__,
- * whose read a step makes first (special_env). */
+/* truth_function, or a descriptor __bool__, whose read a step makes
+ * first (special_env), its AttributeError making v true, or with a
+ * __len__ giving c->missing for its truth (truth_absent, truth_length). */
 static SPYValue *truth_special(SPYContext *c, SPYValue *v, int *length) {
     SPYValue *function = truth_function(c, v, length), *cls = value_class(c, v);
     if (function || builtin_base(c, v, "__bool__", "__len__")) return function;
     function = class_lookup(cls, "__bool__");
-    return function && !class_lookup(cls, "__len__") && descriptor_getter(c, function) ? function : NULL;
+    return function && descriptor_getter(c, function) ? function : NULL;
+}
+/* What a descriptor __bool__ of v whose read raises AttributeError gives
+ * (special_env): True, or c->missing when v's class has a __len__, the
+ * truth of whose result v's is then (truth_length). */
+static SPYValue *truth_absent(SPYContext *c, SPYValue *v) {
+    return class_lookup(value_class(c, v), "__len__") ? c->missing : c->booleans[1];
+}
+/* For a truth step whose descriptor __bool__ of v, owned, was absent
+ * (truth_absent): v and c->missing, marking the truth of what __len__
+ * returns, pushed on m's stack, and v's __len__ left on m as the step's
+ * call (CALL_CHECKED), its read's AttributeError making v true; a native
+ * one's result is returned here, owned; NULL with an error, or for the
+ * call. */
+static NO_INLINE SPYValue *truth_length(SPYContext *c, Machine *m, SPYValue *v) {
+    SPYValue *function = class_lookup(value_class(c, v), "__len__"), *env = NULL, *entered;
+    if (machine_push(c, m, v) || machine_push(c, m, spy_retain(c->missing))) return NULL;
+    if (!special_function(c, function)) return call_special(c, v, "__len__", 0, NULL);
+    if (!(entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : c->booleans[1], &env))) return NULL;
+    c->k_fn = entered; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED; c->consuming = 1;
+    return NULL;
 }
 /* What converting self by the special method of its class that name
  * names (conversion_method), read as a descriptor, gives when an
@@ -31951,12 +31983,14 @@ static SPYValue *truth_special(SPYContext *c, SPYValue *v, int *length) {
 static SPYValue *conversion_absent(SPYContext *c, SPYValue *name, SPYValue *self) {
     const char *method = name && name->type == SPY_STRING ? name->as.string.data : "";
     SPYValue *whole = NULL, *message;
+    /* A __len__ whose result's truth is taken (item_converted) makes it true. */
+    if (name == c->missing) return spy_bool(c, 1);
     char text[320];
     if (!strcmp(method, "__repr__") || !strcmp(method, "ascii") || (!strcmp(method, "__str__") && !class_lookup(value_class(c, self), "__str__"))) {
         Buffer b = { .ctx = c, .whole = &whole };
         return whole_text(&b, bare_repr(&b, self));
     }
-    if (!strcmp(method, "__bool__")) return spy_bool(c, 1);
+    if (!strcmp(method, "__bool__")) return spy_retain(truth_absent(c, self));
     if (!strcmp(method, "__hash__")) snprintf(text, sizeof text, "unhashable type: '%s'", type_name(self));
     else if (!strcmp(method, "__round__")) snprintf(text, sizeof text, "type %s doesn't define __round__ method", type_name(self));
     else return NULL;
@@ -32314,6 +32348,7 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
  * on its result v, which it takes: the call left on m (CALL_CHECKED), y,
  * v and whether it is __bool__ on m's stack for truth_returned, 1, or 1
  * with an error; else 0, v kept. A read's AttributeError makes v true. */
+static int truth_of(SPYValue *);
 static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue *y) {
     int length = 0;
     SPYValue *function = v->type == SPY_INSTANCE || metaclassed(v) ? truth_special(c, v, &length) : NULL, *entered = NULL, *env = NULL;
@@ -32321,7 +32356,7 @@ static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue
     size_t depth = m->len;
     if (y && machine_push(c, m, spy_retain(y))) spy_release(v);
     else if (!machine_push(c, m, v) && !machine_push(c, m, spy_retain(c->booleans[!length])))
-        entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : c->booleans[1], &env);
+        entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : truth_absent(c, v), &env);
     if (!entered) {
         while (m->len > depth) spy_release(machine_pop(m));
         return 1;
@@ -32335,7 +32370,14 @@ static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue
  * the comparison's result. The machine, at its pc. */
 static NO_INLINE Machine *truth_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
     SPYValue *marker = machine_pop(m), *v = machine_pop(m), *y = ins->op == BC_COMPARE ? machine_pop(m) : NULL;
-    int truth = result ? truth_result(c, v, marker == c->booleans[1], result) : 0;
+    if (result == c->missing) {
+        /* An absent __bool__'s truth is __len__'s (truth_length). */
+        spy_release(marker); spy_release(result);
+        if (y && machine_push(c, m, y)) { spy_release(v); return m; }
+        if (!(result = truth_length(c, m, v))) return m;
+        marker = machine_pop(m); v = machine_pop(m); y = y ? machine_pop(m) : NULL;
+    }
+    int truth = !result ? 0 : marker == c->missing ? truth_of(result) : truth_result(c, v, marker == c->booleans[1], result);
     spy_release(marker);
     if (c->error_type[0]) { spy_release(v); spy_release(y); return m; }
     if (truth && y) { machine_push(c, m, y); y = NULL; }
@@ -33486,7 +33528,7 @@ static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPY
     SPYValue *function = truth_special(c, v, &length), *entered;
     if (!function || machine_push(c, m, spy_retain(v))) return NULL;
     if (length && machine_push(c, m, spy_retain(c->booleans[0]))) { spy_release(machine_pop(m)); return NULL; }
-    if ((entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : c->booleans[1], env))) return entered;
+    if ((entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : truth_absent(c, v), env))) return entered;
     for (int i = 0; i <= length; i++) spy_release(machine_pop(m));
     return NULL;
 }
@@ -34190,8 +34232,23 @@ static NO_INLINE int check_truth_call(SPYContext *c, Machine *m, SPYValue *name,
  * __index__ is m's call first (length_indexed). */
 static SPYValue *buffer_copied(SPYContext *, Machine *, SPYValue *, int, SPYValue *);
 static SPYValue *length_indexed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The truth of result, which it takes: 0 with an error when it has none. */
+static int truth_of(SPYValue *result) {
+    int truth = truthy(result);
+    spy_release(result);
+    return truth;
+}
+/* The truth, as a bool, of what __len__ returned in result for a bool()
+ * whose descriptor __bool__ was absent (conversion_value). */
+static SPYValue *length_truth(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m; (void)ctx;
+    int truth = result && truth_of(result);
+    return c->error_type[0] ? NULL : spy_bool(c, truth);
+}
 static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue *v, SPYValue *name, SPYValue *result) {
     SPYValue *whole = NULL, *index;
+    /* What __len__ returned for an absent __bool__ (item_converted): its truth. */
+    if (name == c->missing) return length_truth(c, m, NULL, spy_retain(result));
     Buffer b = { .ctx = c, .whole = &whole };
     int64_t length;
     const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
@@ -34245,6 +34302,14 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue 
     if (!strcmp(method, "bytes") || !strcmp(method, "bytearray")) return buffer_copied(c, m, v, method[4] == 'a', result);
     if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));
     if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);
+    if (result == c->missing && name != c->booleans[0]) {
+        /* An absent __bool__'s truth is that of what __len__ returns (truth_absent). */
+        SPYValue *function = class_lookup(value_class(c, v), "__len__");
+        if (m && special_function(c, function))
+            return special_callk(c, m, function, v, 0, NULL, machine_function(c, function) ? NULL : spy_bool(c, 1), length_truth, NULL);
+        int truth = length_fallback(c, v);
+        return c->error_type[0] ? NULL : spy_bool(c, truth);
+    }
     if (!strcmp(method, "__bool__"))
         return truth_result(c, v, name != c->booleans[0], spy_retain(result)) ? spy_bool(c, 1) : c->error_type[0] ? NULL : spy_bool(c, 0);
     if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__") || !strcmp(method, "__next__"))
@@ -34266,7 +34331,8 @@ static SPYValue *length_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYV
 static int next_ended(SPYContext *, SPYValue *);
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
-    if ((ins->op == BC_TEST || ins->op == BC_COMPARE) && (m->stack[m->len - 1] == c->booleans[0] || m->stack[m->len - 1] == c->booleans[1]))
+    if ((ins->op == BC_TEST || ins->op == BC_COMPARE) &&
+        (m->stack[m->len - 1] == c->booleans[0] || m->stack[m->len - 1] == c->booleans[1] || m->stack[m->len - 1] == c->missing))
         return truth_returned(c, m, ins, result);
     if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
         /* A class's base's __mro_entries__ returned, its step running
@@ -34364,10 +34430,18 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         if (string) machine_push(c, m, string);
         return m;
     }
-    /* False above the value marks its __len__'s truth (bool_call). */
-    int boolean = v != c->booleans[0];
-    if (!boolean) { spy_release(v); v = machine_pop(m); }
-    int truth = truth_result(c, v, boolean, result);
+    /* False above the value marks its __len__'s truth (bool_call), and
+     * c->missing the truth of what __len__ returned (truth_length). */
+    int boolean = v != c->booleans[0], returned = v == c->missing;
+    if (!boolean || returned) { spy_release(v); v = machine_pop(m); }
+    if (result == c->missing) {
+        /* An absent __bool__'s truth is __len__'s (truth_length). */
+        spy_release(result);
+        if (!(result = truth_length(c, m, v))) return m;
+        spy_release(machine_pop(m)); v = machine_pop(m);
+        returned = 1;
+    }
+    int truth = returned ? truth_of(result) : truth_result(c, v, boolean, result);
     if (ins->op == BC_UNARY) { if (!c->error_type[0]) machine_push(c, m, spy_bool(c, !truth)); }
     else if (!c->error_type[0]) short_or_false(m, ins, truth, &m->pc, &c->short_truth);
     spy_release(v);
@@ -34935,7 +35009,17 @@ static SPYValue *new_converted(SPYContext *c, Machine *m, SPYValue *cls, SPYValu
  * next call in c->k_fn. The item and name leave m's stack. */
 static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *result, int kind) {
     spy_release(machine_pop(m));
-    SPYValue *name = machine_pop(m), *item = machine_pop(m), *value = !result ? NULL : name->type != SPY_CLASS ? conversion_value(c, NULL, item, name, result) :
+    SPYValue *name = machine_pop(m), *item = machine_pop(m), *function, *fn, *env;
+    if (result == c->missing && (function = class_lookup(value_class(c, item), "__len__")) && special_function(c, function)) {
+        /* An absent __bool__'s truth is that of what __len__ returns (truth_absent), the next call. */
+        spy_release(name);
+        if (convert_call(c, m, function, item, spy_retain(c->missing), NULL, &fn, &env) > 0) {
+            c->k_fn = fn; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
+        }
+        spy_release(item);
+        return NULL;
+    }
+    SPYValue *value = !result ? NULL : name->type != SPY_CLASS ? conversion_value(c, NULL, item, name, result) :
                     item->type == SPY_TUPLE ? new_converted(c, m, name, item, spy_retain(result), kind) :
                     result->type == SPY_NONE ? spy_retain(item) : errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
     spy_release(result); spy_release(name); spy_release(item);

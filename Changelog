@@ -545,6 +545,8 @@ Unreleased (0.10.0):
 - A throw of a GeneratorExit class with a Python `__init__`, given a value or traceback, into a `yield from` makes the exception without nesting on the C stack
 - A set, or a builtin's subclass instance, compared with another object calls that object's reflected Python method without nesting on the C stack
 - A builtin's subclass instance whose comparison declines no longer calls the other object's reflected method a second time
+- A `__bool__` descriptor whose read raises `AttributeError` makes truth that of what `__len__` returns, unchecked as a length, as in CPython
+- Truth tests of such an object, `bool()` and `filter()` call its `__len__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair

@@ -29,7 +29,12 @@ def instance(kind, side, log, holder):
         return call
 
     namespace = {}
-    if kind == "bool_none":
+    if kind.startswith("absent"):
+        def absent(self):
+            raise AttributeError("absent")
+        namespace["__bool__"] = property(absent)
+        namespace["__len__"] = method("__len__", -1 if kind == "absent_len" else 0)
+    elif kind == "bool_none":
         namespace["__bool__"] = None
     elif kind == "both":
         namespace["__bool__"] = method("__bool__", False)
