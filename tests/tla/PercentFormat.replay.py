@@ -26,6 +26,7 @@ class Q:
     def __float__(self): spin(); Q.log.append('float'); return 2.5
 class Y(Q):
     def __bytes__(self): spin(); Q.log.append('bytes'); return b'by'
+class Txt(str): pass
 class OwnA(bytearray):
     def __bytes__(self): return b"no"
     def __buffer__(self, flags): return memoryview(b"no")
@@ -96,6 +97,7 @@ SOURCES = {
     "bytes_float": "result = b'%.1e' % 12345.0",
     "method_order": "L.log.clear(); result = ('%s-%r-%-3s|%a' % (L('a'), L('b'), L('c'), L('d')), L.log)",
     "method_mapping": "L.log.clear(); result = ('%(y)r/%(x)s/%(y)s' % {'x': L('a'), 'y': L('b')}, L.log)",
+    "method_str_subclass": "L.log.clear(); text = Txt('%s-%r') % (L('a'), L('b')); result = (text, type(text).__name__, L.log)",
     "method_raises": "L.log.clear()\ntry: '%r %s' % (Bad(), L('c'))\nexcept KeyError: result = L.log",
     "method_not_str": "result = '%s' % NotStr()",
     "method_too_few": "L.log.clear()\ntry: '%s %s' % (L('a'),)\nexcept TypeError as e: result = (str(e), L.log)",

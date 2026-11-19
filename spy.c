@@ -10669,9 +10669,16 @@ static int percent_reaches(SPYContext *c, SPYValue *y) {
     } else if (y->type == SPY_LIST) return percent_items(c, y);
     return 0;
 }
+/* The str whose % a str subclass's instance a takes, its class with no
+ * Python __mod__, of b, no instance to reflect it, borrowed; else a. */
+static SPYValue *percent_text(SPYContext *c, SPYValue *a, SPYValue *b) {
+    SPYValue *text = a->type == SPY_INSTANCE && b->type != SPY_INSTANCE ? builtin_value(c, a, SPY_STRING) : NULL;
+    return text && builtin_base(c, a, "__mod__", NULL) ? text : a;
+}
 /* Whether str or bytes a % b, or a %= b, may convert an argument by a
  * Python method (percent_reaches), on the machine (percent_call). */
 static NO_INLINE int percent_converts(SPYContext *c, SPYValue *a, SPYValue *b) {
+    a = percent_text(c, a, b);
     return (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && percent_reaches(c, b);
 }
 static int merges(SPYValue *, SPYValue *);
@@ -24377,10 +24384,12 @@ static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, S
 }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
 /* str, bytes or bytearray x % y on machine m, y reaching an instance
- * (percent_reaches): its job's first call (percent_build), c->unbound;
+ * (percent_reaches), x also a str subclass's (percent_text): its job's
+ * first call (percent_build), c->unbound;
  * else NULL, the text in c->looked or an error. A bytearray stays
  * exported, by a view of it, until the job ends. */
 static NO_INLINE SPYValue *percent_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y) {
+    x = percent_text(c, x, y);
     SPYValue *view = x->type == SPY_BYTEARRAY ? memory_from(c, x) : NULL;
     if (x->type == SPY_BYTEARRAY && !view) return NULL;
     SPYValue *text = percent_build(c, m, view ? view : x, y, NULL, NULL);
@@ -31898,6 +31907,15 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             operator_keep(c, m, ins, y);
             return set_walk(c, m, token, swapped ? y : x, swapped ? x : y, kind == OPERATE_INPLACE, env);
         }
+    }
+    /* A dict's |= of a plain instance merges it as dict.update() does, on
+     * m (consume), the dict its result. */
+    if (kind == OPERATE_INPLACE && op == T_OREQ && x->type == SPY_DICT && plain_instance(y)) {
+        size_t blocks = m->block_len;
+        consume(c, m, B_EXTEND, x, -1, NULL, spy_retain(y), NULL);
+        if (m->block_len == blocks) return NULL;
+        m->blocks[m->block_len - 1].consumer->instance = spy_retain(x);
+        return c->unbound;
     }
     /* A dict's | or |= of a dict whose keys may call a Python __eq__ (merge_walk). */
     if ((kind == OPERATE_BINARY ? op == '|' : kind == OPERATE_INPLACE && op == T_OREQ) && merges(x, y)) {

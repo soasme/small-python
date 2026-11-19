@@ -7,15 +7,15 @@
 (* winning; keys must be hashable, and equal keys (1, 1.0, True) are       *)
 (* one key keeping its first spelling; a dict remembers insertion          *)
 (* order, which reassignment keeps and deletion forgets; d | other and     *)
-(* update() (and |=, which also takes pairs) keep the left operand's       *)
-(* order, give the right operand's values, and append its new keys in      *)
-(* its order; equality ignores order and dicts are unordered and           *)
-(* unhashable; get, setdefault, pop (hashing its key once, but not in      *)
-(* an empty dict), popitem (last in, first out), fromkeys (hashing and     *)
-(* setting each key before taking the next), copy (shallow), clear, a      *)
-(* merge into an empty dict comparing no keys, and into one with keys      *)
-(* a colliding key by its Python __eq__, before its value replaces an      *)
-(* equal key's, a change of the merged dict's size raising                 *)
+(* update() (and |=, which also takes pairs and a mapping's keys()) keep   *)
+(* the left operand's order, give the right operand's values, and append   *)
+(* its new keys in its order; equality ignores order and dicts are        *)
+(* unordered and unhashable; get, setdefault, pop (hashing its key once,  *)
+(* but not in an empty dict), popitem (last in, first out), fromkeys       *)
+(* (hashing and setting each key before taking the next), copy (shallow), *)
+(* clear, a merge into an empty dict comparing no keys, and into one with  *)
+(* keys a colliding key by its Python __eq__, before its value replaces   *)
+(* an equal key's, a change of the merged dict's size raising             *)
 (* RuntimeError, reversed(), and __missing__ in subclasses, also a        *)
 (* staticmethod's or classmethod's, which dict.__getitem__ called on an   *)
 (* instance also calls, as starred, its methods                            *)
@@ -80,7 +80,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_own_keys_calls", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_slot", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "subclass_equal_key_methods", "subclass_missing_equal_keys", "getitem_key_calls", "subclass_hashed", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
-          "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "merge_equal_keys", "merge_mutated", "clear",
+          "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "ior_mapping", "copy_shallow", "merge_empty", "merge_equal_keys", "merge_mutated", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
           "view_live", "view_mapping", "view_contains", "view_set_ops_iterable", "view_set_ops_return_set",
           "values_no_set_ops", "values_equality", "items_unhashable_value", "items_set_op_unhashable",
@@ -168,6 +168,8 @@ Case(c) ==
       [] c = "update_too_many" -> "TypeError: update expected at most 1 argument, got 2"
       [] c = "or_non_dict" -> "TypeError: unsupported operand type(s) for |: 'dict' and 'list'"
       [] c = "ior_iterable" -> "{'a': 1}"
+      \* keys() first, then each key's __getitem__, in order
+      [] c = "ior_mapping" -> "({'z': 0, 'a': 'aa', 'b': 'bb'}, True, ['keys', 'a', 'b'])"
       [] c = "copy_shallow" -> "({'k': [1]}, {'k': [1], 'n': 1})"
       \* A dict merged into an empty one, by dict(), **, a subclass, copy, |
       \* or update, gives its distinct keys comparing none; into a full one,

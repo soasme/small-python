@@ -18,7 +18,8 @@
 (* __repr__, also of a list's or tuple's items, runs as its conversion is  *)
 (* reached, in order, and its error or a result that is not a str stops    *)
 (* the formatting there. A bytearray format stays exported while they     *)
-(* run, so resizing it raises BufferError.                                 *)
+(* run, so resizing it raises BufferError. A str subclass formats as its   *)
+(* str and gives a str.                                                    *)
 (*                                                                         *)
 (* A program formats an int (0, 5, -42, or 255) with every flag            *)
 (* combination among -, +, space, 0, #, -0, +0, #0, and - space, width 7   *)
@@ -90,7 +91,8 @@ Cases == {"s_r_a", "s_object", "percent_literal", "mapping", "mapping_missing", 
           "bytes_c_bad", "bytes_mapping", "bytes_percent", "bytearray_result", "bytes_not_all",
           "bytes_unsupported", "bytes_float", "method_order", "method_mapping", "method_raises", "method_not_str",
           "method_too_few", "method_items", "method_items_augmented", "method_numbers", "method_number_bad", "bytes_methods", "bytes_own", "bytearray_own",
-          "c_index_type", "bytes_c_index_type", "bytearray_methods", "bytearray_exported"}
+          "c_index_type", "bytes_c_index_type", "bytearray_methods", "bytearray_exported",
+          "method_str_subclass"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 255}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
              type : {"d", "i", "o", "x", "X", "u"}, target : {"str", "bytes"}]
             \cup [kind : {"float"}, num : {0, 20, -1, 9875}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
@@ -156,6 +158,7 @@ Case(c) ==
       [] c = "bytes_float" -> "b'1.2e+04'"
       [] c = "method_order" -> "('a-B\\xe9-c  |D\\\\xe9', ['sa', 'rb', 'sc', 'rd'])"
       [] c = "method_mapping" -> "('B\\xe9/a/b', ['rb', 'sa', 'sb'])"
+      [] c = "method_str_subclass" -> "('a-B\\xe9', 'str', ['sa', 'rb'])"
       [] c = "method_raises" -> "[]"
       [] c = "method_not_str" -> "TypeError: NotStr.__str__() must return a str, not int"
       [] c = "method_too_few" -> "('not enough arguments for format string (got 1)', ['sa'])"
