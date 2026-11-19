@@ -512,6 +512,11 @@ struct SPYContext {
     SPYValue *descripting;
     /* Whether k_fn is a unit whose module body k_enter enters (intrinsics_k). */
     int k_unit;
+    /* While a call step's native callee runs given keywords a str
+     * subclass's instance names, the step's machine and the depth of
+     * machines it runs at (spelled_call). */
+    Machine *keywords_m;
+    int keywords_level;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -17525,6 +17530,13 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
 static Machine *binding_machine(SPYContext *c, SPYValue *fn) {
     return c->bind_entries == c->entries && !fn->as.function.signature ? c->bind_machine : NULL;
 }
+/* The machine of the call step whose native callee runs here, given
+ * keywords a str subclass's instance names (spelled_call), or NULL: a
+ * Python __eq__ comparing one is a call there (callk), the callee
+ * returning failure with no error. */
+static Machine *keywords_machine(SPYContext *c) {
+    return c->keywords_m && c->keywords_level == c->machines ? c->keywords_m : NULL;
+}
 /* Binding fn into env after argc positional arguments stops at keyword i
  * of keywords for function's call on its argc arguments args on m (callk),
  * k going on with the state (fn, env, keywords, i, at, text, argc): the
@@ -18451,8 +18463,22 @@ static NO_INLINE SPYValue *host_call(SPYContext *c, Machine *m, SPYValue *fn, si
 static ALWAYS_INLINE SPYValue *step_call(SPYContext *c, Machine *m, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv) {
     return UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host) ? host_call(c, m, fn, argc, argv, NULL) : call_plain(c, fn, method, n, argc, argv);
 }
+/* call_keywords of fn by a call step on m given keywords a str
+ * subclass's instance names: its C code may leave a call to the step
+ * (keywords_machine). */
+static NO_INLINE SPYValue *spelled_call(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    Machine *machine = c->keywords_m;
+    int level = c->keywords_level;
+    c->keywords_m = m; c->keywords_level = c->machines;
+    SPYValue *result = call_keywords(c, fn, argc, argv, keywords);
+    c->keywords_m = machine; c->keywords_level = level;
+    return result;
+}
 static ALWAYS_INLINE SPYValue *step_keywords(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    return UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host) ? host_call(c, m, fn, argc, argv, keywords) : call_keywords(c, fn, argc, argv, keywords);
+    if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host)) return host_call(c, m, fn, argc, argv, keywords);
+    for (size_t i = 0; i < keywords->as.map.len; i++)
+        if (UNLIKELY(map_items(keywords)[i].key->type == SPY_INSTANCE)) return spelled_call(c, m, fn, argc, argv, keywords);
+    return call_keywords(c, fn, argc, argv, keywords);
 }
 /* A spy_callk's call returned result on m: its continuation, in
  * c->k_host, gives the native function's value (callk), and may call
@@ -36571,17 +36597,56 @@ static int import_fromlist(SPYContext *c, SPYValue *module, SPYValue *names, int
 /* _PyArg_UnpackKeywords' report of keywords spelling none of the n names:
  * the first equal to none of them is unexpected; when each equals one, as a
  * str subclass may, they are invalid. */
-static int unknown_keywords(SPYContext *c, const char *function, SPYValue *keywords, const char *const *names, size_t n) {
-    for (size_t i = 0; i < keywords->as.map.len; i++) {
+static SPYValue *unknown_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* unknown_keywords from keyword i's comparison with name at: on m, a
+ * name's comparison with a keyword whose Python __eq__ it calls goes on
+ * there (equalk, unknown_compared), the report left to its continuation,
+ * and no error raised. -1. */
+static int unknown_from(SPYContext *c, Machine *m, const char *function, SPYValue *keywords, const char *const *names, size_t n,
+                        size_t i, size_t at) {
+    for (; i < keywords->as.map.len; i++, at = 0) {
         SPYValue *key = map_items(keywords)[i].key;
-        size_t at = 0;
-        while (at < n && !keyword_matches(c, key, names[at]) && !c->error_type[0]) at++;
-        if (c->error_type[0]) return -1;
+        for (; at < n; at++) {
+            SPYValue *text = m && key->type == SPY_INSTANCE && n <= 64 ? spy_string(c, names[at], strlen(names[at])) : NULL;
+            if (text && rich_function(c, key, text, R_EQ)) {
+                SPYValue *list = spy_list(c), *name = spy_string(c, function, strlen(function));
+                for (size_t k = 0; list && k < n; k++) {
+                    SPYValue *item = spy_string(c, names[k], strlen(names[k]));
+                    if (!item || sequence_append(c, list, item)) { spy_release(list); list = NULL; }
+                    spy_release(item);
+                }
+                SPYValue *state = parts_tuple(c, 4, (SPYValue *[]){name, spy_retain(keywords), list, int_value(c, (int64_t)(i * n + at))});
+                if (state) equalk(c, m, text, key, unknown_compared, state);
+                spy_release(text);
+                return -1;
+            }
+            spy_release(text);
+            if (keyword_matches(c, key, names[at])) break;
+            if (c->error_type[0]) return -1;
+        }
         const char *text = builtin_value(c, key, SPY_STRING)->as.string.data;
         if (at == n) return unexpected_keyword(c, function, text, suggestion(text, names, n));
     }
     errorf(c, "TypeError", "invalid keyword argument for %s()", function);
     return -1;
+}
+/* _PyArg_UnpackKeywords' report of keywords spelling none of the n names
+ * (unknown_from), on the machine of the call step whose callee reports it
+ * (keywords_machine). */
+static int unknown_keywords(SPYContext *c, const char *function, SPYValue *keywords, const char *const *names, size_t n) {
+    return unknown_from(c, keywords_machine(c), function, keywords, names, n, 0, 0);
+}
+/* The comparison unknown_from left on m found result, the truth of a
+ * keyword's equality with a name, or NULL with an error: the report goes
+ * on from the next keyword or the next name. State taken. */
+static SPYValue *unknown_compared(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *list = items[2];
+    size_t n = list->as.seq.len, at = (size_t)items[3]->as.integer_data.small, i = at / n;
+    const char *names[64];
+    for (size_t k = 0; k < n; k++) names[k] = list->as.seq.items[k]->as.string.data;
+    if (result) unknown_from(c, m, items[0]->as.string.data, items[1], names, n, i + (result == c->booleans[1]), result == c->booleans[1] ? 0 : at % n + 1);
+    spy_release(result); spy_release(state);
+    return NULL;
 }
 static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPYValue *const *argv,
                            SPYValue *keywords, const char *const *names, size_t count, size_t required,
