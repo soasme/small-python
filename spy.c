@@ -10490,6 +10490,9 @@ static NO_INLINE int values_python(SPYContext *c, SPYValue *x, SPYValue *y) {
     return 0;
 }
 static SPYValue *proxy_compared(SPYContext *, SPYValue *, SPYValue *);
+static int view_python(SPYContext *, SPYValue *, SPYValue *);
+static int view_operands(SPYValue *, SPYValue *);
+static SPYValue *items_pair(SPYValue *);
 /* Whether x's == and != decline a mappingproxy, whose reflected one then
  * compares its mapping with x: x is no instance, class by its metaclass,
  * or mappingproxy. */
@@ -10507,8 +10510,11 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **lef
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
     if ((op == O_IN || op == O_NOTIN) && ((b->type == SPY_ITERATOR && iterated_python(c, a, b)) ||
                                           (b->type == SPY_DICT_VALUES && values_python(c, a, b)))) return NULL;
-    /* in of a map holding a key whose comparison may call Python (eq_keyed). */
-    if ((op == O_IN || op == O_NOTIN) && hashes_key(b, 1) && eq_keyed(b)) return NULL;
+    /* in of a map holding a key whose comparison may call Python (eq_keyed),
+     * or of a dict view that may (view_python); a dict view's comparison
+     * (view_step). */
+    if ((op == O_IN || op == O_NOTIN) && ((hashes_key(b, 1) && eq_keyed(b)) || (set_view(b) && view_python(c, a, b)))) return NULL;
+    if (op != O_IN && op != O_NOTIN && view_operands(a, b)) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
         if (op != T_EQ && op != T_NE) {
             if (order_python(c, op, a, b)) return NULL;
@@ -10585,7 +10591,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left
     if (op == O_IN || op == O_NOTIN)
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(b) || b->type == SPY_GENERATOR ||
                (b->type == SPY_ITERATOR && iterated_python(c, a, b)) || (b->type == SPY_DICT_VALUES && values_python(c, a, b)) ||
-               (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) ? NULL :
+               (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) || (set_view(b) && view_python(c, a, b)) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     /* A lone == or != while pausing, or a comparison's (compare_enter). */
     if (rich_kind(op) >= 0) return compare_operand(c, op, left, b);
@@ -10993,8 +10999,9 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             result = map_find(view_map(b), a) >= 0;
         } else if (b->type == SPY_DICT_ITEMS) {
             /* Like dictitems_contains: look the key up, then compare the value. */
-            if (a->type == SPY_TUPLE && a->as.seq.len == 2) {
-                SPYValue *map = view_map(b), *key = spy_retain(a->as.seq.items[0]), *expected = spy_retain(a->as.seq.items[1]);
+            SPYValue *pair = items_pair(a);
+            if (pair) {
+                SPYValue *map = view_map(b), *key = spy_retain(pair->as.seq.items[0]), *expected = spy_retain(pair->as.seq.items[1]);
                 ptrdiff_t j = map_find(map, key);
                 SPYValue *found = j >= 0 ? spy_retain(map->as.map.items[j].value) : NULL;
                 result = found && (found == expected || equal(found, expected));
@@ -31980,6 +31987,175 @@ static SPYValue *map_compared(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(map); spy_release(key);
     return result;
 }
+static SPYValue *lookup_hashed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The search of map for key, both borrowed, as map_findk, key hashed
+ * first by its Python __hash__ on m (callk, lookup_hashed). */
+static SPYValue *map_lookupk(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, Continuation k, SPYValue *ctx) {
+    SPYValue *function = hash_function(c, key);
+    int64_t hash;
+    if (function) {
+        SPYValue *state = k_state(c, 2, (SPYValue *[]){spy_retain(map), spy_retain(key), NULL, NULL}, k, ctx);
+        return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(hash_self(key))}, lookup_hashed, state) : NULL;
+    }
+    if (map_hash(c, map, key, &hash)) return k(c, m, ctx, NULL);
+    return map_findk(c, m, map, key, hash, map_cursor(namespace_map(map), hash), k, ctx);
+}
+/* The Python __hash__ map_lookupk called returned result: the search
+ * goes on with it, or the error as map_hash names it. */
+static SPYValue *lookup_hashed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *map = spy_retain(state->as.seq.items[0]), *key = spy_retain(state->as.seq.items[1]);
+    Continuation k;
+    SPYValue *ctx = k_take(c, state, &k);
+    int64_t hash;
+    if (!result || hash_result(c, result, &hash)) { hash_failed(c, map, key); result = k(c, m, ctx, NULL); }
+    else result = map_findk(c, m, map, key, hash, map_cursor(namespace_map(map), hash), k, ctx);
+    spy_release(map); spy_release(key);
+    return result;
+}
+/* The entry map_lookupk found, result, or -1, as the truth of a dict's
+ * __contains__. */
+static SPYValue *lookup_contains(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m; (void)ctx;
+    int found = result && result->as.integer_data.small >= 0, failed = !result;
+    spy_release(result);
+    return failed ? NULL : spy_bool(c, found);
+}
+/* Whether a == b may call a Python method: either's __eq__
+ * (rich_function), or two sequences' items' (python_pair). */
+static int equal_python(SPYContext *c, SPYValue *a, SPYValue *b) {
+    size_t end;
+    return rich_function(c, a, b, R_EQ) || rich_function(c, b, a, R_EQ) || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
+}
+/* The truth of the comparison result, which it takes, for state's
+ * continuation (k_resume). */
+static SPYValue *truth_taken(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    int truth = result ? truthy(result) : 0, failed = !result || c->error_type[0];
+    spy_release(result);
+    return k_resume(c, m, state, failed ? NULL : spy_bool(c, truth));
+}
+/* The tuple x in a dict's items view tests, a tuple's subclass's
+ * instance's tuple, or NULL when it is no pair. */
+static SPYValue *items_pair(SPYValue *x) {
+    SPYValue *pair = sequence_base(x);
+    return pair->type == SPY_TUPLE && pair->as.seq.len == 2 ? pair : NULL;
+}
+/* Whether x in view, a dict's keys or items view, may call a Python
+ * method: x's key's lookup (lookup_key, eq_keyed), or the comparison of
+ * the value found with x's (equal_python). */
+static int view_python(SPYContext *c, SPYValue *x, SPYValue *view) {
+    SPYValue *map = view_map(view), *pair = view->type == SPY_DICT_ITEMS ? items_pair(x) : x;
+    if (!pair) return 0;
+    SPYValue *key = view->type == SPY_DICT_ITEMS ? pair->as.seq.items[0] : x;
+    if (key->type == SPY_INSTANCE || lookup_key(key) || eq_keyed(map)) return 1;
+    if (view->type == SPY_DICT_KEYS) return 0;
+    ptrdiff_t i = map_find(map, key);
+    if (c->error_type[0]) { spy_clear_error(c); return 0; }
+    return i >= 0 && equal_python(c, namespace_map(map)->as.map.items[i].value, pair->as.seq.items[1]);
+}
+static SPYValue *view_found(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* x in view, a dict's keys or items view, as a bool for continuation k
+ * with ctx, which it takes, as dictitems_contains does: the key looked up
+ * by its Python __hash__ and __eq__ on m (map_lookupk), then an item's
+ * value found compared with x's there (view_found). */
+static SPYValue *view_containsk(SPYContext *c, Machine *m, SPYValue *x, SPYValue *view, Continuation k, SPYValue *ctx) {
+    SPYValue *pair = view->type == SPY_DICT_ITEMS ? items_pair(x) : x;
+    if (!pair) return k(c, m, ctx, spy_bool(c, 0));
+    SPYValue *state = k_state(c, 2, (SPYValue *[]){spy_retain(view), spy_retain(pair), NULL, NULL}, k, ctx);
+    return state ? map_lookupk(c, m, view_map(view), view->type == SPY_DICT_KEYS ? x : pair->as.seq.items[0], view_found, state) : NULL;
+}
+/* view_containsk's lookup found entry result, or -1: a keys view's
+ * truth; an item's value compared with the pair's, by a Python method
+ * on m (comparek, truth_taken). */
+static SPYValue *view_found(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *view = state->as.seq.items[0], *pair = state->as.seq.items[1];
+    ptrdiff_t i = result ? (ptrdiff_t)result->as.integer_data.small : -1;
+    int failed = !result;
+    spy_release(result);
+    if (failed || i < 0 || view->type == SPY_DICT_KEYS) return k_resume(c, m, state, failed ? NULL : spy_bool(c, i >= 0));
+    SPYValue *found = namespace_map(view_map(view))->as.map.items[i].value, *expected = pair->as.seq.items[1];
+    if (found != expected && equal_python(c, found, expected))
+        return comparek(c, m, spy_retain(found), spy_retain(expected), R_EQ, truth_taken, state);
+    spy_retain(found); spy_retain(expected);
+    int same = found == expected || equal(found, expected);
+    spy_release(found); spy_release(expected);
+    return k_resume(c, m, state, c->error_type[0] ? NULL : spy_bool(c, same));
+}
+static SPYValue *view_walked(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The rest of view_comparek's walk of state's iterator: each member's
+ * test in the other operand, by a Python method on m (comparek, in, then
+ * view_walked), or else here; the comparison's truth at its end. */
+static SPYValue *view_walk(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue *iterator = state->as.seq.items[0], *other = state->as.seq.items[1], *item;
+    int op = (int)state->as.seq.items[2]->as.integer_data.small, found = 1;
+    for (size_t i = 1; found > 0 && (item = iterator_next(c, iterator)); i++) {
+        if (set_view(other) ? view_python(c, item, other) : lookup_key(item) || eq_keyed(set_storage(other)))
+            return comparek(c, m, item, spy_retain(other), COMPARE_IN, view_walked, state);
+        found = contains(c, other, item);
+        spy_release(item);
+        if (!(i & 15) && spend(c, 1)) found = -1;
+    }
+    if (c->error_type[0]) return k_resume(c, m, state, NULL);
+    return k_resume(c, m, state, spy_bool(c, (op == T_NE) != (found > 0)));
+}
+/* A member's test that view_walk left to m returned result. */
+static SPYValue *view_walked(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    int found = result == c->booleans[1], failed = !result, op = (int)state->as.seq.items[2]->as.integer_data.small;
+    spy_release(result);
+    if (failed || !found) return k_resume(c, m, state, failed ? NULL : spy_bool(c, op == T_NE));
+    return view_walk(c, m, state);
+}
+/* Comparison op of a and b, sets or set-like views, one a keys or items
+ * view, as dictview_richcompare does (view_compare): a bool for
+ * continuation k with ctx, which it takes, the members' tests calling
+ * Python on m (view_walk). */
+static SPYValue *view_comparek(SPYContext *c, Machine *m, int op, SPYValue *a, SPYValue *b, Continuation k, SPYValue *ctx) {
+    size_t la = sized_length(a), lb = sized_length(b);
+    int ok = op == T_EQ || op == T_NE ? la == lb : op == '<' ? la < lb : op == T_LE ? la <= lb : op == '>' ? la > lb : la >= lb;
+    if (!ok) return k(c, m, ctx, spy_bool(c, op == T_NE));
+    SPYValue *walked = op == '>' || op == T_GE ? b : a, *iterator = get_iterator(c, walked);
+    if (!iterator) return k(c, m, ctx, NULL);
+    SPYValue *state = k_state(c, 3, (SPYValue *[]){iterator, spy_retain(walked == a ? b : a), int_value(c, op), NULL, NULL}, k, ctx);
+    return state ? view_walk(c, m, state) : NULL;
+}
+/* Whether a comparison of x and y is a view's (view_compare): one a dict's
+ * keys or items view, the other too or a set or frozenset. */
+static int view_operands(SPYValue *x, SPYValue *y) {
+    return (set_view(x) || set_view(y)) && (set_view(x) || is_set(x)) && (set_view(y) || is_set(y));
+}
+/* View step state's continuation got result: the step at index state[0]
+ * ends with it, negated for not in (operator_finish). */
+static SPYValue *view_stepped(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    Instruction *ins = &m->code->items[state->as.seq.items[0]->as.integer_data.small];
+    int op = 0;
+    step_operation(ins, &op);
+    if (result && op == O_NOTIN) {
+        int truth = result == c->booleans[1];
+        spy_release(result);
+        result = spy_bool(c, !truth);
+    }
+    m->pc = operator_finish(c, m, ins, state->as.seq.items[1], result, m->pc);
+    spy_release(state);
+    return c->stepped;
+}
+/* Operator step ins's in of x in y, a dict's keys or items view
+ * (view_containsk), or its comparison of x and y (view_operands,
+ * view_comparek, reflected for a set x), on m: c->stepped once the step
+ * ended (view_stepped), NULL with a call left on m that ends it, or with
+ * an error; else c->unbound. */
+static NO_INLINE SPYValue *view_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y) {
+    int op = 0, kind = step_operation(ins, &op), rich = kind == OPERATE_INPLACE ? -1 : rich_kind(op);
+    int contains = (op == O_IN || op == O_NOTIN) && set_view(y);
+    if (!contains && (rich < 0 || !view_operands(x, y))) return c->unbound;
+    size_t at = (size_t)(ins - m->code->items);
+    SPYValue *index = int_value(c, (int64_t)at), *state = index ? spy_tuple(c, 2, (SPYValue *[]){index, y}) : NULL;
+    spy_release(index);
+    if (!state) return NULL;
+    m->pc = at + 1;
+    SPYValue *result = contains ? view_containsk(c, m, x, y, view_stepped, state) :
+                       set_view(x) ? view_comparek(c, m, op, x, y, view_stepped, state) :
+                       view_comparek(c, m, compare_tokens[rich_reflected[rich]], y, x, view_stepped, state);
+    return result;
+}
 /* An item's comparison for in, op, of step ins (contains_call) found it
  * equal, or not: the test's truth; or the next item's comparison, or the
  * native search of the rest, from the iterator, under which x is on m's
@@ -35407,6 +35583,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (a) spy_release(a);
             if (b) spy_release(b);
             goto intrinsics_entered;
+        }
+        if (UNLIKELY(y && (UINT64_C(1) << x->type | UINT64_C(1) << y->type) & (UINT64_C(1) << SPY_DICT_KEYS | UINT64_C(1) << SPY_DICT_ITEMS)) &&
+            (value = view_step(c, m, ins, x, y)) != c->unbound) {
+            /* A dict view's in or comparison, whose chain ends the step (view_step). */
+            if (a) spy_release(a);
+            if (b) spy_release(b);
+            if (value == c->stepped) { pc = m->pc; continue; }
+            if (c->k_fn) goto enter_k;
+            pc = operator_finish(c, m, ins, y, NULL, pc);
+            continue;
         }
         if ((value = operator_call(c, m, ins, x, y, &callee_env))) {
             if (a) spy_release(a);
@@ -43812,27 +43998,28 @@ enum { SLOT_REPR, SLOT_STR, SLOT_FORMAT, SLOT_ITER, SLOT_CONTAINS, SLOT_GETITEM,
 #define T_DICTS (T(SPY_DICT) | T(SPY_FROZENDICT))
 #define T_COMPARED (T_NUMBERS | T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T(SPY_SLICE))
 #define T_VIEWS (T(SPY_DICT_KEYS) | T(SPY_DICT_VALUES) | T(SPY_DICT_ITEMS))
+#define T_SET_VIEWS (T(SPY_DICT_KEYS) | T(SPY_DICT_ITEMS))
 #define T_AWAITABLES (T(SPY_ASYNC_GENERATOR_ASEND) | T(SPY_ASYNC_GENERATOR_ATHROW) | T(SPY_ANEXT_AWAITABLE))
 static const struct { const char *name; int kind, op; uint64_t types; } slots[] = {
     {"__add__", SLOT_BINARY, '+', T_NUMBERS | T_SEQUENCES | T(SPY_TEMPLATE)}, {"__radd__", SLOT_RBINARY, '+', T_NUMBERS},
-    {"__sub__", SLOT_BINARY, '-', T_NUMBERS | T_SETS}, {"__rsub__", SLOT_RBINARY, '-', T_NUMBERS | T_SETS},
+    {"__sub__", SLOT_BINARY, '-', T_NUMBERS | T_SETS | T_SET_VIEWS}, {"__rsub__", SLOT_RBINARY, '-', T_NUMBERS | T_SETS | T_SET_VIEWS},
     {"__mul__", SLOT_BINARY, '*', T_NUMBERS | T_SEQUENCES}, {"__rmul__", SLOT_RBINARY, '*', T_NUMBERS | T_SEQUENCES},
     {"__truediv__", SLOT_BINARY, '/', T_NUMBERS}, {"__rtruediv__", SLOT_RBINARY, '/', T_NUMBERS},
     {"__floordiv__", SLOT_BINARY, T_FLOORDIV, T(SPY_INT) | T(SPY_FLOAT)}, {"__rfloordiv__", SLOT_RBINARY, T_FLOORDIV, T(SPY_INT) | T(SPY_FLOAT)},
     {"__mod__", SLOT_BINARY, '%', T(SPY_INT) | T(SPY_FLOAT) | T_TEXT}, {"__rmod__", SLOT_RBINARY, '%', T(SPY_INT) | T(SPY_FLOAT) | T_TEXT},
     {"__divmod__", SLOT_BUILTIN, B_DIVMOD, T(SPY_INT) | T(SPY_FLOAT)}, {"__rdivmod__", SLOT_RBINARY, B_DIVMOD, T(SPY_INT) | T(SPY_FLOAT)},
     {"__pow__", SLOT_BUILTIN, B_POW, T_NUMBERS}, {"__rpow__", SLOT_RBINARY, T_POW, T_NUMBERS},
-    {"__and__", SLOT_BINARY, '&', T(SPY_INT) | T_SETS}, {"__rand__", SLOT_RBINARY, '&', T(SPY_INT) | T_SETS},
-    {"__or__", SLOT_BINARY, '|', T(SPY_INT) | T_SETS | T_DICTS}, {"__ror__", SLOT_RBINARY, '|', T(SPY_INT) | T_SETS | T_DICTS},
-    {"__xor__", SLOT_BINARY, '^', T(SPY_INT) | T_SETS}, {"__rxor__", SLOT_RBINARY, '^', T(SPY_INT) | T_SETS},
+    {"__and__", SLOT_BINARY, '&', T(SPY_INT) | T_SETS | T_SET_VIEWS}, {"__rand__", SLOT_RBINARY, '&', T(SPY_INT) | T_SETS | T_SET_VIEWS},
+    {"__or__", SLOT_BINARY, '|', T(SPY_INT) | T_SETS | T_DICTS | T_SET_VIEWS}, {"__ror__", SLOT_RBINARY, '|', T(SPY_INT) | T_SETS | T_DICTS | T_SET_VIEWS},
+    {"__xor__", SLOT_BINARY, '^', T(SPY_INT) | T_SETS | T_SET_VIEWS}, {"__rxor__", SLOT_RBINARY, '^', T(SPY_INT) | T_SETS | T_SET_VIEWS},
     {"__lshift__", SLOT_BINARY, T_LSHIFT, T(SPY_INT)}, {"__rlshift__", SLOT_RBINARY, T_LSHIFT, T(SPY_INT)},
     {"__rshift__", SLOT_BINARY, T_RSHIFT, T(SPY_INT)}, {"__rrshift__", SLOT_RBINARY, T_RSHIFT, T(SPY_INT)},
     {"__iadd__", SLOT_INPLACE, T_ADDEQ, T(SPY_LIST) | T(SPY_BYTEARRAY)}, {"__imul__", SLOT_INPLACE, T_MULEQ, T(SPY_LIST) | T(SPY_BYTEARRAY)},
     {"__ior__", SLOT_INPLACE, T_OREQ, T(SPY_SET) | T(SPY_DICT)}, {"__iand__", SLOT_INPLACE, T_ANDEQ, T(SPY_SET)},
     {"__ixor__", SLOT_INPLACE, T_XOREQ, T(SPY_SET)}, {"__isub__", SLOT_INPLACE, T_SUBEQ, T(SPY_SET)},
-    {"__lt__", SLOT_COMPARE, R_LT, T_COMPARED | T_OBJECT | T(SPY_NONE)}, {"__le__", SLOT_COMPARE, R_LE, T_COMPARED | T_OBJECT | T(SPY_NONE)},
-    {"__eq__", SLOT_COMPARE, R_EQ, T_COMPARED | T_OBJECT | T(SPY_NONE)}, {"__ne__", SLOT_COMPARE, R_NE, T_COMPARED | T_OBJECT | T(SPY_NONE)},
-    {"__gt__", SLOT_COMPARE, R_GT, T_COMPARED | T_OBJECT | T(SPY_NONE)}, {"__ge__", SLOT_COMPARE, R_GE, T_COMPARED | T_OBJECT | T(SPY_NONE)},
+    {"__lt__", SLOT_COMPARE, R_LT, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)}, {"__le__", SLOT_COMPARE, R_LE, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)},
+    {"__eq__", SLOT_COMPARE, R_EQ, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)}, {"__ne__", SLOT_COMPARE, R_NE, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)},
+    {"__gt__", SLOT_COMPARE, R_GT, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)}, {"__ge__", SLOT_COMPARE, R_GE, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)},
     {"__neg__", SLOT_UNARY, '-', T_NUMBERS}, {"__pos__", SLOT_UNARY, '+', T_NUMBERS}, {"__invert__", SLOT_UNARY, '~', T(SPY_INT)},
     {"__abs__", SLOT_BUILTIN, B_ABS, T_NUMBERS}, {"__bool__", SLOT_OTHER, SLOT_BOOL, T_NUMBERS | T(SPY_RANGE) | T(SPY_NONE)},
     {"__int__", SLOT_BUILTIN, B_INT, T(SPY_INT) | T(SPY_FLOAT)}, {"__float__", SLOT_BUILTIN, B_FLOAT, T(SPY_INT) | T(SPY_FLOAT)},
@@ -43854,6 +44041,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__format__", SLOT_OTHER, SLOT_FORMAT, T_OBJECT | T_NUMBERS | T(SPY_STRING)},
     {"__call__", SLOT_CALL, 0, T(SPY_FUNCTION) | T(SPY_NATIVE) | T(SPY_METHOD)},
 };
+#undef T_SET_VIEWS
 #undef T
 static int builtin_type_id(SPYContext *c, SPYValue *cls) {
     if (cls == c->object) return 63;
@@ -44003,6 +44191,8 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
             return binary_builtin(c, '+', value, other);
         if (op == '%' && (type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY))
             return text_mod_slot(c, kind == SLOT_RBINARY, type, value, self, argv[0]);
+        /* A dict view's set operation takes any iterable (dictviews_sub). */
+        if (set_view(value)) return kind == SLOT_BINARY ? binary(c, op, value, argv[0]) : binary(c, op, argv[0], value);
         if (!slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
         if (op == '|' && (type == SPY_DICT || type == SPY_FROZENDICT))
             return dict_union(c, kind == SLOT_BINARY ? self : argv[0], kind == SLOT_BINARY ? argv[0] : self);
@@ -44045,6 +44235,11 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
             static const int tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
             return bytearray_compare(c, tokens[op], self, argv[0]);
         }
+        /* A dict view compares with a set or view (dictview_richcompare),
+         * by Python on the call step's machine (view_comparek). */
+        if (type == SPY_DICT_KEYS || type == SPY_DICT_ITEMS)
+            return view_operands(value, argv[0]) ? view_comparek(c, step_machine(c), compare_tokens[op], value, argv[0], proxied, NULL) :
+                   spy_retain(c->not_implemented);
         if (!slot_accepts(c, type, argv[0]) || (type != SPY_FLOAT && type != SPY_COMPLEX && type != SPY_INT &&
             builtin_type_id(c, value_class(c, other)) != type && type != SPY_SET && type != SPY_FROZENSET && type != SPY_BYTES && type != SPY_BYTEARRAY))
             return spy_retain(c->not_implemented);
@@ -44084,7 +44279,11 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         SPYValue *result = iterator_next(c, value);
         return result || c->error_type[0] ? result : spy_error(c, "StopIteration", "");
     }
-    case SLOT_CONTAINS: return comparison(c, O_IN, argv[0], value);
+    case SLOT_CONTAINS:
+        /* A dict view's lookup calls Python on the call step's machine (view_containsk). */
+        if (set_view(value)) return view_containsk(c, step_machine(c), argv[0], value, proxied, NULL);
+        if (value->type == SPY_DICT) return map_lookupk(c, step_machine(c), value, argv[0], lookup_contains, NULL);
+        return comparison(c, O_IN, argv[0], value);
     case SLOT_GETITEM:
         return (type == SPY_DICT || type == SPY_FROZENDICT) ? dict_subscript(c, value, self, argv[0]) : get_index(c, value, argv[0]);
     case SLOT_SETITEM: return set_index(c, value, argv[0], argv[1]) ? NULL : spy_none(c);
@@ -44159,6 +44358,11 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
         descriptor->as.native.data = descriptor;
         descriptor->as.native.method = 1;
         descriptor->as.native.owner = spy_retain(cls);
+        /* A dict's or view's lookups and a view's comparisons may leave a
+         * call to the step (view_containsk, view_comparek, map_lookupk). */
+        int contains = index >= 0 && slots[index].kind == SLOT_OTHER && slots[index].op == SLOT_CONTAINS;
+        descriptor->as.native.host = ((type == SPY_DICT_KEYS || type == SPY_DICT_ITEMS) && index >= 0 && (contains || slots[index].kind == SLOT_COMPARE)) ||
+                                     (type == SPY_DICT && contains) ? 2 : 0;
         if (!(descriptor->as.native.name = spy_string(c, name, strlen(name)))) { spy_release(descriptor); return NULL; }
     }
     int status = name_set(c, c->slots, key, descriptor);

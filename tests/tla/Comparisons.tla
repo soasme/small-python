@@ -41,7 +41,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_int_sub_iter", "contains_list_sub_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "builtin_declines",
+          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "view_calls", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected",
           "builtin_sub_unordered"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
@@ -174,6 +174,11 @@ Case(c) ==
       \* a subclass's own ordering that declines leaves the other operand's
       \* reflected builtin method, which compares that operand's items first
       [] c = "seq_sub_declined" -> <<"'b<c'", <<"'L<'", "'aa'", "'cb'", "'b<c'">>>>
+      \* a dict view's in and comparisons look keys up by their __hash__ and
+      \* __eq__, an items view comparing the value found with the pair's
+      [] c = "view_calls" -> <<"(True, False, True, False, False)",
+                                <<"'ha'", "'ha'", "'a=a'", "'ha'", "'a=a'", "'x=y'", "'ha'", "'a=a'", "'x=x'",
+                                  "'hb'", "'ha'", "'b=a'", "'hc'", "'hc'", "'a=c'">>>>
       \* None, a str, a tuple, and an instance comparing as object does decline
       \* an instance of another class, whose reflected method decides
       [] c = "builtin_declines" -> <<"('a==NoneType', 'b>str', 'c==P', 'd==tuple')",

@@ -523,6 +523,8 @@ Unreleased (0.10.0):
 - a class whose `__hash__` is a method object runs it without nesting on the C stack when its instances are stored or looked up
 - an explicit collection closes the dead generators it reclaims without nesting their `finally` clauses on the C stack
 - a sort calls its items' Python comparisons without nesting on the C stack also when its first comparison calls none, or its items nest tuples or lists
+- a dict's keys and items views' `in`, `__contains__` and comparisons, and a dict's `__contains__`, call keys' Python `__hash__` and `__eq__` without nesting on the C stack
+- a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
 
 2026-11-10 0.9.0:
 

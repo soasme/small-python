@@ -124,6 +124,12 @@ SOURCES = {
                         "    def __lt__(s, o): return t(s.n + '<' + o.n)\n"
                         "class L(list):\n    def __lt__(s, o): t('L<'); return NotImplemented\n"
                         "result = L([E('a'), E('b')]) < L([E('a'), E('c')])",
+    "view_calls": "class K:\n    def __init__(s, n): s.n = n\n"
+                  "    def __hash__(s):\n        for _ in (): pass\n        t('h' + s.n); return 1\n"
+                  "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"
+                  "d = {K('a'): K('x')}\n"
+                  "result = (K('a') in d.keys(), (K('a'), K('y')) in d.items(), d.items().__contains__((K('a'), K('x'))),\n"
+                  "          d.keys() == {K('b'): 0}.keys(), {K('c')} <= d.keys())",
     "builtin_declines": "class E:\n    def __init__(s, n): s.n = n\n"
                         "    def __eq__(s, o): return t(s.n + '==' + type(o).__name__)\n"
                         "    def __gt__(s, o): return t(s.n + '>' + type(o).__name__)\n"
