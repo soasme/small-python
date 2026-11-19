@@ -8904,15 +8904,29 @@ static ALWAYS_INLINE SPYValue *iterator_of(SPYContext *c, SPYValue *source, SPYV
     return v;
 }
 static SPYValue *get_iterator(SPYContext *c, SPYValue *source) { return iterator_of(c, source, NULL); }
-/* What source's Python __iter__ returned for iter() (callk). */
+/* What source's Python __iter__ returned for iter() (callk); c->missing
+ * when a descriptor __iter__'s read raised AttributeError, which leaves
+ * the sequence protocol of a class with __getitem__. */
 static SPYValue *iterated(SPYContext *c, Machine *m, SPYValue *source, SPYValue *result) {
     (void)m;
-    if (result) result = iterator_returned(c, source, result, "__iter__");
+    if (result == c->missing) {
+        spy_release(result);
+        result = !class_lookup(value_class(c, source), "__getitem__") ? errorf(c, "TypeError", "'%s' object is not iterable", type_name(source)) :
+                 value_new(c, SPY_ITERATOR);
+        if (result) { result->as.iterator.source = spy_retain(source); result->as.iterator.kind = I_GETITEM; }
+    } else if (result) result = iterator_returned(c, source, result, "__iter__");
     spy_release(source);
     return result;
 }
-/* iter() of source on machine m, whose Python __iter__ is m's call (callk). */
+static SPYValue *special_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, Continuation, SPYValue *);
+static int machine_function(SPYContext *, SPYValue *);
+static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
+/* iter() of source on machine m, whose Python __iter__, or a descriptor
+ * __iter__'s Python read (special_callk), is m's call (callk). */
 static SPYValue *iter_builtin(SPYContext *c, Machine *m, SPYValue *source) {
+    SPYValue *described = special_dispatch(source) && !builtin_base(c, source, "__iter__", NULL) ? class_lookup(value_class(c, source), "__iter__") : NULL;
+    if (described && !machine_function(c, described) && descriptor_getter(c, described))
+        return special_callk(c, m, described, source, 0, NULL, spy_retain(c->missing), iterated, spy_retain(source));
     SPYValue *method = NULL, *iterator = iterator_of(c, source, &method);
     if (!method) return iterator;
     iterator = callk(c, m, method, 0, NULL, iterated, spy_retain(source));
@@ -11065,6 +11079,27 @@ static int byte_found(SPYContext *c, SPYValue *b, SPYValue *a, int index, SPYVal
     spy_release(copy);
     return found;
 }
+/* `a in b` or `a not in b`, as op, by b's items (_PySequence_IterSearch). */
+static SPYValue *iterated_search(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    int result = 0;
+    SPYValue *iterator = get_iterator(c, b);
+    if (!iterator) {
+        /* PySequence_Contains: any TypeError from iter() is replaced. */
+        if (!error_is(c, "TypeError")) return NULL;
+        spy_clear_error(c);
+        return errorf(c, "TypeError", "argument of type '%s' is not a container or iterable", type_name(b));
+    }
+    for (;;) {
+        SPYValue *item = iterator_next(c, iterator);
+        if (!item) break;
+        result = a == item || equal(item, a); spy_release(item);
+        if (result || c->error_type[0]) break;
+        if (pass(c)) break;
+    }
+    spy_release(iterator);
+    if (c->error_type[0]) return NULL;
+    return spy_bool(c, op == O_IN ? result : !result);
+}
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
     /* Exact small ints and floats compare first. */
@@ -11155,23 +11190,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             if (!needle) return errorf(c, "TypeError", "'in <string>' requires string as left operand, not %s", type_name(a));
             /* UTF-8 bytes match only at character boundaries. */
             result = find_bytes(c, b->as.string.data, b->as.string.len, needle->as.string.data, needle->as.string.len, 0) != SIZE_MAX;
-        } else {
-            SPYValue *iterator = get_iterator(c, b);
-            if (!iterator) {
-                /* PySequence_Contains: any TypeError from iter() is replaced. */
-                if (!error_is(c, "TypeError")) return NULL;
-                spy_clear_error(c);
-                return errorf(c, "TypeError", "argument of type '%s' is not a container or iterable", type_name(b));
-            }
-            for (;;) {
-                SPYValue *item = iterator_next(c, iterator);
-                if (!item) break;
-                result = a == item || equal(item, a); spy_release(item);
-                if (result || c->error_type[0]) break;
-                if (pass(c)) break;
-            }
-            spy_release(iterator);
-        }
+        } else return iterated_search(c, op, a, b);
         if (c->error_type[0]) return NULL;
         return spy_bool(c, op == O_IN ? result : !result);
     }
@@ -30541,15 +30560,15 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
 /* For `x in y` or `x not in y`, as op, a lone test or the last of a chain, y a
  * generator the machine can resume or a plain instance whose class has a
  * Python __iter__ (iter_function), or a Python __getitem__ and no __iter__
- * (getitem_iterated), and no __contains__: 1 when the items of
+ * (getitem_iterated), and no __contains__ unless it is absent: 1 when the items of
  * y, or of the iterator its __iter__ returns, are compared with x on the
  * machine (BLOCK_CONSUME, CONTAINS_ITEMS), the truth going on the stack at
  * their end; else 0, with an error pending when __iter__ failed, a
  * TypeError replaced as the native search replaces it. */
-static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y) {
+static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y, int absent) {
     if (contained_base(c, y)) return 0;
     if (y->type != SPY_DICT_VALUES && !(y->type == SPY_ITERATOR && y->as.iterator.kind == I_REVERSED) && !resumable(y) &&
-        (!(iter_function(c, y) || getitem_iterated(c, y)) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
+        (!(iter_function(c, y) || getitem_iterated(c, y)) || (!absent && class_lookup(y->as.map.parent, "__contains__")))) return 0;
     /* An __iter__ on the machine is the search's first call (KEY_ITER). */
     SPYValue *items = spy_retain(y);
     int keyed = consumer_source(c, &items);
@@ -32183,9 +32202,16 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
         if ((y->type == SPY_LIST || y->type == SPY_TUPLE || y->type == SPY_ITERATOR) && (ins->op != BC_COMPARE || !ins->arg) &&
             (function = contains_call(c, m, x, y, env))) return function;
-        /* in takes the container's __contains__, given the item. */
+        /* in takes the container's __contains__, given the item, or a
+         * descriptor's read first, absent on its AttributeError (contains_absent). */
         if ((function = item_function(c, y, "__contains__")) && (function = last_call(c, m, function, x, y, y, x, env))) return function;
-        return last && !c->error_type[0] && contains_step(c, m, op, x, y) ? c->unbound : NULL;
+        SPYValue *described = !function && y->type == SPY_INSTANCE && !contained_base(c, y) ? class_lookup(y->as.map.parent, "__contains__") : NULL;
+        if (described && !machine_function(c, described) && descriptor_getter(c, described) && !operator_push(c, m, x, y, OPERATOR_LAST)) {
+            if ((function = special_env(c, m, described, y, x, c->missing, env))) return function;
+            for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+            return NULL;
+        }
+        return last && !c->error_type[0] && contains_step(c, m, op, x, y, 0) ? c->unbound : NULL;
     }
     /* not calls a Python __bool__ (CALL_CHECKED), inverting its truth
      * (checked_returned). */
@@ -32919,6 +32945,19 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
  * binary operator or comparison goes on with the other operand's method,
  * entered as the last call, or the rest of the operation. The machine to
  * run on, at its pc. */
+/* An in, op, of step ins whose descriptor __contains__'s read raised
+ * AttributeError (operator_call): its operands, under the phase on m's
+ * stack, searched by their items, on m when the step's test ends there
+ * (contains_step), c->consuming then set; else here, its value pushed. */
+static NO_INLINE Machine *contains_absent(SPYContext *c, Machine *m, Instruction *ins, int op) {
+    SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
+    spy_release(marker);
+    int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
+    if (last && contains_step(c, m, op, x, y, 1)) c->consuming = 1;
+    else m->pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : iterated_search(c, op, x, y), m->pc);
+    spy_release(x); spy_release(y);
+    return m;
+}
 static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
     if (m->stack[m->len - 1] == c->booleans[0] || m->stack[m->len - 1] == c->booleans[1]) {
@@ -32971,6 +33010,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         return contains_returned(c, m, ins, op, found, pc);
     }
     int op = 0, kind = step_operation(ins, &op);
+    if (result == c->missing) return contains_absent(c, m, ins, op);
     /* An in tests a Python __contains__ result's truth by a call too. */
     Call *call = result && (op == O_IN || op == O_NOTIN) ? operator_truth(c, m, result) : NULL;
     if (call) { spy_release(result); return &call->m; }
@@ -35522,6 +35562,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result) {
                             m = operator_returned(c, m, &code[pc - 1], result, pc);
                             f = m->frame; code = m->code->items; pc = m->pc;
+                            /* An absent __contains__'s search takes the items on m (contains_absent). */
+                            if (UNLIKELY(c->consuming)) { c->consuming = 0; goto consume_generator; }
                         }
                     } else if (kind == CALL_ENTER) {
                         if (result) with_entered(c, m, &code[pc - 1], machine_pop(m), result);

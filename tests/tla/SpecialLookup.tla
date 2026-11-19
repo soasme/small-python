@@ -10,8 +10,9 @@
 (* access.                                                                 *)
 (*                                                                         *)
 (* A program, for M one of __len__, __iter__, __bool__, __call__, __neg__, *)
-(* __index__, __repr__, with an implementation giving 5 (iter([5]),       *)
-(* False and "5" for __iter__, __bool__ and __repr__), defines M           *)
+(* __index__, __repr__, __contains__, with an implementation giving 5     *)
+(* (iter([5]), False and "5" for __iter__, __bool__ and __repr__, and      *)
+(* whether its argument, 5 by default, is 5 for __contains__), defines M   *)
 (*                                                                         *)
 (*     instance   on c = C() only: c.M = lambda: ...                       *)
 (*     class      on C             base       on B, with class C(B)        *)
@@ -23,22 +24,23 @@
 (*                returns the implementation bound to the object           *)
 (*                                                                         *)
 (* A failing descriptor makes M absent for the operations with a fallback  *)
-(* (bool, iter and repr here, PLS-315 7.3.2 LookupSpecialMaybe; repr then  *)
-(* gives the default text), and raises its AttributeError for the rest.    *)
+(* (bool, iter, in and repr here, PLS-315 7.3.2 LookupSpecialMaybe; repr  *)
+(* then gives the default text, and in iterates), and raises its          *)
+(* AttributeError for the rest.                                            *)
 (*                                                                         *)
 (* where C may also define __getattribute__ recording the names it looks   *)
 (* up, then invokes M implicitly on c (len(c), list(iter(c)), bool(c),     *)
-(* c(), -c, range(9)[c], repr(c)) or on C, or explicitly as c.M(). The     *)
+(* c(), -c, range(9)[c], repr(c), 5 in c) or on C, or explicitly as c.M(). The     *)
 (* outcome is the result (a list for iterators, "default" for a default    *)
 (* repr), or the exception, and whether __getattribute__ saw M.            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__", "__index__", "__repr__"}
+Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__", "__index__", "__repr__", "__contains__"}
 Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass", "failing", "descriptor"}
 
 \* The methods looked up with LookupSpecialMaybe here.
-Optional == {"__bool__", "__iter__", "__repr__"}
+Optional == {"__bool__", "__iter__", "__repr__", "__contains__"}
 Programs == [method : Methods, where : Wheres, getattribute : BOOLEAN, op : {"implicit", "onclass", "explicit"}]
 
 VARIABLES program, outcome
@@ -49,6 +51,7 @@ Pending == "pending"
 \* The result of an implementation giving 5 (or 6).
 Gives(m, six) == CASE m = "__iter__" -> IF six THEN "[6]" ELSE "[5]"
                    [] m = "__bool__" -> IF six THEN "True" ELSE "False"
+                   [] m = "__contains__" -> IF six THEN "False" ELSE "True"
                    [] OTHER -> IF six THEN "6" ELSE "5"
 
 \* An implicit invocation on an object whose type does not define M.
