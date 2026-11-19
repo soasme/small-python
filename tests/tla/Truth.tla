@@ -28,7 +28,9 @@
 (* with __index__ returning 2, or __bool__ returning False with __len__    *)
 (* returning 3, or a __bool__ property raising AttributeError, absent,     *)
 (* with __len__ returning -1 or 0, whose result's truth is then the        *)
-(* object's, unchecked as a length. The outcome is the result ("left" or "right" for and and   *)
+(* object's, unchecked as a length, or with no __bool__ a __len__ property *)
+(* giving the __len__ returning 0, or raising AttributeError, which then   *)
+(* propagates. The outcome is the result ("left" or "right" for and and   *)
 (* or) or the exception, and the log. Each class is of a HOLDER: an        *)
 (* instance's class, a list subclass whose instance holds one item, or a  *)
 (* metaclass whose class is tested; the outcome is the same for each.     *)
@@ -36,7 +38,8 @@
 EXTENDS Naturals, Sequences
 
 Kinds == {"plain", "bool_true", "bool_false", "bool_int", "bool_none", "len_zero", "len_three", "len_negative",
-          "len_str", "len_big", "len_index", "both", "absent_len", "absent_len_zero"}
+          "len_str", "len_big", "len_index", "both", "absent_len", "absent_len_zero",
+          "len_read", "len_unread"}
 Values == {"0", "0.0", "-0.0", "0j", "''", "b''", "[]", "()", "{}", "set()", "frozenset()", "range(0)", "range(1, 1)",
            "None", "...", "NotImplemented", "float('nan')", "' '", "[0]", "frozendict()", "bytearray()",
            "memoryview(b'')", "type", "object()", "1e-300 * 1e-300"}
@@ -67,6 +70,8 @@ Truth(k, side) ==
           [] k = "len_str" -> <<"TypeError: 'str' object cannot be interpreted as an integer", called("len")>>
           [] k = "absent_len" -> <<"true", called("len")>>
           [] k = "absent_len_zero" -> <<"false", called("len")>>
+          [] k = "len_read" -> <<"false", called("len")>>
+          [] k = "len_unread" -> <<"AttributeError: absent", <<>>>>
           [] k = "len_big" -> <<"OverflowError: cannot fit 'int' into an index-sized integer", called("len")>>
 
 Show(b) == IF b = "true" THEN "True" ELSE "False"

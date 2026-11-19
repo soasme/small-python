@@ -552,6 +552,7 @@ Unreleased (0.10.0):
 - `callable()` is true of an instance whose class defines `__call__` without reading it, as in CPython
 - Calling an instance whose class's `__call__` is a Python descriptor reads and calls it without nesting on the C stack
 - Iterating an object whose class's `__getitem__` is a Python descriptor reads and calls it for each item without nesting on the C stack
+- Truth tests, `bool()`, `any()` and `all()` read a Python `__len__` descriptor, and `any()` and `all()` a `__bool__` one, without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair

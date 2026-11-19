@@ -29,7 +29,13 @@ def instance(kind, side, log, holder):
         return call
 
     namespace = {}
-    if kind.startswith("absent"):
+    if kind in ("len_read", "len_unread"):
+        def read(self):
+            if kind == "len_unread":
+                raise AttributeError("absent")
+            return method("__len__", 0).__get__(self)
+        namespace["__len__"] = property(read)
+    elif kind.startswith("absent"):
         def absent(self):
             raise AttributeError("absent")
         namespace["__bool__"] = property(absent)

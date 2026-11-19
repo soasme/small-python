@@ -27048,6 +27048,9 @@ static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
 /* The key function the consumer atop m calls next, owned, with its env;
  * or NULL when its items are all taken, then its value on the stack, or
  * an error. */
+static SPYValue *truth_absent(SPYContext *, SPYValue *);
+static int special_function(SPYContext *, SPYValue *);
+static int truth_of(SPYValue *);
 static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValue **env) {
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
@@ -27060,12 +27063,15 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         return NULL;
     }
     if (s->keyed == KEY_BOOL) {
-        SPYValue *function = s->best;
+        /* A descriptor's read first (special_env): an absent __bool__
+         * gives c->missing for its __len__ (truth_absent), whose absence
+         * then makes the item true. */
+        SPYValue *function = s->best, *entered;
         s->best = NULL;
-        item = spy_retain(s->item);
-        if ((*env = function_env(c, function, 1, &item, NULL, 1))) return function;
+        entered = special_env(c, m, function, s->item, NULL, machine_function(c, function) || s->phase == 1 ? NULL :
+                                                         s->phase ? c->booleans[1] : truth_absent(c, s->item), env);
         spy_release(function);
-        return NULL;
+        return entered;
     }
     if (s->keyed == KEY_EQ) {
         int truth = s->phase >= 2;
@@ -27457,10 +27463,18 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     }
     if (s->keyed == KEY_BOOL) {
         /* The item's truth goes on to the next item, or decides any() or
-         * all(), which ends (consumer_took). */
-        SPYValue *item = s->item;
+         * all(), which ends (consumer_took); an absent __bool__'s is that
+         * of what its __len__ returns, unchecked (phase 2), a call first. */
+        SPYValue *item = s->item, *function;
+        if (key == c->missing) {
+            spy_release(key);
+            s->phase = 2;
+            if (special_function(c, function = class_lookup(value_class(c, item), "__len__"))) { s->best = spy_retain(function); return 0; }
+            key = call_special(c, item, "__len__", 0, NULL);
+            if (!key) { s->item = NULL; s->keyed = 0; spy_release(item); return -1; }
+        }
         s->item = NULL; s->keyed = 0;
-        int truth = truth_result(c, item, !s->phase, key);
+        int truth = s->phase == 2 ? truth_of(key) : truth_result(c, item, !s->phase, key);
         spy_release(item);
         if (c->error_type[0]) return -1;
         if (truth == (s->id == B_ALL)) return 0;
@@ -31984,11 +31998,13 @@ static NO_INLINE Machine *descripted(SPYContext *c, Machine *m, int kind, SPYVal
 static int special_function(SPYContext *c, SPYValue *function) { return machine_function(c, function) || descriptor_getter(c, function); }
 /* truth_function, or a descriptor __bool__, whose read a step makes
  * first (special_env), its AttributeError making v true, or with a
- * __len__ giving c->missing for its truth (truth_absent, truth_length). */
+ * __len__ giving c->missing for its truth (truth_absent, truth_length);
+ * or without __bool__ a descriptor __len__, *length set, whose read's
+ * AttributeError propagates. */
 static SPYValue *truth_special(SPYContext *c, SPYValue *v, int *length) {
     SPYValue *function = truth_function(c, v, length), *cls = value_class(c, v);
     if (function || builtin_base(c, v, "__bool__", "__len__")) return function;
-    function = class_lookup(cls, "__bool__");
+    if (!(function = class_lookup(cls, "__bool__")) && (function = class_lookup(cls, "__len__"))) *length = 1;
     return function && descriptor_getter(c, function) ? function : NULL;
 }
 /* What a descriptor __bool__ of v whose read raises AttributeError gives
@@ -32402,7 +32418,6 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
  * on its result v, which it takes: the call left on m (CALL_CHECKED), y,
  * v and whether it is __bool__ on m's stack for truth_returned, 1, or 1
  * with an error; else 0, v kept. A read's AttributeError makes v true. */
-static int truth_of(SPYValue *);
 static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue *y) {
     int length = 0;
     SPYValue *function = v->type == SPY_INSTANCE || metaclassed(v) ? truth_special(c, v, &length) : NULL, *entered = NULL, *env = NULL;
@@ -32410,7 +32425,7 @@ static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue
     size_t depth = m->len;
     if (y && machine_push(c, m, spy_retain(y))) spy_release(v);
     else if (!machine_push(c, m, v) && !machine_push(c, m, spy_retain(c->booleans[!length])))
-        entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : truth_absent(c, v), &env);
+        entered = special_env(c, m, function, v, NULL, machine_function(c, function) || length ? NULL : truth_absent(c, v), &env);
     if (!entered) {
         while (m->len > depth) spy_release(machine_pop(m));
         return 1;
@@ -33599,7 +33614,7 @@ static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPY
     SPYValue *function = truth_special(c, v, &length), *entered;
     if (!function || machine_push(c, m, spy_retain(v))) return NULL;
     if (length && machine_push(c, m, spy_retain(c->booleans[0]))) { spy_release(machine_pop(m)); return NULL; }
-    if ((entered = special_env(c, m, function, v, NULL, machine_function(c, function) ? NULL : truth_absent(c, v), env))) return entered;
+    if ((entered = special_env(c, m, function, v, NULL, machine_function(c, function) || length ? NULL : truth_absent(c, v), env))) return entered;
     for (int i = 0; i <= length; i++) spy_release(machine_pop(m));
     return NULL;
 }
@@ -42365,7 +42380,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
     consumer_settle(c, s);
     if (s->id == B_ALL || s->id == B_ANY) {
         int length = 0;
-        SPYValue *function = s->calls && (item->type == SPY_INSTANCE || metaclassed(item)) ? truth_function(c, item, &length) : NULL;
+        SPYValue *function = s->calls && (item->type == SPY_INSTANCE || metaclassed(item)) ? truth_special(c, item, &length) : NULL;
         if (function) { s->best = spy_retain(function); s->item = item; s->keyed = KEY_BOOL; s->phase = length; return 0; }
         int truth = truthy(item);
         spy_release(item);
