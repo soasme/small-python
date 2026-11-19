@@ -36,7 +36,21 @@ SOURCES = {
     "compat_from": "__lazy_modules__ = ['pkg']\nfrom pkg import sub\n" + PLACEHOLDER % "sub",
     "compat_try": "__lazy_modules__ = ['pkg']\ntry:\n    import pkg\nfinally:\n    pass\n" + PLACEHOLDER % "pkg",
     "compat_function": "__lazy_modules__ = ['pkg']\ndef f():\n    import pkg\n    return type(pkg).__name__\nresult = f()",
+    "compat_getitem": "import pkg, nosuchmod\n" + PLACEHOLDER % "pkg",
 }
+
+
+class Listing(dict):
+    """Globals whose __getitem__ answers __lazy_modules__, counting."""
+    reads = 0
+
+    def __getitem__(self, key):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        if key != "__lazy_modules__":
+            return dict.__getitem__(self, key)
+        self.reads += 1
+        return ["pkg", "nosuchmod"]
 
 
 def clean():
@@ -51,10 +65,12 @@ def clean():
 
 def outcome(p):
     clean()
-    namespace = {}
+    namespace = Listing() if p["case"] == "compat_getitem" else {}
     try:
         exec(SOURCES[p["case"]], namespace)
         result = repr(namespace.get("result"))
+        if p["case"] == "compat_getitem":
+            result = repr((namespace.get("result"), namespace.reads))
     except (ImportError, SyntaxError) as error:
         result = "%s: %s" % (type(error).__name__, str(error).split(" (")[0])
     import tracelog

@@ -531,6 +531,7 @@ Unreleased (0.10.0):
 - a bytearray's and a set's `__reduce__()` and `__reduce_ex__()` call a Python `__getstate__` without nesting on the C stack
 - `repr()`, `str()`, `ascii()`, `format()`, f-strings, `str.format` and `%` of a container's subclass instance, and a `staticmethod` `__repr__` of an item, call the items' Python `__repr__` without nesting on the C stack
 - `exec()` and `eval()` code, its functions and a class body call a namespace's Python `__getitem__`, a namespace key's Python `__eq__`, and a `__prepare__` namespace's lookups of `__annotations__` without nesting on the C stack
+- an import at module level reads `__lazy_modules__` through the `__getitem__` of `exec()` globals that are a `dict` subclass, once per imported module
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
 
 2026-11-10 0.9.0:

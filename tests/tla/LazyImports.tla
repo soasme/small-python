@@ -12,19 +12,24 @@
 (* module level and outside try statements, never with * or __future__;    *)
 (* and a module-level __lazy_modules__ makes the regular imports of the    *)
 (* modules it lists (by absolute name, the module after `from` for a from  *)
-(* import) lazy, except inside try statements, functions, and classes.     *)
+(* import) lazy, except inside try statements, functions, and classes,     *)
+(* read before each module through the __getitem__ of globals that are a   *)
+(* dict subclass's instance.                                               *)
 (*                                                                         *)
 (* A program clears the fixture modules (those of Imports) from sys.modules*)
 (* and sys.lazy_modules and runs one of the statements of CASES. The       *)
 (* outcome is the program's result (or the exception and its message,      *)
-(* without the file name) and the log of the modules that ran.             *)
+(* without the file name) and the log of the modules that ran; for         *)
+(* compat_getitem, in globals whose Python __getitem__ answers ['pkg',     *)
+(* 'nosuchmod'] for __lazy_modules__, the result and how often it did.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Cases == {"unused", "used", "from_unused", "from_used", "placeholder", "from_placeholder", "missing_unused",
           "missing_used", "broken", "as", "not_cached", "in_function_use", "registry", "submodule",
           "in_function", "in_try", "in_class", "star", "future",
-          "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function"}
+          "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function",
+          "compat_getitem"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -58,6 +63,7 @@ Run(p) ==
       [] p.case = "compat_from" -> "'lazy_import' []"
       [] p.case = "compat_try" -> "'module' ['pkg']"
       [] p.case = "compat_function" -> "'module' ['pkg']"
+      [] p.case = "compat_getitem" -> "('lazy_import', 2) []"           \* read once per module
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -68,6 +74,6 @@ Done == outcome # Pending
 
 \* A program that never uses a lazy name runs no module.
 Unused == {"unused", "from_unused", "placeholder", "from_placeholder", "missing_unused", "not_cached", "registry",
-           "compat", "compat_from"}
+           "compat", "compat_from", "compat_getitem"}
 NothingRuns == Done /\ program.case \in Unused => SubSeq(outcome, Len(outcome) - 1, Len(outcome)) = "[]"
 =============================================================================
