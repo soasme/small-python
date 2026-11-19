@@ -10,6 +10,7 @@ EXCEPTIONS = {
     "EG(V,EG(K))": "ExceptionGroup('', [ValueError(), ExceptionGroup('', [KeyError()])])",
     "EG(T,K)": "ExceptionGroup('', [TypeError(), KeyError()])",
     "LG(V,T)": "Logged('', [ValueError(), TypeError()])",
+    "DG(V,T)": "Derived('', [ValueError(), TypeError()])",
 }
 splits = []
 
@@ -18,6 +19,12 @@ class Logged(ExceptionGroup):
     def split(self, condition):
         splits.append(condition)
         return super().split(condition)
+class Derived(ExceptionGroup):
+    def derive(self, excs):
+        for _ in (): pass
+        return Derived(self.message, excs)
+
+
 LETTERS = {ValueError: "V", TypeError: "T", KeyError: "K", RuntimeError: "R"}
 
 
@@ -37,7 +44,7 @@ def outcome(p):
     log = []
     del splits[:]
     try:
-        exec("\n".join(lines) + "\n", {"log": log, "leaves": leaves, "Logged": Logged})
+        exec("\n".join(lines) + "\n", {"log": log, "leaves": leaves, "Logged": Logged, "Derived": Derived})
     except Exception as e:
         return (tuple(log), "group" if isinstance(e, BaseExceptionGroup) else "single", leaves(e), len(splits))
     return (tuple(log), "none", "", len(splits))

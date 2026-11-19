@@ -538,6 +538,8 @@ struct SPYContext {
      * attribute and __getattr__ the read found before the search, which
      * its reads of that instance take. */
     SPYValue *searched, *searched_class, *searched_hook;
+    /* On a machine's stack, under the pair a group's split returns to an except* step (star_split). */
+    SPYValue *splitting;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -23503,6 +23505,7 @@ static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv,
     return split_begin(c, NULL, self, condition, which == 3 ? SPLIT_REST : 0);
 }
 /* except* matching: a full match wraps a naked exception in a group. */
+static SPYValue *attribute_callk(SPYContext *, Machine *, SPYValue *, const char *, SPYValue *, Continuation, SPYValue *);
 static int star_match(SPYContext *c, SPYValue *exception, SPYValue *type, SPYValue **match, SPYValue **rest) {
     *match = *rest = NULL;
     if (!valid_exception_types(c, type)) {
@@ -23528,19 +23531,46 @@ static int star_match(SPYContext *c, SPYValue *exception, SPYValue *type, SPYVal
         return *match ? 0 : -1;
     }
     if (!is_group(c, exception)) { *rest = spy_retain(exception); return 0; }
-    /* A group splits itself, through its own split method. */
-    SPYValue *split = attribute(c, exception, "split"), *pair = split ? call(c, split, 1, &type) : NULL;
-    spy_release(split);
-    if (pair && pair->type != SPY_TUPLE)
+    /* A group splits itself, through its own split method (star_split). */
+    return 1;
+}
+/* What group exception's split method returned for except*, pair: its
+ * match and rest, None for none. */
+static int star_pair(SPYContext *c, SPYValue *exception, SPYValue *pair, SPYValue **match, SPYValue **rest) {
+    if (pair->type != SPY_TUPLE)
         errorf(c, "TypeError", "%s.split must return a tuple, not %s", type_name(exception), type_name(pair));
-    else if (pair && pair->as.seq.len < 2)
+    else if (pair->as.seq.len < 2)
         errorf(c, "TypeError", "%s.split must return a 2-tuple, got tuple of size %zu", type_name(exception), pair->as.seq.len);
-    else if (pair) {
+    else {
         if (pair->as.seq.items[0] != c->none) *match = spy_retain(pair->as.seq.items[0]);
         if (pair->as.seq.items[1] != c->none) *rest = spy_retain(pair->as.seq.items[1]);
     }
-    spy_release(pair);
     return c->error_type[0] ? -1 : 0;
+}
+/* The call of split, a group's split method, on type for except*: a
+ * group's own goes on on m (split_run), another is m's call (callk). */
+static SPYValue *star_split_called(SPYContext *c, Machine *m, SPYValue *split, SPYValue *type) {
+    SPYValue *self = split->type == SPY_METHOD ? split->as.method.self : NULL, *fn = self ? split->as.method.function : NULL;
+    if (fn && fn->type == SPY_NATIVE && fn->as.native.kwcall == group_method && (intptr_t)fn->as.native.data == 3 && is_group(c, self) &&
+        hidden_field(self, "message") && group_exceptions(self) && split_condition(c, type))
+        return split_begin(c, m, self, type, SPLIT_REST);
+    return callk(c, m, split, 1, (SPYValue *[]){spy_retain(type)}, unchanged, NULL);
+}
+/* The split method a group's read gave, then its call on type, which it takes. */
+static SPYValue *star_split_read(SPYContext *c, Machine *m, SPYValue *type, SPYValue *split) {
+    SPYValue *pair = split ? star_split_called(c, m, split, type) : NULL;
+    spy_release(split); spy_release(type);
+    return pair;
+}
+/* except*'s split of group by type, on m: its split method read, then
+ * called (star_split_called), the pair returned; or NULL with an error,
+ * or with c->k_fn set for m's call, whose value is the pair. */
+static SPYValue *star_split(SPYContext *c, Machine *m, SPYValue *group, SPYValue *type) {
+    SPYValue *split = attribute_step(c, group, "split");
+    if (split || c->error_type[0] || !c->fallback) return star_split_read(c, m, spy_retain(type), split);
+    SPYValue *function = c->fallback;
+    c->fallback = NULL;
+    return attribute_callk(c, m, group, "split", function, star_split_read, spy_retain(type));
 }
 static int same_metadata(SPYValue *a, SPYValue *b) {
     static const char *const fields[] = {"__notes__", "__traceback__", "__cause__", "__context__"};
@@ -23549,8 +23579,10 @@ static int same_metadata(SPYValue *a, SPYValue *b) {
     return 1;
 }
 /* The exception left after except* handlers: re-raised parts keep the
- * original group's shape; new exceptions join them in a new group. */
-static SPYValue *reraise_star(SPYContext *c, SPYValue *original, SPYValue *raised) {
+ * original group's shape, its split by their leaves made on m, or kept
+ * when given; new exceptions join them in a new group. NULL with
+ * c->k_fn set when that split is m's call, whose value is kept. */
+static SPYValue *reraise_star(SPYContext *c, Machine *m, SPYValue *original, SPYValue *raised, SPYValue *kept) {
     if (!raised->as.seq.len) return NULL;
     if (!is_group(c, original)) return spy_retain(raised->as.seq.items[0]);
     SPYValue *fresh = spy_list(c), *reraised = spy_list(c), *leaves = spy_list(c), *keep = NULL, *result = NULL;
@@ -23560,7 +23592,8 @@ static SPYValue *reraise_star(SPYContext *c, SPYValue *original, SPYValue *raise
         if (sequence_append(c, same_metadata(item, original) ? reraised : fresh, item)) goto done;
     }
     for (size_t i = 0; i < reraised->as.seq.len; i++) if (group_leaves(c, reraised->as.seq.items[i], leaves)) goto done;
-    if (leaves->as.seq.len && !(keep = split_begin(c, NULL, original, leaves, SPLIT_MEMBER))) goto done;
+    if (kept) keep = spy_retain(kept);
+    else if (leaves->as.seq.len && !(keep = split_begin(c, m, original, leaves, SPLIT_MEMBER))) goto done;
     if (keep == c->none) { spy_release(keep); keep = NULL; }
     if (!fresh->as.seq.len) { result = keep; keep = NULL; goto done; }
     if (keep && sequence_append(c, fresh, keep)) goto done;
@@ -23615,7 +23648,7 @@ static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
         c->handled = outer;
         spy_release(handled);
         if (!c->error_type[0] && raised && (!rest || !sequence_append(c, raised, rest))) {
-            SPYValue *result = reraise_star(c, error.value, raised);
+            SPYValue *result = reraise_star(c, NULL, error.value, raised, NULL);
             if (result == error.value) restore_error(c, &error);
             else if (result) raise_unchained(c, result, raised->as.seq.len == 1 ? line : error.line);
             spy_release(result);
@@ -36345,8 +36378,27 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_STAR_MATCH) {
             a = machine_pop(m);
             SPYValue *state = m->blocks[m->block_len - 1].value, *match = NULL, *rest = NULL;
-            if (state->as.seq.items[0] == c->none) { pc = ins->target; break; }
-            if (star_match(c, state->as.seq.items[0], a, &match, &rest)) break;
+            int status;
+            if (UNLIKELY(m->len && m->stack[m->len - 1] == c->splitting)) {
+                /* The group's split returned the pair a, the step running again (star_split). */
+                spy_release(machine_pop(m)); spy_release(machine_pop(m));
+                status = star_pair(c, state->as.seq.items[0], a, &match, &rest);
+            } else {
+                if (state->as.seq.items[0] == c->none) { pc = ins->target; break; }
+                if ((status = star_match(c, state->as.seq.items[0], a, &match, &rest)) == 1) {
+                    /* Its split's calls are m's, the type kept under c->splitting. */
+                    if (machine_push(c, m, spy_retain(a)) || machine_push(c, m, spy_retain(c->splitting))) break;
+                    if (!(value = star_split(c, m, state->as.seq.items[0], a))) {
+                        if (!c->k_fn) break;
+                        spy_release(a); pc--;
+                        goto enter_k;
+                    }
+                    spy_release(machine_pop(m)); spy_release(machine_pop(m));
+                    status = star_pair(c, state->as.seq.items[0], value, &match, &rest);
+                    spy_release(value);
+                }
+            }
+            if (status) break;
             spy_release(state->as.seq.items[0]); state->as.seq.items[0] = rest ? rest : spy_none(c);
             if (!match) { pc = ins->target; break; }
             Block *inner = push_block(c, m, BLOCK_EXCEPT, ins);
@@ -36409,9 +36461,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             delete_evaluated(c, n, a, b); break;
         CASE(BC_STAR_RERAISE) {
             Block *block = &m->blocks[m->block_len - 1];
-            SPYValue *rest = block->value->as.seq.items[0], *raised = block->value->as.seq.items[1];
-            if (rest != c->none && sequence_append(c, raised, rest)) break;
-            SPYValue *result = reraise_star(c, block->error->value, raised);
+            SPYValue *rest = block->value->as.seq.items[0], *raised = block->value->as.seq.items[1], *kept = NULL;
+            if (UNLIKELY(m->len > 1 && m->stack[m->len - 2] == c->splitting)) {
+                /* The split for what was re-raised returned kept, the step running again (reraise_star). */
+                kept = machine_pop(m);
+                spy_release(machine_pop(m));
+            } else if ((rest != c->none && sequence_append(c, raised, rest)) || machine_push(c, m, spy_retain(c->splitting))) break;
+            SPYValue *result = reraise_star(c, m, block->error->value, raised, kept);
+            if (!kept && !result && c->k_fn) { pc--; goto enter_k; }
+            if (!kept) spy_release(machine_pop(m));
+            spy_release(kept);
             if (c->error_type[0]) { spy_release(result); break; }
             if (!result) pop_block(c, m, &f);
             else if (result == block->error->value) restore_error(c, block->error);
@@ -46187,10 +46246,11 @@ SPYContext *spy_context_new(void) {
     c->missing = value_new(c, V_UNBOUND);
     c->stepped = value_new(c, V_UNBOUND);
     c->descripting = value_new(c, V_UNBOUND);
+    c->splitting = value_new(c, V_UNBOUND);
     c->reflecting = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->missing || !c->stepped || !c->descripting || !c->reflecting || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->missing || !c->stepped || !c->descripting || !c->reflecting || !c->splitting || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

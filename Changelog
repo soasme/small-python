@@ -556,6 +556,7 @@ Unreleased (0.10.0):
 - A `__del__` descriptor is read and called on finalization without nesting on the C stack; an error of its read is dropped, as in CPython
 - A `__getattr__` descriptor is read and called for a missing attribute, by `getattr()` and `hasattr()` too, without nesting on the C stack
 - `map()` of `next` or of a generator's or coroutine's own `send`, `throw` or `close` resumes each generator without nesting on the C stack
+- `except*` calls a group's Python `split`, and a subclass's Python `derive` when splitting or re-raising, without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair

@@ -12,8 +12,9 @@
 (*     except* <type 2> as eg: ...                                         *)
 (*                                                                         *)
 (* The exception is a ValueError (V), a TypeError (T), a KeyError (K), or  *)
-(* a group of them, possibly nested, or LG(V,T), a group of a subclass     *)
-(* whose split logs its calls; the types are ValueError, TypeError,        *)
+(* a group of them, possibly nested, LG(V,T), a group of a subclass whose  *)
+(* split logs its calls, or DG(V,T), one whose Python derive makes each    *)
+(* part a split makes; the types are ValueError, TypeError,                *)
 (* LookupError, and Exception. leaves() lists an exception's leaves in     *)
 (* name order, a RuntimeError being R. The outcome is the log, what the    *)
 (* statement raised: nothing, a single exception, or a group, with its     *)
@@ -21,7 +22,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-Raised == {"V", "T", "K", "EG(V,T)", "EG(V,EG(K))", "EG(T,K)", "LG(V,T)"}
+Raised == {"V", "T", "K", "EG(V,T)", "EG(V,EG(K))", "EG(T,K)", "LG(V,T)", "DG(V,T)"}
 Types == {"ValueError", "TypeError", "LookupError", "Exception"}
 Actions == {"pass", "raise", "new"}
 Clauses == [type : Types, action : Actions]
@@ -32,7 +33,7 @@ vars == <<program, outcome>>
 
 Pending == <<<<>>, "pending", "", 0>>
 
-LeavesOf(r) == CASE r \in {"EG(V,T)", "LG(V,T)"} -> {"V", "T"} [] r = "EG(V,EG(K))" -> {"V", "K"}
+LeavesOf(r) == CASE r \in {"EG(V,T)", "LG(V,T)", "DG(V,T)"} -> {"V", "T"} [] r = "EG(V,EG(K))" -> {"V", "K"}
                  [] r = "EG(T,K)" -> {"T", "K"} [] OTHER -> {r}
 IsGroup(r) == Cardinality(LeavesOf(r)) > 1
 Matches(type, leaf) == CASE type = "ValueError" -> leaf = "V" [] type = "TypeError" -> leaf = "T"
