@@ -30645,6 +30645,9 @@ static size_t pair_length(SPYValue *v) { return v->type == SPY_DICT ? v->as.map.
 static int sequence_pair(SPYValue *a, SPYValue *b) {
     return a->type == b->type && (a->type == SPY_TUPLE || ((a->type == SPY_LIST || a->type == SPY_DICT) && pair_length(a) == pair_length(b)));
 }
+/* Whether a and b are two sets or frozensets, compared whole (equal_call). */
+static int set_pair(SPYValue *a, SPYValue *b) { return is_set(a) && is_set(b); }
+static int set_walks(int, SPYValue *, SPYValue *);
 /* The items of pair at of a and b (sequence_pair) in *x and *y: the
  * sequences' items at that index, or the value of a's entry at and that
  * of its key in b; 0 past an end, at a key whose lookup may call Python
@@ -30701,6 +30704,8 @@ static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at, si
             if (inner == pair_length(x) && inner == pair_length(y)) continue;
             break;
         }
+        /* So do two sets whose lookups call Python (set_walks). */
+        if (set_pair(x, y) && set_walks(T_EQ, x, y)) return at;
         if (x->type > SPY_STRING || y->type > SPY_STRING || !equal(x, y)) break;
     }
     *end = at;
@@ -30748,7 +30753,8 @@ static int sequence_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t a
         if (x == y) continue;
         if (scalars && (x->type > SPY_STRING || y->type > SPY_STRING)) {
             size_t end = at;
-            if ((x->type == SPY_INSTANCE || y->type == SPY_INSTANCE || sequence_pair(x, y)) && python_pair(c, a, b, at, &end) != SIZE_MAX) return 2;
+            if ((x->type == SPY_INSTANCE || y->type == SPY_INSTANCE || sequence_pair(x, y) || set_pair(x, y)) && python_pair(c, a, b, at, &end) != SIZE_MAX)
+                return 2;
             scalars = 0;
             /* The pairs it found equal. */
             if (end > at) { at = end - 1; continue; }
@@ -30765,8 +30771,9 @@ static int sequence_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t a
  * __eq__ that comparing their items at a pair python_pair found calls
  * first, owned, with its env; x, y, the next pair's index, the two
  * operands in the order of the call and c->pairing pushed on m's stack
- * (pair_returned). Two dicts whose keys' lookups call Python (dict_walks)
- * compare as that call, left in c->k_fn (compare_enter): c->unbound, *env unset,
+ * (pair_returned). Two dicts whose keys' lookups call Python (dict_walks),
+ * or two sets (set_walks), compare as that call, left in c->k_fn
+ * (compare_enter): c->unbound, *env unset,
  * entered by pair_enter or the step. */
 static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, size_t at, SPYValue **env) {
     SPYValue *a, *b, *function;
@@ -30774,13 +30781,13 @@ static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SP
     pair_at(x, y, at, &a, &b);
     /* A pair of sequences compares its own pairs, each sequence's x, y
      * and next pair's index under them with c->nesting. */
-    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE && (a->type != SPY_DICT || !dict_walks(a, b, 0))) {
+    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE && !set_pair(a, b) && (a->type != SPY_DICT || !dict_walks(a, b, 0))) {
         if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
             machine_push(c, m, spy_retain(c->nesting))) goto fail;
         x = a; y = b; at = python_pair(c, x, y, 0, &end);
         pair_at(x, y, at, &a, &b);
     }
-    if (a->type == SPY_DICT) {
+    if (a->type == SPY_DICT || set_pair(a, b)) {
         if (machine_push_all(c, m, 6, (SPYValue *[]){spy_retain(x), spy_retain(y), int_value(c, (int64_t)at + 1), spy_retain(a), spy_retain(b),
                                                      spy_retain(c->pairing)})) goto fail;
         c->k_fn = spy_retain(a); c->k_env = spy_retain(b); c->k_unit = 2 + R_EQ; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_OPERATOR;

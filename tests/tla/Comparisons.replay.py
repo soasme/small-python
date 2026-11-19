@@ -131,6 +131,9 @@ SOURCES = {
                      "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"
                      "result = (({K('a'): 1},) == ({K('a'): 1},), [{K('b'): {K('c'): 2}}] != [{K('b'): {K('c'): 2}}],\n"
                      "          ({K('d'): 1},) in [({K('e'): 1},)])",
+    "seq_set_pair": "class K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n"
+                    "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"
+                    "result = ((1, {K('a')}) == (1, {K('a')}), [frozenset({K('b')})] == [{K('c')}])",
     "sort_reflected_items": "class R:\n    def __init__(s, v): s.v = v\n    def __eq__(s, o):\n        for _ in (): pass\n        k.add('eq'); return s.v == o if type(o) is int else NotImplemented\n    def __lt__(s, o):\n        for _ in (): pass\n        k.add('order'); return s.v < o\n    def __gt__(s, o):\n        for _ in (): pass\n        k.add('order'); return s.v > o\nk = set()\nresult = ([u if type(u) is int else -u.v for _, u in sorted([(0, R(1)), (0, 2), (0, 0)])], sorted(k))",
     "seq_scalar_order": "class W(int):\n    def __lt__(s, o):\n        for _ in (): pass\n"
                         "        t('%d<%d' % (s, o)); return int.__lt__(s, o)\n"

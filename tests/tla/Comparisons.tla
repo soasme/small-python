@@ -41,7 +41,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_int_sub_iter", "contains_list_sub_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_scalar_order", "sort_reflected_items", "map_builtin_calls", "view_calls", "builtin_declines",
+          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_set_pair", "seq_scalar_order", "sort_reflected_items", "map_builtin_calls", "view_calls", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected",
           "builtin_sub_unordered", "builtin_sub_declines", "in_chain_calls"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
@@ -179,6 +179,8 @@ Case(c) ==
       \* tuples and lists holding dicts compare them as dicts do, each key
       \* looked up by its __eq__ before the values compare
       [] c = "seq_dict_pair" -> <<"(True, False, False)", <<"'a=a'", "'b=b'", "'c=c'", "'d=e'">>>>
+      \* and sets as sets do, the stored element's __eq__ given each one looked up
+      [] c = "seq_set_pair" -> <<"(True, False)", <<"'a=a'", "'c=b'">>>>
       \* lists ordered by an int subclass's __lt__, equal pairs skipped by
       \* int's ==, a list subclass's items so too
       [] c = "seq_scalar_order" -> <<"(False, True, True)", <<"'2<3'", "'3<4'">>>>
