@@ -110,6 +110,8 @@ SOURCES = {
     "map_strict": 'result = list(map(pow, [1, 2], [3], strict=True))',
     "map_shortest": 'result = list(map(pow, [2, 3, 4], [1, 2]))',
     "map_none": 'result = list(map(None, [1]))',
+    "callable_generator": "def gen():\n    for _ in (): pass\n    yield 1\n    yield 2\n    yield 40\n"
+                          "it = iter(gen().__next__, 2)\nresult = (list(iter(gen().__next__, 40)), (next(it), next(it, 'end')))",
     "map_metaclass": "log = []\nclass M(type):\n    def __dir__(s):\n        for _ in (): pass\n        log.append(1)\n        return ['b', 'a']\n"
                      "    def __len__(s):\n        for _ in (): pass\n        log.append(2)\n        return 1\n"
                      "class A(metaclass=M): pass\nresult = (list(map(dir, [A])), list(map(len, [A])), len(log))",

@@ -25771,6 +25771,11 @@ static NO_INLINE int delegating(Machine *m) {
 }
 static SPYValue *getitem_function(SPYContext *, SPYValue *);
 static ALWAYS_INLINE int adapts(SPYValue *);
+/* Whether f, a callable iterator's function, is a generator's or
+ * coroutine's __next__, which a call step resumes on the machine. */
+static int next_resumes(SPYValue *f) {
+    return f->type == SPY_BOUND_METHOD && !f->as.bound.module && f->as.bound.method == M_NEXT && resumable(f->as.bound.self);
+}
 /* Whether an adapter's iterable s may give its next item by a call
  * (adapts): a map, a zip or enumerate that adapts, a callable iterator of a Python function, a
  * __getitem__ or reversed iterator over a Python __getitem__
@@ -25780,7 +25785,7 @@ static int adapted_source(SPYContext *c, SPYValue *s) {
     switch (s->as.iterator.kind) {
     case I_MAP: return 1;
     case I_ZIP: case I_ENUMERATE: return adapts(s);
-    case I_CALLABLE: return !s->as.iterator.done && machine_function(c, s->as.iterator.source);
+    case I_CALLABLE: return !s->as.iterator.done && (machine_function(c, s->as.iterator.source) || next_resumes(s->as.iterator.source));
     case I_GETITEM: case I_REVERSED: return getitem_function(c, s->as.iterator.source) != NULL;
     default: return 0;
     }
@@ -26016,7 +26021,7 @@ static int called_iterator(SPYValue *v) {
     int kind = v->as.iterator.kind;
     return kind == I_MAP || kind == I_FILTER ||
            ((kind == I_GETITEM || kind == I_REVERSED) && (v->as.iterator.source->type == SPY_INSTANCE || metaclassed(v->as.iterator.source))) ||
-           (kind == I_CALLABLE && v->as.iterator.source->type == SPY_FUNCTION) || adapts(v);
+           (kind == I_CALLABLE && (v->as.iterator.source->type == SPY_FUNCTION || next_resumes(v->as.iterator.source))) || adapts(v);
 }
 /* Whether next() of v takes its item on the machine (consume): one that
  * adapts a map's, or a map or filter whose function is Python. */
@@ -26027,7 +26032,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
     if (adapts(v)) return 1;
-    if (kind == I_CALLABLE) return !v->as.iterator.done && machine_function(c, v->as.iterator.source);
+    if (kind == I_CALLABLE) return !v->as.iterator.done && (machine_function(c, v->as.iterator.source) || next_resumes(v->as.iterator.source));
     if (kind == I_FILTER && !v->as.iterator.done && filter_fetches(c, v)) return 1;
     SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
     return function && (machine_function(c, function) || (kind == I_MAP && (bound_function(c, function) || map_steps(function))));
@@ -35262,9 +35267,17 @@ static ALWAYS_INLINE int filtering(SPYValue *v) {
  * 0 for iterator_next when v ended or f is no Python function. */
 static NO_INLINE int sentinel_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function = v->as.iterator.source;
-    if (v->as.iterator.done || !machine_function(c, function)) return 0;
-    if (!(*env = function_env(c, function, 0, NULL, NULL, 0))) return -1;
-    *fn = spy_retain(function);
+    if (v->as.iterator.done) return 0;
+    if (next_resumes(function)) {
+        /* A generator's __next__ is a call step of its own, the call of
+         * c->unbound left in c->k_fn (map_convert). */
+        SPYValue *none = value_new(c, SPY_TUPLE);
+        if (!none) return -1;
+        c->k_fn = spy_retain(function); c->k_env = none; c->k = NULL; c->k_ctx = NULL; c->k_unit = 2 + COMPARE_CALL;
+        *fn = spy_retain(c->unbound);
+    } else if (!machine_function(c, function)) return 0;
+    else if (!(*env = function_env(c, function, 0, NULL, NULL, 0))) return -1;
+    else *fn = spy_retain(function);
     v->as.iterator.index++;
     return 1;
 }
