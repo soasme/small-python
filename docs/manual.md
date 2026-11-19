@@ -1689,7 +1689,9 @@ the call as another frame, then the continuation, which finishes the C
 code's work or calls again. `iter()` calls a class's Python `__iter__` so,
 and a list made of an instance's items calls its `__len__` and
 `__length_hint__`; a host function does so through `spy_callk`, whose
-continuation the engine wraps (`host_continued`).
+continuation the engine wraps (`host_continued`). A special method that a
+class holds as a descriptor or property is read the same way, before the
+call of what the read returns.
 Called from C with no machine running, the call is made directly and the
 continuation runs after it.
 
