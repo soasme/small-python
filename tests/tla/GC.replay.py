@@ -26,6 +26,14 @@ class A:
         log.append(self.name)
 
 
+class Read(A):
+    # A descriptor __del__: its getter's call, then what it gives.
+    @property
+    def __del__(self):
+        for _ in range(2): pass
+        return lambda: log.append(self.name)
+
+
 class Phoenix(A):
     def __del__(self):
         global saved
@@ -50,7 +58,7 @@ def started():
 
 
 SOURCE = {
-    "new": lambda v, o: f"{v} = started()" if o == "g" else f"{v} = {'Phoenix' if o == 'p' else 'A'}({o!r})",
+    "new": lambda v, o: f"{v} = started()" if o == "g" else f"{v} = {'Phoenix' if o == 'p' else 'Read' if o == 'b' else 'A'}({o!r})",
     "link": lambda v, f, w: f"{v}.{f} = {w}",
     "load": lambda v, w, f: f"{v} = {w}.{f}",
     "frame": lambda v, w: f"{v} = {w}.gi_frame",

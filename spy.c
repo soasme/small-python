@@ -19187,9 +19187,12 @@ static void finalize_one(SPYContext *c) {
     if (function && function->type == SPY_FUNCTION) method = spy_retain(function);
     else method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
     const char *failure = "Exception ignored while closing generator ";
+    /* A read of __del__ that fails is dropped (slot_tp_finalize); a call's
+     * error names what the read gave. */
+    if (self->type == SPY_INSTANCE && !method) spy_clear_error(c);
     if (method) {
         spy_release(method == function ? call(c, method, 1, &self) : call(c, method, 0, NULL));
-        if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling deallocator ", class_lookup(self->as.map.parent, "__del__"), NULL);
+        if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling deallocator ", method, NULL);
     } else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
     else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
         spy_release(call(c, self->as.generator.origin, 1, &self));
@@ -19256,6 +19259,36 @@ static int gc_tracked(SPYContext *c, SPYValue *v) {
  * m's call (callk), its error unraisable (collect_called); another runs
  * here; after each round the collector passes again. The count. */
 static SPYValue *collect_go(SPYContext *, Machine *, SPYValue *);
+/* The call of what a __del__ descriptor's read gave, state its
+ * continuation and context then that, ended: its error unraisable. */
+static SPYValue *deleter_called(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (!result) report_unraisable(c, "Exception ignored while calling deallocator ", state->as.seq.items[0], NULL);
+    spy_release(result);
+    return k_resume(c, m, state, spy_none(c));
+}
+/* A __del__ descriptor's read ended, state its continuation and
+ * context: what it gave called (deleter_called), its own error dropped
+ * (slot_tp_finalize). */
+static SPYValue *deleter_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *bound) {
+    if (!bound) {
+        spy_clear_error(c);
+        return k_resume(c, m, state, spy_none(c));
+    }
+    /* The continuation and context stay last (k_resume). */
+    SPYValue *held = spy_tuple(c, 3, (SPYValue *[]){bound, state->as.seq.items[0], state->as.seq.items[1]});
+    spy_release(state);
+    SPYValue *result = held ? callk(c, m, bound, 0, NULL, deleter_called, held) : NULL;
+    spy_release(bound);
+    return result;
+}
+/* callk of self's __del__ descriptor function, read, then what it gave
+ * called, then k with ctx, given None. */
+static SPYValue *deleter_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, Continuation k, SPYValue *ctx) {
+    SPYValue *state = k_state(c, 0, (SPYValue *[]){NULL, NULL}, k, ctx), *get = descriptor_getter(c, function);
+    if (!state) return NULL;
+    if (function->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, deleter_read, state);
+    return callk(c, m, get, 3, (SPYValue *[]){spy_retain(function), spy_retain(self), spy_retain(value_class(c, self))}, deleter_read, state);
+}
 static SPYValue *collect_called(SPYContext *c, Machine *m, SPYValue *held, SPYValue *result) {
     SPYValue **items = held->as.seq.items, *state = spy_retain(items[0]);
     int finalizer = items[2]->type == SPY_INT;
@@ -19300,7 +19333,7 @@ static SPYValue *collect_go(SPYContext *c, Machine *m, SPYValue *state) {
             c->k_fn = spy_retain(self); c->k_unit = -1; c->k = collect_closed; c->k_ctx = state;
             return NULL;
         }
-        if (!function || !machine_function(c, function)) {
+        if (!function || (weak && !machine_function(c, function))) {
             /* One that runs in C runs here, as weak_callbacks runs it. */
             c->weak_running = 1;
             weak ? weak_one(c) : finalize_one(c);
@@ -19327,6 +19360,11 @@ static SPYValue *collect_go(SPYContext *c, Machine *m, SPYValue *state) {
         if (!held) { spy_release(self); return NULL; }
         /* While it runs, no collection runs finalizers (finalizers_wait). */
         c->finalizing = c->calls_len + 1;
+        if (!weak && !machine_function(c, function)) {
+            SPYValue *result = deleter_callk(c, m, function, self, collect_called, held);
+            spy_release(self);
+            return result;
+        }
         return callk(c, m, function, 1, &self, collect_called, held);
     }
     schedule_collection(c);
@@ -25473,6 +25511,8 @@ static NO_INLINE int anext_entered(Machine *m) {
  * the reference, reported as unraisable. */
 static void finalize_close(SPYContext *, Machine *);
 static NO_INLINE void finalized(SPYContext *, Machine *, SPYValue *);
+static SPYValue *deleted(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *deleter_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, Continuation, SPYValue *);
 static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
     if (weak_next(c)) {
         /* A dead target's weak reference, its Python callback cleared,
@@ -25494,11 +25534,30 @@ static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **
         return c->error_type[0] ? NULL : c->unbound;
     }
     finalize_pop(c);
+    if (!machine_function(c, method)) {
+        /* A descriptor's read and what it gives are calls with no step (deleter_callk). */
+        SPYValue *waiting = int_value(c, (int64_t)c->finalize_calls_len);
+        c->finalizing = c->calls_len + 1;
+        if (waiting) deleter_callk(c, m, method, self, deleted, waiting);
+        spy_release(self);
+        return NULL;
+    }
     if (machine_push(c, m, self) || machine_push(c, m, spy_int(c, (int64_t)c->finalize_calls_len))) return NULL;
     c->finalizing = c->calls_len + 1;
     spy_retain(self);
     *env = function_env(c, method, 1, &self, NULL, 1);
     return *env ? spy_retain(method) : NULL;
+}
+/* A __del__ descriptor's calls ended (deleter_callk), waiting the
+ * number of entries after it: the step it came before runs. */
+static SPYValue *deleted(SPYContext *c, Machine *m, SPYValue *waiting, SPYValue *result) {
+    (void)m;
+    spy_release(result);
+    c->finalizing = 0;
+    finalize_ahead(c, (size_t)waiting->as.integer_data.small);
+    spy_release(waiting);
+    attend(c);
+    return c->stepped;
 }
 /* The finalizer finalizer_call entered returned result, or NULL with its
  * exception, which is unraisable. */
@@ -26652,7 +26711,7 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
         return suspended(self) && self->as.generator.started && innermost(self->as.generator.machine)->awaiting == AWAIT_YIELD &&
                !close_quietly(c, self) ? self : NULL;
     SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
-    return method && machine_function(c, method) ? method : NULL;
+    return method && (machine_function(c, method) || descriptor_getter(c, method)) ? method : NULL;
 }
 /* Whether the machine calls the first callback due of a weak reference
  * whose target died (finalizer_call): a function of the machine, where
@@ -36638,7 +36697,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         callee_env = NULL;
         /* The step runs again once a dead generator closed (finalize_close),
          * or a weak reference's callback could not take it (finalizer_call). */
-        if (!(value = finalizer_call(c, m, &callee_env))) { pc -= !c->error_type[0]; continue; }
+        if (!(value = finalizer_call(c, m, &callee_env))) {
+            pc -= !c->error_type[0];
+            if (c->k_fn) goto enter_k;
+            continue;
+        }
         if (value == c->unbound) { pc--; goto consume_generator; }
         special = CALL_FINALIZE;
         goto enter_special;
