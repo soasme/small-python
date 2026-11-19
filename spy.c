@@ -10631,19 +10631,17 @@ static int proxy_reflects(SPYValue *x) {
 /* A step's comparison op of *left, owned, and b, done natively, or NULL
  * for the machine to dispatch, or with an error. A mappingproxy's == and
  * != compare its mapping instead, which replaces *left (proxy_compared). */
+static NO_INLINE SPYValue *binary_operand(SPYContext *, int, SPYValue **, SPYValue *);
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **left, SPYValue *b) {
     if (UNLIKELY((*left)->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && !(*left = proxy_compared(c, *left, b))) return NULL;
     SPYValue *a = *left;
     /* Of one on the right, the machine compares the mapping (operator_call). */
     if (UNLIKELY(b->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && proxy_reflects(a)) return NULL;
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
-    if ((op == O_IN || op == O_NOTIN) && ((b->type == SPY_ITERATOR && iterated_python(c, a, b)) ||
-                                          (b->type == SPY_DICT_VALUES && values_python(c, a, b)))) return NULL;
-    /* in of a map holding a key whose comparison may call Python (eq_keyed),
-     * or of a dict view that may (view_python); a dict view's comparison
-     * (view_step). */
-    if ((op == O_IN || op == O_NOTIN) && ((hashes_key(b, 1) && eq_keyed(b)) || (set_view(b) && view_python(c, a, b)))) return NULL;
-    if (op != O_IN && op != O_NOTIN && view_operands(a, b)) return NULL;
+    /* An in searches as a lone one does; a dict view's comparison is the
+     * machine's (view_step). */
+    if (op == O_IN || op == O_NOTIN) return binary_operand(c, op, left, b);
+    if (view_operands(a, b)) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
         if (op != T_EQ && op != T_NE) {
             if (order_python(c, op, a, b)) return NULL;
@@ -10721,7 +10719,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left
     SPYValue *a = *left;
     /* An operand's Python __buffer__ is a call on the machine (buffered_step). */
     if (machine_exporter(c, a) || machine_exporter(c, b)) return NULL;
-    /* A lone in, whose container may be a generator the machine searches,
+    /* An in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
      * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
@@ -15301,6 +15299,7 @@ typedef struct {
     size_t source;
     int updating, subset, rehash;
     int closes; /* An operation's close, a throw of GeneratorExit, ending as close() does (operation_close_end). */
+    Instruction *step; /* An in inside a chain: its step, which its truth ends, its right operand under the block (contains_step). */
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
@@ -22844,6 +22843,7 @@ static SPYValue *property_called(SPYContext *c, Machine *m, SPYValue *ctx, SPYVa
 }
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *native_entered_rest(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+
 /* native_entered_rest of a native callee or a method of one. */
 static ALWAYS_INLINE SPYValue *native_entered(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     return callee->type == SPY_NATIVE || callee->type == SPY_METHOD ? native_entered_rest(c, m, callee, argc, argv, env) : NULL;
@@ -26728,6 +26728,7 @@ static NO_INLINE int set_source(SPYContext *c, Block *top) {
     top->value = source;
     return source != NULL;
 }
+static NO_INLINE size_t operator_finish(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t);
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
     /* A generator closes on the GeneratorExit its close threw. */
@@ -26792,10 +26793,15 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     if (status > 0 && top->consumer->sources && top->consumer->source < top->consumer->sources->as.seq.len) return set_source(c, top);
     if (status > 0) {
         int id = top->consumer->id;
+        Instruction *step = top->consumer->step;
         SPYValue *result = consumer_end(c, top->consumer);
         pop_block(c, m, f);
         /* An unpacking's items go on the stack last first, as BC_UNPACK's. */
-        if (id == EXTEND_ITEMS) spy_release(result);
+        if (step) {
+            SPYValue *y = machine_pop(m);
+            m->pc = operator_finish(c, m, step, y, result, m->pc);
+            spy_release(y);
+        } else if (id == EXTEND_ITEMS) spy_release(result);
         else if (id != UNPACK_ITEMS || !result) machine_push(c, m, result);
         else {
             for (size_t i = result->as.seq.len; i; i--) if (machine_push(c, m, spy_retain(result->as.seq.items[i - 1]))) break;
@@ -30508,7 +30514,7 @@ static NO_INLINE SPYValue *order_decide(SPYContext *c, Machine *m, Instruction *
     if (!function && !c->error_type[0]) *value = comparison(c, op, a, b);
     return function;
 }
-/* For `x in y`, a lone test or the last comparison of its chain, y a list
+/* For `x in y`, y a list
  * or tuple or a forward iterator over one that an earlier item's call left
  * (operator_returned): the Python __eq__ that comparing x with the next
  * item whose comparison calls one (python_item) calls first, the item's
@@ -30562,10 +30568,11 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
  * Python __iter__ (iter_function), or a Python __getitem__ and no __iter__
  * (getitem_iterated), and no __contains__ unless it is absent: 1 when the items of
  * y, or of the iterator its __iter__ returns, are compared with x on the
- * machine (BLOCK_CONSUME, CONTAINS_ITEMS), the truth going on the stack at
- * their end; else 0, with an error pending when __iter__ failed, a
- * TypeError replaced as the native search replaces it. */
-static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y, int absent) {
+ * machine (BLOCK_CONSUME, CONTAINS_ITEMS), the truth ending step ins at
+ * their end, y kept under the block for a chain's; else 0, with an error
+ * pending when __iter__ failed, a TypeError replaced as the native search
+ * replaces it. */
+static NO_INLINE int contains_step(SPYContext *c, Machine *m, Instruction *ins, int op, SPYValue *x, SPYValue *y, int absent) {
     if (contained_base(c, y)) return 0;
     if (y->type != SPY_DICT_VALUES && !(y->type == SPY_ITERATOR && y->as.iterator.kind == I_REVERSED) && !resumable(y) &&
         (!(iter_function(c, y) || getitem_iterated(c, y)) || (!absent && class_lookup(y->as.map.parent, "__contains__")))) return 0;
@@ -30573,10 +30580,11 @@ static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *
     SPYValue *items = spy_retain(y);
     int keyed = consumer_source(c, &items);
     if (!items) contains_refused(c, y);
+    int chained = ins->op == BC_COMPARE && ins->arg;
     Consumer *s = items ? allocate(c, sizeof(*s)) : NULL;
-    Block *block = s ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    Block *block = s && !(chained && machine_push(c, m, spy_retain(y))) ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(s); spy_release(items); return 0; }
-    *s = (Consumer){.id = CONTAINS_ITEMS, .best = spy_retain(x), .count = op == O_NOTIN, .keyed = keyed};
+    *s = (Consumer){.id = CONTAINS_ITEMS, .best = spy_retain(x), .count = op == O_NOTIN, .keyed = keyed, .step = chained ? ins : NULL};
     block->value = items; block->consumer = s;
     return 1;
 }
@@ -32197,11 +32205,14 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         !operator_push(c, m, count == y ? x : y, count, OPERATOR_INDEX))
         return special_env(c, m, function, count, NULL, NULL, env);
     if (contains) {
-        /* A list's or tuple's items, in any test but one inside a chain;
-         * a generator's or an iterable instance's, in an expression. */
-        int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
-        if ((y->type == SPY_LIST || y->type == SPY_TUPLE || y->type == SPY_ITERATOR) && (ins->op != BC_COMPARE || !ins->arg) &&
-            (function = contains_call(c, m, x, y, env))) return function;
+        /* A list's or tuple's items, or a generator's or an iterable
+         * instance's, y kept under the search for a chain's test. */
+        if (y->type == SPY_LIST || y->type == SPY_TUPLE || y->type == SPY_ITERATOR) {
+            int chained = ins->op == BC_COMPARE && ins->arg;
+            if (chained && machine_push(c, m, spy_retain(y))) return NULL;
+            if ((function = contains_call(c, m, x, y, env))) return function;
+            if (chained) spy_release(machine_pop(m));
+        }
         /* in takes the container's __contains__, given the item, or a
          * descriptor's read first, absent on its AttributeError (contains_absent). */
         if ((function = item_function(c, y, "__contains__")) && (function = last_call(c, m, function, x, y, y, x, env))) return function;
@@ -32211,7 +32222,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
             return NULL;
         }
-        return last && !c->error_type[0] && contains_step(c, m, op, x, y, 0) ? c->unbound : NULL;
+        return (ins->op == BC_BINARY || ins->op == BC_COMPARE) && !c->error_type[0] && contains_step(c, m, ins, op, x, y, 0) ? c->unbound : NULL;
     }
     /* not calls a Python __bool__ (CALL_CHECKED), inverting its truth
      * (checked_returned). */
@@ -32775,13 +32786,16 @@ static NO_INLINE SPYValue *view_step(SPYContext *c, Machine *m, Instruction *ins
 /* An item's comparison for in, op, of step ins (contains_call) found it
  * equal, or not: the test's truth; or the next item's comparison, or the
  * native search of the rest, from the iterator, under which x is on m's
- * stack. The machine to run on, at its pc. */
+ * stack, over y for a chain's test, which goes on with it. The machine to
+ * run on, at its pc. */
 static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instruction *ins, int op, int found, size_t pc) {
+    int chained = ins->op == BC_COMPARE && ins->arg;
     if (found || c->error_type[0]) {
         SPYValue *iterator = machine_pop(m);
         spy_release(machine_pop(m));
-        m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == found), pc);
-        spy_release(iterator);
+        SPYValue *y = chained ? machine_pop(m) : spy_retain(iterator);
+        m->pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == found), pc);
+        spy_release(iterator); spy_release(y);
         return m;
     }
     SPYValue *iterator = machine_pop(m), *x = machine_pop(m), *env = NULL;
@@ -32794,8 +32808,9 @@ static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instructi
         return &call->m;
     }
     while (m->len > len) spy_release(machine_pop(m));
-    m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : operation(c, ins, x, iterator), pc);
-    spy_release(x); spy_release(iterator);
+    SPYValue *value = c->error_type[0] ? NULL : operation(c, ins, x, iterator), *y = chained ? machine_pop(m) : spy_retain(iterator);
+    m->pc = operator_finish(c, m, ins, y, value, pc);
+    spy_release(x); spy_release(iterator); spy_release(y);
     return m;
 }
 /* The comparison a op b, whose method was entered with a and b under
@@ -32952,8 +32967,7 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
 static NO_INLINE Machine *contains_absent(SPYContext *c, Machine *m, Instruction *ins, int op) {
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
     spy_release(marker);
-    int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
-    if (last && contains_step(c, m, op, x, y, 1)) c->consuming = 1;
+    if ((ins->op == BC_BINARY || ins->op == BC_COMPARE) && contains_step(c, m, ins, op, x, y, 1)) c->consuming = 1;
     else m->pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : iterated_search(c, op, x, y), m->pc);
     spy_release(x); spy_release(y);
     return m;
@@ -35604,6 +35618,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                          * which leaves no further call. */
                         if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result, CALL_KEY);
                         if (!key_took(c, m, result)) goto consume_generator;
+                        pc = m->pc;
                     } else if (kind >= CALL_EXEC) {
                         /* An import's statement runs again, finding the module. */
                         if (kind == CALL_IMPORT) pc -= import_returned(c, m, result);
@@ -36356,6 +36371,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 }
                 /* A fed min or max whose key was taken natively takes its next item. */
                 if (!c->error_type[0] && m->block_len == depth) goto consume_generator;
+                pc = m->pc;
                 continue;
             }
             /* A map's function is a call returning its item (CALL_ITEM). */
@@ -36449,7 +36465,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         a = flow.value; flow.value = NULL;
     consume_item:
         if (consumer_took(c, m, &f, a)) goto consume_generator;
-        a = NULL;
+        /* An in inside a chain may jump out of it (contains_step). */
+        a = NULL; pc = m->pc;
         continue;
     enter_call:
         m->pc = pc;

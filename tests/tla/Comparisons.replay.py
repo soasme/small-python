@@ -77,6 +77,9 @@ SOURCES = {
                      "result = (2 in g(), 1 in G(), 5 in G())",
     "in_list_iterator_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o\n"
                               "it = iter([0, E(1), E(2), E(3)])\nfound = 2 in it\nresult = (found, [e.n for e in it])",
+    "in_chain_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o\n"
+                      "def g():\n    yield E(1)\n    yield E(2)\n"
+                      "l = [E(3), E(4)]\nresult = (0 < 4 in l is l, 5 in l is l, 2 in g() is not None, 3 in g() is not None)",
     "in_mixed_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o\n"
                       "class P: pass\nresult = (2 in [1, (1,), P(), E(2)], 3 in [P(), [3], E(4), 3])",
     "seq_subclass_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o.n\n"

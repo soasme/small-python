@@ -43,7 +43,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
           "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_scalar_order", "sort_reflected_items", "map_builtin_calls", "view_calls", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected",
-          "builtin_sub_unordered", "builtin_sub_declines"}
+          "builtin_sub_unordered", "builtin_sub_declines", "in_chain_calls"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -154,6 +154,8 @@ Case(c) ==
       [] c = "in_value_calls" -> <<"(True, False, True)", <<"'set'", "'slice'", "'builtin_function_or_method'">>>> \* any builtin x
       [] c = "in_iter_calls" -> <<"(True, True, False)", <<"1", "2", "0", "1", "0", "1">>>> \* generator, __getitem__
       [] c = "in_list_iterator_calls" -> <<"(True, [3])", <<"1", "2">>>> \* stops past the match
+      \* an in inside a chain searches as a lone one, then goes on with its container or stops
+      [] c = "in_chain_calls" -> <<"(True, False, True, False)", <<"3", "4", "3", "4", "1", "2", "1", "2">>>>
       [] c = "in_mixed_calls" -> <<"(True, True)", <<"2", "4">>>> \* past items that call no Python
       [] c = "seq_subclass_calls" -> <<"(False, True, False)", <<"1", "3", "4", "6">>>> \* a list or tuple subclass as its base
       [] c = "in_reflected_truth_calls" -> <<"(True, 1, True)", <<"'d'", "'x'", "True", "'d'", "'x'", "True", "'x'", "True">>>> \* reflected, then truth
