@@ -119,6 +119,11 @@ SOURCES = {
                                "    def __gt__(s, o): return t(s.n + '>' + o.n)\n"
                                "class L(list): pass\n"
                                "result = ([E('a'), E('b')] < L([E('a'), E('c')]), [E('x')] < L([E('x'), E('y')]))",
+    "seq_sub_declined": "class E:\n    def __init__(s, n): s.n = n\n"
+                        "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + o.n); return s.n == o.n\n"
+                        "    def __lt__(s, o): return t(s.n + '<' + o.n)\n"
+                        "class L(list):\n    def __lt__(s, o): t('L<'); return NotImplemented\n"
+                        "result = L([E('a'), E('b')]) < L([E('a'), E('c')])",
     "builtin_declines": "class E:\n    def __init__(s, n): s.n = n\n"
                         "    def __eq__(s, o): return t(s.n + '==' + type(o).__name__)\n"
                         "    def __gt__(s, o): return t(s.n + '>' + type(o).__name__)\n"

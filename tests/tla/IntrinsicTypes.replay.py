@@ -107,6 +107,12 @@ SOURCES = {
     "proxy_reflected": "class M(dict):\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return ('eq', type(other).__name__)\n"
                        "p = types.MappingProxyType({'a': 1})\n"
                        "result = ({} == types.MappingProxyType(M()), {'a': 1} == p == {'a': 1}, [] == p, 1 != p)",
+    "proxy_declined_calls": "log = []\nclass K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n"
+                            "    def __eq__(s, o):\n        for _ in range(2): pass\n"
+                            "        log.append(s.n + getattr(o, 'n', '?')); return s.n == getattr(o, 'n', None)\n"
+                            "class E:\n    def __eq__(s, o):\n        for _ in range(2): pass\n        log.append('E'); return NotImplemented\n"
+                            "p = types.MappingProxyType({K('a'): K('b')})\n"
+                            "result = (p.__eq__({K('a'): K('b')}), p.__contains__(K('a')), E() == p, log)",
     "proxy_compare": "class M(dict):\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return 'eq'\n"
                      "class O:\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return type(other).__name__\n"
                      "result = (types.MappingProxyType(M()) == {}, types.MappingProxyType({'a': 1}) == O(), types.MappingProxyType({}) != {})",

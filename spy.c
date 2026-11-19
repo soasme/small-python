@@ -525,6 +525,10 @@ struct SPYContext {
     /* Under an ordering's operands on a machine's stack: a list's or tuple's subclass instance, the right operand,
      * compares first, by the reflected operator (reflected_order). */
     SPYValue *reflecting;
+    /* A rich comparison's two steps, its operator's and its return, for
+     * each of the six (compare_enter), and the comparisons running. */
+    Program *compare_code;
+    size_t comparing;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -10569,6 +10573,7 @@ static SPYValue *instance_exporter(SPYContext *, SPYValue *);
 static ALWAYS_INLINE SPYValue *machine_exporter(SPYContext *c, SPYValue *v) {
     return v->type == SPY_INSTANCE ? instance_exporter(c, v) : NULL;
 }
+static int rich_kind(int);
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left, SPYValue *b) {
     SPYValue *a = *left;
     /* An operand's Python __buffer__ is a call on the machine (buffered_step). */
@@ -10581,7 +10586,8 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left
                (b->type == SPY_ITERATOR && iterated_python(c, a, b)) || (b->type == SPY_DICT_VALUES && values_python(c, a, b)) ||
                (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
-    if (op == T_EQ || op == T_NE) return compare_operand(c, op, left, b);
+    /* A lone == or != while pausing, or a comparison's (compare_enter). */
+    if (rich_kind(op) >= 0) return compare_operand(c, op, left, b);
     return (python_kinds(a, b) && (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) ||
                                     (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b))) ||
            (op == '|' && merges(a, b)) || (op == '%' && percent_converts(c, a, b)) ? NULL : binary(c, op, a, b);
@@ -18127,6 +18133,48 @@ static ALWAYS_INLINE Machine *call_leave(SPYContext *c, Call *call, SPYValue *va
     spy_release(fn);
     return caller;
 }
+static int machine_push(SPYContext *, Machine *, SPYValue *);
+/* The operators compare_enter runs: the rich comparisons by rich_kind, then in. */
+enum { COMPARE_IN = 6 };
+static const int compare_tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE, O_IN};
+/* Enter on m the rich comparison rich of x and y, or x in y (COMPARE_IN), which it takes, as a
+ * call that returns into kind, with no frame of its own: its steps tick
+ * on m's node and its errors' traceback is m's. NULL, x and y released,
+ * on an error; nested past the recursion limit, RecursionError. */
+static NO_INLINE Call *compare_enter(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int rich, int kind) {
+    if (!c->compare_code && (c->compare_code = allocate(c, sizeof(Program)))) {
+        *c->compare_code = (Program){0};
+        for (int r = 0; r < COMPARE_IN + 1; r++) {
+            emit(c, c->compare_code, BC_BINARY, NULL, compare_tokens[r]);
+            emit(c, c->compare_code, BC_FLOW, NULL, FLOW_RETURN);
+        }
+        if (c->compare_code->len < 2 * (COMPARE_IN + 1)) { free_program(c->compare_code); c->compare_code = NULL; }
+    }
+    if (c->comparing >= (size_t)c->recursion_limit) errorf(c, "RecursionError", "maximum recursion depth exceeded in comparison");
+    if (c->error_type[0] || !c->compare_code || !((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c))) {
+        if (!c->error_type[0]) spy_error(c, "MemoryError", "");
+        spy_release(x); spy_release(y);
+        return NULL;
+    }
+    Node *owner = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : ((Call *)m)->fn->as.function.def;
+    Call *call = c->calls[c->calls_len++];
+    call->m.code = c->compare_code; call->m.pc = 2 * (size_t)rich; call->m.outermost = kind;
+    call->m.frame = m->frame; call->m.owner = owner;
+    call->caller = m; call->fn = NULL; call->caller_env = c->eval_env;
+    c->comparing++;
+    machine_push(c, &call->m, x);
+    machine_push(c, &call->m, y);
+    return call;
+}
+/* Leave call, a comparison of compare_enter's or a function's, which
+ * returns value (call_leave). */
+static NO_INLINE Machine *compare_leave(SPYContext *c, Call *call, SPYValue *value) {
+    if (call->fn) return call_leave(c, call, value);
+    c->calls_len--; c->comparing--;
+    while (call->m.len) spy_release(call->m.stack[--call->m.len]);
+    call->m.owner = NULL;
+    return call->caller;
+}
 /* Whether call_keywords accepts the keys of keywords. */
 static int string_keys(SPYContext *c, SPYValue *keywords) {
     for (size_t i = 0; i < keywords->as.map.len; i++)
@@ -18262,10 +18310,23 @@ static NO_INLINE SPYValue *callk_keywords(SPYContext *c, Machine *m, SPYValue *f
 static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
     return callk_keywords(c, m, fn, argc, argv, NULL, k, ctx);
 }
+/* The rich comparison rich of x and y, which it takes, then continuation
+ * k with ctx, which it takes, as callk: on machine m, m's call
+ * (compare_enter), whose Python methods run there; otherwise in C. */
+static NO_INLINE SPYValue *comparek(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int rich, Continuation k, SPYValue *ctx) {
+    if (m && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE]) {
+        c->k_fn = x; c->k_env = y; c->k_unit = 2 + rich; c->k = k; c->k_ctx = ctx;
+        return NULL;
+    }
+    SPYValue *result = comparison(c, compare_tokens[rich], x, y);
+    spy_release(x); spy_release(y);
+    return k(c, m, ctx, result);
+}
 /* The call callk left on m, its continuation's (CALL_K), or a repr job's
  * first left with none (CALL_CHECKED): the machine to run on. */
 static NO_INLINE Machine *k_enter(SPYContext *c, Machine *m) {
-    Call *call = c->k_unit ? unit_enter(c, c->k_fn, c->k_env, m) : call_enter(c, c->k_fn, c->k_env, m);
+    Call *call = c->k_unit >= 2 ? compare_enter(c, m, c->k_fn, c->k_env, c->k_unit - 2, CALL_K) :
+                 c->k_unit ? unit_enter(c, c->k_fn, c->k_env, m) : call_enter(c, c->k_fn, c->k_env, m);
     c->k_fn = c->k_env = NULL; c->k_unit = 0;
     int kind = c->k_kind;
     c->k_kind = 0;
@@ -19870,7 +19931,6 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
     }
     return store_items(c, f, n, value);
 }
-static int machine_push(SPYContext *, Machine *, SPYValue *);
 static SPYValue *machine_pop(Machine *);
 static Result run_machine(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 /* Whether comprehension n runs to its value when it is evaluated: a list,
@@ -31383,6 +31443,7 @@ static int operator_declines(SPYContext *c, SPYValue *cls, int type, const Opera
     if (type == SPY_SET || type == SPY_FROZENSET) return o->token == '|' || o->token == '&' || o->token == '-' || o->token == '^';
     return (type == SPY_FROZENDICT || (type == SPY_DICT && !inplace)) && o->token == '|';
 }
+static int declined_step(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -31690,6 +31751,42 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
  * reflected one after x's unless y's class is x's for an operator, x's own
  * after y's first, a Python function on the machine, borrowed, its self
  * in *self; else NULL, the rest of the operation done in C into *result. */
+/* Whether what comparison op of x and y does once their Python methods
+ * declined is another comparison: a mappingproxy self's method name
+ * compares its mapping (proxy_compared); with a list's or tuple's
+ * subclass instance among them, the other one of the same builtin, self's
+ * builtin method name, or, when name is NULL, comparison_declined's,
+ * compares their items, *self then the one whose items go first
+ * (declined_entered). */
+static int declined_bases(SPYContext *c, int op, SPYValue *x, SPYValue *y, const char *name, SPYValue **self) {
+    if (name && (*self)->type == SPY_MAPPINGPROXY) return op == T_EQ || op == T_NE;
+    SPYValue *a = sequence_base(x), *b = sequence_base(y);
+    if ((a == x && b == y) || a->type != b->type || (a->type != SPY_LIST && a->type != SPY_TUPLE)) return 0;
+    if (name) return class_lookup(value_class(c, *self), name) == class_lookup(value_class(c, sequence_base(*self)), name);
+    SPYValue *left = value_class(c, x), *right = value_class(c, y);
+    *self = b != y && right != left && subclass(right, left) && !class_lookup(right, rich_names[rich_reflected[rich_kind(op)]]) ? y : x;
+    return 1;
+}
+/* Leave on m, for operator step ins, the comparison op of x and y as
+ * comparison_declined compares them, self's items first, as its last
+ * call (compare_enter), returning into operator_returned: 1, or 0 with
+ * nothing left on m. */
+static int declined_k(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, int op, SPYValue *self) {
+    int rich = rich_kind(op), mine = self == x;
+    if (operator_push(c, m, x, y, ins->node ? OPERATOR_LAST : OPERATOR_LAST | op << 2)) return 0;
+    c->k_fn = spy_retain(sequence_base(self)); c->k_env = spy_retain(sequence_base(mine ? y : x));
+    c->k_unit = 2 + (mine ? rich : rich_reflected[rich]); c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_OPERATOR;
+    return 1;
+}
+/* Whether comparison step ins of x and y, which no Python method
+ * decides, compares lists' or tuples' items as comparison_declined does,
+ * left on m (declined_k). */
+static NO_INLINE int declined_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y) {
+    int op = 0;
+    SPYValue *self = NULL;
+    return step_operation(ins, &op) == OPERATE_COMPARE && rich_kind(op) >= 0 && declined_bases(c, op, x, y, NULL, &self) &&
+           declined_k(c, m, ins, x, y, op, self);
+}
 static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, int op, SPYValue *x, SPYValue *y, int phase,
                                              SPYValue **self, SPYValue **result, int *negated) {
     int rich = rich_kind(op);
@@ -31701,6 +31798,10 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
     SPYValue *function = !name ? NULL : negated && !o ? rich_special(c, *self, *self == y ? rich_reflected[rich] : rich, negated) :
                          negated ? item_special(c, *self, name) : item_function(c, *self, name);
     if (function || c->error_type[0]) return function;
+    /* On the machine, lists or tuples, a subclass's instance among them,
+     * compare as their builtin's method of self, or comparison_declined,
+     * does: by their items, there (declined_bases). */
+    if (!o && negated && declined_bases(c, op, x, y, name, self)) return c->unbound;
     *result = !name ? NULL : o ? try_operator(c, *self, name, other, NULL, 0) : rich_method(c, *self == y ? rich_reflected[rich] : rich, *self, other);
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
     return NULL;
@@ -32115,7 +32216,21 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         } else {
             int negated = 0;
             SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result, &negated);
-            if (function && !operator_push(c, m, x, y, OPERATOR_LAST | called) && !(negated && machine_push(c, m, spy_retain(c->negating)))) {
+            if (function == c->unbound) {
+                /* Self's comparison runs on the machine (declined_bases):
+                 * its mapping's, or its items', first. */
+                int rich = rich_kind(op), mine = self == x;
+                SPYValue *other = mine ? y : x;
+                SPYValue *a = self->type == SPY_MAPPINGPROXY ? proxy_compared(c, spy_retain(self), other) : spy_retain(sequence_base(self));
+                int pushed = a && !operator_push(c, m, x, y, OPERATOR_LAST | called);
+                Call *call = pushed ? compare_enter(c, m, a, spy_retain(self->type == SPY_MAPPINGPROXY ? other : sequence_base(other)), mine ? rich : rich_reflected[rich], CALL_OPERATOR) : (spy_release(a), NULL);
+                if (call) {
+                    spy_release(x); spy_release(y);
+                    return &call->m;
+                }
+                if (pushed) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+                function = NULL;
+            } else if (function && !operator_push(c, m, x, y, OPERATOR_LAST | called) && !(negated && machine_push(c, m, spy_retain(c->negating)))) {
                 SPYValue *env = NULL, *entered = special_env(c, m, function, self, self == x ? y : x, c->not_implemented, &env);
                 Call *call = entered ? call_enter(c, entered, env, m) : NULL;
                 if (call) {
@@ -34246,7 +34361,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         SPYValue *k_ctx = ((Call *)m)->k_ctx;
                         c->k_host = ((Call *)m)->host;
                         m->owner = NULL;
-                        m = call_leave(c, (Call *)m, result);
+                        m = compare_leave(c, (Call *)m, result);
                         f = m->frame; code = m->code->items; pc = m->pc;
                         if ((result = k(c, m, k_ctx, result)) == c->stepped) {
                             /* It ended its operator step (buffered_end). */
@@ -34257,7 +34372,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         else if (c->k_fn || !c->error_type[0]) goto consume_generator;
                         continue;
                     }
-                    m = call_leave(c, (Call *)m, result);
+                    m = compare_leave(c, (Call *)m, result);
                     f = m->frame; code = m->code->items; pc = m->pc;
                     /* What the step that made it raises next is at its line. */
                     if (result) c->line = *c->frame_line;
@@ -35228,6 +35343,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (value == c->unbound) goto consume_generator;
             special = c->entering_kind;
             goto enter_special;
+        }
+        if (!c->error_type[0] && y && (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE) && declined_step(c, m, ins, x, y)) {
+            if (a) spy_release(a);
+            if (b) spy_release(b);
+            goto enter_k;
         }
         if (!c->error_type[0] && y && ins->op != BC_INDEX && (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE)) {
             /* An operand's Python __buffer__ or __index__ is a call on m, whose continuation ends the step (machine_operand). */
@@ -37264,6 +37384,9 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
         result = callk(c, m, method, n, (SPYValue *[]){n ? spy_retain(args[0]) : NULL, n ? spy_retain(args[1] ? args[1] : c->none) : NULL}, proxied, NULL);
         spy_release(method); return result;
     }
+    /* Its comparisons and in run on the machine (comparek). */
+    Machine *step = op == MP_CONTAINS || op == MP_EQ || op == MP_NE ? step_machine(c) : NULL;
+    if (step && op == MP_CONTAINS) return comparek(c, step, spy_retain(args[0]), spy_retain(mapping), COMPARE_IN, proxied, NULL);
     switch (op) {
     case MP_GETITEM: return get_index(c, mapping, args[0]);
     case MP_CONTAINS: return comparison(c, O_IN, args[0], mapping);
@@ -37273,6 +37396,7 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     case MP_HASH: return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
     case MP_EQ: case MP_NE: {
         SPYValue *compared = proxy_compared(c, spy_retain(proxy), args[0]);
+        if (compared && step) return comparek(c, step, compared, spy_retain(args[0]), op == MP_EQ ? R_EQ : R_NE, proxied, NULL);
         SPYValue *result = compared ? comparison(c, op == MP_EQ ? T_EQ : T_NE, compared, args[0]) : NULL;
         spy_release(compared); return result;
     }
@@ -45104,6 +45228,7 @@ void spy_context_free(SPYContext *c) {
     while (c->spare_entries_len) mem_free(c->spare_entries[--c->spare_entries_len]);
     if (c->spare_machine) { mem_free(c->spare_machine->blocks); mem_free(c->spare_machine->stack); mem_free(c->spare_machine); }
     calls_free(c, 0);
+    free_program(c->compare_code);
     mem_free(c->calls);
     for (int k = 0; k < 16; k++)
         for (MemHead *b = c->spare_blocks[k], *next; b; b = next) { cache_take(b, sizeof(*b) + (k + 1) * 16); next = b->next; free(b); }

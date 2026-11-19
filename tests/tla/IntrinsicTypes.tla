@@ -39,7 +39,7 @@ Module(n) == CASE n = "GenericAlias" -> "types" [] n = "UnionType" -> "typing" [
 
 
 Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name", "cell_empty", "cell_set",
-          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare", "proxy_forward", "proxy_reflected",
+          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare", "proxy_forward", "proxy_reflected", "proxy_declined_calls",
           "class_dict_proxy", "function_ctor", "code_replace", "notimplemented_ctor", "none_ctor",
           "classmethod_descr_repr", "classmethod_descr_call", "classmethod_descr_get",
           "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg",
@@ -74,6 +74,9 @@ Case(c) ==
       [] c = "proxy_forward" -> "(1, 0, ['k'], [1], [('k', 1)], ['copy'], 'KeyError: z')"
       \* A builtin on the left declines: the proxy compares its mapping with it.
       [] c = "proxy_reflected" -> "(('eq', 'dict'), True, False, True)"
+      \* Its __eq__ and __contains__, and its reflected == after a declining
+      \* __eq__, run the mapping's keys' and values' Python methods.
+      [] c = "proxy_declined_calls" -> "(True, True, False, ['aa', 'bb', 'aa', 'E', 'E'])"
       [] c = "class_dict_proxy" -> "TypeError: 'mappingproxy' object does not support item assignment"
       [] c = "function_ctor" -> "(5, 'g')"
       [] c = "code_replace" -> "'g'"
