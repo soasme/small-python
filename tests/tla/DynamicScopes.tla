@@ -29,14 +29,19 @@
 (* each binding, in order; or exec("r = (q, z, len('ab'))\nclass C:\n    *)
 (* w = q\ns = C.w\ndef f(): return q\nt = f()", g) for g a dict subclass  *)
 (* with q = 2 and z = 4 whose __getitem__ logs each key and raises         *)
-(* KeyError for z, then r, s, t and the log. The outcome is the result or  *)
-(* the exception.                                                          *)
+(* KeyError for z, then r, s, t and the log; or eval("v", {k: 5}) for k a  *)
+(* key whose Python __eq__ logs it and whose hash is that of "v", then the *)
+(* result and the log; or exec("from __future__ import annotations\nclass *)
+(* E(metaclass=M):\n    x: int = 1") for M's __prepare__ a dict subclass  *)
+(* whose __getitem__ logs each key, then the log. The outcome is the       *)
+(* result or the exception.                                                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Cases == {"exec_rebind", "exec_new", "exec_mapping", "eval_local", "eval_free", "eval_free_referenced",
           "locals_write", "locals_snapshot", "frame_locals", "eval_mappings", "class_eval", "exec_custom_hit",
-          "exec_custom_miss", "exec_custom_error", "exec_custom_loop", "exec_globals_storage"}
+          "exec_custom_miss", "exec_custom_error", "exec_custom_loop", "exec_globals_storage", "eval_key_eq",
+          "class_annotation_future"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -62,6 +67,9 @@ Run(p) == CASE p.case = "exec_rebind" -> "1"                   \* the snapshot c
                  "[('set', 'i', 1), ('set', 'i', 2), ('set', 'i', 3), ('set', 'k', 0), ('set', 'j', 0), ('del', 'k'), ('del', 'j')]"
             \* The module body's misses (z, len) and the class body read the storage.
             [] p.case = "exec_globals_storage" -> "((2, 4, 2), 2, 2, ['q', 'z', 'len', 'C', 'f', 'q'])"
+            [] p.case = "eval_key_eq" -> "(5, ['v'])"         \* a key that is not a str compares by __eq__
+            \* The body sets up its __annotations__, then records the text in it.
+            [] p.case = "class_annotation_future" -> "['__name__', '__annotations__', '__annotations__']"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

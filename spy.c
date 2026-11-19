@@ -3258,52 +3258,146 @@ static SPYValue *name_lookup(SPYContext *c, SPYValue *env, Name name) {
 static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
 static int inlined_comprehension(SPYValue *);
 static SPYValue *name_find(SPYContext *, SPYValue *, Name);
-/* name's value in env, looked up from env from on (name_find), annotation
- * whether the envs before from are annotation scopes. A module or class
- * body's lookup past its locals reads exec()'s globals by their dictionary
- * storage, never their __getitem__ (9.3.1); a global name its body
- * declares is read as a function's (9.3.2). */
-static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name name, int annotation) {
+/* The Python __getitem__ of env e's namespace, not a dict, that a lookup
+ * of a name there calls (name_lookup), borrowed; else NULL. */
+static SPYValue *store_function(SPYContext *, SPYValue *, const char *);
+static SPYValue *name_getitem(SPYContext *c, SPYValue *e) {
+    SPYValue *namespace = e->as.map.namespace;
+    SPYValue *classdict = e->type == V_ENV && e->as.map.flags == 1 && e->as.map.base ? cell_contents(e->as.map.base) : NULL;
+    return (!classdict || classdict == namespace) && namespace && namespace->type != SPY_DICT ? store_function(c, namespace, "__getitem__") : NULL;
+}
+/* Value v, owned, of name text found in env e of a lookup from env: an
+ * unbound local's error, a lazy import reified in a global or class
+ * namespace, else v. */
+static SPYValue *name_bound(SPYContext *c, SPYValue *env, SPYValue *e, SPYValue *v, const char *text) {
+    if (v->type == V_UNBOUND) {
+        spy_release(v);
+        /* List, set, and dict comprehensions are inlined into their
+         * function (PEP 709), so its locals are theirs too. */
+        SPYValue *inner = env;
+        while (inner != e && inlined_comprehension(inner)) inner = inner->as.map.parent;
+        if (inner != e) return name_error(c, text, 1);
+        return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", text);
+    }
+    /* Global and class namespaces resolve lazy imports; function locals do not. */
+    if (v->type == SPY_LAZY_IMPORT && (e->type != V_ENV || !e->as.map.scope || e->as.map.scope->kind == S_MODULE ||
+                                       e->as.map.scope->kind == S_CLASS))
+        return lazy_reify(c, e, text, v);
+    return v;
+}
+static SPYValue *k_state(SPYContext *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *k_take(SPYContext *, SPYValue *, Continuation *);
+static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *map_findk(SPYContext *, Machine *, SPYValue *, SPYValue *, int64_t, MapCursor, Continuation, SPYValue *);
+static SPYValue *name_resumed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *name_searched(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The dict whose keys dict_name searches for a lookup in env e
+ * (name_lookup), borrowed; else NULL. */
+static SPYValue *name_dict(SPYValue *e) {
+    SPYValue *namespace = e->as.map.namespace;
+    SPYValue *classdict = e->type == V_ENV && e->as.map.flags == 1 && e->as.map.base ? cell_contents(e->as.map.base) : NULL;
+    if (classdict && classdict != namespace) return classdict;
+    if (namespace && namespace->type != SPY_DICT) return NULL;
+    return e->type == SPY_DICT || namespace ? namespace ? namespace : e : NULL;
+}
+/* Whether dict's search for a missing name compares a key that is not a
+ * str (dict_name). */
+static int name_compares(SPYContext *c, SPYValue *dict, Name name) {
+    SPYValue *map = local_value(dict, name) ? NULL : dictionary_value(c, dict);
+    for (size_t i = 0; map && i < map->as.map.len; i++) if (!builtin_value(c, map_items(map)[i].key, SPY_STRING)) return 1;
+    return 0;
+}
+/* name's value in env, looked up from env from on, annotation whether the
+ * envs before from are annotation scopes, given to k with ctx, which it
+ * takes; looked, the lookup at from, its binding env, gave v (owned) or
+ * NULL. A namespace's Python __getitem__ is a call on m (callk,
+ * name_resumed), its KeyError passing the name on; in C without m. A
+ * module or class body's lookup past its locals reads exec()'s globals
+ * by their dictionary storage, never their __getitem__ (9.3.1); a global
+ * name its body declares is read as a function's (9.3.2). */
+static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e, Name name, int annotation, int looked, SPYValue *v,
+                           Continuation k, SPYValue *ctx) {
     const char *text = name.text;
     Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
     int locals = env->type == V_ENV && (env->as.map.flags == 1 || (scope && (scope->kind == S_MODULE || scope->kind == S_CLASS)));
-    for (SPYValue *e = from; e; e = e->as.map.parent) {
-        SPYValue *at = e, *namespace;
-        e = binding_env(c, e, name);
-        SPYValue *v = locals && at != env && e == at && e->type == V_ENV && e->as.map.flags == 3 &&
-                      (namespace = e->as.map.namespace) && namespace->type != SPY_DICT ?
-                      spy_retain(dict_name(c, dictionary_value(c, namespace), name)) : name_lookup(c, e, name);
-        if (!v && c->error_type[0]) return NULL;
+    for (; e; e = e->as.map.parent, looked = 0) {
+        if (!looked) {
+            SPYValue *at = e, *namespace, *function;
+            e = binding_env(c, e, name);
+            int storage = locals && at != env && e == at && e->type == V_ENV && e->as.map.flags == 3 &&
+                          (namespace = e->as.map.namespace) && namespace->type != SPY_DICT;
+            if (!storage && (function = name_getitem(c, e))) {
+                SPYValue *key = spy_string(c, name.text, name.len), *state = NULL;
+                if (key) state = k_state(c, 4, (SPYValue *[6]){spy_retain(env), spy_retain(e), spy_retain(key), int_value(c, annotation)}, k, ctx);
+                else spy_release(ctx);
+                if (!state) { spy_release(key); return NULL; }
+                return callk(c, m, function, 2, (SPYValue *[]){spy_retain(e->as.map.namespace), key}, name_resumed, state);
+            }
+            /* A dict's key that is not a str compares on m (map_findk, name_searched). */
+            SPYValue *dict = storage ? dictionary_value(c, namespace) : name_dict(e);
+            if (dict && name_compares(c, dict, name)) {
+                SPYValue *key = spy_string(c, name.text, name.len), *state = NULL;
+                int64_t hash;
+                if (key && !hash_value(c, key, &hash))
+                    state = k_state(c, 5, (SPYValue *[7]){spy_retain(env), spy_retain(e), spy_retain(key), int_value(c, annotation), spy_retain(dict)}, k, ctx);
+                else spy_release(ctx);
+                if (!state) { spy_release(key); return NULL; }
+                SPYValue *result = map_findk(c, m, dict, key, hash, map_cursor(namespace_map(dict), hash), name_searched, state);
+                spy_release(key);
+                return result;
+            }
+            v = storage ? spy_retain(dict_name(c, dict, name)) : name_lookup(c, e, name);
+            if (!v && c->error_type[0]) return k(c, m, ctx, NULL);
+        }
         if (!v && annotation && e->type == V_ENV && e->as.map.flags == 5 && e->as.map.class_cell) {
             SPYValue *value = name_lookup(c, e->as.map.class_cell, name);
-            if (value && value->type != V_UNBOUND) return value;
+            if (value && value->type != V_UNBOUND) return k(c, m, ctx, value);
             spy_release(value);
-            if (c->error_type[0]) return NULL;
+            if (c->error_type[0]) return k(c, m, ctx, NULL);
         }
         annotation = annotation && annotation_env(e);
         if (!v && e->type == V_ENV && e->as.map.scope && e->as.map.scope->kind == S_CLASS) {
             Symbol *symbol = scope_find(e->as.map.scope, name);
             if (symbol && (symbol->flags & S_LOCAL) && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)))
-                return name_from(c, env, module_env(c, e), name, 1);
+                return name_walk(c, m, env, module_env(c, e), name, 1, 0, NULL, k, ctx);
         }
-        if (v) {
-            if (v->type == V_UNBOUND) {
-                spy_release(v);
-                /* List, set, and dict comprehensions are inlined into their
-                 * function (PEP 709), so its locals are theirs too. */
-                SPYValue *inner = env;
-                while (inner != e && inlined_comprehension(inner)) inner = inner->as.map.parent;
-                if (inner != e) return name_error(c, text, 1);
-                return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", text);
-            }
-            /* Global and class namespaces resolve lazy imports; function locals do not. */
-            if (v->type == SPY_LAZY_IMPORT && (e->type != V_ENV || !e->as.map.scope || e->as.map.scope->kind == S_MODULE ||
-                                               e->as.map.scope->kind == S_CLASS))
-                return lazy_reify(c, e, text, v);
-            return v;
-        }
+        if (v) return k(c, m, ctx, name_bound(c, env, e, v, text));
     }
-    return name_error(c, text, 0);
+    return k(c, m, ctx, name_error(c, text, 0));
+}
+/* What a namespace's __getitem__ that name_walk called returned in
+ * result, state its env, the binding env, the name and the annotation
+ * flag, then its continuation: the lookup goes on past a KeyError. */
+static SPYValue *name_resumed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *env = spy_retain(items[0]), *e = spy_retain(items[1]), *key = spy_retain(items[2]), *value;
+    int annotation = (int)items[3]->as.integer_data.small;
+    Continuation k;
+    SPYValue *ctx = k_take(c, state, &k);
+    int missing = !result && !c->stopped && error_is(c, "KeyError");
+    if (missing) spy_clear_error(c);
+    value = result || missing ? name_walk(c, m, env, e, name_of(key->as.string.data), annotation, 1, result, k, ctx) : k(c, m, ctx, NULL);
+    spy_release(env); spy_release(e); spy_release(key);
+    return value;
+}
+/* What name_walk's search of a dict found, result the entry's index or
+ * -1, NULL on an error, state as name_resumed's, the dict last: the
+ * lookup goes on with its value or past it. */
+static SPYValue *name_searched(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *env = spy_retain(items[0]), *e = spy_retain(items[1]), *key = spy_retain(items[2]), *value;
+    int annotation = (int)items[3]->as.integer_data.small;
+    ptrdiff_t i = result ? (ptrdiff_t)result->as.integer_data.small : -1;
+    SPYValue *v = i >= 0 ? spy_retain(namespace_map(items[4])->as.map.items[i].value) : NULL;
+    Continuation k;
+    SPYValue *ctx = k_take(c, state, &k);
+    value = result ? name_walk(c, m, env, e, name_of(key->as.string.data), annotation, 1, v, k, ctx) : k(c, m, ctx, NULL);
+    spy_release(result); spy_release(env); spy_release(e); spy_release(key);
+    return value;
+}
+/* The value continuation name_from gives. */
+static SPYValue *name_given(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) { (void)c; (void)m; (void)ctx; return result; }
+/* name_walk in C. */
+static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name name, int annotation) {
+    return name_walk(c, NULL, env, from, name, annotation, 0, NULL, name_given, NULL);
 }
 static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) { return name_from(c, env, env, name, 1); }
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
@@ -8062,8 +8156,9 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = 2;
         return scope_node(c, scope, n->a);
     case N_NAME:
-        /* So does code exec() and eval() run, whose locals may be a mapping (name_load). */
-        if (scope->kind == S_CLASS || (scope->kind == S_MODULE && c->string_source)) n->flags |= F_LOADED;
+        /* So does code exec() and eval() run, whose locals and globals may
+         * be a mapping, its functions' too (name_load). */
+        if (scope->kind == S_CLASS || c->string_source) n->flags |= F_LOADED;
         return scope_record(c, scope, n, S_USE);
     case N_STRING: return n->annotate ? scope_string_annotation(c, n) : 0;
     case N_GLOBAL: case N_NONLOCAL:
@@ -8093,7 +8188,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         return 0;
     case N_ASSIGN:
         /* An augmented assignment's name is loaded too. */
-        if ((scope->kind == S_CLASS || (scope->kind == S_MODULE && c->string_source)) && n->op != '=' && n->a->kind == N_NAME)
+        if ((scope->kind == S_CLASS || c->string_source) && n->op != '=' && n->a->kind == N_NAME)
             n->a->flags |= F_LOADED;
         if (scope_node(c, scope, n->b) || scope_target(c, scope, n->a, 1)) return -1;
         for (Node *target = n->args; target; target = target->next) if (scope_target(c, scope, target, 1)) return -1;
@@ -15282,9 +15377,13 @@ static int arithmetic(Node *n) {
 }
 static int expands(Node *n, int calls) {
     if (!n) return 0;
-    /* A class body binds and loads names through its namespace, whose
-     * Python methods are calls (store_call, name_delete, name_load). */
-    if ((n->flags & F_LOADED) || (calls >= BODY && (n->flags & F_NAMESPACE))) return 1;
+    /* A class body binds and loads names through its namespace, and exec()
+     * and eval() code loads them through its namespaces, whose Python
+     * methods are calls (store_call, name_delete, name_load); a load is
+     * no yield. */
+    if ((calls && (n->flags & F_LOADED)) || (calls >= BODY && (n->flags & F_NAMESPACE))) return 1;
+    /* So does an annotation's record (record_annotation). */
+    if (calls >= BODY && n->kind == N_ANNASSIGN && (n->flags & (F_FUTURE | F_CONDITIONAL))) return 1;
     if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
         (operator_right(n) || arithmetic(n))) return 0;
     /* An import runs a module of source as a call (import_step), and a
@@ -15710,7 +15809,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             compile_expr(c, p, n->a->a); emit(c, p, BC_POP, n, 0);
             if (n->a->kind == N_INDEX) { compile_expr(c, p, n->a->b); emit(c, p, BC_POP, n, 0); }
         }
-        if (n->flags & (F_FUTURE | F_CONDITIONAL)) emit(c, p, BC_ANNOTATE, n, 0);
+        if (n->flags & (F_FUTURE | F_CONDITIONAL)) { emit(c, p, BC_ANNOTATE, n, 0); emit(c, p, BC_POP, n, 0); }
         break;
     case N_MATCH: {
         /* The subject stays on the stack until a case is chosen. */
@@ -15745,8 +15844,9 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         }
         emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     case N_RETURN:
-        /* A return of a name or literal loads it in its own step. */
-        if (n->a && (n->a->kind == N_NAME || n->a->constant)) { emit(c, p, BC_RETURN, n, 0); break; }
+        /* A return of a name or literal loads it in its own step, one
+         * through a namespace aside (name_load). */
+        if (n->a && ((n->a->kind == N_NAME && !(n->a->flags & F_LOADED)) || n->a->constant)) { emit(c, p, BC_RETURN, n, 0); break; }
         compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     case N_RAISE:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b);
@@ -23514,7 +23614,7 @@ static SPYValue *conditional_set(SPYContext *c, Frame *f) {
             return spy_retain(name_local(e->as.map.class_cell, "__conditional_annotations__"));
     return name_get(c, f->env, "__conditional_annotations__");
 }
-static void record_annotation(SPYContext *, Frame *, Node *);
+static SPYValue *record_annotation(SPYContext *, Machine *, Frame *, Node *);
 static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
     if (n->c) {
         SPYValue *value = eval(c, f, n->c);
@@ -23525,26 +23625,49 @@ static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
         SPYValue *index = object && n->a->kind == N_INDEX ? eval(c, f, n->a->b) : NULL;
         spy_release(object); spy_release(index);
     }
-    if (!c->error_type[0]) record_annotation(c, f, n);
+    if (!c->error_type[0]) spy_release(record_annotation(c, NULL, f, n));
+}
+/* The __conditional_annotations__ set an annotation's record (ctx: its
+ * key and value, the env and the index) found in executed, or NULL with
+ * an error: the index added; None. */
+static SPYValue *annotation_marked(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *executed) {
+    (void)m;
+    SPYValue *index = ctx->as.seq.items[3];
+    if (executed && executed->type != SPY_SET) errorf(c, "TypeError", "'%s' object is not a set", type_name(executed));
+    else if (executed) set_add(c, executed, index);
+    spy_release(executed); spy_release(ctx);
+    return c->error_type[0] ? NULL : spy_none(c);
+}
+/* The rest of an annotation's record ctx: in a conditional block, that
+ * it ran, its set looked up in the env (name_walk); else None. */
+static SPYValue *annotation_mark(SPYContext *c, Machine *m, SPYValue *ctx) {
+    SPYValue *env = ctx->as.seq.items[2];
+    if (env->type == SPY_NONE) { spy_release(ctx); return spy_none(c); }
+    return name_walk(c, m, env, env, name_of("__conditional_annotations__"), 1, 0, NULL, annotation_marked, ctx);
+}
+/* The __annotations__ a future annotation's record ctx found, or NULL
+ * with an error: its text stored under its name, then annotation_mark. */
+static SPYValue *annotation_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *annotations) {
+    if (annotations) set_index(c, annotations, ctx->as.seq.items[0], ctx->as.seq.items[1]);
+    spy_release(annotations);
+    if (c->error_type[0]) { spy_release(ctx); return NULL; }
+    return annotation_mark(c, m, ctx);
 }
 /* After annotated assignment n's store, the annotation it records: its
- * text under `from __future__ import annotations`, or, in a conditional
- * block, that it ran. */
-static NO_INLINE void record_annotation(SPYContext *c, Frame *f, Node *n) {
-    if (n->flags & F_FUTURE) {
-        SPYValue *annotations = name_get(c, f->env, "__annotations__");
-        SPYValue *key = annotations ? spy_string(c, n->a->text, strlen(n->a->text)) : NULL;
-        SPYValue *value = key ? spy_string(c, n->b->text, (size_t)n->b->op) : NULL;
-        if (value) set_index(c, annotations, key, value);
-        spy_release(value); spy_release(key); spy_release(annotations);
-    }
-    if (!c->error_type[0] && (n->flags & F_CONDITIONAL)) {
-        SPYValue *executed = name_get(c, conditional_env(f), "__conditional_annotations__");
-        SPYValue *index = executed ? spy_int(c, n->op) : NULL;
-        if (index && executed->type != SPY_SET) errorf(c, "TypeError", "'%s' object is not a set", type_name(executed));
-        else if (index) set_add(c, executed, index);
-        spy_release(index); spy_release(executed);
-    }
+ * text under `from __future__ import annotations` in __annotations__,
+ * or, in a conditional block, that it ran in __conditional_annotations__.
+ * None, or NULL with an error; on m, those names' lookups may be calls
+ * there (name_walk). */
+static NO_INLINE SPYValue *record_annotation(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    int future = (n->flags & F_FUTURE) != 0, conditional = (n->flags & F_CONDITIONAL) != 0;
+    SPYValue *items[] = {future ? spy_string(c, n->a->text, strlen(n->a->text)) : spy_none(c),
+                         future ? spy_string(c, n->b->text, (size_t)n->b->op) : spy_none(c),
+                         spy_retain(conditional ? conditional_env(f) : c->none), conditional ? spy_int(c, n->op) : spy_none(c)};
+    SPYValue *ctx = items[0] && items[1] && items[3] ? spy_tuple(c, 4, items) : NULL;
+    release_all(4, items);
+    if (!ctx) return NULL;
+    if (future) return name_walk(c, m, f->env, f->env, name_of("__annotations__"), 1, 0, NULL, annotation_stored, ctx);
+    return annotation_mark(c, m, ctx);
 }
 /* An annotation function n's dict, or NULL with an error: a format above
  * 2 is NotImplementedError. */
@@ -27742,6 +27865,7 @@ static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *, SPYValue *, int, si
 static int buffer_argument(SPYContext *, SPYValue *);
 static SPYValue *complex_construct(SPYContext *, Machine *, SPYValue *, SPYValue *, int);
 static SPYValue *complex_keywords(SPYContext *, Machine *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *builtin_call(SPYContext *, Machine *, Node *, SPYValue *, size_t, SPYValue **, SPYValue **);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -27891,6 +28015,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         argv++; argc--;
         id = consumer_of(c, callee, method, argc, argv);
     }
+    /* exec() and eval() of a mapping's instance run their code on m (source_call). */
+    if (id < 0 && !init && method < 0 && !c->error_type[0] && (is_builtin(callee, B_EXEC) || is_builtin(callee, B_EVAL)))
+        return builtin_call(c, m, n, callee, argc, argv, env);
     if (id >= 0)
         consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
                        argc > 3 ? set_rest(c, argc, argv) : argc > 1 ? spy_retain(argv[1]) : NULL, argc > 3 ? c->unbound : argc > 2 ? argv[2] : NULL);
@@ -32911,29 +33038,13 @@ static NO_INLINE SPYValue *name_delete(SPYContext *c, Machine *m, Frame *f, Node
     SPYValue *name = spy_string(c, n->text, strlen(n->text));
     return name ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(name)}, name_deleted, name) : NULL;
 }
-/* What the __getitem__ of a class body's load of name state returned in
- * result: the value; on a KeyError, the name found past the namespace,
- * a local's in the globals (name_find). */
-static SPYValue *name_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    if (!result && !c->stopped && error_is(c, "KeyError")) {
-        SPYValue *env = m->frame.env;
-        Name name = name_of(state->as.string.data);
-        Symbol *symbol = scope_find(env->as.map.scope, name);
-        spy_clear_error(c);
-        result = symbol && (symbol->flags & S_LOCAL) ? name_from(c, env, module_env(c, env), name, 1) :
-                 name_from(c, env, env->as.map.parent, name, annotation_env(env));
-    }
-    spy_release(state);
-    return result;
-}
-/* BC_CLASS 10: name n loaded in a class body, whose namespace's Python
- * __getitem__ is m's call (callk, name_loaded); else as BC_LOAD's. */
+/* BC_CLASS 10: name n loaded in a class body or exec() and eval() code,
+ * whose namespaces' Python __getitem__ are m's calls (name_walk). */
 static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, Node *n) {
-    SPYValue *owner = n->constant ? NULL : binding_env(c, f->env, node_name(n)), *namespace = owner == f->env ? owner->as.map.namespace : NULL;
-    SPYValue *function = namespace && namespace->type != SPY_DICT && owner->as.map.flags != 3 ? store_function(c, namespace, "__getitem__") : NULL;
-    if (!function) { SPYValue *value = leaf_operand(f, n); return value ? spy_retain(value) : eval(c, f, n); }
-    SPYValue *name = spy_string(c, n->text, strlen(n->text));
-    return name ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(name)}, name_loaded, name) : NULL;
+    SPYValue *value = leaf_operand(f, n);
+    if (value) return spy_retain(value);
+    if (!strcmp(n->text, "__debug__")) return spy_bool(c, 1);
+    return name_walk(c, m, f->env, f->env, node_name(n), 1, 0, NULL, name_given, NULL);
 }
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
@@ -35145,7 +35256,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
             continue;
         CASE(BC_NONE) machine_push(c, m, spy_none(c)); NEXT;
-        CASE(BC_ANNOTATE) record_annotation(c, &f, n); break;
+        CASE(BC_ANNOTATE)
+            value = record_annotation(c, m, &f, n);
+            if (c->k_fn) goto enter_k;
+            machine_push(c, m, value); break;
         CASE(BC_POP) spy_release(machine_pop(m)); NEXT;
         CASE(BC_SLICE)
             b = machine_pop(m); a = machine_pop(m); value = machine_pop(m);

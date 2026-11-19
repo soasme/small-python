@@ -142,6 +142,45 @@ def exec_globals_storage():
     return tuple(dict.__getitem__(g, k) for k in "rst") + (g.log,)
 
 
+class Key:
+    def __init__(self, log):
+        self.log = log
+
+    def __hash__(self):
+        return hash("v")
+
+    def __eq__(self, other):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        self.log.append(other)
+        return other == "v"
+
+
+def eval_key_eq():
+    log = []
+    return eval("v", {Key(log): 5}), log
+
+
+class Marking(dict):
+    def __getitem__(self, key):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        Marking.log.append(key)
+        return dict.__getitem__(self, key)
+
+
+class Meta(type):
+    @classmethod
+    def __prepare__(mcls, name, bases):
+        return Marking()
+
+
+def class_annotation_future():
+    Marking.log = []
+    exec("from __future__ import annotations\nclass E(metaclass=Meta):\n    x: int = 1\n", {"Meta": Meta})
+    return Marking.log
+
+
 def outcome(p):
     try:
         return repr(globals()[p["case"]]())
