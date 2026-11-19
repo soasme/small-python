@@ -1,5 +1,5 @@
 # spec: PLS-315 22.4.1, 22.3.1
-# description: complex(real, imag), and complex() naming either part by
+# description: complex(x), complex(real, imag), and complex() naming either part by
 # keyword, positionally, starred or through a mapping, converts its parts
 # by their Python methods in order: the real part's __complex__ first,
 # then both parts checked to be numbers, then the real part's __float__
@@ -59,7 +59,9 @@ def calls():
             t(lambda: complex(F(-0.0), -0.0)), t(lambda: complex(C(-0.0j), -0.0)), t(lambda: complex(Nested(), F(1.0))),
             t(lambda: complex(real=F(2.0))), t(lambda: complex(imag=I(4))), t(lambda: complex(real=I(1), imag=F(2.0))),
             t(lambda: complex(F(1.0), imag=C(1j))), t(lambda: complex(*[I(7), F(8.0)])), t(lambda: complex(**{"imag": F(6.0)})),
-            t(lambda: complex(real=F(1.0), real2=2)), t(lambda: complex(F(1.0), 2, 3))]
+            t(lambda: complex(real=F(1.0), real2=2)), t(lambda: complex(F(1.0), 2, 3)),
+            t(lambda: complex(C(3j))), t(lambda: complex(F(2.5))), t(lambda: complex(I(6))), t(lambda: complex(C(1.0))),
+            t(lambda: complex(N())), t(lambda: complex(*[C(1 + 1j)]))]
 
 expected = [((1.5+2j), [("float", 1.5), ("index", 2)]),
             ((1+5j), [("complex", 1 + 2j), ("float", 3.0)]),
@@ -83,13 +85,18 @@ expected = [((1.5+2j), [("float", 1.5), ("index", 2)]),
             ((7+8j), [("index", 7), ("float", 8.0)]),
             (6j, [("float", 6.0)]),
             ("TypeError: complex() got an unexpected keyword argument 'real2'. Did you mean 'real'?", []),
-            ("TypeError: complex() takes at most 2 arguments (3 given)", [])]
+            ("TypeError: complex() takes at most 2 arguments (3 given)", []),
+            (3j, [("complex", 3j)]), ((2.5+0j), [("float", 2.5)]), ((6+0j), [("index", 6)]),
+            ("TypeError: C.__complex__() must return a complex, not float", [("complex", 1.0)]),
+            ("TypeError: complex() argument must be a string or a number, not N", []),
+            ((1+1j), [("complex", 1 + 1j)])]
 
 def paused():
     # Each part's method runs while a generator is suspended around it.
     def gen():
         yield complex(F(1.0), I(2))
         yield complex(imag=F(3.0), real=C(1j))
+        yield complex(C(2j))
     return list(gen()), log[:]
 
 def results():
@@ -97,7 +104,7 @@ def results():
     del log[:]
     return out
 
-expected_all = (expected, ([(1+2j), 4j], [("float", 1.0), ("index", 2), ("complex", 1j), ("float", 3.0)]))
+expected_all = (expected, ([(1+2j), 4j, 2j], [("float", 1.0), ("index", 2), ("complex", 1j), ("float", 3.0), ("complex", 2j)]))
 
 def main():
     return results()
@@ -105,6 +112,15 @@ def main():
 assert_eq(main(), expected_all)
 assert_eq(results(), expected_all)
 
+class DeepOne:
+    def __complex__(self):
+        for _ in range(2): pass
+        return complex(self)
+try:
+    complex(DeepOne())
+except RecursionError:
+    deep = "RecursionError"
+assert_eq(deep, "RecursionError")
 try:
     complex(Deep(), 0)
 except RecursionError:

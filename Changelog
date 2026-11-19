@@ -470,8 +470,8 @@ Unreleased (0.10.0):
 - `object.__reduce__()`, `__reduce_ex__()` and `__getstate__()` call Python methods without nesting on the C stack
 - a builtin method or slot wrapper called without its object raises CPython's message for its kind; `property.__set_name__` and memoryview's `__enter__` and `__exit__` are method descriptors
 - exception groups' `split()` and `subgroup()` call a Python condition or `derive` without nesting on the C stack
-- `complex(real, imag)`, and `complex()` naming its parts, call their Python `__complex__`, `__float__` and
-  `__index__` without nesting on the C stack
+- `complex(x)`, `complex(real, imag)`, and `complex()` naming its parts, call their Python `__complex__`,
+  `__float__` and `__index__` without nesting on the C stack
 - `==` and `!=` of a mappingproxy compare its mapping's Python methods without nesting on the C stack
 - a weak reference's Python callback runs without nesting on the C stack; one that takes no argument is
   reported instead of raising into the code that dropped the target

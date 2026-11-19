@@ -26967,9 +26967,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         release_all(argc, argv); spy_release(callee);
         return result;
     }
-    if (method < 0 && argc == 2 && callee == c->types[SPY_COMPLEX]) {
-        /* complex(real, imag) converts its parts on m (complex_go). */
-        result = complex_construct(c, m, argv[0], argv[1], 1);
+    if (method < 0 && (argc == 1 || argc == 2) && callee == c->types[SPY_COMPLEX]) {
+        /* complex(real[, imag]) converts its parts on m (complex_go). */
+        result = complex_construct(c, m, argv[0], argc == 2 ? argv[1] : NULL, argc == 2);
         release_all(argc, argv); spy_release(callee);
         return result;
     }
@@ -28125,9 +28125,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(function);
         return NULL;
     }
-    if (calls && argc == 2 && callee == c->types[SPY_COMPLEX]) {
-        /* So does complex(real, imag), the callee and arguments leaving the stack. */
-        result = complex_construct(c, m, argv[0], argv[1], 1);
+    if (calls && (argc == 1 || argc == 2) && callee == c->types[SPY_COMPLEX]) {
+        /* So does complex(real[, imag]), the callee and arguments leaving the stack. */
+        result = complex_construct(c, m, argv[0], argc == 2 ? argv[1] : NULL, argc == 2);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
