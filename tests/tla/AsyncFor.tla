@@ -21,7 +21,10 @@
 (* and 2, a class whose plain-function __anext__ returns coroutines of 1   *)
 (* and 2 and then raises StopAsyncIteration itself, a class whose          *)
 (* __anext__ awaits a step before returning 1 and                          *)
-(* 2 and before raising StopAsyncIteration, a class without __aiter__,     *)
+(* 2 and before raising StopAsyncIteration, a class whose __anext__       *)
+(* returns instances whose plain-method __await__ returns a generator      *)
+(* that passes out a step and returns 1 and 2, the same whose __await__    *)
+(* raises (a TypeError caused by it), a class without __aiter__,           *)
 (* a class whose __anext__ returns 5, or a class whose __aiter__           *)
 (* returns 5; and BODY appends x and then completes, breaks, or raises     *)
 (* KeyError. A comprehension program builds a list, set, or dict over      *)
@@ -38,7 +41,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"loop"}, source : {"agen", "relay", "class", "plain", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
+Programs == [part : {"loop"}, source : {"agen", "relay", "class", "plain", "awaiting", "ticket", "badawait", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
             \cup [part : {"comprehension"}, kind : {"list", "set", "dict", "class", "element"}]
             \cup [part : {"syntax"}, construct : {"for", "with", "await", "comprehension"}]
             \cup [part : {"builtin"}, source : {"class", "plain", "awaiting", "noaiter", "badanext", "noanext"}, default : BOOLEAN]
@@ -52,14 +55,15 @@ Ticks(n) == CASE n = 0 -> "[]" [] n = 1 -> "['tick']" [] n = 2 -> "['tick', 'tic
                 [] n = 4 -> "['tick', 'tick', 'tick', 'tick']"
 
 Loop(p) ==
-    IF p.source \in {"noaiter", "badanext", "noanext"} THEN "[] TypeError"
+    IF p.source \in {"noaiter", "badanext", "noanext", "badawait"} THEN "[] TypeError"
     ELSE LET agen == p.source \in {"agen", "relay"}
              awaiting == p.source = "awaiting"
+             ticket == p.source = "ticket"
              first == IF agen THEN "0" ELSE "1"
              second == IF agen THEN "1" ELSE "2"
-         IN  CASE p.body = "normal" -> Ticks(IF agen THEN 2 ELSE IF awaiting THEN 3 ELSE 0) \o " [" \o first \o ", " \o second \o ", 'else']"
-               [] p.body = "break" -> Ticks(IF agen \/ awaiting THEN 1 ELSE 0) \o " [" \o first \o "]"
-               [] p.body = "raise" -> Ticks(IF agen \/ awaiting THEN 1 ELSE 0) \o " KeyError"
+         IN  CASE p.body = "normal" -> Ticks(IF agen \/ ticket THEN 2 ELSE IF awaiting THEN 3 ELSE 0) \o " [" \o first \o ", " \o second \o ", 'else']"
+               [] p.body = "break" -> Ticks(IF agen \/ awaiting \/ ticket THEN 1 ELSE 0) \o " [" \o first \o "]"
+               [] p.body = "raise" -> Ticks(IF agen \/ awaiting \/ ticket THEN 1 ELSE 0) \o " KeyError"
 
 Comprehension(p) == CASE p.kind = "list" -> "['tick', 'tick'] [0, 1]"
                       [] p.kind = "set" -> "['tick', 'tick'] {0, 1}"

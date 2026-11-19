@@ -25277,15 +25277,26 @@ static int iterable_coroutine(SPYValue *v) {
     int64_t value = 0;
     return flags && !spy_as_int(v->ctx, flags, &value) && (value & 0x100);
 }
+/* NULL, the error an async for's await of value, what __anext__
+ * returned, raised becoming the cause of its TypeError. */
+static SPYValue *anext_invalid(SPYContext *c, SPYValue *value) {
+    if (c->stopped) return NULL;
+    char text[160];
+    snprintf(text, sizeof(text), "'async for' received an invalid object from __anext__: %.100s", type_name(value));
+    error_from_cause(c, "TypeError", text);
+    return NULL;
+}
+/* An async for's step, its awaitable atop m's stack, given what the
+ * awaitable's __await__ returned, which it takes: 1 with that iterator
+ * m's delegate and c->unbound pushed for the step to run again; else 0
+ * with the error. */
+static int anext_awaited(SPYContext *c, Machine *m, SPYValue *result) {
+    return (m->delegate = iterator_returned(c, m->stack[m->len - 1], result, "__await__")) && !machine_push(c, m, spy_retain(c->unbound));
+}
 static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *method_name) {
     if (method_name && !strcmp(method_name, "__anext__")) {
         SPYValue *iterator = await_iterator(c, value, NULL);
-        if (!iterator) {
-            char text[160];
-            snprintf(text, sizeof(text), "'async for' received an invalid object from __anext__: %.100s", type_name(value));
-            error_from_cause(c, "TypeError", text);
-        }
-        return iterator;
+        return iterator ? iterator : anext_invalid(c, value);
     }
     if (iterable_coroutine(value)) return spy_retain(value);
     if (value->type == SPY_COROUTINE) {
@@ -32943,6 +32954,7 @@ static NO_INLINE int iter_returned(SPYContext *c, Machine *m, Instruction *ins, 
     }
     if (ins->op == BC_DELEGATE)
         return !!(m->delegate = iterator_returned(c, m->stack[m->len - 1], result, ins->arg ? "__await__" : "__iter__"));
+    if (ins->op == BC_NEXT) return anext_awaited(c, m, result);
     SPYValue *source = machine_pop(m);
     SPYValue *iterator = ins->arg == 2 ? async_returned(c, source, result, 1) : iterator_returned(c, source, result, "__iter__");
     spy_release(source);
@@ -35244,10 +35256,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
                         spy_release(result);
                     } else if (kind == CALL_ITER) {
-                        if (code[pc - 1].op == BC_NEXT) {
+                        if (code[pc - 1].op == BC_NEXT && m->awaiting == AWAIT_NEXT) {
+                            /* Its awaitable's __await__ returned the delegate. */
+                            m->awaiting = AWAIT_NONE;
+                            if (result && anext_awaited(c, m, result)) pc--;
+                            else anext_invalid(c, m->stack[m->len - 1]);
+                        } else if (code[pc - 1].op == BC_NEXT) {
                             /* An async for's __anext__ returned its awaitable, or
                              * raising StopAsyncIteration ends the loop. */
-                            if (result && !machine_push(c, m, result) && !machine_push(c, m, spy_retain(c->unbound))) pc--;
+                            if (result &&!machine_push(c, m, result) && !machine_push(c, m, spy_retain(c->unbound))) pc--;
                             else if (!result && error_is(c, "StopAsyncIteration")) { spy_clear_error(c); pc = code[pc - 1].target; }
                         } else if (result) pc -= iter_returned(c, m, &code[pc - 1], result);
                     } else if (kind == CALL_HASH) {
@@ -35854,8 +35871,19 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     if (!value) break;
                     special = CALL_ITER; goto enter_special;
                 } else a = call_special(c, iterator, "__anext__", 0, NULL);
+                if (a && a->type == SPY_INSTANCE && !m->delegate) {
+                    /* So is the awaitable's Python __await__, returning its
+                     * iterator into this step as the delegate (anext_awaited). */
+                    if (machine_push(c, m, a)) break;
+                    callee_env = NULL;
+                    value = iter_call(c, m, ins, "__await__", &callee_env);
+                    if (value && value != c->unbound) { m->awaiting = AWAIT_NEXT; special = CALL_ITER; goto enter_special; }
+                    if (c->error_type[0]) { anext_invalid(c, m->stack[m->len - 1]); break; }
+                    if (value) spy_release(machine_pop(m));
+                    a = machine_pop(m);
+                }
                 m->awaiting = AWAIT_NEXT; m->await_target = ins->target; m->drop = 0;
-                if (a) m->delegate = await_iterator(c, a, "__anext__");
+                if (a && !m->delegate) m->delegate = await_iterator(c, a, "__anext__");
                 if (m->delegate && (delegable(m->delegate) || (m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(c, m)))) {
                     m->awaiting = AWAIT_DELEGATE; m->await_target = ins->target;
                     spy_release(a); a = NULL; value = m->delegate; goto resume_generator;

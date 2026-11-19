@@ -74,6 +74,36 @@ async def given(value):
     return value
 
 
+class Ticket:
+    def __init__(self, value):
+        self.value = value
+
+    def __await__(self):
+        return self.steps()
+
+    def steps(self):
+        yield "tick"
+        return self.value
+
+
+class BadTicket:
+    def __await__(self):
+        raise KeyError
+
+
+class Ticketed(Counter):
+    def __anext__(self):
+        self.i += 1
+        if self.i > 2:
+            raise StopAsyncIteration
+        return Ticket(self.i)
+
+
+class BadAwait(Counter):
+    def __anext__(self):
+        return BadTicket()
+
+
 class NoAiter:
     pass
 
@@ -91,7 +121,7 @@ class NoAnext:
         return 5
 
 
-SOURCES = {"agen": agen, "relay": relay, "class": Counter, "plain": Plain, "awaiting": Awaiting, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
+SOURCES = {"agen": agen, "relay": relay, "class": Counter, "plain": Plain, "awaiting": Awaiting, "ticket": Ticketed, "badawait": BadAwait, "noaiter": NoAiter, "badanext": BadAnext, "noanext": NoAnext}
 SYNTAX = {"for": "def f():\n    async for x in y: pass", "with": "def f():\n    async with x: pass",
           "await": "def f():\n    await x", "comprehension": "def f():\n    return [x async for x in y]"}
 
