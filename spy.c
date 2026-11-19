@@ -27642,7 +27642,8 @@ static SPYValue *str_format_map(SPYContext *, size_t, SPYValue *const *, SPYValu
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv, at most 8, is str.format (1) or str.format_map (2) of
  * *self, a str: bound, or argv[0] (*skip 1), format_map's argument after
- * it an exact dict; else 0. */
+ * it a dict, or a dict subclass's instance with no Python __getitem__;
+ * else 0. */
 static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **self,
                                    size_t *skip) {
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
@@ -27657,18 +27658,21 @@ static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, 
                       !strcmp(callee->as.native.name->as.string.data, "format"))))
         *self = argv[(*skip = 1) - 1];
     if (!*self || (*self)->type != SPY_STRING) return 0;
-    return !map ? 1 : argc == *skip + 1 && argv[*skip]->type == SPY_DICT ? 2 : 0;
+    if (!map) return 1;
+    SPYValue *mapping = argc == *skip + 1 ? argv[*skip] : NULL;
+    return mapping && (mapping->type == SPY_DICT || (builtin_value(c, mapping, SPY_DICT) && !store_function(c, mapping, "__getitem__"))) ? 2 : 0;
 }
 /* Whether a field may reach an instance with a Python __format__
  * (format_job) through one of the argc values argv, of str.format, or
- * the values of the dict argv[0], of str.format_map (kind 2): an
+ * the values of argv[0]'s dict, of str.format_map (kind 2): an
  * instance or a container (repr_container). */
-static NO_INLINE int format_instances(int kind, size_t argc, SPYValue *const *argv) {
+static NO_INLINE int format_instances(SPYContext *c, int kind, size_t argc, SPYValue *const *argv) {
     const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
                               UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET;
     if (kind == 2) {
-        for (size_t i = 0; i < map_used(argv[0]); i++)
-            if (map_items(argv[0])[i].key && UINT64_C(1) << map_items(argv[0])[i].value->type & reaching) return 1;
+        SPYValue *dict = builtin_value(c, argv[0], SPY_DICT);
+        for (size_t i = 0; i < map_used(dict); i++)
+            if (map_items(dict)[i].key && UINT64_C(1) << map_items(dict)[i].value->type & reaching) return 1;
         return 0;
     }
     for (size_t i = 0; i < argc; i++)
@@ -27679,7 +27683,7 @@ static NO_INLINE int format_reaches(SPYContext *c, SPYValue *callee, int method,
     SPYValue *self;
     size_t skip;
     int kind = format_target(c, callee, method, argc, argv, &self, &skip);
-    return kind && format_instances(kind, argc - skip, argv + skip);
+    return kind && format_instances(c, kind, argc - skip, argv + skip);
 }
 /* Whether callee, method number method of it or -1, may be str.format or
  * str.format_map (format_target), tested before anything slower. */
@@ -29641,7 +29645,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     SPYValue *target;
     size_t fields;
     if (calls && format_callee(callee, -1) && format_target(c, callee, -1, positional, argv, &target, &fields) == 1 && argc <= 8 &&
-        format_instances(1, argc - fields, argv + fields)) {
+        format_instances(c, 1, argc - fields, argv + fields)) {
         /* str.format, as a plain call's step (stack_call), with keywords. */
         SPYValue *keywords = entries_dict(c, kw, kwc), *args[8];
         for (size_t i = 0; i < positional; i++) args[i] = spy_retain(argv[i]);

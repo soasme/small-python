@@ -19,7 +19,8 @@
 (* fields name a positional argument (automatic or manual numbering, never *)
 (* both), a keyword, attributes, and indexes, with a conversion !r, !s, or *)
 (* !a, and a spec that may nest one level of replacement fields; doubled   *)
-(* braces are literal.                                                     *)
+(* braces are literal; format_map's dict subclass answers a missing key by *)
+(* its __missing__.                                                        *)
 (*                                                                         *)
 (* A program formats an int (0, 5, -42, or 1234567) with every combination *)
 (* of alignment, sign, alternate form, zero padding, width, grouping, and  *)
@@ -139,7 +140,8 @@ Cases == {"str_align", "str_precision", "str_equal_align", "str_sign", "str_type
           "str_format_extra_args", "format_map_missing", "fstring_format_spec", "format_builtin_default",
           "str_format_conversion_spec", "str_format_conversion_str_raises", "str_format_conversion_bad_repr",
           "str_format_conversion_nested", "str_format_conversion_nested_raises", "str_format_containers",
-          "str_format_container_raises", "str_format_container_nested", "str_format_container_nested_spec"}
+          "str_format_container_raises", "str_format_container_nested", "str_format_container_nested_spec",
+          "format_map_subclass"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 1234567}, align : {"", "<", ">", "^", "=", "*^"}, sign : Signs,
              alt : {"", "#"}, zero : {"", "0"}, width : {0, 9}, group : Groups, type : {"", "d", "b", "x", "X", "o"}]
             \cup [kind : {"float"}, num : {0, 20, -1, 9875, 4}, align : {"", "<", "^", "="}, sign : Signs,
@@ -224,6 +226,7 @@ Case(c) ==
       [] c = "str_format_example_items" -> "'The complex number (3-5j) is formed from the real part 3.0 and the imaginary part -5.0.'"
       [] c = "str_format_extra_args" -> "'1'"
       [] c = "format_map_missing" -> "KeyError: 'a'"
+      [] c = "format_map_subclass" -> "'[sp]|  sp|cc'"
       [] c = "fstring_format_spec" -> "\"  3.14| 'x' \""
       [] c = "format_builtin_default" -> "('5', 'a', 'None')"
       [] c = "str_format_conversion_spec" -> "'  P()|*p*|\\\\xe9|\\xe9u'"

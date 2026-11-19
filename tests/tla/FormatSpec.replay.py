@@ -18,6 +18,8 @@ class Spin:
     def __repr__(self):
         for _ in (): pass
         return 'sp'
+class Defaulting(dict):
+    def __missing__(self, key): return key * 2
 class BadRepr:
     def __repr__(self): return 3
 
@@ -91,6 +93,7 @@ SOURCES = {
     "str_format_example_items": "c = 3-5j\nresult = ('The complex number {0} is formed from the real part {0.real} and the imaginary part {0.imag}.').format(c)",
     "str_format_extra_args": "result = '{0}'.format(1, 2, x=3)",
     "format_map_missing": "result = '{a}'.format_map({})",
+    "format_map_subclass": "result = '{a}|{b!r:>4}|{c}'.format_map(Defaulting(a=[Spin()], b=Spin()))",
     "fstring_format_spec": 'w = 6\nresult = f\'{3.14159:{w}.2f}|{"x"!r:^5}\'',
     "format_builtin_default": "result = (format(5), format('a'), format(None))",
     "str_format_conversion_spec": "result = '{0!r:>5}|{0!s:*^3}|{1!a:.4}|{1!r}'.format(P(), U())",
