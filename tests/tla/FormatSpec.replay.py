@@ -22,6 +22,11 @@ class Defaulting(dict):
     def __missing__(self, key): return key * 2
 class BadRepr:
     def __repr__(self): return 3
+class Fields:
+    @property
+    def p(self): return Spin()
+    def __getattr__(self, name): return Fields() if name == 'f' else name * 2
+    def __getitem__(self, key): return [Spin()] if key == 'k' else P()
 
 SOURCES = {
     "str_align": "result = (format('ab', '<5'), format('ab', '>5'), format('ab', '^5'), format('ab', '*^6'), format('ab', '5'))",
@@ -94,6 +99,7 @@ SOURCES = {
     "str_format_extra_args": "result = '{0}'.format(1, 2, x=3)",
     "format_map_missing": "result = '{a}'.format_map({})",
     "format_map_subclass": "result = '{a}|{b!r:>4}|{c}'.format_map(Defaulting(a=[Spin()], b=Spin()))",
+    "format_field_lookup": "result = '{0.p!r:>3}|{0.f.g}|{0[k]}|{0[1]:<}|{k.p!s}|{k[x].y[1]}'.format(Fields(), k=Fields())",
     "fstring_format_spec": 'w = 6\nresult = f\'{3.14159:{w}.2f}|{"x"!r:^5}\'',
     "format_builtin_default": "result = (format(5), format('a'), format(None))",
     "str_format_conversion_spec": "result = '{0!r:>5}|{0!s:*^3}|{1!a:.4}|{1!r}'.format(P(), U())",

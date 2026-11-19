@@ -141,7 +141,7 @@ Cases == {"str_align", "str_precision", "str_equal_align", "str_sign", "str_type
           "str_format_conversion_spec", "str_format_conversion_str_raises", "str_format_conversion_bad_repr",
           "str_format_conversion_nested", "str_format_conversion_nested_raises", "str_format_containers",
           "str_format_container_raises", "str_format_container_nested", "str_format_container_nested_spec",
-          "format_map_subclass"}
+          "format_map_subclass", "format_field_lookup"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 1234567}, align : {"", "<", ">", "^", "=", "*^"}, sign : Signs,
              alt : {"", "#"}, zero : {"", "0"}, width : {0, 9}, group : Groups, type : {"", "d", "b", "x", "X", "o"}]
             \cup [kind : {"float"}, num : {0, 20, -1, 9875, 4}, align : {"", "<", "^", "="}, sign : Signs,
@@ -227,6 +227,7 @@ Case(c) ==
       [] c = "str_format_extra_args" -> "'1'"
       [] c = "format_map_missing" -> "KeyError: 'a'"
       [] c = "format_map_subclass" -> "'[sp]|  sp|cc'"
+      [] c = "format_field_lookup" -> "' sp|gg|[sp]|P[<]|sp|5'"
       [] c = "fstring_format_spec" -> "\"  3.14| 'x' \""
       [] c = "format_builtin_default" -> "('5', 'a', 'None')"
       [] c = "str_format_conversion_spec" -> "'  P()|*p*|\\\\xe9|\\xe9u'"

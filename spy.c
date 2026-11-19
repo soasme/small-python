@@ -13740,7 +13740,40 @@ static SPYValue *repr_base(SPYContext *, SPYValue *);
 typedef struct {
     size_t argc; SPYValue *const *argv; SPYValue *keywords; AutoNumber numbering;
     int suspend; size_t resume, spec_end; SPYValue *pending, *pending_spec; unsigned conversion;
+    /* A field's lookup by looking, its object so far field, from field_at
+     * of the field name at field_name (format_lookup). */
+    SPYValue *looking, *field; size_t field_name, field_at, looking_argc;
 } FormatArgs;
+static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
+static int machine_function(SPYContext *, SPYValue *);
+static int default_hook(SPYValue *, int, int);
+static ALWAYS_INLINE int plain_instance(SPYValue *);
+/* The Python function that a format field's step ch ('[' or '.', or 0
+ * for a keyword field) of key on object calls, on the machine as its job
+ * suspends (format_from): a Python __getitem__, a dict subclass's
+ * __missing__ of a missing key, a property's getter, or a __getattr__
+ * after an attribute lookup that runs no Python fails; else NULL, the
+ * step's lookup running here. *argc is its argument count. */
+static NO_INLINE SPYValue *format_lookup(SPYContext *c, SPYValue *object, int ch, SPYValue *key, size_t *argc) {
+    *argc = 2;
+    if (ch != '.') {
+        SPYValue *function = item_function(c, object, "__getitem__"), *dict = function ? NULL : builtin_value(c, object, SPY_DICT);
+        if (function || !dict || object->type != SPY_INSTANCE) return function;
+        ptrdiff_t found = map_find(dict, key);
+        return found < 0 && !c->error_type[0] ? item_function(c, object, "__missing__") : NULL;
+    }
+    if (!plain_instance(object)) return NULL;
+    SPYValue *cls = object->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
+    if (hook && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) return NULL;
+    const char *name = key->as.string.data;
+    SPYValue *attr = class_lookup(cls, name);
+    if (attr && attr->type == SPY_PROPERTY) {
+        *argc = 1;
+        return attr->as.property.get && machine_function(c, attr->as.property.get) ? attr->as.property.get : NULL;
+    }
+    SPYValue *fallback = attr || name_local(object, name) ? NULL : class_lookup(cls, "__getattr__");
+    return fallback && machine_function(c, fallback) ? fallback : NULL;
+}
 static int64_t format_field_index(SPYContext *c, const char *text, size_t start, size_t end) {
     if (start >= end) return -1;
     int64_t accumulator = 0;
@@ -13752,8 +13785,17 @@ static int64_t format_field_index(SPYContext *c, const char *text, size_t start,
     }
     return accumulator;
 }
+/* The object of a field whose name is text from start to end, or c->unbound
+ * when a step's lookup suspends the job (format_lookup): the object so far
+ * pending, the key pending_spec, the function looking, the next step at
+ * field_at. A field resumes from args->field. */
 static SPYValue *format_field_object(SPYContext *c, const char *text, size_t start, size_t end, FormatArgs *args) {
-    size_t i = start;
+    size_t i = start, count;
+    SPYValue *object, *function;
+    if (args->field && args->field_name == start) {
+        object = args->field; args->field = NULL; i = args->field_at;
+        goto steps;
+    }
     while (i < end && text[i] != '[' && text[i] != '.') i++;
     int64_t index = format_field_index(c, text, start, i);
     if (index == -2) return NULL;
@@ -13765,16 +13807,21 @@ static SPYValue *format_field_object(SPYContext *c, const char *text, size_t sta
     if (numeric && numbering->state != 2 && !empty)
         return spy_error(c, "ValueError", "cannot switch from automatic field numbering to manual field specification");
     if (empty) index = numbering->number++;
-    SPYValue *object;
     if (index == -1) {
         SPYValue *key = spy_string(c, text + start, i - start);
         if (!key) return NULL;
+        if (args->suspend && args->keywords && (function = format_lookup(c, args->keywords, 0, key, &count))) {
+            args->pending = spy_retain(args->keywords); args->pending_spec = key; args->looking = function;
+            args->field_name = start; args->field_at = i; args->looking_argc = count;
+            return c->unbound;
+        }
         object = args->keywords ? get_index(c, args->keywords, key) : missing_key(c, key);
         spy_release(key);
     } else if (!args->argv) return spy_error(c, "ValueError", "Format string contains positional fields");
     else if ((uint64_t)index >= args->argc)
         return errorf(c, "IndexError", "Replacement index %lld out of range for positional args tuple", (long long)index);
     else object = spy_retain(args->argv[index]);
+steps:
     while (object && i < end) {
         char ch = text[i++];
         size_t name = i, name_end;
@@ -13793,6 +13840,11 @@ static SPYValue *format_field_object(SPYContext *c, const char *text, size_t sta
         }
         if (name == name_end) { spy_release(object); return spy_error(c, "ValueError", "Empty attribute in format string"); }
         SPYValue *key = item >= 0 ? spy_int(c, item) : spy_string(c, text + name, name_end - name), *next = NULL;
+        if (key && args->suspend && (function = format_lookup(c, object, ch, key, &count))) {
+            args->pending = object; args->pending_spec = key; args->looking = function;
+            args->field_name = start; args->field_at = i; args->looking_argc = count;
+            return c->unbound;
+        }
         if (key) next = ch == '.' ? attribute(c, object, key->as.string.data) : get_index(c, object, key);
         spy_release(key); spy_release(object); object = next;
     }
@@ -13855,6 +13907,8 @@ static int format_replacement(SPYContext *c, Buffer *out, const char *text, size
     } else if (ch != '}') { spy_error(c, "ValueError", "expected '}' before end of string"); return -1; }
     *pos = at;
     SPYValue *object = format_field_object(c, text, name, name_end, args), *format = NULL, *found[2];
+    /* The field's lookup suspends the job, which takes it up again at its brace. */
+    if (object == c->unbound) { args->resume = name - 1; return 4; }
     /* A container formats by an empty spec as by !s. */
     unsigned converting = conversion ? conversion : object && (repr_container(object) || repr_base(c, object)) && !expanding && spec == spec_end ? 's' : 0;
     SPYValue *converter = converting == 's' ? c->types[SPY_STRING] : c->field_calls[0];
@@ -13914,7 +13968,7 @@ static int format_markup(SPYContext *c, Buffer *out, const char *text, size_t po
 }
 static SPYValue *string_format(SPYContext *c, SPYValue *self, size_t argc, SPYValue *const *argv, SPYValue *keywords, int positional) {
     static SPYValue *const none[1];
-    FormatArgs args = {argc, positional ? (argv ? argv : none) : NULL, keywords, {0, 0}, 0, 0, 0, NULL, NULL, 0};
+    FormatArgs args = {argc, positional ? (argv ? argv : none) : NULL, keywords, {0, 0}, 0, 0, 0, NULL, NULL, 0, NULL, NULL, 0, 0, 0};
     /* PEP 3101 allows two levels: "{0:{1}}" works, "{0:{1:{2}}}" does not. */
     return format_build(c, self->as.string.data, 0, self->as.string.len, &args, 2);
 }
@@ -27650,9 +27704,8 @@ static int set_slot(SPYValue *, int *, int *);
 static SPYValue *str_format_map(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv, at most 8, is str.format (1) or str.format_map (2) of
- * *self, a str: bound, or argv[0] (*skip 1), format_map's argument after
- * it a dict, or a dict subclass's instance with no Python __getitem__;
- * else 0. */
+ * *self, a str: bound, or argv[0] (*skip 1), with format_map's mapping
+ * after it; else 0. */
 static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **self,
                                    size_t *skip) {
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
@@ -27667,19 +27720,19 @@ static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, 
                       !strcmp(callee->as.native.name->as.string.data, "format"))))
         *self = argv[(*skip = 1) - 1];
     if (!*self || (*self)->type != SPY_STRING) return 0;
-    if (!map) return 1;
-    SPYValue *mapping = argc == *skip + 1 ? argv[*skip] : NULL;
-    return mapping && (mapping->type == SPY_DICT || (builtin_value(c, mapping, SPY_DICT) && !store_function(c, mapping, "__getitem__"))) ? 2 : 0;
+    return !map ? 1 : argc == *skip + 1 ? 2 : 0;
 }
 /* Whether a field may reach an instance with a Python __format__
  * (format_job) through one of the argc values argv, of str.format, or
- * the values of argv[0]'s dict, of str.format_map (kind 2): an
+ * the values of the dict argv[0], of str.format_map (kind 2), whose
+ * lookups may call Python when it is an instance (format_lookup): an
  * instance or a container (repr_container). */
-static NO_INLINE int format_instances(SPYContext *c, int kind, size_t argc, SPYValue *const *argv) {
+static NO_INLINE int format_instances(int kind, size_t argc, SPYValue *const *argv) {
     const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
                               UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET;
     if (kind == 2) {
-        SPYValue *dict = builtin_value(c, argv[0], SPY_DICT);
+        SPYValue *dict = argv[0];
+        if (dict->type != SPY_DICT) return dict->type == SPY_INSTANCE;
         for (size_t i = 0; i < map_used(dict); i++)
             if (map_items(dict)[i].key && UINT64_C(1) << map_items(dict)[i].value->type & reaching) return 1;
         return 0;
@@ -27692,7 +27745,7 @@ static NO_INLINE int format_reaches(SPYContext *c, SPYValue *callee, int method,
     SPYValue *self;
     size_t skip;
     int kind = format_target(c, callee, method, argc, argv, &self, &skip);
-    return kind && format_instances(c, kind, argc - skip, argv + skip);
+    return kind && format_instances(kind, argc - skip, argv + skip);
 }
 /* Whether callee, method number method of it or -1, may be str.format or
  * str.format_map (format_target), tested before anything slower. */
@@ -29654,7 +29707,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     SPYValue *target;
     size_t fields;
     if (calls && format_callee(callee, -1) && format_target(c, callee, -1, positional, argv, &target, &fields) == 1 && argc <= 8 &&
-        format_instances(c, 1, argc - fields, argv + fields)) {
+        format_instances(1, argc - fields, argv + fields)) {
         /* str.format, as a plain call's step (stack_call), with keywords. */
         SPYValue *keywords = entries_dict(c, kw, kwc), *args[8];
         for (size_t i = 0; i < positional; i++) args[i] = spy_retain(argv[i]);
@@ -34001,7 +34054,8 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, Machine *m, SPYValue 
     }
     if (!strcmp(method, "__len__")) return length_result(c, result, &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "reversed")) return length_result(c, result, &length) ? NULL : reversed_iterator(c, v, length);
-    if (!strcmp(method, "next") || !strcmp(method, "write") || !strcmp(method, "flush")) return spy_retain(result);
+    /* A format field's lookup ("field", format_from) gives its object. */
+    if (!strcmp(method, "next") || !strcmp(method, "write") || !strcmp(method, "flush") || !strcmp(method, "field")) return spy_retain(result);
     int number = !strcmp(method, "hex") ? B_HEX : !strcmp(method, "oct") ? B_OCT : !strcmp(method, "bin") ? B_BIN : !strcmp(method, "chr") ? B_CHR : -1;
     if (number >= 0) {
         SPYValue *index = index_result(c, v, spy_retain(result)), *value = index ? builtin(c, 1, &index, (void *)(intptr_t)number) : NULL;
@@ -43231,8 +43285,10 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
  * position, the text so far, inside a nested spec its field's object,
  * the spec's end and the spec so far (else None, 0, ""), the keywords'
  * dict or None, and a field's conversion's spec, or None before a nested
- * one, its character and the nested spec's end (else None), from its next
- * field on: 1 at a field's Python __format__
+ * one, its character and the nested spec's end (else None), and a field's
+ * lookup (else None: the field name's position and the next step's, then
+ * with the object it found, text_returned), from its next field on: at a
+ * field's Python lookup (format_lookup), 1 at a field's Python __format__
  * (format_function), or its conversion's __str__ or __repr__
  * (conversion_method), the call *function with *env to enter
  * (CALL_CHECKED), the state, c->replacing, the method's name and the
@@ -43242,10 +43298,18 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
     SPYValue **items = state->as.seq.items, *self = items[0], *args = items[1];
     FormatArgs format = {args == c->none ? 0 : args->as.seq.len, args == c->none ? NULL : args->as.seq.len ? args->as.seq.items : none,
                          items[9] == c->none ? NULL : items[9],
-                         {(int)items[2]->as.integer_data.small, items[3]->as.integer_data.small}, 1, 0, 0, NULL, NULL, 0};
+                         {(int)items[2]->as.integer_data.small, items[3]->as.integer_data.small}, 1, 0, 0, NULL, NULL, 0,
+                         NULL, NULL, 0, 0, 0};
     size_t pos = (size_t)items[4]->as.integer_data.small;
     int status = 0, nested;
     *function = NULL;
+    if (items[11]->type == SPY_TUPLE) {
+        /* The field takes up its lookup's object. */
+        SPYValue **found = items[11]->as.seq.items;
+        format.field_name = (size_t)found[0]->as.integer_data.small; format.field_at = (size_t)found[1]->as.integer_data.small;
+        format.field = spy_retain(found[2]);
+        spy_release(items[11]); items[11] = spy_none(c);
+    }
     for (;;) {
         /* Inside a nested spec, which may end with its field's call. */
         Buffer out = {.ctx = c};
@@ -43253,7 +43317,31 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         status = append(&out, text->as.string.data, text->as.string.len);
         if (!status) status = format_markup(c, &out, self->as.string.data, pos, nested ? (size_t)items[7]->as.integer_data.small :
                                             self->as.string.len, &format, 2 - nested);
+        spy_release(format.field); format.field = NULL;
         if (status < 0 || (!status && !nested)) return format_finish(c, &out, status);
+        if (status == 4) {
+            /* A field's lookup is the call, the field taken up again with
+             * what it returns (text_returned). */
+            SPYValue *done = format_finish(c, &out, 0), *object = format.pending, *key = format.pending_spec;
+            SPYValue *parts[] = {int_value(c, format.numbering.state), int_value(c, format.numbering.number), int_value(c, (int64_t)format.resume)};
+            SPYValue *at[] = {int_value(c, (int64_t)format.field_name), int_value(c, (int64_t)format.field_at)};
+            SPYValue *place = at[0] && at[1] ? spy_tuple(c, 2, at) : NULL;
+            release_all(2, at);
+            for (int i = 0; i < 3; i++) { spy_release(items[2 + i]); items[2 + i] = parts[i]; }
+            spy_release(items[nested ? 8 : 5]); items[nested ? 8 : 5] = done ? done : spy_string(c, "", 0);
+            spy_release(items[11]); items[11] = place ? place : spy_none(c);
+            SPYValue *args[] = {spy_retain(object), key};
+            if (format.looking_argc == 1) spy_release(key);
+            if (!done || !parts[0] || !parts[1] || !parts[2] || !place ||
+                machine_push_all(c, m, 4, (SPYValue *[]){spy_retain(state), spy_retain(c->replacing), spy_string(c, "field", 5), object})) {
+                if (!done || !parts[0] || !parts[1] || !parts[2] || !place) spy_release(object);
+                release_all(format.looking_argc, args);
+                return NULL;
+            }
+            if (!(*env = function_env(c, format.looking, format.looking_argc, args, NULL, 1))) return NULL;
+            c->entering_init = *function = format.looking; c->entering_kind = CALL_CHECKED;
+            return spy_retain(c->types[SPY_STRING]);
+        }
         if (status == 2) {
             /* A nested spec's markup follows. */
             object = format.pending; pos = format.resume;
@@ -43371,10 +43459,11 @@ static NO_INLINE SPYValue *format_job(SPYContext *c, Machine *m, SPYValue *calle
     SPYValue *args = map ? spy_none(c) : spy_tuple(c, argc - skip, argv + skip), *function, *result = NULL;
     SPYValue *state = args && !c->error_type[0] ? spy_list(c) : NULL, *mapping = map ? argv[skip] : keywords;
     SPYValue *parts[] = {spy_retain(self), args, int_value(c, 0), int_value(c, 0), int_value(c, 0), spy_string(c, "", 0),
-                         spy_none(c), int_value(c, 0), spy_string(c, "", 0), mapping ? spy_retain(mapping) : spy_none(c), spy_none(c)};
+                         spy_none(c), int_value(c, 0), spy_string(c, "", 0), mapping ? spy_retain(mapping) : spy_none(c), spy_none(c),
+                         spy_none(c)};
     release_all(argc, argv);
-    for (int i = 0; i < 11; i++) if (!parts[i] || !state || sequence_append(c, state, parts[i])) state = NULL;
-    release_all(11, parts);
+    for (int i = 0; i < 12; i++) if (!parts[i] || !state || sequence_append(c, state, parts[i])) state = NULL;
+    release_all(12, parts);
     if (state) result = format_from(c, m, state, &function, env);
     spy_release(state);
     return result;
@@ -43428,8 +43517,15 @@ static NO_INLINE Machine *text_returned(SPYContext *c, Machine *m, SPYValue *tex
     if (m->stack[m->len - 2]->type != SPY_LIST) return print_returned(c, m, text);
     spy_release(machine_pop(m));
     SPYValue *state = machine_pop(m), *function, *env, **items = state->as.seq.items;
-    /* A format job's text takes the field's. */
+    /* A format job's text takes the field's; a field's lookup gives its
+     * object to the field (format_from). */
     int format = items[0]->type == SPY_STRING;
+    if (format && text && items[11]->type == SPY_TUPLE) {
+        SPYValue **at = items[11]->as.seq.items, *found = spy_tuple(c, 3, (SPYValue *[]){at[0], at[1], text});
+        spy_release(text);
+        text = found ? spy_string(c, "", 0) : NULL;
+        if (found) { spy_release(items[11]); items[11] = found; }
+    }
     SPYValue *joined = NULL, *part = text ? builtin_value(c, text, SPY_STRING) : NULL;
     int nesting = 0;
     if (format && part && items[10] != c->none) {

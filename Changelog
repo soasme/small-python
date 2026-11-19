@@ -533,6 +533,7 @@ Unreleased (0.10.0):
 - `exec()` and `eval()` code, its functions and a class body call a namespace's Python `__getitem__`, a namespace key's Python `__eq__`, and a `__prepare__` namespace's lookups of `__annotations__` without nesting on the C stack
 - an import at module level reads `__lazy_modules__` through the `__getitem__` of `exec()` globals that are a `dict` subclass, once per imported module
 - `str.format_map()` of a `dict` subclass calls its values' Python `__format__` and `__repr__` without nesting on the C stack
+- A format field's `.attr` and `[key]` call a Python property getter, `__getattr__`, `__getitem__` or `__missing__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
 
