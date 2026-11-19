@@ -586,6 +586,7 @@ static int callable_value(SPYContext *, SPYValue *);
 static SPYValue *code_names(SPYContext *, SPYValue *, Node *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
 static SPYValue *hash_function(SPYContext *, SPYValue *);
+static SPYValue *hash_self(SPYValue *);
 static SPYValue *module_definition(SPYContext *, SPYValue *, const char *);
 static int hash_reaches(SPYContext *, SPYValue *, int);
 static int key_reaches(SPYContext *, SPYValue *);
@@ -17762,7 +17763,7 @@ static NO_INLINE int keyword_compare(SPYContext *c, SPYValue *fn, SPYValue *env,
 static NO_INLINE int keyword_hash(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i) {
     Machine *m = binding_machine(c, fn);
     SPYValue *key = map_items(keywords)[i].key, *function = m ? hash_function(c, key) : NULL;
-    return function && keyword_call_k(c, m, function, 1, (SPYValue *[]){spy_retain(key)}, keyword_hashed, fn, env, argc, keywords, i, -1,
+    return function && keyword_call_k(c, m, function, 1, (SPYValue *[]){spy_retain(hash_self(key))}, keyword_hashed, fn, env, argc, keywords, i, -1,
                                       spy_none(c));
 }
 /* The **kwargs dict of fn binding into env, borrowed, or NULL. */
@@ -26586,7 +26587,7 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
     }
     if (s->keyed == KEY_HASH) {
         SPYValue *function = hash_function(c, s->item);
-        item = spy_retain(s->item);
+        item = spy_retain(hash_self(s->item));
         if ((*env = function_env(c, function, 1, &item, NULL, 1))) return spy_retain(function);
         hash_failed(c, s->result, s->item);
         return NULL;
@@ -29989,7 +29990,15 @@ static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char
 static SPYValue *hash_function(SPYContext *c, SPYValue *key) {
     SPYValue *function = key->type == SPY_INSTANCE && key != c->hashed && (!key->as.map.base || !builtin_base(c, key, "__hash__", NULL)) ?
                          class_lookup(key->as.map.parent, "__hash__") : NULL;
+    /* A method object stays bound to its own self (hash_self). */
+    if (function && function->type == SPY_METHOD) function = function->as.method.function;
     return function && machine_function(c, function) ? function : NULL;
+}
+/* What key's Python __hash__ (hash_function) is called with: key, or the
+ * self of the method object its class holds, borrowed. */
+static SPYValue *hash_self(SPYValue *key) {
+    SPYValue *held = key->type == SPY_INSTANCE ? class_lookup(key->as.map.parent, "__hash__") : NULL;
+    return held && held->type == SPY_METHOD ? held->as.method.self : key;
 }
 /* The Python __hash__, a machine function, that hashing key calls first
  * (hash_entered) within depth nested tuples; a sealed tuple holds no
@@ -30054,7 +30063,7 @@ static SPYValue *tuple_next(SPYContext *c, Machine *m, SPYValue **env, int64_t *
         if (item->type == SPY_TUPLE && hash_entered(c, item)) {
             if (tuple_push(c, m, item, 0, HASH_SEED)) break;
         } else if ((function = hash_function(c, item))) {
-            if ((*env = function_env(c, function, 1, &item, NULL, 0))) return spy_retain(function);
+            if ((*env = function_env(c, function, 1, (SPYValue *[]){hash_self(item)}, NULL, 0))) return spy_retain(function);
             break;
         } else if (hash_value(c, item, &part) || tuple_fold(c, m, part)) break;
     }
@@ -30134,7 +30143,7 @@ static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, s
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_HASH;
     if (key->type == SPY_TUPLE ? !tuple_push(c, m, key, 0, HASH_SEED) && (function = tuple_next(c, m, env, &hash))
-                               : !!(*env = function_env(c, function, 1, &key, NULL, 0)))
+                               : !!(*env = function_env(c, function, 1, (SPYValue *[]){hash_self(key)}, NULL, 0)))
         return key->type == SPY_TUPLE ? function : spy_retain(function);
     /* A __hash__ that cannot bind, or an item that cannot hash, fails again
      * in C, as the step reports it. */
@@ -43087,7 +43096,7 @@ static SPYValue *keys_from(SPYContext *c, Machine *m, SPYValue *d, SPYValue *key
         int64_t hash;
         if (function) {
             if (!(state = parts_tuple(c, 4, (SPYValue *[]){d, keywords, int_value(c, (int64_t)i), spy_none(c)}))) return NULL;
-            return callk(c, m, function, 1, (SPYValue *[]){spy_retain(entry->key)}, keys_hashed, state);
+            return callk(c, m, function, 1, (SPYValue *[]){spy_retain(hash_self(entry->key))}, keys_hashed, state);
         }
         if (map_hash(c, d, entry->key, &hash)) { spy_release(d); spy_release(keywords); return NULL; }
         if (keys_put(c, m, d, keywords, i, hash)) return NULL;

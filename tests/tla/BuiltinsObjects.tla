@@ -55,7 +55,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
 
 Cases == {"getattr_nonstr", "property_get_calls", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
-          "dir_hook_bad", "callable_forms", "id_identity", "hash_big", "hash_bad", "hash_eq_only",
+          "dir_hook_bad", "callable_forms", "id_identity", "hash_big", "hash_bad", "hash_eq_only", "hash_method_object",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
           "type_bad_dict", "type_bad_name", "type_qualname_kw", "isinstance_hook", "isinstance_bad",
           "issubclass_bad_first", "issubclass_bad_second", "object_no_attrs", "object_args",
@@ -104,6 +104,8 @@ Case(c) ==
       [] c = "hash_big" -> "True"
       [] c = "hash_bad" -> "TypeError: __hash__ method should return an integer"
       [] c = "hash_eq_only" -> "TypeError: unhashable type: 'Eq'"
+      \* A class's __hash__ that is a method object is called with no argument.
+      [] c = "hash_method_object" -> "(7, 1, True, [0, 0, 0, 0, 0])"
       [] c = "hash_numeric" -> "(True, -2, -2)"
       \* A tuple hashes its items in order, depth first, and keeps its hash;
       \* an item's error keeps none.

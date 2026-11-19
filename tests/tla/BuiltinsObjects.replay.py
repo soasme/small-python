@@ -79,6 +79,8 @@ SOURCES = {
     "hash_big": 'result = hash(H()) == hash(2 ** 70)',
     "hash_bad": 'result = hash(HN())',
     "hash_eq_only": 'result = hash(Eq())',
+    "hash_method_object": "log = []\nclass Hasher:\n    def hash(self, *args):\n        for _ in (): pass\n        log.append(len(args)); return 7\n"
+                          "class HM:\n    __hash__ = Hasher().hash\nk = HM()\nresult = (hash(k), {k: 1}[k], k in {k}, log)",
     "hash_tuple": "class T:\n    def __init__(s, v): s.v = v\n    def __hash__(s):\n        for _ in range(2): pass\n        log.append(s.v)\n        return s.v\n"
                   "log = []\nt = (T(1), (T(2), 3))\nresult = (hash(t) == hash((1, (2, 3))), hash(t) == hash((1, (2, 3))), log)",
     "hash_tuple_fails": "class R:\n    def __hash__(s):\n        for _ in range(2): pass\n        log.append(0)\n        raise ValueError('r')\n"

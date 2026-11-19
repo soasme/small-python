@@ -520,6 +520,7 @@ Unreleased (0.10.0):
 - an ordering of a list or tuple and its subclass's instance on the right calls the items' Python methods without nesting on the C stack
 - a list's or tuple's subclass whose comparison returns NotImplemented leaves the other operand's builtin method, which compares that operand's items first
 - a mappingproxy's `__eq__`, `__ne__` and `__contains__`, and a comparison a list's or tuple's subclass leaves to its builtin, call the items' Python methods without nesting on the C stack
+- a class whose `__hash__` is a method object runs it without nesting on the C stack when its instances are stored or looked up
 
 2026-11-10 0.9.0:
 
