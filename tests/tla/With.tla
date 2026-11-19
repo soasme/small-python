@@ -17,8 +17,10 @@
 (* A single program runs `with M(): BODY` in a function, or in a         *)
 (* generator that yields once before BODY, where M's                       *)
 (* __enter__ succeeds, raises ValueError, or is missing; its __exit__      *)
-(* returns False, returns True, raises RuntimeError, or is missing; and    *)
-(* BODY completes, raises KeyError, or returns. A nested program runs      *)
+(* returns False, returns True, returns an object whose __bool__ is True,  *)
+(* raises RuntimeError, or is missing; both are plain methods or read     *)
+(* through descriptors whose __get__ loops before it binds the method;    *)
+(* and BODY completes, raises KeyError, or returns. A nested program runs  *)
 (* `with M(), N(): pass` where N's __enter__ raises ValueError and M's     *)
 (* __exit__ returns False or True. Every method logs a word; the outcome   *)
 (* is the log followed by "done", "returned", or the exception's name,    *)
@@ -27,8 +29,8 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"single"}, frame : {"function", "generator"}, enter : {"ok", "raise", "missing"}, exit : {"false", "true", "raise", "missing"},
-             body : {"normal", "raise", "return"}]
+Programs == [part : {"single"}, frame : {"function", "generator"}, enter : {"ok", "raise", "missing"},
+             exit : {"false", "true", "object", "raise", "missing"}, reads : {"plain", "descriptor"}, body : {"normal", "raise", "return"}]
             \cup [part : {"nested"}, exit : {"false", "true"}]
 
 VARIABLES program, outcome
@@ -42,7 +44,7 @@ Single(p) ==
     ELSE LET raised == p.body = "raise"
              start == "enter body exit:" \o (IF raised THEN "KeyError" ELSE "None") \o " "
              final == CASE p.exit = "raise" -> "RuntimeError at with"
-                        [] raised /\ p.exit = "true" -> "done"
+                        [] raised /\ p.exit \in {"true", "object"} -> "done"
                         [] raised -> "KeyError at raise"
                         [] p.body = "return" -> "returned"
                         [] OTHER -> "done"

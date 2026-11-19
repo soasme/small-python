@@ -28784,8 +28784,79 @@ static void with_entered(SPYContext *c, Machine *m, Instruction *ins, SPYValue *
  * a Python __enter__, owned, with its env, is a call to enter on the
  * machine (CALL_ENTER), the __exit__ on the stack under it; else NULL,
  * with the statement's block pushed, or an error. */
+static SPYValue *with_read(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The read of state's manager's __exit__, while state, a list, holds only
+ * the manager, else of its __enter__: a descriptor's Python getter is m's
+ * call (callk), the statement going on with what it returns (with_read). */
+static SPYValue *with_next(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue *manager = state->as.seq.items[0];
+    const char *name = state->as.seq.len == 1 ? "__exit__" : "__enter__";
+    SPYValue *descriptor = class_lookup(value_class(c, manager), name), *get = descriptor ? descriptor_getter(c, descriptor) : NULL;
+    if (!get) return with_read(c, m, state, special_method(c, manager, name));
+    if (descriptor->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(manager)}, with_read, state);
+    return callk(c, m, get, 3, (SPYValue *[]){spy_retain(descriptor), spy_retain(manager), spy_retain(value_class(c, manager))}, with_read, state);
+}
+/* What with_next's read returned in value, kept in state after the
+ * manager, then the call of the __enter__ read, on m too (callk), whose
+ * value enters the statement's block (with_entered): the step then ends,
+ * c->stepped. */
+static SPYValue *with_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
+    SPYValue **items = state->as.seq.items;
+    size_t len = state->as.seq.len;
+    if (len == 3 && value) { with_entered(c, m, &m->code->items[m->pc - 1], spy_retain(items[1]), value); value = NULL; }
+    else if (!value && !c->error_type[0]) manager_error(c, items[0], 0, len == 2);
+    if (!value || sequence_append(c, state, value)) {
+        spy_release(value); spy_release(state);
+        return c->error_type[0] ? NULL : c->stepped;
+    }
+    spy_release(value);
+    if (len == 1) return with_next(c, m, state);
+    SPYValue *enter = spy_retain(state->as.seq.items[2]), *result = callk(c, m, enter, 0, NULL, with_read, state);
+    spy_release(enter);
+    return result;
+}
+/* What the Python __bool__ or __len__ of an __exit__'s result returned,
+ * the result and whether __bool__ in held: its truth, pushed for
+ * BC_END_WITH to run again. */
+static SPYValue *with_truth_returned(SPYContext *c, Machine *m, SPYValue *held, SPYValue *result) {
+    int truth = result ? truth_result(c, held->as.seq.items[0], held->as.seq.items[1] == c->booleans[1], result) : 0;
+    spy_release(held);
+    /* A wrong result's error has the exception being suppressed as its context. */
+    if (c->error_type[0]) { materialize_error(c); return NULL; }
+    m->pc--;
+    machine_push(c, m, spy_bool(c, truth));
+    return c->stepped;
+}
+/* The truth of value, an __exit__'s result that an exception's
+ * suppression tests: 1 when it calls no Python; else 0 with value taken
+ * and its Python __bool__ or __len__ m's call (callk), returning into
+ * with_truth_returned. */
+static int with_truth(SPYContext *c, Machine *m, SPYValue *value) {
+    int length = 0;
+    SPYValue *function = truth_function(c, value, &length), *held = function ? parts_tuple(c, 2, (SPYValue *[]){spy_retain(value), spy_bool(c, !length)}) : NULL;
+    if (!function) return 1;
+    if (held) callk(c, m, function, 1, (SPYValue *[]){value}, with_truth_returned, held);
+    else spy_release(value);
+    return 0;
+}
+/* Whether manager's __exit__ or __enter__ is a descriptor whose read calls
+ * Python (with_next). */
+static int with_reads(SPYContext *c, SPYValue *manager) {
+    SPYValue *cls = manager->type == SPY_INSTANCE ? manager->as.map.parent : NULL, *exit = cls ? class_lookup(cls, "__exit__") : NULL;
+    SPYValue *enter = cls ? class_lookup(cls, "__enter__") : NULL;
+    return (exit && descriptor_getter(c, exit)) || (enter && descriptor_getter(c, enter));
+}
 static NO_INLINE SPYValue *with_enter(SPYContext *c, Machine *m, Instruction *ins, SPYValue **env) {
-    SPYValue *manager = machine_pop(m), *exit = special_method(c, manager, "__exit__");
+    SPYValue *manager = machine_pop(m), *state;
+    if (UNLIKELY(with_reads(c, manager))) {
+        if ((state = spy_list(c)) && sequence_append(c, state, manager)) { spy_release(state); state = NULL; }
+        spy_release(manager);
+        /* The block pushed at the step's end (with_read) is the step's. */
+        m->pc = (size_t)(ins - m->code->items) + 1;
+        if (state) with_next(c, m, state);
+        return NULL;
+    }
+    SPYValue *exit = special_method(c, manager, "__exit__");
     SPYValue *enter = exit ? special_method(c, manager, "__enter__") : NULL, *function = NULL, *value = NULL;
     if (!enter && !c->error_type[0]) manager_error(c, manager, 0, exit != NULL);
     spy_release(manager);
@@ -34125,7 +34196,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_END_WITH) {
             a = machine_pop(m);
             Block *block = &m->blocks[m->block_len - 1];
+            if (UNLIKELY(block->error && a->type != SPY_BOOL && (a->type == SPY_INSTANCE || metaclassed(a)))) {
+                m->pc = pc;
+                if (!with_truth(c, m, a)) { a = NULL; if (c->k_fn) goto enter_k; break; }
+            }
             int suppress = block->error && truthy(a);
+            materialize_error(c);
             flow = (Result){suppress ? FLOW_NORMAL : block->flow, block->value};
             block->value = NULL;
             /* The exception leaves the frame from the line that raised it. */
@@ -34136,7 +34212,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             pop_block(c, m, &f); break;
         }
         CASE(BC_WITH)
-            if (!(value = with_enter(c, m, ins, &callee_env))) break;
+            if (!(value = with_enter(c, m, ins, &callee_env))) {
+                if (c->k_fn) goto enter_k;
+                break;
+            }
             special = CALL_ENTER;
             goto enter_special;
         CASE(BC_INCREMENT) increment_step(c, &f, n); break;

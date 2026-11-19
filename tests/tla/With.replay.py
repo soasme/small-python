@@ -6,7 +6,24 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
-def manager(log, name, enter, exit, suffix=""):
+class Truthy:
+    def __bool__(self):
+        for _ in range(2):
+            pass
+        return True
+
+
+class Reads:
+    def __init__(self, method):
+        self.method = method
+
+    def __get__(self, obj, owner):
+        for _ in range(2):
+            pass
+        return self.method.__get__(obj, owner)
+
+
+def manager(log, name, enter, exit, suffix="", reads="plain"):
     body = {}
     if enter != "missing":
         def __enter__(self):
@@ -20,13 +37,15 @@ def manager(log, name, enter, exit, suffix=""):
             log.append("exit%s:%s" % (suffix, "None" if kind is None else kind.__name__))
             if exit == "raise":
                 raise RuntimeError
-            return exit == "true"
+            return Truthy() if exit == "object" else exit == "true"
         body["__exit__"] = __exit__
+    if reads == "descriptor":
+        body = {name: Reads(method) for name, method in body.items()}
     return type(name, (), body)()
 
 
 def single(p, log):
-    m = manager(log, "M", p["enter"], p["exit"])
+    m = manager(log, "M", p["enter"], p["exit"], reads=p["reads"])
     with m:
         log.append("body")
         if p["body"] == "raise":
@@ -37,7 +56,7 @@ def single(p, log):
 
 
 def single_gen(p, log):
-    m = manager(log, "M", p["enter"], p["exit"])
+    m = manager(log, "M", p["enter"], p["exit"], reads=p["reads"])
     with m:
         yield
         log.append("body")

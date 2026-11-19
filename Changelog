@@ -477,6 +477,9 @@ Unreleased (0.10.0):
   reported instead of raising into the code that dropped the target
 - an operator's special method or an `__index__` held as a descriptor or property is read and called
   without nesting on the C stack
+- a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
+  its Python `__bool__` or `__len__`, without nesting on the C stack
+- an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`
 
 2026-11-10 0.9.0:
 
