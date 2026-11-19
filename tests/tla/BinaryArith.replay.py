@@ -88,6 +88,10 @@ SOURCES = {
     "pow3_inverse": "try:\n    pow(2, -1, 4)\nexcept ValueError as e:\n    result = (pow(2, -1, 5), 'ValueError: ' + str(e))",
     "inplace_messages": "class A: pass\na = A()\na <<= 1",
     "inplace_pow_message": "x = 1\nx **= 'a'",
+    "sequence_reflected": "class R:\n    def __init__(self, v): self.v = v\n    def __radd__(self, o):\n        for _ in range(2): pass\n        return self.v\n"
+                          "    __rmul__ = __radd__\n    def __iter__(self): return iter([7])\n    def __index__(self): return 2\n"
+                          "a = [1]; a += R('r')\nb = [1]; c = b; b += R(NotImplemented)\nd = bytearray(b'x'); d *= R(NotImplemented)\n"
+                          "result = (a, b, b is c, d)",
 }
 
 

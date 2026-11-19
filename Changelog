@@ -503,6 +503,7 @@ Unreleased (0.10.0):
 - `type.__or__()` and `type.__ror__()`, also bound, make a union without nesting on the C stack, loading the intrinsics on first use likewise
 - a mappingproxy's `__getitem__()`, `get()`, `keys()`, `values()`, `items()` and `copy()` call a Python mapping's methods, and `x == proxy` its mapping's comparison, without nesting on the C stack
 - `|` of a sentinel and a class, `None` or another sentinel makes its union without nesting on the C stack
+- `list += y` and `*=`, also of a bytearray, call an instance's Python `__radd__` or `__rmul__` without nesting on the C stack
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

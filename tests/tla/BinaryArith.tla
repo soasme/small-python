@@ -9,18 +9,19 @@
 (* calls x's __op__ and, if it is missing or returns NotImplemented, y's   *)
 (* __rop__ (when y's type differs), calling y's __rop__ first when y's     *)
 (* type is a subclass of x's that overrides it; x op= y first tries x's    *)
-(* __iop__; when all decline the operation raises TypeError naming the     *)
-(* operator (op= for an augmented assignment, "** or pow()" for a power)   *)
-(* and both types; a number of a narrower type is widened (int to float to *)
-(* complex) before a built-in operation, true division of ints is a float, *)
-(* floor division and modulo follow the divisor's sign, a negative power   *)
-(* of an int is a float and of a negative float a fractional power is      *)
-(* complex, zero to a negative power and division by zero raise            *)
-(* ZeroDivisionError, results too large for a float raise OverflowError,   *)
-(* and types without an operator (complex with //, %, and bitwise ones,    *)
-(* float with bitwise ones, every number with @) decline it; three-        *)
-(* argument pow() tries each operand's power, int's needing ints, float's  *)
-(* and complex's refusing a modulus.                                       *)
+(* __iop__, a list or bytearray x y's __rop__ for += and *= before its own *)
+(* in-place operation; when all decline the operation raises TypeError     *)
+(* naming the operator (op= for an augmented assignment, "** or pow()" for *)
+(* a power) and both types; a number of a narrower type is widened (int to *)
+(* float to complex) before a built-in operation, true division of ints is *)
+(* a float, floor division and modulo follow the divisor's sign, a         *)
+(* negative power of an int is a float and of a negative float a           *)
+(* fractional power is complex, zero to a negative power and division by   *)
+(* zero raise ZeroDivisionError, results too large for a float raise       *)
+(* OverflowError, and types without an operator (complex with //, %, and   *)
+(* bitwise ones, float with bitwise ones, every number with @) decline it; *)
+(* three- argument pow() tries each operand's power, int's needing ints,   *)
+(* float's and complex's refusing a modulus.                               *)
 (*                                                                         *)
 (* A program evaluates x OP y (or x OP= y) for an instance x of class A    *)
 (* and y of class B, where B is unrelated to A, a subclass of it, or A     *)
@@ -44,7 +45,8 @@ Cases == {"int_float", "true_div", "floor_div", "mod_sign", "divmod", "complex_m
           "str_add_int", "list_add_tuple", "subclass_concat", "bytes_subclass_concat", "int_add_str", "matmul_int", "float_floor_big", "nan_inf", "shift_neg",
           "shift_float", "bitwise_float", "big_mul", "complex_zero_power", "complex_overflow", "complex_matmul",
           "bool_matmul", "complex_shift", "divmod_complex", "complex_zero_div", "pow3_instance", "pow3_methods", "divmod_methods", "builtin_declines", "divmod_descriptor",
-          "pow3_float", "pow3_complex", "pow3_zero", "pow3_inverse", "inplace_messages", "inplace_pow_message"}
+          "pow3_float", "pow3_complex", "pow3_zero", "pow3_inverse", "inplace_messages", "inplace_pow_message",
+          "sequence_reflected"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}]
             \cup [op : Ops, left : Kinds, right : {"same"}, relation : {"same"}]
             \cup [case : Cases]
@@ -158,6 +160,8 @@ Case(c) ==
       [] c = "pow3_inverse" -> "(3, 'ValueError: base is not invertible for the given modulus')"
       [] c = "inplace_messages" -> "TypeError: unsupported operand type(s) for <<=: 'A' and 'int'"
       [] c = "inplace_pow_message" -> "TypeError: unsupported operand type(s) for **=: 'int' and 'str'"
+      \* list and bytearray have no number slots: y's __radd__ comes before their own +=.
+      [] c = "sequence_reflected" -> "('r', [1, 7], True, bytearray(b'xx'))"
 
 Run(p) == IF "case" \in DOMAIN p THEN <<Case(p.case), <<>>>> ELSE Arith(p)
 

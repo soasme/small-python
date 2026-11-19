@@ -31377,6 +31377,14 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
                 self = y; other = x; phase = OPERATOR_REFLECTED;
                 goto found;
             }
+            if (kind == OPERATE_INPLACE && (x->type == SPY_LIST || x->type == SPY_BYTEARRAY) && (token == '+' || token == '*') &&
+                special_dispatch(y)) {
+                /* list and bytearray have no number slots: y's reflected
+                 * method comes before their in-place one (augmented). */
+                if (!(function = item_special(c, y, reflected))) return NULL;
+                self = y; other = x; phase = OPERATOR_REFLECTED;
+                goto found;
+            }
             if (kind == OPERATE_BINARY && repeats(x) && (token != '%' || x->type == SPY_LIST || x->type == SPY_TUPLE) && !subclass(right, left)) {
                 /* A sequence has no number method: an unrelated y's reflected one comes first. */
                 if (!(function = item_special(c, y, reflected))) return NULL;
@@ -31912,6 +31920,9 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             if (function) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
             if (m->len && m->stack[m->len - 1] == c->augmenting) spy_release(machine_pop(m));
             result = function || c->error_type[0] ? NULL : binary(c, o->token, x, y);
+        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_INPLACE && (x->type == SPY_LIST || x->type == SPY_BYTEARRAY)) {
+            /* Their own in-place operation then (operator_call). */
+            result = c->error_type[0] ? NULL : inplace(c, op, x, y);
         } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_BINARY && op == '*' && repeats(x) && y->type == SPY_INSTANCE &&
                    index_special(c, y)) {
             /* The repetition then takes y's Python __index__ (operator_call). */
