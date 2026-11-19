@@ -115,6 +115,10 @@ SOURCES = {
                    "a, b = K(1), K(2)\n"
                    "result = (list(map(str, [a, b])), list(map(repr, (a, 7))), ','.join(map(str, iter([a, b]))), list(map(format, [a])), log)",
     "map_adapted": "log = []\nclass S:\n    def __init__(s, v): s.v = v\n    def __str__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return str(s.v)\nresult = (list(zip('ab', map(str, [S(1), S(2)]))), list(enumerate(map(str, [S(3)]))), log)",
+    "sorted_later_calls": "log = []\nclass P:\n    def __init__(s, v): s.v = v\n"
+                          "    def __eq__(s, o):\n        for _ in (): pass\n        log.append('=' + str(s.v)); return s.v == o.v\n"
+                          "    def __lt__(s, o):\n        for _ in (): pass\n        log.append('<' + str(s.v)); return s.v < o.v\n"
+                          "result = ([t[0] for t in sorted([(0, P(2)), (1, P(3)), (1, P(1))])], [t[0][0] for t in sorted([((1, P(2)),), ((1, P(1)),)])], log)",
     "sorted_sources": "log = []\nclass O:\n    def __init__(s, v): s.v = v\n    def __hash__(s): return s.v\n    def __lt__(s, o):\n        for _ in (): pass\n        log.append(s.v)\n        return s.v < o.v\n"
                       "it = iter([O(9), O(4), O(2)])\nnext(it)\nv = lambda l: [o.v for o in l]\n"
                       "result = (v(sorted({O(3), O(1), O(2)})), v(sorted({O(1): 0, O(3): 0}.keys(), reverse=True)), v(sorted(it)), log != [])",

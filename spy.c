@@ -26401,9 +26401,22 @@ static NO_INLINE int keys_sort(SPYContext *c, SPYValue *source) {
     } else return 0;
     return (a->type == SPY_INSTANCE || a->type == SPY_TUPLE || a->type == SPY_LIST) && sort_calls(c, a, b);
 }
+/* Whether sorting key may call a Python comparison: an instance, or a
+ * tuple or list holding one within depth nestings. */
+static int sort_reaches(SPYValue *key, int depth) {
+    if (key->type == SPY_INSTANCE) return 1;
+    if ((key->type != SPY_TUPLE && key->type != SPY_LIST) || !depth) return 0;
+    for (size_t i = 0; i < key->as.seq.len; i++) if (sort_reaches(key->as.seq.items[i], depth - 1)) return 1;
+    return 0;
+}
+/* Whether any of the n keys may (sort_reaches). */
+static int keys_reach(SPYValue *const *keys, size_t n) {
+    for (size_t i = 0; i < n; i++) if (sort_reaches(keys[i], 64)) return 1;
+    return 0;
+}
 static int instance_sort(SPYContext *c, SPYValue *source) {
     if (source->type != SPY_LIST && source->type != SPY_TUPLE) return keys_sort(c, source);
-    return source->as.seq.len > 1 && sort_calls(c, source->as.seq.items[1], source->as.seq.items[0]);
+    return source->as.seq.len > 1 && keys_reach(source->as.seq.items, source->as.seq.len);
 }
 /* A call node's sort, min or max by a key function on the machine, keyword
  * call stack_keyword_call's with positional arguments argv and keywords
@@ -26682,6 +26695,12 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
                 if (t->x->type == SPY_LIST && !t->reflected) {
                     spy_release(s->pair);
                     if (!(s->pair = tuple_of(c, 2, (SPYValue *[]){t->cx, t->cy}))) return NULL;
+                }
+                if (function == c->unbound) {
+                    /* The pair compares on the machine as a whole, returning into key_took. */
+                    c->k_fn = spy_retain(t->cx); c->k_env = spy_retain(t->cy); c->k_unit = 2 + t->rich;
+                    c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_KEY;
+                    return c->unbound;
                 }
                 SPYValue *args[] = {spy_retain(t->reflected ? t->cy : t->cx), spy_retain(t->reflected ? t->cx : t->cy)};
                 return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
@@ -31725,7 +31744,8 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
     int op = 0, kind = step_operation(ins, &op);
     /* A lookup found in C (lookup_found). */
     if (c->looked) return looked(c);
-    relocate(c, ins->node);
+    /* A comparison's of compare_enter has no node: its line is its caller's. */
+    if (ins->node) relocate(c, ins->node);
     spy_retain(x); spy_retain(y);
     /* A lone in is a BC_BINARY (binary_operand). */
     SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY && op != O_IN && op != O_NOTIN ? binary(c, op, x, y) :
@@ -35263,7 +35283,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             callee_env = NULL;
             if (key_working(m->blocks[m->block_len - 1].consumer)) {
                 size_t depth = m->block_len;
-                if ((value = key_call(c, m, &f, &callee_env))) { special = CALL_KEY; goto enter_special; }
+                if ((value = key_call(c, m, &f, &callee_env))) {
+                    if (value == c->unbound) goto enter_k;
+                    special = CALL_KEY; goto enter_special;
+                }
                 /* A fed min or max whose key was taken natively takes its next item. */
                 if (!c->error_type[0] && m->block_len == depth) goto consume_generator;
                 continue;
@@ -36294,6 +36317,7 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
     s->open = 0;
     if (!ordered_pair(a, b)) {
         if ((function = rich_function(c, a, b, R_LT))) { s->cx = a; s->cy = b; s->rich = R_LT; return function; }
+        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) { s->cx = a; s->cy = b; s->rich = R_LT; return c->unbound; }
         s->less = sort_less(c, a, b);
         return NULL;
     }
@@ -36302,6 +36326,8 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
         SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
         if (x == y) continue;
         if ((function = rich_function(c, x, y, R_EQ))) { s->cx = x; s->cy = y; s->rich = R_EQ; return function; }
+        /* Two nested tuples or lists compare on the machine (compare_enter, key_call). */
+        if (ordered_pair(x, y) && (sort_reaches(x, 64) || sort_reaches(y, 64))) { s->cx = x; s->cy = y; s->rich = R_EQ; return c->unbound; }
         spy_retain(x); spy_retain(y);
         int same = equal(x, y);
         spy_release(x); spy_release(y);
@@ -36312,6 +36338,7 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
     if (s->at_item >= a->as.seq.len || s->at_item >= b->as.seq.len) { s->less = a->as.seq.len < b->as.seq.len; return NULL; }
     SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
     if ((function = rich_function(c, x, y, R_LT))) { s->cx = x; s->cy = y; s->rich = R_LT; return function; }
+    if (ordered_pair(x, y) && (sort_reaches(x, 64) || sort_reaches(y, 64))) { s->cx = x; s->cy = y; s->rich = R_LT; return c->unbound; }
     s->less = sort_less(c, x, y);
     return NULL;
 }
@@ -36332,7 +36359,7 @@ static int sort_calls(SPYContext *c, SPYValue *a, SPYValue *b) {
 static struct Sorter *sorter_begin(SPYContext *c, SPYValue *items, SPYValue *keys, int descending) {
     size_t len = items->as.seq.len;
     SPYValue **key = keys->as.seq.items;
-    if (len < 2 || !sort_calls(c, key[descending ? len - 2 : 1], key[descending ? len - 1 : 0])) return NULL;
+    if (len < 2 || !keys_reach(key, len)) return NULL;
     struct Sorter *s = sorter_new(c, len);
     for (size_t i = 0; s && i < len; i++) {
         size_t at = descending ? len - 1 - i : i;

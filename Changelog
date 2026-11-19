@@ -522,6 +522,7 @@ Unreleased (0.10.0):
 - a mappingproxy's `__eq__`, `__ne__` and `__contains__`, and a comparison a list's or tuple's subclass leaves to its builtin, call the items' Python methods without nesting on the C stack
 - a class whose `__hash__` is a method object runs it without nesting on the C stack when its instances are stored or looked up
 - an explicit collection closes the dead generators it reclaims without nesting their `finally` clauses on the C stack
+- a sort calls its items' Python comparisons without nesting on the C stack also when its first comparison calls none, or its items nest tuples or lists
 
 2026-11-10 0.9.0:
 
