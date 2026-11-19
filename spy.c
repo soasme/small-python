@@ -25685,17 +25685,32 @@ static NO_INLINE int adapter_iterates(SPYContext *c, SPYValue *callee, size_t ar
 }
 /* That call (adapter_iterates) on machine m, which takes callee and the
  * arguments: the iterators are m's calls (adapter_step). */
+static SPYValue *adapter_indexed(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *adapter_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     int id = callee->as.map.native - 1;
-    SPYValue *args = tuple_of(c, argc, argv);
+    SPYValue *args = tuple_of(c, argc, argv), *state = args ? spy_list(c) : NULL, *index;
     release_all(argc, argv);
-    /* enumerate() converts its start before calling iter(). */
-    SPYValue *counter = !args ? NULL : id != B_ENUMERATE ? spy_none(c) :
-                        args->as.seq.len == 2 ? index_object(c, args->as.seq.items[1]) : spy_int(c, 0);
-    SPYValue *state = counter ? spy_list(c) : NULL;
-    int status = !state || sequence_append(c, state, callee) || sequence_append(c, state, args) || sequence_append(c, state, counter) ||
-                 ((id == B_MAP || id == B_FILTER) && sequence_append(c, state, args->as.seq.items[0]));
-    spy_release(counter); spy_release(args); spy_release(callee);
+    int status = !state || sequence_append(c, state, callee) || sequence_append(c, state, args);
+    spy_release(callee);
+    if (status) { spy_release(args); spy_release(state); return NULL; }
+    /* enumerate() converts its start before calling iter(), a Python
+     * __index__ m's call first (adapter_indexed). */
+    if (id == B_ENUMERATE && args->as.seq.len == 2 && (index = index_function(c, args->as.seq.items[1]))) {
+        SPYValue *start = spy_retain(args->as.seq.items[1]);
+        spy_release(args);
+        return callk(c, m, index, 1, &start, adapter_indexed, state);
+    }
+    SPYValue *counter = id != B_ENUMERATE ? spy_none(c) : args->as.seq.len == 2 ? index_object(c, args->as.seq.items[1]) : spy_int(c, 0);
+    status = !counter || sequence_append(c, state, counter) || ((id == B_MAP || id == B_FILTER) && sequence_append(c, state, args->as.seq.items[0]));
+    spy_release(counter); spy_release(args);
+    if (status) { spy_release(state); return NULL; }
+    return adapter_step(c, m, state);
+}
+/* What an enumerate's start's Python __index__ returned for adapter_call (callk). */
+static SPYValue *adapter_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *counter = result ? index_result(c, state->as.seq.items[1]->as.seq.items[1], result) : NULL;
+    int status = !counter || sequence_append(c, state, counter);
+    spy_release(counter);
     if (status) { spy_release(state); return NULL; }
     return adapter_step(c, m, state);
 }
@@ -29645,6 +29660,21 @@ static int round_keywords(size_t positional, SPYValue **argv, const Entry *kw, s
 /* BC_CALLK: call node n of argc arguments, positional and then keyword
  * ones, taken from the stack after its callee; a generator's machine
  * (calls 0) enters no call. A keyword's name is kept on its node. */
+/* Whether callee is enumerate, given its iterable, and its start or not,
+ * by position or by name, each once, the first argc of argv positional,
+ * the kwc keywords kw named: those two in named, borrowed, named[1] NULL
+ * without a start. */
+static int enumerate_named(SPYValue *callee, size_t positional, SPYValue *const *argv, const Entry *kw, size_t kwc, SPYValue **named) {
+    if (callee->type != SPY_CLASS || callee->as.map.native != B_ENUMERATE + 1 || !kwc || positional + kwc > 2) return 0;
+    named[0] = positional ? argv[0] : NULL; named[1] = NULL;
+    for (size_t i = 0; i < kwc; i++) {
+        const char *name = kw[i].key->as.string.data;
+        size_t slot = !strcmp(name, "iterable") ? 0 : !strcmp(name, "start") ? 1 : 2;
+        if (slot > 1 || named[slot]) return 0;
+        named[slot] = kw[i].value;
+    }
+    return named[0] != NULL;
+}
 static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result = NULL;
     Entry kw[8];
@@ -29764,6 +29794,13 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
             block.depth = m->len; m->blocks[m->block_len++] = block;
             return NULL;
         }
+    }
+    SPYValue *named[2];
+    if (calls && enumerate_named(callee, positional, argv, kw, kwc, named) && adapter_iterates(c, callee, 1 + !!named[1], named)) {
+        /* enumerate() naming its iterable or start, as a positional call (adapter_call). */
+        spy_retain(callee); spy_retain(named[0]); if (named[1]) spy_retain(named[1]);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return adapter_call(c, m, callee, 1 + !!named[1], named);
     }
     ptrdiff_t at;
     if (calls && kwc == 1 && (at = keyword_index(c, callee, positional, kw)) >= 0) {
