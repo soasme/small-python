@@ -25781,14 +25781,14 @@ static SPYValue *adapter_indexed(SPYContext *c, Machine *m, SPYValue *state, SPY
     if (status) { spy_release(state); return NULL; }
     return adapter_step(c, m, state);
 }
-/* The Python __getitem__ on the machine of plain instance v's class,
- * borrowed; else NULL. */
+/* The Python __getitem__ on the machine of plain instance v's class, or
+ * a descriptor with a Python getter (special_env), borrowed; else NULL. */
 static SPYValue *getitem_function(SPYContext *c, SPYValue *v) {
     /* A class's is its metaclass's. */
     SPYValue *cls = metaclassed(v) ? value_class(c, v) :
                     v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__getitem__", NULL) ? NULL : v->as.map.parent;
     SPYValue *function = cls ? class_lookup(cls, "__getitem__") : NULL;
-    return function && machine_function(c, function) ? function : NULL;
+    return function && (machine_function(c, function) || descriptor_getter(c, function)) ? function : NULL;
 }
 /* The Python method name of plain instance v, found by its class's
  * default attribute lookup, borrowed; else NULL. dict() and dict.update()
@@ -27122,10 +27122,7 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
          * keyword raises first. */
         if (s->call && keyword_taken(c, s->result, s->item, s->call)) return NULL;
         SPYValue *function = getitem_function(c, s->mapping);
-        if (function) {
-            SPYValue *args[] = {spy_retain(s->mapping), spy_retain(s->item)};
-            return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
-        }
+        if (function) return special_env(c, m, function, s->mapping, s->item, NULL, env);
         SPYValue *value = get_index(c, s->mapping, s->item);
         if (value) key_took(c, m, value);
         return NULL;
@@ -35006,16 +35003,14 @@ static NO_INLINE int sentinel_call(SPYContext *c, SPYValue *v, SPYValue **fn, SP
 /* next_call_of for a __getitem__ iterator v, or a reversed one over an
  * instance: its source's Python __getitem__ on the machine, given the
  * next index. */
-static NO_INLINE int getitem_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
-    SPYValue *function = getitem_function(c, v->as.iterator.source), *args[2] = {v->as.iterator.source, NULL};
+static NO_INLINE int getitem_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    SPYValue *function = getitem_function(c, v->as.iterator.source), *index;
     int reversed = v->as.iterator.kind == I_REVERSED;
     if (!function || (reversed ? !v->as.iterator.index : v->as.iterator.done || v->as.iterator.index > INT64_MAX)) return 0;
-    if (!(args[1] = spy_int(c, (int64_t)(reversed ? --v->as.iterator.index : v->as.iterator.index++)))) return -1;
-    *env = function_env(c, function, 2, args, NULL, 0);
-    spy_release(args[1]);
-    if (!*env) return -1;
-    *fn = spy_retain(function);
-    return 1;
+    if (!(index = spy_int(c, (int64_t)(reversed ? --v->as.iterator.index : v->as.iterator.index++)))) return -1;
+    *fn = special_env(c, m, function, v->as.iterator.source, index, NULL, env);
+    spy_release(index);
+    return *fn ? 1 : -1;
 }
 /* Whether a call for iterator v's next item that failed ended its items:
  * a StopIteration, or a __getitem__ iterator's IndexError, which ends it
@@ -35295,7 +35290,7 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         if ((v->as.iterator.removed & 2) && (status = adapted_call(c, m, v, fn, env))) return status;
         if (v->as.iterator.kind == I_FILTER) return filter_call(c, m, v, fn, env);
         if (v->as.iterator.kind == I_CALLABLE) return sentinel_call(c, v, fn, env);
-        if (v->as.iterator.kind == I_GETITEM || v->as.iterator.kind == I_REVERSED) return getitem_call(c, v, fn, env);
+        if (v->as.iterator.kind == I_GETITEM || v->as.iterator.kind == I_REVERSED) return getitem_call(c, m, v, fn, env);
         SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
         if (!callee) return 0;
         if (!(function = machine_function(c, callee) ? callee : bound_function(c, callee)))

@@ -10,9 +10,10 @@
 (* access.                                                                 *)
 (*                                                                         *)
 (* A program, for M one of __len__, __iter__, __bool__, __call__, __neg__, *)
-(* __index__, __repr__, __contains__, with an implementation giving 5     *)
-(* (iter([5]), False and "5" for __iter__, __bool__ and __repr__, and      *)
-(* whether its argument, 5 by default, is 5 for __contains__), defines M   *)
+(* __index__, __repr__, __contains__, __getitem__, with an implementation  *)
+(* giving 5 (iter([5]), False and "5" for __iter__, __bool__ and __repr__, *)
+(* whether its argument, 5 by default, is 5 for __contains__, and item i,  *)
+(* 0 by default, of [5] for __getitem__), defines M                        *)
 (*                                                                         *)
 (*     instance   on c = C() only: c.M = lambda: ...                       *)
 (*     class      on C             base       on B, with class C(B)        *)
@@ -24,19 +25,21 @@
 (*                returns the implementation bound to the object           *)
 (*                                                                         *)
 (* A failing descriptor makes M absent for the operations with a fallback  *)
-(* (bool, iter, in and repr here, PLS-315 7.3.2 LookupSpecialMaybe; repr  *)
-(* then gives the default text, and in iterates), and raises its          *)
+(* (bool, iter, in and repr here, PLS-315 7.3.2 LookupSpecialMaybe; repr   *)
+(* then gives the default text, and in iterates), and raises its           *)
 (* AttributeError for the rest.                                            *)
 (*                                                                         *)
 (* where C may also define __getattribute__ recording the names it looks   *)
 (* up, then invokes M implicitly on c (len(c), list(iter(c)), bool(c),     *)
-(* c(), -c, range(9)[c], repr(c), 5 in c) or on C, or explicitly as c.M(). The     *)
-(* outcome is the result (a list for iterators, "default" for a default    *)
-(* repr), or the exception, and whether __getattribute__ saw M.            *)
+(* c(), -c, range(9)[c], repr(c), 5 in c, next(iter(c)) by the sequence    *)
+(* protocol) or on C, or explicitly as c.M(). The outcome is the result (a *)
+(* list for iterators, "default" for a default repr), or the exception,    *)
+(* and whether __getattribute__ saw M.                                     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__", "__index__", "__repr__", "__contains__"}
+Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__", "__index__", "__repr__", "__contains__",
+             "__getitem__"}
 Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass", "failing", "descriptor"}
 
 \* The methods looked up with LookupSpecialMaybe here.
