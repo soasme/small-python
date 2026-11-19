@@ -15333,7 +15333,7 @@ enum { CLOSING = 1, THROWING };
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__, a key's
  * __hash__ (hash_call) or a list index's __index__ (index_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_PATTERN, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT, CALL_INTRINSICS };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_PATTERN, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_ASKED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT, CALL_INTRINSICS };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */
@@ -25495,6 +25495,7 @@ static NO_INLINE int thrown_at(SPYContext *c, Machine *m, size_t argc, SPYValue 
  * generator, an asend's throw of an exception. */
 static SPYValue *method_function(SPYContext *, SPYValue *, const char *);
 static int method_absent(SPYValue *, const char *);
+static SPYValue *asked_function(SPYContext *, SPYValue *, const char *);
 static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     if ((g->type != SPY_GENERATOR && g->type != SPY_COROUTINE && g->type != SPY_ASYNC_GENERATOR) || !suspended(g)) return 0;
     Machine *m = innermost(g->as.generator.machine);
@@ -25523,7 +25524,7 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     /* One without the method passes the exception on at the yield from
      * (iterator_send), a class made first, as no Python asked for the
      * method. */
-    return function ? machine_function(c, function) : method_absent(m->delegate, name);
+    return function ? machine_function(c, function) : method_absent(m->delegate, name) || asked_function(c, m->delegate, name);
 }
 /* The Python __next__ on the machine of instance v's class, borrowed;
  * else NULL. */
@@ -25711,6 +25712,15 @@ static int method_absent(SPYValue *v, const char *name) {
     if (!plain_instance(v) || name_local(v, name)) return 0;
     SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
     return (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) && !class_lookup(cls, name) && !class_lookup(cls, "__getattr__");
+}
+/* The Python __getattr__ that a lookup of method name on plain instance v
+ * calls, the class's default lookup failing, borrowed; else NULL. */
+static SPYValue *asked_function(SPYContext *c, SPYValue *v, const char *name) {
+    if (!plain_instance(v) || name_local(v, name)) return NULL;
+    SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
+    SPYValue *function = (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) && !class_lookup(cls, name) ?
+                         class_lookup(cls, "__getattr__") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
 }
 /* The Python keys() that dict() and dict.update() call to merge plain
  * instance v (KEY_KEYS): its class's (method_function), *bound then, or
@@ -35040,7 +35050,19 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
     SPYValue *function = thrown ? method_function(c, d, closing ? "close" : "throw") : next ? next_function(c, d) : method_function(c, d, "send"), *call = NULL;
     *kind = !thrown ? CALL_DELEGATE : closing ? CALL_CLOSED : CALL_THROWN;
     *item = NULL;
-    if (function && machine_function(c, function) && !(closing && machine_push(c, m, spy_retain(thrown)))) {
+    const char *name = thrown ? closing ? "close" : "throw" : "send";
+    SPYValue *asked = !function && !next ? asked_function(c, d, name) : NULL;
+    if (asked) {
+        /* Its __getattr__ is asked for the method first, the exception or
+         * value under the call's kind on m's stack (CALL_ASKED, delegate_asked). */
+        SPYValue *args[] = {spy_retain(d), spy_string(c, name, strlen(name))};
+        if (!args[1]) spy_release(args[0]);
+        else if ((*env = function_env(c, asked, 2, args, NULL, 1)) &&
+                 machine_push_all(c, m, 2, (SPYValue *[]){spy_retain(thrown ? thrown : sent), int_value(c, *kind)})) {
+            spy_release(*env); *env = NULL;
+        }
+        if (*env) { call = spy_retain(asked); *kind = CALL_ASKED; }
+    } else if (function && machine_function(c, function) && !(closing && machine_push(c, m, spy_retain(thrown)))) {
         SPYValue *args[] = {spy_retain(d), next || closing ? NULL : spy_retain(thrown ? thrown : sent)};
         if ((*env = function_env(c, function, next || closing ? 1 : 2, args, NULL, 1))) call = spy_retain(function);
     } else if (next && d->type == SPY_ITERATOR && !(d->as.iterator.removed & 1) && adapts(d)) {
@@ -35058,11 +35080,58 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
     if (!call && !*item) { if (thrown && c->handled) delegate_raised(c); finish_delegate(c, m); }
     return call;
 }
+/* The method a delegate's __getattr__ returned, result, for a send, throw
+ * or close (delegate_next) of the value or exception on m's stack under
+ * the call's kind, *kind: a Python one called next on m (CALL_DELEGATE,
+ * CALL_THROWN, CALL_CLOSED with the exception still there), NULL; another
+ * called here, its result, a close's raising the exception, NULL. A
+ * failed lookup raises at the yield from, a throw's or close's
+ * AttributeError the exception, as one absent does (iterator_send), a
+ * close's other errors unraisable: NULL; a throw's other errors halt the
+ * generator: c->unbound. */
+static SPYValue *raise_given(SPYContext *, SPYValue *, size_t, SPYValue *const *, int *);
+static NO_INLINE SPYValue *delegate_asked(SPYContext *c, Machine *m, SPYValue *result, int *kind) {
+    SPYValue *called = machine_pop(m), *given = machine_pop(m);
+    int closing = (*kind = (int)called->as.integer_data.small) == CALL_CLOSED, sending = *kind == CALL_DELEGATE;
+    spy_release(called);
+    if (!result) {
+        int absent = error_is(c, "AttributeError");
+        if (!sending && !closing && !absent) { spy_release(given); return c->unbound; }
+        if (closing && !absent) report_unraisable(c, "Exception ignored while closing generator ", m->delegate, NULL);
+        if (!sending) { spy_clear_error(c); raise_given(c, given, 1, &given, NULL); }
+        spy_release(given);
+        return NULL;
+    }
+    SPYValue *function = machine_function(c, result) ? result : result->type == SPY_METHOD ? bound_function(c, result) : NULL;
+    if (function) {
+        SPYValue *args[2];
+        size_t argc = 0;
+        if (function != result) args[argc++] = spy_retain(result->as.method.self);
+        if (!closing) args[argc++] = spy_retain(given);
+        SPYValue *env = function_env(c, function, argc, args, NULL, 1);
+        if (env && closing && machine_push(c, m, spy_retain(given))) { spy_release(env); env = NULL; }
+        if (env) { c->k_fn = spy_retain(function); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = *kind; }
+        spy_release(result); spy_release(given);
+        return NULL;
+    }
+    SPYValue *value = call(c, result, closing ? 0 : 1, &given);
+    spy_release(result);
+    /* A close's exception raises at the yield from after it. */
+    if (closing) { spy_release(value); value = NULL; if (!c->error_type[0]) raise_thrown(c, given, c->handled); }
+    spy_release(given);
+    return value;
+}
 /* A call delegate_next made, of kind, returned result into m: the item
  * its yield from yields, owned; else NULL, the delegation ended, a close
  * raising its exception at the yield from, a throw's error chained again
  * to the exception m handles. */
 static NO_INLINE SPYValue *delegate_returned(SPYContext *c, Machine *m, int kind, SPYValue *result) {
+    if (kind == CALL_ASKED) {
+        /* The method a __getattr__ gave, called here or next
+         * (delegate_asked), a close's exception raised already. */
+        if ((result = delegate_asked(c, m, result, &kind)) == c->unbound || c->k_fn) return result;
+        if (kind == CALL_CLOSED) kind = CALL_THROWN;
+    }
     if (kind == CALL_CLOSED) {
         SPYValue *thrown = machine_pop(m);
         spy_release(result); result = NULL;
@@ -35177,7 +35246,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         int matched = pattern_step(c, m, &f, code[pc - 1].node, 1);
                         if (matched == 2) goto enter_k;
                         if (!matched) pc = code[pc - 1].target;
-                    } else if (kind >= CALL_DELEGATE && kind <= CALL_CLOSED) {
+                    } else if (kind >= CALL_DELEGATE && kind <= CALL_ASKED) {
                         if (kind == CALL_DELEGATE && m->delegate && m->delegate->type == SPY_ITERATOR && adapts(m->delegate)) {
                             /* An adapter's call gives its item as to a loop (CALL_NEXT). */
                             int again = 0;
@@ -35203,8 +35272,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             if (!result && c->k_fn) goto enter_k;
                         }
                         /* An iterator's method gives a yield from's item. */
-                        if ((result = delegate_returned(c, m, kind, result))) YIELD(result);
+                        if ((result = delegate_returned(c, m, kind, result)) == c->unbound) {
+                            /* The throw ends; the generator stays suspended (delegate_asked). */
+                            flow = (Result){FLOW_HALT, NULL};
+                            if (!m->resumer) return flow;
+                            goto generator_left;
+                        }
+                        if (result) YIELD(result);
                         pc = m->pc;
+                        /* The method a __getattr__ gave is called next (delegate_asked). */
+                        if (UNLIKELY(c->k_fn != NULL)) goto enter_k;
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
                         if (result && (code[pc - 1].op == BC_EXEC || code[pc - 1].op == BC_NEXT || (code[pc - 1].op == BC_STORE && code[pc - 1].arg)))

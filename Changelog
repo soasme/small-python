@@ -534,6 +534,7 @@ Unreleased (0.10.0):
 - an import at module level reads `__lazy_modules__` through the `__getitem__` of `exec()` globals that are a `dict` subclass, once per imported module
 - `str.format_map()` of a `dict` subclass calls its values' Python `__format__` and `__repr__` without nesting on the C stack
 - A format field's `.attr` and `[key]` call a Python property getter, `__getattr__`, `__getitem__` or `__missing__` without nesting on the C stack
+- `send()`, `throw()` and `close()` through a `yield from` of an object whose `send`, `throw` or `close` comes from its Python `__getattr__` run without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
 
