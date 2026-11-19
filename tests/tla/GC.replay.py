@@ -37,6 +37,8 @@ def suspended():
     try:
         yield
     finally:
+        # Python code a collection's close runs on the machine.
+        for _ in range(2): pass
         log.append("g")
 
 

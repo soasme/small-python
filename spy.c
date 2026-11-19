@@ -15033,6 +15033,8 @@ typedef struct {
     size_t count, star;
     size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
     struct Sorter *sorter;
+    /* A collection's close of a dead generator: what goes on once it ends (finalize_closed), its context owned. */
+    Continuation closed; SPYValue *closed_ctx;
 } Consumer;
 static int consumer_lookup(SPYContext *, Machine *, Consumer *, SPYValue *, int64_t, MapCursor);
 /* An assignment's unpacking, collecting in result the items for a target
@@ -15121,6 +15123,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->awaited) visit(b->consumer->awaited, data);
         if (b->consumer && b->consumer->instance) visit(b->consumer->instance, data);
         if (b->consumer && b->consumer->pair) visit(b->consumer->pair, data);
+        if (b->consumer && b->consumer->closed_ctx) visit(b->consumer->closed_ctx, data);
         if (b->consumer && b->consumer->sources) visit(b->consumer->sources, data);
         if (b->consumer && b->consumer->updated) visit(b->consumer->updated, data);
         if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
@@ -18325,7 +18328,22 @@ static NO_INLINE SPYValue *comparek(SPYContext *c, Machine *m, SPYValue *x, SPYV
 }
 /* The call callk left on m, its continuation's (CALL_K), or a repr job's
  * first left with none (CALL_CHECKED): the machine to run on. */
+static void finalize_close(SPYContext *, Machine *);
 static NO_INLINE Machine *k_enter(SPYContext *c, Machine *m) {
+    if (c->k_unit < 0) {
+        /* A collection's close of the dead generator first in line
+         * (collect_go), for m to consume, its continuation going on
+         * after it (finalize_closed). */
+        size_t depth = m->block_len;
+        spy_release(c->k_fn); c->k_fn = NULL; c->k_unit = 0;
+        finalize_close(c, m);
+        if (m->block_len > depth) {
+            m->blocks[depth].consumer->closed = c->k; m->blocks[depth].consumer->closed_ctx = c->k_ctx;
+            c->consuming = 1;
+        } else spy_release(c->k_ctx);
+        c->k = NULL; c->k_ctx = NULL;
+        return m;
+    }
     Call *call = c->k_unit >= 2 ? compare_enter(c, m, c->k_fn, c->k_env, c->k_unit - 2, CALL_K) :
                  c->k_unit ? unit_enter(c, c->k_fn, c->k_env, m) : call_enter(c, c->k_fn, c->k_env, m);
     c->k_fn = c->k_env = NULL; c->k_unit = 0;
@@ -18955,6 +18973,12 @@ static SPYValue *collect_called(SPYContext *c, Machine *m, SPYValue *held, SPYVa
     attend(c);
     return collect_go(c, m, state);
 }
+static SPYValue *collect_go(SPYContext *, Machine *, SPYValue *);
+/* A collection's close of a dead generator ended (finalize_closed). */
+static SPYValue *collect_closed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    spy_release(result);
+    return collect_go(c, m, state);
+}
 static SPYValue *collect_go(SPYContext *c, Machine *m, SPYValue *state) {
     SPYValue **items = state->as.seq.items;
     for (;;) {
@@ -18974,6 +18998,12 @@ static SPYValue *collect_go(SPYContext *c, Machine *m, SPYValue *state) {
             spy_release(items[0]); items[0] = count;
             items[1] = spy_retain(kept ? c->booleans[0] : c->none); spy_release(c->booleans[1]);
             continue;
+        }
+        if (!weak && self->type != SPY_INSTANCE && finalizer(c)) {
+            /* A dead generator closes at its yield on m (k_enter), the
+             * collection going on after it (collect_closed). */
+            c->k_fn = spy_retain(self); c->k_unit = -1; c->k = collect_closed; c->k_ctx = state;
+            return NULL;
         }
         if (!function || !machine_function(c, function)) {
             /* One that runs in C runs here, as weak_callbacks runs it. */
@@ -24747,6 +24777,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->awaited); spy_release(b.consumer->instance); spy_release(b.consumer->pair);
         spy_release(b.consumer->sources); spy_release(b.consumer->updated);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
+        spy_release(b.consumer->closed_ctx);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
 }
@@ -26192,8 +26223,10 @@ static void finalize_close(SPYContext *c, Machine *m) {
  * (item) or its error: either is unraisable; the generator is done with. */
 static NO_INLINE int finalize_closed(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
-    SPYValue *g = spy_retain(top->value);
+    SPYValue *g = spy_retain(top->value), *ctx = top->consumer->closed_ctx;
+    Continuation closed = top->consumer->closed;
     size_t waiting = top->consumer->finalizing - 1;
+    top->consumer->closed_ctx = NULL;
     if (item) {
         spy_release(item);
         spy_error(c, "RuntimeError", g->type == SPY_ASYNC_GENERATOR ? "async generator ignored GeneratorExit" :
@@ -26206,7 +26239,13 @@ static NO_INLINE int finalize_closed(SPYContext *c, Machine *m, Frame *f, SPYVal
     c->weak_running = 0;
     finalize_ahead(c, waiting);
     attend(c);
-    return 0;
+    if (!closed) return 0;
+    /* A collection goes on (collect_go): its count, or its next call, or
+     * close, for m to consume. */
+    SPYValue *value = closed(c, m, ctx, spy_none(c));
+    if (value) return machine_push(c, m, value), 0;
+    return c->k_fn || (!c->error_type[0] && m->block_len && m->blocks[m->block_len - 1].consumer &&
+                       m->blocks[m->block_len - 1].consumer->closed);
 }
 static int keys_merge(SPYContext *, Block *, SPYValue *);
 static SPYValue *set_walk(SPYContext *, Machine *, int, SPYValue *, SPYValue *, int, SPYValue **);
@@ -35431,6 +35470,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         m->pc = pc;
         {
             Machine *entered = k_enter(c, m);
+            if (UNLIKELY(c->consuming) && entered == m) { c->consuming = 0; goto consume_generator; }
             if (entered == m) continue;
             m = entered;
             goto switch_call;
