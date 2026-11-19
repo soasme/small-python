@@ -10575,7 +10575,8 @@ static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b
     /* A concatenation reads a subclass's buffer by its own __buffer__. */
     if (op == '+' && (x->type == SPY_BYTES || x->type == SPY_BYTEARRAY) && (own_buffer(a) || own_buffer(b)) && concatenable(y))
         return bytes_concat(c, x, a, b);
-    SPYValue *result = binary(c, op, x, y);
+    /* A plain instance's reflected method, which declined, is not called again. */
+    SPYValue *result = y->type == SPY_INSTANCE && class_lookup(y->as.map.parent, o->reflected) ? binary_builtin(c, op, x, y) : binary(c, op, x, y);
     /* An unsupported operation names the operands' own types; a str, list
      * or tuple concatenation, only the right operand's. A concatenation's
      * TypeError of a Python method is its own. */
@@ -31026,6 +31027,16 @@ static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SP
     if (function->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, special_read, state);
     return callk(c, m, get, 3, (SPYValue *[]){spy_retain(function), spy_retain(self), spy_retain(value_class(c, self))}, special_read, state);
 }
+/* Whether a builtin value of type and class cls declines operator o, in
+ * place if inplace, with y: it has neither method, or y is a plain
+ * instance and o a set's operator on a set or a dict's | on a dict, not
+ * in place, or on a frozendict. */
+static int operator_declines(SPYContext *c, SPYValue *cls, int type, const Operator *o, int inplace, SPYValue *y) {
+    if (!builtin_slot_before(c, cls, o->direct) && (!inplace || !builtin_slot_before(c, cls, o->inplace))) return !c->error_type[0];
+    if (y->type != SPY_INSTANCE || y->as.map.base) return 0;
+    if (type == SPY_SET || type == SPY_FROZENSET) return o->token == '|' || o->token == '&' || o->token == '-' || o->token == '^';
+    return (type == SPY_FROZENDICT || (type == SPY_DICT && !inplace)) && o->token == '|';
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -31182,6 +31193,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
                 self = y; other = x; phase = OPERATOR_REFLECTED;
                 goto found;
             }
+            if (right != left && !subclass(right, left) && operator_declines(c, left, x->type, o, kind == OPERATE_INPLACE, y) &&
+                (function = item_special(c, y, reflected))) {
+                self = y; other = x; phase = OPERATOR_LAST;
+                goto found;
+            }
             if (right == left || !subclass(right, left) || class_lookup(right, reflected) == class_lookup(left, reflected) ||
                 (kind == OPERATE_INPLACE && ((x->type == SPY_SET && (token == '|' || token == '&' || token == '-' || token == '^')) ||
                                              (x->type == SPY_DICT && token == '|'))) ||
@@ -31210,9 +31226,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             /* A builtin sequence's operator is no number method: y's reflected one comes first. */
             self = y; other = x; phase = OPERATOR_REFLECTED;
         } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_special(c, x, rich, &negated);
-        /* A plain instance without the method leaves another class's
-         * reflected one as the last call. */
-        if (!function && o && x->type == SPY_INSTANCE && !x->as.map.base && right != cls && (function = item_special(c, y, reflected))) {
+        /* A plain instance without the method, or a builtin subclass's
+         * whose builtin declines (operator_declines), leaves
+         * another class's reflected one as the last call. */
+        if (!function && o && x->type == SPY_INSTANCE && right != cls &&
+            (!x->as.map.base || operator_declines(c, cls, x->as.map.base->type, o, kind == OPERATE_INPLACE, y)) &&
+            !c->error_type[0] && (function = item_special(c, y, reflected))) {
             self = y; other = x; phase = OPERATOR_LAST;
         }
     }

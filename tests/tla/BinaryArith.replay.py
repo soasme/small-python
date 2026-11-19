@@ -69,6 +69,11 @@ SOURCES = {
     "pow3_instance": "class A: pass\npow(A(), 1, 2)",
     "pow3_methods": "class P:\n    def __pow__(self, o, m=None): return ('P', o, m)\n"
                     "    def __rpow__(self, o, m=None): return ('rP', o, m)\nresult = (pow(P(), 2, 3), pow(2, P(), 3))",
+    "builtin_declines": "calls = []\nclass R:\n    def __init__(self, a): self.a = a\n    def __ror__(self, o): return self.r(o)\n"
+                        "    def __rsub__(self, o): return self.r(o)\n"
+                        "    def r(self, o):\n        for _ in (): pass\n        calls.append(1)\n        return ('r', type(o).__name__) if self.a else NotImplemented\n"
+                        "class SubList(list): pass\ndef no():\n    s = {1}\n    try: s |= R(0)\n    except TypeError as e: return str(e)\n"
+                        "x = SubList()\nx -= R(1)\nresult = ({1} | R(1), x, no(), calls)",
     "divmod_methods": "log = []\nclass D:\n    def __init__(self, r): self.r = r\n    def __divmod__(self, o):\n        for _ in (): pass\n"
                       "        log.append(('D', self.r))\n        return NotImplemented if self.r == 'ni' else ('D', o)\n"
                       "class E:\n    def __rdivmod__(self, o):\n        for _ in (): pass\n        log.append(('rE', 2))\n        return ('rE', 2)\n"
