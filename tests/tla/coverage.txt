@@ -343,7 +343,7 @@ Contents | - navigation
 20 Fundamental Objects > 20.2 The `type` class > 20.2.4 `type.__repr__` ( ) | ClassObjects
 20 Fundamental Objects > 20.2 The `type` class > 20.2.5 `type.__call__` ( *args, **kwds* ) | Callables
 20 Fundamental Objects > 20.2 The `type` class > 20.2.6 `type.mro` ( ) | MRO
-20 Fundamental Objects > 20.2 The `type` class > 20.2.7 Other methods of `type` | ClassObjects, InstanceChecks
+20 Fundamental Objects > 20.2 The `type` class > 20.2.7 Other methods of `type` | ClassObjects, InstanceChecks, AbstractChecks, TypeAnnotations
 20 Fundamental Objects > 20.2 The `type` class > 20.2.8 Abstract classes | Callables
 20 Fundamental Objects > 20.3 The `super` class | = sections
 20 Fundamental Objects > 20.3 The `super` class > 20.3.1 super ( [ *type* [, *object_or_type*] ] ) | Super

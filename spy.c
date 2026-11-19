@@ -27494,8 +27494,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
                        argc > 1 ? spy_retain(argv[1]) : NULL, argc > 2 ? argv[2] : NULL);
     /* A builtin function runs as the step (step_native). */
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : c->error_type[0] ? NULL :
-             method < 0 && callee->type == SPY_NATIVE && (callee->as.native.call == builtin || callee->as.native.kwcall == object_method) ?
-             step_native(c, m, callee, method, n, argc, argv, NULL) :
+             method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin ? step_native(c, m, callee, method, n, argc, argv, NULL) :
              step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
@@ -43267,7 +43266,16 @@ static SPYValue *open_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue 
     return fn ? callk(c, m, fn, argc, args, method_called, NULL) : NULL;
 }
 static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
-    SPYValue *self = NULL, *function;
+    SPYValue *self = NULL, *function, *native = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    /* One that may leave a call to its step runs as the step, bound too,
+     * given its self first (step_native). */
+    if (native->type == SPY_NATIVE && native->as.native.host == 2) {
+        SPYValue *args[9];
+        if (native == callee || argc > 8) return step_native(c, m, callee, -1, NULL, argc, argv, NULL);
+        args[0] = callee->as.method.self;
+        memcpy(args + 1, argv, argc * sizeof(*argv));
+        return step_native(c, m, native, -1, NULL, argc + 1, args, NULL);
+    }
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
     if (callee->type != SPY_NATIVE || (!self && !argc--)) return NULL;
     if (!self) self = *argv++;
@@ -44069,6 +44077,45 @@ static SPYValue *getnewargs(SPYContext *c, size_t argc, SPYValue *const *argv, S
 /* object.__dir__, object.__sizeof__, and type's __dir__, __instancecheck__,
  * __subclasscheck__, __or__ and __ror__. */
 enum { OBJ_DIR, OBJ_SIZEOF, TYPE_DIR, TYPE_INSTANCECHECK, TYPE_SUBCLASSCHECK, TYPE_OR, TYPE_ROR };
+/* type.__or__'s or __ror__'s union of left and right, other the operand
+ * that is not the type: NotImplemented when other cannot join one. */
+static SPYValue *type_union(SPYContext *c, SPYValue *left, SPYValue *right, SPYValue *other) {
+    SPYValue *unionable = call_intrinsic(c, "_unionable", 1, &other);
+    if (!unionable) return NULL;
+    int truth = truthy(unionable);
+    spy_release(unionable);
+    if (!truth) return spy_retain(c->not_implemented);
+    return call_intrinsic(c, "_union", 2, (SPYValue *[]){left, right});
+}
+/* type_union on m of ctx's left, right and other operand, which it
+ * takes: each intrinsic m's call (callk). */
+static SPYValue *union_made(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)c; (void)m;
+    spy_release(ctx);
+    return result;
+}
+static SPYValue *union_checked(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    int truth = result ? truthy(result) : 0;
+    spy_release(result);
+    SPYValue *fn = !result || c->error_type[0] || !truth ? NULL : intrinsic(c, "_union");
+    if (!fn) {
+        spy_release(ctx);
+        return result && !c->error_type[0] ? spy_retain(c->not_implemented) : NULL;
+    }
+    return callk(c, m, fn, 2, (SPYValue *[]){spy_retain(ctx->as.seq.items[0]), spy_retain(ctx->as.seq.items[1])}, union_made, ctx);
+}
+static SPYValue *union_go(SPYContext *c, Machine *m, SPYValue *ctx) {
+    SPYValue *fn = intrinsic(c, "_unionable");
+    if (!fn) { spy_release(ctx); return NULL; }
+    return callk(c, m, fn, 1, (SPYValue *[]){spy_retain(ctx->as.seq.items[2])}, union_checked, ctx);
+}
+/* The intrinsics a type union (ctx) needs are loaded, given result: the
+ * union (union_go). */
+static SPYValue *union_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    if (!result) { spy_release(ctx); return NULL; }
+    spy_release(result);
+    return union_go(c, m, ctx);
+}
 static const char *const object_method_names[] = {"__dir__", "__sizeof__", "__dir__", "__instancecheck__", "__subclasscheck__", "__or__", "__ror__"};
 static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
@@ -44093,13 +44140,13 @@ static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv
         return result < 0 ? NULL : spy_bool(c, result);
     }
     default: {
-        SPYValue *unionable = call_intrinsic(c, "_unionable", 1, args);
-        if (!unionable) return NULL;
-        int truth = truthy(unionable);
-        spy_release(unionable);
-        if (!truth) return spy_retain(c->not_implemented);
         SPYValue *operands[] = {op == TYPE_OR ? argv[0] : args[0], op == TYPE_OR ? args[0] : argv[0]};
-        return call_intrinsic(c, "_union", 2, operands);
+        /* On the step's machine the intrinsics' calls are its, their first
+         * use loading them there (intrinsics_k). */
+        Machine *m = step_machine(c);
+        SPYValue *ctx = m ? tuple_of(c, 3, (SPYValue *[]){operands[0], operands[1], args[0]}) : NULL;
+        if (ctx) return c->intrinsics ? union_go(c, m, ctx) : intrinsics_k(c, m, union_loaded, ctx);
+        return c->error_type[0] ? NULL : type_union(c, operands[0], operands[1], args[0]);
     }
     }
 }
@@ -44235,6 +44282,8 @@ static int class_method_set(SPYContext *c, SPYValue *cls, const char *name, Nati
     method->as.native.kwcall = call;
     method->as.native.data = (void *)data;
     method->as.native.method = kind == METHOD_INSTANCE;
+    /* Its C code may leave a call to its step (step_native). */
+    method->as.native.host = call == object_method ? 2 : 0;
     /* Allocators stay bound to their type, as tp_new wrappers are. */
     method->as.native.static_method = kind == METHOD_STATIC && strcmp(name, "__new__");
     if (kind != METHOD_INSTANCE) {

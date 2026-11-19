@@ -500,6 +500,7 @@ Unreleased (0.10.0):
 - `aiter()` and `async for` check the iterator's class has `__anext__` without reading it through a descriptor
 - `throw()` of a `GeneratorExit` subclass with a Python `__init__` or `__new__` into a `yield from` makes it after the delegates close without nesting on the C stack
 - an explicit collection runs Python `__del__` methods and weak reference callbacks without nesting on the C stack
+- `type.__or__()` and `type.__ror__()`, also bound, make a union without nesting on the C stack, loading the intrinsics on first use likewise
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

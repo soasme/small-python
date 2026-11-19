@@ -56,6 +56,8 @@ SOURCES = {
     "union_subclass": 'class X(int | str): pass',
     "union_eq_order": 'result = (int | str | float) == (float | str | int)',
     "union_call": 'result = (int | str)()',
+    "union_type_methods": 'result = (type.__or__(int, str).__args__, type.__ror__(int, str).__args__, type.__or__(int, 1))',
+    "union_type_bound": 'result = repr(type.__or__.__get__(int)(list[int]))',
     "ga_instancecheck_inner": 'result = isinstance(list[int], type)',
     "ga_repr_nested": 'result = repr(list[list[dict[str, ...]]])',
     "ga_repr_callable_like": 'result = repr(dict[int, ...])',
