@@ -490,6 +490,7 @@ Unreleased (0.10.0):
 - `open()` with positional arguments runs its file-object code without nesting on the C stack
 - A built-in's report of an unknown keyword compares a `str` subclass keyword by its Python `__eq__` without nesting on the C stack
 - `dict()` and `frozendict()` hash and compare `str` subclass keyword names by their Python `__hash__` and `__eq__` without nesting on the C stack
+- `pow()` with a modulus and `divmod()` call operands' Python methods without nesting on the C stack, also given by keyword or through a metaclass
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

@@ -11631,21 +11631,25 @@ static int repeats(SPYValue *);
 static SPYValue *builtin_slot_before(SPYContext *, SPYValue *, const char *);
 /* Binary methods are optional (special_method_maybe); an in-place method's
  * lookup error propagates. */
-static SPYValue *try_operator(SPYContext *c, SPYValue *self, const char *name, SPYValue *other, SPYValue *modulus, int inplace) {
+static SPYValue *operator_method(SPYContext *c, SPYValue *self, const char *name, int inplace, SPYValue **slot) {
     SPYValue *method = inplace ? special_method(c, self, name) : special_method_maybe(c, self, name);
     /* A builtin subclass's instance without the method has its builtin's
      * in the method's place. A sequence's concatenation and repetition come
      * after both operands' methods (binary_declined), unless the class
      * defines the method's other side, giving it the number slot. */
-    SPYValue *slot = NULL;
+    *slot = NULL;
     if (!method && !inplace && !c->error_type[0] && self->type == SPY_INSTANCE && self->as.map.base) {
         const char *side = name + 2 + (name[2] == 'r');
         char other_side[16];
         int sequence = repeats(self->as.map.base) && (!strcmp(side, "add__") || !strcmp(side, "mul__"));
         snprintf(other_side, sizeof other_side, "__%s%s", name[2] == 'r' ? "" : "r", side);
         if (!sequence || class_lookup(self->as.map.parent, other_side))
-            slot = builtin_slot_before(c, self->as.map.parent, name);
+            *slot = builtin_slot_before(c, self->as.map.parent, name);
     }
+    return method;
+}
+static SPYValue *try_operator(SPYContext *c, SPYValue *self, const char *name, SPYValue *other, SPYValue *modulus, int inplace) {
+    SPYValue *slot, *method = operator_method(c, self, name, inplace, &slot);
     if (!method && !slot) return NULL;
     SPYValue *args[] = {self, other, modulus};
     SPYValue *result = slot ? call(c, slot, modulus ? 3 : 2, args) : call(c, method, modulus ? 2 : 1, args + 1);
@@ -11664,6 +11668,54 @@ static SPYValue *binary_special(SPYContext *c, const Operator *op, SPYValue *lef
     if (a != b && !reflected_first && (modulus || !number_takes(c, op, 0, left, right)))
         result = try_operator(c, right, op->reflected, left, modulus, 0);
     return result;
+}
+static int machine_function(SPYContext *, SPYValue *);
+static SPYValue *special_tried(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *k_state(SPYContext *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *k_resume(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* binary_special of state's operator token, left, right and modulus (or
+ * None) on m from try phase on: 0 a subclass's reflected method first, 1
+ * the direct one, 2 the reflected one. A Python method is m's call
+ * (callk) whose continuation goes on (special_tried). The first result
+ * but NotImplemented goes to state's continuation, or NotImplemented when
+ * every method declined; NULL with an error. State taken. */
+static SPYValue *special_from(SPYContext *c, Machine *m, SPYValue *state, int phase) {
+    SPYValue **items = state->as.seq.items, *left = items[1], *right = items[2], *modulus = items[3] == c->none ? NULL : items[3];
+    const Operator *op = operator_of((int)items[0]->as.integer_data.small);
+    SPYValue *a = value_class(c, left), *b = value_class(c, right), *result = NULL;
+    int reflected_first = a != b && subclass(b, a) && class_lookup(b, op->reflected) != class_lookup(a, op->reflected);
+    for (; phase < 3 && !result && !c->error_type[0]; phase++) {
+        if (phase == 0 ? !reflected_first : phase == 2 && !(a != b && !reflected_first && (modulus || !number_takes(c, op, 0, left, right))))
+            continue;
+        SPYValue *self = phase == 1 ? left : right, *other = phase == 1 ? right : left, *slot;
+        SPYValue *method = operator_method(c, self, phase == 1 ? op->direct : op->reflected, 0, &slot), *index;
+        if (method && method->type == SPY_METHOD && machine_function(c, method->as.method.function) && (index = int_value(c, phase + 1))) {
+            spy_release(items[4]); items[4] = index;
+            return callk(c, m, method, 1 + !!modulus, (SPYValue *[]){spy_retain(other), modulus ? spy_retain(modulus) : NULL}, special_tried, state);
+        }
+        if (!method && !slot) continue;
+        SPYValue *args[] = {self, other, modulus};
+        result = slot ? call(c, slot, modulus ? 3 : 2, args) : call(c, method, modulus ? 2 : 1, args + 1);
+        spy_release(method);
+        if (result == c->not_implemented) { spy_release(result); result = NULL; }
+    }
+    if (c->error_type[0]) { spy_release(result); result = NULL; }
+    else if (!result) result = spy_retain(c->not_implemented);
+    return k_resume(c, m, state, result);
+}
+/* binary_special of operator token op, left, right and modulus, NULL for
+ * none, on m (special_from), then k with ctx, which it takes. */
+static SPYValue *special_k(SPYContext *c, Machine *m, int op, SPYValue *left, SPYValue *right, SPYValue *modulus, Continuation k, SPYValue *ctx) {
+    SPYValue *state = k_state(c, 5, (SPYValue *[]){int_value(c, op), spy_retain(left), spy_retain(right), spy_retain(modulus ? modulus : c->none),
+                                                  int_value(c, 0), NULL, NULL}, k, ctx);
+    return state ? special_from(c, m, state, 0) : NULL;
+}
+/* special_from's Python method returned result: NotImplemented goes on
+ * with the next phase; else the continuation has it. */
+static SPYValue *special_tried(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (result != c->not_implemented) return k_resume(c, m, state, result);
+    spy_release(result);
+    return special_from(c, m, state, (int)state->as.seq.items[4]->as.integer_data.small);
 }
 static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size_t argc, SPYValue *const *argv) {
     SPYValue *method = special_method(c, v, name);
@@ -11736,7 +11788,6 @@ static SPYValue *annotation_dict(SPYContext *c, SPYValue *annotate) {
     }
     return value;
 }
-static int machine_function(SPYContext *, SPYValue *);
 static int class_hooked(SPYValue *);
 /* Whether type's own attribute name answers its read on class v: its
  * metaclass, if any, inherits it. */
@@ -27276,8 +27327,10 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     if (id >= 0)
         consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
                        argc > 1 ? spy_retain(argv[1]) : NULL, argc > 2 ? argv[2] : NULL);
-    result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) :
-             c->error_type[0] ? NULL : step_call(c, m, callee, method, n, argc, argv);
+    /* A builtin function runs as the step (step_native). */
+    result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : c->error_type[0] ? NULL :
+             method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin ? step_native(c, m, callee, method, n, argc, argv, NULL) :
+             step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
     return result;
@@ -27962,7 +28015,7 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
     if (function) {
         c->entering_init = function; spy_release(function);
         result = spy_retain(c->types[SPY_STRING]);
-    } else result = c->error_type[0] ? NULL : call_plain(c, callee, -1, n, argc, argv);
+    } else result = c->error_type[0] ? NULL : step_native(c, m, callee, -1, n, argc, argv, NULL);
     release_all(argc, argv); spy_release(callee);
     return result;
 }
@@ -40841,6 +40894,20 @@ static SPYValue *attribute_builtin(SPYContext *c, intptr_t id, SPYValue *a, cons
     if (value && id == B_HASATTR) { spy_release(value); return spy_bool(c, 1); }
     return value;
 }
+/* pow() of three arguments or divmod(), args, whose Python methods
+ * special_k called, got result: NotImplemented from each goes on to the
+ * built-in slots, pow()'s or divmod()'s error (power_slots,
+ * divmod_declined). */
+static SPYValue *operator_declined_k(SPYContext *c, Machine *m, SPYValue *args, SPYValue *result) {
+    (void)m;
+    SPYValue **v = args->as.seq.items;
+    if (result == c->not_implemented) {
+        spy_release(result);
+        result = v[2] == c->none ? divmod_declined(c, v[0], v[1]) : power_slots(c, v[0], v[1], v[2]);
+    }
+    spy_release(args);
+    return result;
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -40978,24 +41045,19 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             NULL : spy_string(c, out.data, out.len);
         mem_free(out.data); spy_release(integer); return result;
     }
-    case B_POW: {
-        if (argc < 2 || argc > 3) goto arity;
+    case B_POW: case B_DIVMOD: {
+        if (id == B_POW ? argc < 2 || argc > 3 : argc != 2) goto arity;
         SPYValue *b = argv[1], *modulus = argc == 3 && argv[2]->type != SPY_NONE ? argv[2] : NULL;
-        if (!modulus) return binary(c, T_POW, a, b);
+        if (id == B_POW && !modulus) return binary(c, T_POW, a, b);
         if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) {
-            SPYValue *result = binary_special(c, operator_of(T_POW), a, b, modulus);
+            /* On the machine of the call step, a Python method is a call there (special_k). */
+            Machine *m = step_machine(c);
+            SPYValue *args = m ? tuple_of(c, 3, (SPYValue *[]){a, b, modulus ? modulus : c->none}) : NULL;
+            if (args) return special_k(c, m, id == B_POW ? T_POW : O_DIVMOD, a, b, modulus, operator_declined_k, args);
+            SPYValue *result = c->error_type[0] ? NULL : binary_special(c, id == B_POW ? operator_of(T_POW) : &divmod_operator, a, b, modulus);
             if (result || c->error_type[0]) return result;
         }
-        return power_slots(c, a, b, modulus);
-    }
-    case B_DIVMOD: {
-        if (argc != 2) goto arity;
-        SPYValue *b = argv[1];
-        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) {
-            SPYValue *result = binary_special(c, &divmod_operator, a, b, NULL);
-            if (result || c->error_type[0]) return result;
-        }
-        return divmod_declined(c, a, b);
+        return id == B_POW ? power_slots(c, a, b, modulus) : divmod_declined(c, a, b);
     }
     case B_COMPILE: case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
         SPYValue *env = NULL, *unit = source_unit(c, id, argc, argv, &env);

@@ -69,6 +69,11 @@ SOURCES = {
     "pow3_instance": "class A: pass\npow(A(), 1, 2)",
     "pow3_methods": "class P:\n    def __pow__(self, o, m=None): return ('P', o, m)\n"
                     "    def __rpow__(self, o, m=None): return ('rP', o, m)\nresult = (pow(P(), 2, 3), pow(2, P(), 3))",
+    "divmod_methods": "log = []\nclass D:\n    def __init__(self, r): self.r = r\n    def __divmod__(self, o):\n        for _ in (): pass\n"
+                      "        log.append(('D', self.r))\n        return NotImplemented if self.r == 'ni' else ('D', o)\n"
+                      "class E:\n    def __rdivmod__(self, o):\n        for _ in (): pass\n        log.append(('rE', 2))\n        return ('rE', 2)\n"
+                      "class S(D):\n    def __rdivmod__(self, o):\n        for _ in (): pass\n        log.append(('rS', 3))\n        return ('rS', 3)\n"
+                      "result = (divmod(D(1), 1), divmod(D('ni'), E()), divmod(D(0), S(0)), log)",
     "pow3_float": "pow(1, 2.0, 3)",
     "pow3_complex": "pow(1j, 2, 3)",
     "pow3_zero": "pow(2, 3, 0)",
