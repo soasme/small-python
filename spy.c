@@ -35139,28 +35139,26 @@ static NO_INLINE Result zip_left(SPYContext *c, Block *top) {
     return (Result){FLOW_YIELD, NULL};
 }
 static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **, SPYValue **);
-/* Whether filter v's iterator is an instance whose Python __next__ gives
- * its items on the machine (filter_next). */
-static int filter_fetches(SPYContext *c, SPYValue *v) {
-    SPYValue *source = v->as.iterator.source->as.seq.items[1];
-    return source->type == SPY_INSTANCE && next_function(c, source);
-}
-/* Filter v's next item to test: the one its iterator's Python __next__
- * gave on the machine (adapted_returned), waiting in its counter, its
- * index 1; else its iterator's next in C; NULL, with *status -1 at its
- * end or on an error, or 1 when that __next__'s call begins on m, as
- * next_call_of's of an instance, v and c->adapting under it. */
+static int next_call_of(SPYContext *, Machine *, SPYValue *, SPYValue **, SPYValue **);
+/* Whether filter v's iterator may give its next item by a call on the
+ * machine (adapted_source, filter_next). */
+static int filter_fetches(SPYContext *c, SPYValue *v) { return adapted_source(c, v->as.iterator.source->as.seq.items[1]); }
+/* Filter v's next item to test: the one its iterator's call gave on the
+ * machine (adapted_returned), waiting in its counter, its index 1; else
+ * its iterator's next made at once, or in C; NULL, with *status -1 at its
+ * end or on an error, or 1 when that call (next_call_of) begins on m, v
+ * and c->adapting under it. */
 static SPYValue *filter_next(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env, int *status) {
     SPYValue *source = v->as.iterator.source->as.seq.items[1], *item = v->as.iterator.counter;
     *status = -1;
     if (v->as.iterator.index) { v->as.iterator.index = 0; v->as.iterator.counter = NULL; return item; }
     if (!filter_fetches(c, v)) return iterator_next(c, source);
-    SPYValue *function = next_function(c, source);
     if (machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->adapting))) return NULL;
-    SPYValue *self = spy_retain(source);
-    if (!(*env = function_env(c, function, 1, &self, NULL, 1))) { spy_release(machine_pop(m)); spy_release(machine_pop(m)); return NULL; }
-    *fn = spy_retain(function); *status = 1;
-    return NULL;
+    int called = next_call_of(c, m, source, fn, env);
+    if (called == 1) { *status = 1; return NULL; }
+    spy_release(machine_pop(m)); spy_release(machine_pop(m));
+    if (called == 3) return *fn;
+    return called < 0 ? NULL : iterator_next(c, source);
 }
 /* For filter v of None or bool: the next item of its iterator that is
  * true, in *fn, 3; or at an instance whose truth is a Python __bool__ or
@@ -35627,15 +35625,9 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
  * with the sentinel's Python __eq__ in c->k_fn, v left on m's stack. */
 static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue *result, int *again, int tested, int kind) {
     SPYValue *v = m->stack[m->len - 2], *source = v->as.iterator.source, *inner = source;
-    if (v->as.iterator.kind == I_FILTER) {
-        /* A filter's iterator's item waits to be tested (filter_next). */
-        spy_release(machine_pop(m)); machine_pop(m);
-        if (result) { v->as.iterator.counter = result; v->as.iterator.index = 1; *again = 1; }
-        spy_release(v);
-        return NULL;
-    }
-    /* The iterable called is the first a zip or map has no item of. */
-    if (v->as.iterator.kind != I_ENUMERATE)
+    /* The iterable called is a filter's, or the first a zip or map has no item of. */
+    if (v->as.iterator.kind == I_FILTER) inner = source->as.seq.items[1];
+    else if (v->as.iterator.kind != I_ENUMERATE)
         inner = source->as.seq.items[(v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0)];
     if (!tested && inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE &&
         !(result = sentinel_returned(c, m, inner, result, kind)) && c->k_fn) return NULL;
@@ -35643,6 +35635,12 @@ static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue 
     if (!result && inner->type == SPY_ITERATOR && (inner->as.iterator.kind == I_GETITEM || inner->as.iterator.kind == I_REVERSED))
         next_ended(c, inner);
     spy_release(machine_pop(m)); machine_pop(m);
+    if (v->as.iterator.kind == I_FILTER) {
+        /* A filter's iterator's item waits to be tested (filter_next). */
+        if (result) { v->as.iterator.counter = result; v->as.iterator.index = 1; *again = 1; }
+        spy_release(v);
+        return NULL;
+    }
     SPYValue *item = result ? adapted_item(c, v, result) : NULL;
     if (!item && !c->error_type[0]) *again = 1;
     else if (!item && v->as.iterator.kind != I_ENUMERATE) { spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL; }

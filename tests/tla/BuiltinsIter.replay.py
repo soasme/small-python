@@ -186,6 +186,9 @@ SOURCES = {
     "consume_getitem": "class G:\n    def __getitem__(s, i):\n        if i >= 3: raise IndexError(i)\n        return i\n"
                        "class L(G):\n    def __len__(s): return 3\n"
                        "result = (list(G()), sum(G()), sorted(G()), [x for x in G()], tuple(iter(G())), list(reversed(L())))",
+    "filter_adapted": "log = []\nclass S:\n    def __getitem__(s, i):\n        for _ in (): pass\n        log.append(i)\n        if i > 3: raise IndexError\n        return i % 2\n"
+                      "n = [0]\ndef f():\n    for _ in (): pass\n    n[0] += 1; return n[0]\n"
+                      "result = (list(filter(None, S())), list(filter(None, iter(f, 3))), list(filter(None, map(lambda x: x - 1, [1, 2]))), len(log) + n[0])",
     "filter_next": "log = []\nclass N:\n    def __init__(s, *v): s.v = list(v)\n    def __iter__(s): return s\n    def __next__(s):\n        for _ in (): pass\n        if not s.v: raise StopIteration\n        log.append(s.v[0]); return s.v.pop(0)\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s): log.append('b%d' % s.v); return bool(s.v)\nresult = (list(filter(None, N(0, 1, 2))), [t.v for t in filter(bool, N(T(0), T(1)))], list(filter(abs, N(0, -3))), next(filter(lambda x: x > 1, N(1, 2))), len(log))",
     "filter_none": "result = list(filter(None, [0, 1, '', 'a', None, []]))",
     "filter_truth": "log = []\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n"
