@@ -14867,6 +14867,7 @@ typedef struct {
     SPYValue *instance; /* A class call's instance whose list's or set's __init__ extends it (constructed): the value. */
     SPYValue *pair; /* A sort's comparison of two lists' items, which its call may remove (sorter_call): the two. */
     int updating, subset, rehash;
+    int closes; /* An operation's close, a throw of GeneratorExit, ending as close() does (operation_close_end). */
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
@@ -25148,9 +25149,17 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (wrapped) callee = callee->as.iterator.source;
     if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_COROUTINE_ITERATOR && is_builtin(callee, B_NEXT))
         return suspended(argv[0]->as.iterator.source) ? B_NEXT : -1;
-    /* An asend's throw throws into its async generator at a yield (throws_in). */
-    if (method == M_THROW && callee->type == SPY_ASYNC_GENERATOR_ASEND && asend_open(callee)) callee = callee->as.async_operation.generator;
-    else if (method >= 0 && callee->type == SPY_ASYNC_GENERATOR_ASEND) return asend_resumes(callee, method, argc, argv) ? B_NEXT : -1;
+    /* A throw into an operation that may resume its generator (asend_open),
+     * or its close, a throw of GeneratorExit, throws into its async
+     * generator (throws_in). */
+    int operation = callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW;
+    if ((method == M_CLOSE || method == M_THROW) && operation && asend_open(callee)) {
+        if (method == M_CLOSE) { argc = 1; argv = &c->exceptions[X_GENERATOR_EXIT]; method = M_THROW; }
+        callee = callee->as.async_operation.generator;
+    } else if (method == M_THROW && callee->type == SPY_ASYNC_GENERATOR_ASEND && asend_open(callee)) callee = callee->as.async_operation.generator;
+    /* A send to one, or its __next__, resumes it as an asend's does. */
+    else if (method >= 0 && (callee->type == SPY_ASYNC_GENERATOR_ASEND || (operation && callee->as.async_operation.state == 1)))
+        return asend_resumes(callee, method, argc, argv) ? B_NEXT : -1;
     if (method < 0 && argc == 2 && self_consumer(c, callee, argv[0])) { argc--; argv++; }
     if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ASEND && is_builtin(callee, B_NEXT))
         return asend_resumes(argv[0], M_NEXT, 0, NULL) ? B_NEXT : -1;
@@ -25434,7 +25443,11 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     if (id == B_NEXT && callee->type == SPY_METHOD && !generator) generator = spy_retain(slotted_next(c, callee, 0, NULL));
     /* An athrow's or aclose's first send throws its exception (athrow_args). */
     SPYValue *op = callee->type == SPY_BOUND_METHOD ? callee->as.bound.self : method < 0 && generator ? generator : callee, *awaited = NULL;
-    if (id == B_THROW && op->type == SPY_ASYNC_GENERATOR_ATHROW && method != M_THROW) {
+    /* An operation's close throws GeneratorExit (consumer_id). */
+    int called = callee->type == SPY_BOUND_METHOD ? callee->as.bound.method : method;
+    int closes = id == B_THROW && (op->type == SPY_ASYNC_GENERATOR_ASEND || op->type == SPY_ASYNC_GENERATOR_ATHROW) && called == M_CLOSE;
+    if (closes) { spy_release(generator); generator = spy_retain(c->exceptions[X_GENERATOR_EXIT]); }
+    if (id == B_THROW && op->type == SPY_ASYNC_GENERATOR_ATHROW && called != M_THROW && !closes) {
         size_t argc;
         SPYValue *const *args = athrow_args(c, awaited = spy_retain(op), &argc);
         spy_release(generator); spy_release(start);
@@ -25480,6 +25493,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         else restore_error(c, &error);
     }
     if (callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self; }
+    if (closes) method = M_THROW;
     /* A coroutine wrapper's coroutine is resumed (consumer_id). */
     if (callee->type == SPY_COROUTINE_ITERATOR && method >= 0) callee = callee->as.iterator.source;
     if (method < 0 && generator && generator->type == SPY_COROUTINE_ITERATOR) {
@@ -25542,14 +25556,15 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
                            .searched = searched, .wrap = wrap, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
-                           .phase = id == B_SET_TOGGLE, .awaited = awaited};
+                           .phase = id == B_SET_TOGGLE, .awaited = awaited, .closes = closes};
     if (!keyed) min_max_fed(consumer);
     spy_release(bound);
     block->value = generator; block->consumer = consumer;
     /* The operation runs its generator until the send ends (pop_block). */
     if (awaited) {
         awaited->as.async_operation.state = 1; generator->as.generator.async_running = 1;
-        if (awaited->as.async_operation.method == M_ACLOSE) generator->as.generator.async_closed = 1;
+        /* An aclose closes its generator as it begins, but by its throw or close. */
+        if (awaited->as.async_operation.method == M_ACLOSE && called != M_THROW && !closes) generator->as.generator.async_closed = 1;
     }
     /* An __iter__ the machine calls asks the hint as it returns (key_took). */
     if (source && keyed == KEY_ITER) spy_release(source);
@@ -25776,6 +25791,10 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
         else if (result) machine_push(c, m, result);
         return 0;
     }
+    /* An operation's close ends quietly as its generator raises StopIteration,
+     * StopAsyncIteration or GeneratorExit (operation_close_end). */
+    if (!item && top->consumer->closes && (error_is(c, "StopIteration") || error_is(c, "StopAsyncIteration") || error_is(c, "GeneratorExit")))
+        spy_clear_error(c);
     int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;
     if (status > 0 && top->consumer->id == B_LIST && top->consumer->searched) {
         /* A slice's store takes the list of its value's items (slice_listing). */
@@ -40407,7 +40426,22 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
 }
 /* Consumer s's result, once its items ran out or decided it; or NULL with
  * the error that stopped it. */
+/* An operation's close (closes) ended by its generator's yield or end,
+ * as close() ends (awaitable_method): an await yielded raises RuntimeError,
+ * the operation running on; a value an aclose()'s generator yields raises
+ * RuntimeError too; else None, the operation ended. */
+static SPYValue *operation_close_end(SPYContext *c, Consumer *s) {
+    SPYValue *item = s->best ? s->best : s->result, *op = s->awaited, *g = op->as.async_operation.generator;
+    s->best = s->result = NULL;
+    int awaits = item && g->as.generator.machine && g->as.generator.machine->awaiting != AWAIT_YIELD;
+    spy_release(item);
+    if (awaits) { s->awaited = NULL; spy_release(op); return spy_error(c, "RuntimeError", "coroutine ignored GeneratorExit"); }
+    if (item && op->as.async_operation.method == M_ACLOSE) return spy_error(c, "RuntimeError", "async generator ignored GeneratorExit");
+    op->as.async_operation.state = 2; g->as.generator.async_running = 0;
+    return spy_none(c);
+}
 static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
+    if (s->closes) return operation_close_end(c, s);
     if (s->id == B_CLOSE) {
         /* What the generator returned. */
         SPYValue *returned = s->sent;

@@ -501,7 +501,7 @@ Contents | - navigation
 27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.4 Attributes | Awaitables
 27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.5 Iterable coroutines | Awaitables, IntrinsicTypes
 27 Control Abstraction Objects > 27.5 Asynchronous generator objects | = sections
-27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.1 Asynchronous generator awaitables | AsyncGenerators, OperationThrow
+27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.1 Asynchronous generator awaitables | AsyncGenerators, OperationThrow, OperationClose
 27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.2 athrow and aclose | AsyncGenerators
 27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.3 Attributes | AsyncGenerators
 27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.4 Host hooks | - host hook HostAsyncGenHooks (Annex B)
