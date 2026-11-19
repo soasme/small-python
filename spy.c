@@ -25712,6 +25712,7 @@ static NO_INLINE int thrown_at(Machine *m, size_t argc) {
  * generator, an asend's throw of an exception. */
 static SPYValue *method_function(SPYContext *, SPYValue *, const char *);
 static int method_absent(SPYValue *, const char *);
+static SPYValue *own_function(SPYContext *, SPYValue *, const char *);
 static SPYValue *asked_function(SPYContext *, SPYValue *, const char *);
 static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     if ((g->type != SPY_GENERATOR && g->type != SPY_COROUTINE && g->type != SPY_ASYNC_GENERATOR) || !suspended(g)) return 0;
@@ -25742,7 +25743,8 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     /* One without the method passes the exception on at the yield from
      * (iterator_send), a class made first, as no Python asked for the
      * method. */
-    return function ? machine_function(c, function) : method_absent(m->delegate, name) || asked_function(c, m->delegate, name);
+    return function ? machine_function(c, function) :
+           method_absent(m->delegate, name) || own_function(c, m->delegate, name) || asked_function(c, m->delegate, name);
 }
 /* The Python __next__ on the machine of instance v's class, borrowed;
  * else NULL. */
@@ -25947,6 +25949,15 @@ static SPYValue *method_function(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
     SPYValue *function = !hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE) ? class_lookup(cls, name) : NULL;
     return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
+}
+/* The Python function plain instance v holds as its own attribute name,
+ * which its class's default lookup gives as is, no class attribute but a
+ * function overriding it; borrowed, else NULL. */
+static SPYValue *own_function(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *function = plain_instance(v) ? name_local(v, name) : NULL;
+    if (!function || !machine_function(c, function)) return NULL;
+    SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__"), *shadowed = class_lookup(cls, name);
+    return (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) && (!shadowed || shadowed->type == SPY_FUNCTION) ? function : NULL;
 }
 /* Whether plain instance v lacks method name, its class's default
  * attribute lookup failing with no __getattr__, so no Python runs. */
@@ -35610,7 +35621,9 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
     *kind = !thrown ? CALL_DELEGATE : closing ? CALL_CLOSED : CALL_THROWN;
     *item = NULL;
     const char *name = thrown ? closing ? "close" : "throw" : "send";
-    SPYValue *asked = !function && !next ? asked_function(c, d, name) : NULL;
+    /* One the delegate holds itself takes no self. */
+    SPYValue *own = !function && !next ? own_function(c, d, name) : NULL;
+    SPYValue *asked = !function && !next && !own ? asked_function(c, d, name) : NULL;
     if (asked) {
         /* Its __getattr__ is asked for the method first, the exception or
          * value under the call's kind on m's stack (CALL_ASKED, delegate_asked). */
@@ -35621,6 +35634,9 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
             spy_release(*env); *env = NULL;
         }
         if (*env) { call = spy_retain(asked); *kind = CALL_ASKED; }
+    } else if (own && !(closing && machine_push(c, m, spy_retain(thrown)))) {
+        SPYValue *arg = closing ? NULL : spy_retain(thrown ? thrown : sent);
+        if ((*env = function_env(c, own, !closing, &arg, NULL, 1))) call = spy_retain(own);
     } else if (function && machine_function(c, function) && !(closing && machine_push(c, m, spy_retain(thrown)))) {
         SPYValue *args[] = {spy_retain(d), next || closing ? NULL : spy_retain(thrown ? thrown : sent)};
         if ((*env = function_env(c, function, next || closing ? 1 : 2, args, NULL, 1))) call = spy_retain(function);

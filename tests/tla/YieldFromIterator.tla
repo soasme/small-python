@@ -29,8 +29,9 @@
 (* more next() passes.                                                     *)
 (* where it's __next__ returns 1, then raises StopIteration(8).            *)
 (* Each of it's send, throw and close is defined (send and throw return 7, *)
-(* close returns None), raises ValueError when called, is missing, or is   *)
-(* broken: looking it up raises ZeroDivisionError. Or it is a map whose    *)
+(* close returns None), so held by it as its own attributes, taking no     *)
+(* self ("own"), raises ValueError when called, is missing, or is broken:  *)
+(* looking it up raises ZeroDivisionError. Or it is a map whose            *)
 (* Python function acts as that __next__, and has none of the three        *)
 (* methods, or a builtin list iterator of the one item 1, which ends with  *)
 (* StopIteration(None) and has no methods. The outcome is the              *)
@@ -39,7 +40,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Kinds == {"defined", "raises", "missing", "broken", "map", "builtin"}
+Kinds == {"defined", "own", "raises", "missing", "broken", "map", "builtin"}
 Programs == [kind : Kinds, step : {"close", "throw", "throwclass", "send", "next", "loop", "nested", "consume", "drop"}, first : BOOLEAN]
 
 VARIABLES program, outcome
@@ -51,7 +52,7 @@ Method(step) == CASE step \in {"close", "drop"} -> "close" [] step = "throwclass
 
 Run(p) ==
     LET m == Method(p.step)
-        called == IF p.kind = "builtin" THEN "" ELSE IF p.kind \in {"defined", "raises"} \/ m = "next" THEN m ELSE ""
+        called == IF p.kind = "builtin" THEN "" ELSE IF p.kind \in {"defined", "own", "raises"} \/ m = "next" THEN m ELSE ""
     IN CASE p.kind = "builtin" /\ p.step = "next" -> [result |-> "StopIteration None", called |-> called, finished |-> TRUE]
          [] p.kind = "builtin" /\ p.step = "loop" -> [result |-> "[('ret', None)]", called |-> called, finished |-> TRUE]
          [] p.step = "next" -> [result |-> "StopIteration 8", called |-> called, finished |-> TRUE]
@@ -59,8 +60,8 @@ Run(p) ==
          [] p.step = "consume" -> [result |-> "[]", called |-> called, finished |-> TRUE]
          \* The close a dropped g gets reports its errors as unraisable.
          [] p.step = "drop" -> [result |-> "dropped", called |-> called, finished |-> TRUE]
-         [] p.kind = "defined" /\ p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]
-         [] p.kind = "defined" -> [result |-> "7", called |-> called, finished |-> FALSE]
+         [] p.kind \in {"defined", "own"} /\ p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]
+         [] p.kind \in {"defined", "own"} -> [result |-> "7", called |-> called, finished |-> FALSE]
          \* The method's own exception propagates, and ends the delegator.
          [] p.kind = "raises" -> [result |-> "ValueError", called |-> called, finished |-> TRUE]
          \* An unraisable lookup error: close() completes as if there were no close.
@@ -87,8 +88,8 @@ ConsumeEnds == Done /\ program.step = "consume" => outcome.result = "[]" /\ outc
 
 \* A dropped g is closed, its iterator's close called when it has one.
 DropCloses == Done /\ program.step = "drop" =>
-    outcome.finished /\ (outcome.called = "close" <=> program.kind \in {"defined", "raises"})
+    outcome.finished /\ (outcome.called = "close" <=> program.kind \in {"defined", "own", "raises"})
 
 \* A thrown class reaches the iterator's throw as given, not made.
-ThrowClassRaw == Done /\ program.step = "throwclass" /\ program.kind \in {"defined", "raises"} => outcome.called = "throwC"
+ThrowClassRaw == Done /\ program.step = "throwclass" /\ program.kind \in {"defined", "own", "raises"} => outcome.called = "throwC"
 =============================================================================

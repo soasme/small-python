@@ -35,6 +35,12 @@ def iterator(kind, called):
         def close(self):
             called.append("close")
         body.update(send=send, throw=throw, close=close)
+    elif kind == "own":
+        it = type("It", (), body)()
+        it.send = lambda value: called.append("send") or 7
+        it.throw = lambda *args: called.append("throwC" if isinstance(args[0], type) else "throw") or 7
+        it.close = lambda: called.append("close")
+        return it
     elif kind == "raises":
         def method(name):
             def call(self, *args):
