@@ -22517,45 +22517,88 @@ static SPYValue *intrinsics_k(SPYContext *c, Machine *m, Continuation k, SPYValu
     c->k_fn = unit; c->k_env = module; c->k = intrinsics_loaded; c->k_ctx = state; c->k_unit = 1;
     return NULL;
 }
-static SPYValue *object_reduce(SPYContext *, Machine *, int, size_t, SPYValue *const *);
-/* The intrinsics an object reduction (ctx: its id and arguments) needs are
- * loaded, given result, or NULL with an error: it goes on (object_reduce). */
-static SPYValue *reduce_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
-    SPYValue *value = NULL;
-    if (result) {
-        spy_release(result);
-        value = object_reduce(c, m, (int)ctx->as.seq.items[0]->as.integer_data.small, ctx->as.seq.len - 1, ctx->as.seq.items + 1);
-    }
-    spy_release(ctx);
+static SPYValue *object_reducek(SPYContext *, Machine *, int, size_t, SPYValue *const *, Continuation, SPYValue *);
+static SPYValue *k_take(SPYContext *, SPYValue *, Continuation *);
+static int is_builtin(SPYValue *, int);
+/* The intrinsics an object reduction (state: its id and arguments, then
+ * its continuation) needs are loaded, given result, or NULL with an
+ * error: it goes on (object_reducek). */
+static SPYValue *reduce_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    size_t argc = state->as.seq.len - 3;
+    int id = (int)state->as.seq.items[0]->as.integer_data.small;
+    SPYValue *args[2] = {NULL, NULL}, *value;
+    for (size_t i = 0; i < argc; i++) args[i] = spy_retain(state->as.seq.items[1 + i]);
+    Continuation k;
+    SPYValue *ctx = k_take(c, state, &k);
+    spy_release(result);
+    value = result ? object_reducek(c, m, id, argc, args, k, ctx) : k(c, m, ctx, NULL);
+    release_all(argc, args);
     return value;
 }
-static SPYValue *object_reduce(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv) {
+/* object.__reduce__(), __reduce_ex__() or __getstate__() (id) of argc
+ * arguments argv: the protocol itself is Python code in the intrinsics
+ * module, on m when given (callk), the call then m's, its value going to
+ * k with ctx, which it takes. */
+static SPYValue *object_reducek(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv, Continuation k, SPYValue *ctx) {
     size_t expected = id == B_OBJECT_REDUCE_EX ? 2 : 1;
     const char *method = id == B_OBJECT_REDUCE ? "__reduce__" : id == B_OBJECT_REDUCE_EX ? "__reduce_ex__" : "__getstate__";
+    int64_t protocol;
     if (argc != expected) {
-        if (!argc) return errorf(c, "TypeError", "unbound method object.%s() needs an argument", method);
-        if (expected == 1) return errorf(c, "TypeError", "object.%s() takes no arguments (%zu given)", method, argc - 1);
-        return errorf(c, "TypeError", "object.__reduce_ex__() takes exactly one argument (%zu given)", argc - 1);
+        if (!argc) errorf(c, "TypeError", "unbound method object.%s() needs an argument", method);
+        else if (expected == 1) errorf(c, "TypeError", "object.%s() takes no arguments (%zu given)", method, argc - 1);
+        else errorf(c, "TypeError", "object.__reduce_ex__() takes exactly one argument (%zu given)", argc - 1);
+        return k(c, m, ctx, NULL);
     }
+    if (id == B_OBJECT_REDUCE_EX && !is_int(argv[1])) {
+        errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(argv[1]));
+        return k(c, m, ctx, NULL);
+    }
+    if (id == B_OBJECT_REDUCE_EX && spy_as_int(c, argv[1], &protocol)) return k(c, m, ctx, NULL);
     /* Protocols 0 and 1 reconstruct from the first class of the
      * Standard in the MRO (CPython: the first non-heap type). */
     SPYValue *base = c->object, *mro = value_class(c, argv[0])->as.map.mro;
     for (size_t i = 0; mro && i < mro->as.seq.len; i++)
         if (static_type(c, mro->as.seq.items[i])) { base = mro->as.seq.items[i]; break; }
-    int64_t protocol;
-    if (id == B_OBJECT_REDUCE_EX && !is_int(argv[1])) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(argv[1]));
-    if (id == B_OBJECT_REDUCE_EX && spy_as_int(c, argv[1], &protocol)) return NULL;
     if (m && !c->intrinsics) {
         /* Its intrinsic's module loads on m first (intrinsics_k). */
-        SPYValue *which = int_value(c, id), *ctx = which ? tuple_of(c, argc + 1, (SPYValue *[3]){which, argv[0], argc > 1 ? argv[1] : NULL}) : NULL;
-        spy_release(which);
-        return ctx ? intrinsics_k(c, m, reduce_loaded, ctx) : NULL;
+        SPYValue *which = int_value(c, id), *state = which ? k_state(c, argc + 1, (SPYValue *[5]){which, spy_retain(argv[0]), argc > 1 ? spy_retain(argv[1]) : NULL}, k, ctx) : NULL;
+        if (!which) return k(c, m, ctx, NULL);
+        return state ? intrinsics_k(c, m, reduce_loaded, state) : NULL;
     }
     SPYValue *function = intrinsic(c, id == B_OBJECT_REDUCE_EX ? "_object_reduce_ex" : id == B_OBJECT_REDUCE ? "_object_common_reduce" : "_object_getstate_default");
     SPYValue *second = id == B_OBJECT_REDUCE_EX ? spy_retain(argv[1]) : id == B_OBJECT_REDUCE ? spy_int(c, 0) : spy_retain(c->booleans[0]);
-    if (!function || !second) { spy_release(second); return NULL; }
+    if (!function || !second) { spy_release(second); return k(c, m, ctx, NULL); }
     SPYValue *args[] = {spy_retain(argv[0]), second, spy_retain(base)};
-    return callk(c, m, function, 3 - (id == B_OBJECT_GETSTATE), args, method_called, NULL);
+    return callk(c, m, function, 3 - (id == B_OBJECT_GETSTATE), args, k, ctx);
+}
+/* object_reducek, its value the call's. */
+static SPYValue *object_reduce(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv) {
+    return object_reducek(c, m, id, argc, argv, method_called, NULL);
+}
+/* A native reduce's value of what the __getstate__ that reduce_state
+ * called returned, state: (class, arguments, state), as ctx holds the
+ * first two. */
+static SPYValue *reduce_wrapped(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *state) {
+    (void)m;
+    SPYValue *result = state ? spy_tuple(c, 3, (SPYValue *[]){ctx->as.seq.items[0], ctx->as.seq.items[1], state}) : NULL;
+    spy_release(state); spy_release(ctx);
+    return result;
+}
+/* (class, args, state) of a native __reduce__ of self, args taken, state
+ * what self's __getstate__ returns: object's own or a Python one a call
+ * on the step's machine (step_machine, object_reducek, callk). */
+static SPYValue *reduce_state(SPYContext *c, SPYValue *self, SPYValue *args) {
+    Machine *m = step_machine(c);
+    SPYValue *getstate = args ? attribute(c, self, "__getstate__") : NULL;
+    SPYValue *ctx = getstate ? tuple_of(c, 2, (SPYValue *[]){value_class(c, self), args}) : NULL;
+    spy_release(args);
+    if (!ctx) { spy_release(getstate); return NULL; }
+    SPYValue *result, *function = getstate->type == SPY_METHOD ? getstate->as.method.function : NULL;
+    if (function && is_builtin(function, B_OBJECT_GETSTATE) && getstate->as.method.self == self)
+        result = object_reducek(c, m, B_OBJECT_GETSTATE, 1, &self, reduce_wrapped, ctx);
+    else result = callk(c, m, getstate, 0, NULL, reduce_wrapped, ctx);
+    spy_release(getstate);
+    return result;
 }
 static SPYValue *map_findk(SPYContext *, Machine *, SPYValue *, SPYValue *, int64_t, MapCursor, Continuation, SPYValue *);
 /* The builtins dict whose lookup of name compares a key other than a str
@@ -27883,9 +27926,11 @@ static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
             callee->as.native.kwcall == open_builtin);
 }
 /* Whether a map's builtin callee may go on on the machine, its call a call
- * step's (map_convert): machine_builtin's, sorted(), min() or max(). */
+ * step's (map_convert): machine_builtin's, sorted(), min(), max() or a
+ * native method that may leave a call to its step (step_native). */
 static int map_steps(SPYValue *callee) {
-    return machine_builtin(callee) || is_builtin(callee, B_SORTED) || is_builtin(callee, B_MIN) || is_builtin(callee, B_MAX);
+    return machine_builtin(callee) || is_builtin(callee, B_SORTED) || is_builtin(callee, B_MIN) || is_builtin(callee, B_MAX) ||
+           (callee->type == SPY_NATIVE && callee->as.native.host == 2);
 }
 static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
@@ -34719,7 +34764,8 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
         if (!callee) return 0;
         if (!(function = machine_function(c, callee) ? callee : bound_function(c, callee)))
-            return (callee->type == SPY_NATIVE && callee->as.native.call == builtin) || callee->type == SPY_CLASS ? map_convert(c, m, v, fn, env) : 0;
+            return (callee->type == SPY_NATIVE && (callee->as.native.call == builtin || callee->as.native.host == 2)) || callee->type == SPY_CLASS ?
+                   map_convert(c, m, v, fn, env) : 0;
         if (!(args = zip_items(c, v))) return -1;
         /* A bound method or callable instance's self goes first. */
         if (function != callee) {
@@ -40022,12 +40068,8 @@ static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *ar
         for (size_t i = 0; items && i < self->as.map.len; i++)
             if (sequence_append(c, items, map_items(self)[i].key)) { spy_release(items); items = NULL; }
         SPYValue *args = items ? spy_tuple(c, 1, &items) : NULL;
-        SPYValue *getstate = args ? attribute(c, argv[0], "__getstate__") : NULL;
-        SPYValue *state = getstate ? call(c, getstate, 0, NULL) : NULL;
-        SPYValue *parts[] = {value_class(c, argv[0]), args, state};
-        SPYValue *result = state ? spy_tuple(c, 3, parts) : NULL;
-        spy_release(items); spy_release(args); spy_release(getstate); spy_release(state);
-        return result;
+        spy_release(items);
+        return reduce_state(c, argv[0], args);
     }
     default:
         if (self->type == SPY_FROZENSET && argv[0]->type == SPY_FROZENSET) return spy_retain(self);
@@ -41317,12 +41359,8 @@ static SPYValue *bytearray_reduce(SPYContext *c, size_t argc, SPYValue *const *a
     SPYValue *contents = proto >= 3 ? spy_bytes(c, self->as.string.data, self->as.string.len) :
         encoding ? bytes_decode(c, self->as.string.data, self->as.string.len, encoding, NULL) : NULL;
     SPYValue *parts[] = {contents, encoding}, *args = contents ? spy_tuple(c, proto < 3 ? 2 : 1, parts) : NULL;
-    SPYValue *getstate = args ? attribute(c, argv[0], "__getstate__") : NULL;
-    SPYValue *state = getstate ? call(c, getstate, 0, NULL) : NULL;
-    SPYValue *items[] = {value_class(c, argv[0]), args, state};
-    SPYValue *result = state ? spy_tuple(c, 3, items) : NULL;
-    spy_release(contents); spy_release(encoding); spy_release(args); spy_release(getstate); spy_release(state);
-    return result;
+    spy_release(contents); spy_release(encoding);
+    return reduce_state(c, argv[0], args);
 }
 static SPYValue *bytearray_resize_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int take = (int)(intptr_t)data;
@@ -45194,7 +45232,8 @@ static int class_method_set(SPYContext *c, SPYValue *cls, const char *name, Nati
     method->as.native.data = (void *)data;
     method->as.native.method = kind == METHOD_INSTANCE;
     /* Its C code may leave a call to its step (step_native). */
-    method->as.native.host = call == object_method || call == mappingproxy_method ? 2 : 0;
+    method->as.native.host = call == object_method || call == mappingproxy_method || call == bytearray_reduce ||
+                             (call == set_item_method && (data & 0xff) == SET_REDUCE) ? 2 : 0;
     /* Allocators stay bound to their type, as tp_new wrappers are. */
     method->as.native.static_method = kind == METHOD_STATIC && strcmp(name, "__new__");
     if (kind != METHOD_INSTANCE) {

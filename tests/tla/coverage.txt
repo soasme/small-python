@@ -439,7 +439,7 @@ Contents | - navigation
 24 Binary Data > 24.1 The `bytes` type > 24.1.1 bytes ( [ *source* [ , *encoding* [ , *errors* ] ] ] ) | Bytes
 24 Binary Data > 24.1 The `bytes` type > 24.1.2 BytesRepr ( *b* ) | Bytes
 24 Binary Data > 24.1 The `bytes` type > 24.1.3 fromhex and hex | Bytes
-24 Binary Data > 24.2 The `bytearray` type | Bytes, Lists
+24 Binary Data > 24.2 The `bytearray` type | Bytes, Lists, NativeReduce
 24 Binary Data > 24.3 Bytes and bytearray operations | Bytes, PercentFormat
 24 Binary Data > 24.4 The buffer protocol and `memoryview` | = sections
 24 Binary Data > 24.4 The buffer protocol and `memoryview` > 24.4.1 Buffers | Buffers
@@ -472,7 +472,7 @@ Contents | - navigation
 26 Mappings and Sets > 26.2 The `frozendict` type | FrozenDicts, KeywordHashes
 26 Mappings and Sets > 26.3 The `set` and `frozenset` types | = sections
 26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.1 set ( [ *iterable* ] ) and frozenset ( [ *iterable* ] ) | Sets
-26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.2 Operations | Sets, SetWalks
+26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.2 Operations | Sets, SetWalks, NativeReduce
 26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.3 Mutation during iteration | Iterators
 26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.4 FrozenSetHash ( *s* ) | NumericHash, Sets
 26 Mappings and Sets > 26.4 Dictionary views | DictMethods
