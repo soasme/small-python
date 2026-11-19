@@ -151,6 +151,11 @@ SOURCES = {
                         "    def __gt__(s, o): return t(s.n + '>' + type(o).__name__)\n"
                         "class P: pass\n"
                         "result = (None == E('a'), 'x' < E('b'), P() == E('c'), (1,) == E('d'))",
+    "builtin_sub_declines": "class I(int): pass\nclass N(str):\n    def __lt__(s, o): t('N<'); return NotImplemented\n"
+                            "class E:\n    def __init__(s, r): s.r = r\n"
+                            "    def __gt__(s, o):\n        for _ in (): pass\n        t('E>' + type(o).__name__); return s.r\n"
+                            "def f(x, e):\n    try: return x < e\n    except TypeError: return 'TypeError'\n"
+                            "result = (f(I(1), E('v')), f(I(1), E(NotImplemented)), f(N('n'), E(NotImplemented)))",
     "ne_by_eq": "class E:\n    def __init__(s, n): s.n = n\n"
                 "    def __eq__(s, o): t(s.n + '==' + type(o).__name__); return NotImplemented if s.n == 'd' else s.n\n"
                 "class P: pass\n"

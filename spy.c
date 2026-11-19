@@ -10969,10 +10969,12 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
         if (result != c->not_implemented) return result;
         spy_release(result);
     }
-    if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base)) {
+    SPYValue *x = a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a;
+    SPYValue *y = b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b;
+    /* Builtin values compare by their builtins' methods; another object's
+     * methods have declined already. */
+    if ((x != a || y != b) && !special_dispatch(x) && !special_dispatch(y)) {
         static const int tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
-        SPYValue *x = a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a;
-        SPYValue *y = b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b;
         /* A builtin subclass's instance b compares first by its builtin's
          * reflected method, unless its class has a Python one. */
         int reflected = rich_reflected[rich_kind(op)];
@@ -30565,6 +30567,15 @@ static int rich_declines(SPYContext *c, SPYValue *x, int rich) {
     return (plain_instance(x) || metaclassed(x)) && class_lookup(value_class(c, x), rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
            (rich != R_NE || rich_declines(c, x, R_EQ));
 }
+/* Whether x, an instance of a builtin's subclass whose rich comparison
+ * rich is the builtin's, declines y, an instance of no builtin's
+ * subclass, as its builtin value would (rich_declines); a number's does. */
+static int based_declines(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
+    SPYValue *base = x->type == SPY_INSTANCE ? x->as.map.base : NULL;
+    if (!base || y->type != SPY_INSTANCE || y->as.map.base) return 0;
+    return class_lookup(x->as.map.parent, rich_names[rich]) == class_lookup(value_class(c, base), rich_names[rich]) &&
+           (base->type == SPY_INT || base->type == SPY_FLOAT || base->type == SPY_COMPLEX || rich_declines(c, base, rich));
+}
 /* The Python special method that operator step ins calls first on x and
  * y, owned, with its env, to enter on m (CALL_OPERATOR), x, y and the
  * phase on the stack under it (operator_push): instance x's __getitem__,
@@ -32177,10 +32188,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     int phase = OPERATOR_FIRST, negated = 0;
     if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT || x->type == SPY_COMPLEX ||
         (o && x->type == SPY_CLASS && !metaclassed(x) && y->type == SPY_INSTANCE) ||
-        (rich >= 0 && (y->type == SPY_INSTANCE || metaclassed(y)) && rich_declines(c, x, rich))) {
+        (rich >= 0 && (y->type == SPY_INSTANCE || metaclassed(y)) && (rich_declines(c, x, rich) || based_declines(c, x, y, rich)))) {
         /* A number, or a class by type's | (a union of no instance),
-         * declines an operator or comparison with a plain instance, whose
-         * reflected method is the last call; a number takes a narrower
+         * declines an operator or comparison with a plain instance, as
+         * does a builtin's subclass instance by the builtin's comparison
+         * (based_declines), whose reflected method is the last call; a number takes a narrower
          * number's subclass instance itself (number_takes). */
         if (!reflected || number_takes(c, o, rich, x, y) ||
             !(function = o ? item_special(c, y, reflected) : rich_special(c, y, rich_reflected[rich], &negated))) return NULL;

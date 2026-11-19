@@ -43,7 +43,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
           "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_scalar_order", "sort_reflected_items", "map_builtin_calls", "view_calls", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected",
-          "builtin_sub_unordered"}
+          "builtin_sub_unordered", "builtin_sub_declines"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -196,6 +196,9 @@ Case(c) ==
       \* an instance of another class, whose reflected method decides
       [] c = "builtin_declines" -> <<"('a==NoneType', 'b>str', 'c==P', 'd==tuple')",
                                      <<"'a==NoneType'", "'b>str'", "'c==P'", "'d==tuple'">>>>
+      \* so does a builtin's subclass instance by its builtin's method, or its
+      \* own declining one: the reflected method is called once
+      [] c = "builtin_sub_declines" -> <<"('v', 'TypeError', 'TypeError')", <<"'E>I'", "'E>I'", "'N<'", "'E>N'">>>>
       \* object's __ne__ inverts whatever __eq__ returns, also for a declining str
       \* or int; its NotImplemented goes on with the other operand's __ne__
       [] c = "ne_by_eq" -> <<"(True, False, False, False)", <<"'==str'", "'a==P'", "'b==int'", "'d==E'", "'c==E'">>>>
