@@ -98,6 +98,15 @@ SOURCES = {
     "proxy_bad": 'types.MappingProxyType([1])',
     "proxy_or": "result = types.MappingProxyType({'a': 1}) | {'b': 2}",
     "proxy_copy": "c = types.MappingProxyType({'a': 1}).copy()\nresult = (type(c).__name__, c)",
+    "proxy_forward": "class M:\n    def __getitem__(self, k):\n        for _ in range(2): pass\n        return {'k': 1}[k]\n"
+                     "    def get(self, k, d=None):\n        for _ in range(2): pass\n        return d\n"
+                     "    def keys(self): return ['k']\n    def values(self): return [1]\n    def items(self): return [('k', 1)]\n"
+                     "    def copy(self): return ['copy']\n"
+                     "p = types.MappingProxyType(M())\ntry: p['z']\nexcept KeyError as e: z = 'KeyError: ' + str(e.args[0])\n"
+                     "result = (p['k'], p.get('k', 0), p.keys(), p.values(), p.items(), p.copy(), z)",
+    "proxy_reflected": "class M(dict):\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return ('eq', type(other).__name__)\n"
+                       "p = types.MappingProxyType({'a': 1})\n"
+                       "result = ({} == types.MappingProxyType(M()), {'a': 1} == p == {'a': 1}, [] == p, 1 != p)",
     "proxy_compare": "class M(dict):\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return 'eq'\n"
                      "class O:\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return type(other).__name__\n"
                      "result = (types.MappingProxyType(M()) == {}, types.MappingProxyType({'a': 1}) == O(), types.MappingProxyType({}) != {})",

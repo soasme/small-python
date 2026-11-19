@@ -7,11 +7,12 @@
 (* LambdaType is FunctionType and BuiltinMethodType is                     *)
 (* BuiltinFunctionType; MethodType, ModuleType, CellType, FunctionType,    *)
 (* and MappingProxyType construct their objects, a mapping proxy being a   *)
-(* read-only live view of its mapping; NoneType and NotImplementedType     *)
-(* return their singletons; the method, wrapper, class-method, getset, and *)
-(* member descriptors bind and check their owner class; tracebacks and     *)
-(* frames link to their neighbors; and generator and function types        *)
-(* neither construct nor subclass.                                         *)
+(* read-only live view of its mapping, whose item reads and get, keys,     *)
+(* values, items, and copy call the mapping's own methods; NoneType and    *)
+(* NotImplementedType return their singletons; the method, wrapper,        *)
+(* class-method, getset, and member descriptors bind and check their owner *)
+(* class; tracebacks and frames link to their neighbors; and generator and *)
+(* function types neither construct nor subclass.                          *)
 (*                                                                         *)
 (* A program makes a sample object for each name of NAMES and reports its  *)
 (* type's __name__, whether the name is that type, the type's __module__,  *)
@@ -38,7 +39,7 @@ Module(n) == CASE n = "GenericAlias" -> "types" [] n = "UnionType" -> "typing" [
 
 
 Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name", "cell_empty", "cell_set",
-          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare",
+          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare", "proxy_forward", "proxy_reflected",
           "class_dict_proxy", "function_ctor", "code_replace", "notimplemented_ctor", "none_ctor",
           "classmethod_descr_repr", "classmethod_descr_call", "classmethod_descr_get",
           "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg",
@@ -69,6 +70,10 @@ Case(c) ==
       [] c = "proxy_copy" -> "('dict', {'a': 1})"
       \* == and != compare the mapping, an exact dict reaching the other operand as a copy.
       [] c = "proxy_compare" -> "('eq', 'dict', False)"
+      \* Item reads and get, keys, values, items, copy call the mapping's own methods.
+      [] c = "proxy_forward" -> "(1, 0, ['k'], [1], [('k', 1)], ['copy'], 'KeyError: z')"
+      \* A builtin on the left declines: the proxy compares its mapping with it.
+      [] c = "proxy_reflected" -> "(('eq', 'dict'), True, False, True)"
       [] c = "class_dict_proxy" -> "TypeError: 'mappingproxy' object does not support item assignment"
       [] c = "function_ctor" -> "(5, 'g')"
       [] c = "code_replace" -> "'g'"

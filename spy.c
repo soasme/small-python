@@ -10441,12 +10441,20 @@ static NO_INLINE int values_python(SPYContext *c, SPYValue *x, SPYValue *y) {
     return 0;
 }
 static SPYValue *proxy_compared(SPYContext *, SPYValue *, SPYValue *);
+/* Whether x's == and != decline a mappingproxy, whose reflected one then
+ * compares its mapping with x: x is no instance, class by its metaclass,
+ * or mappingproxy. */
+static int proxy_reflects(SPYValue *x) {
+    return x->type != SPY_INSTANCE && x->type != SPY_MAPPINGPROXY && !metaclassed(x);
+}
 /* A step's comparison op of *left, owned, and b, done natively, or NULL
  * for the machine to dispatch, or with an error. A mappingproxy's == and
  * != compare its mapping instead, which replaces *left (proxy_compared). */
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **left, SPYValue *b) {
     if (UNLIKELY((*left)->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && !(*left = proxy_compared(c, *left, b))) return NULL;
     SPYValue *a = *left;
+    /* Of one on the right, the machine compares the mapping (operator_call). */
+    if (UNLIKELY(b->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && proxy_reflects(a)) return NULL;
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
     if ((op == O_IN || op == O_NOTIN) && ((b->type == SPY_ITERATOR && iterated_python(c, a, b)) ||
                                           (b->type == SPY_DICT_VALUES && values_python(c, a, b)))) return NULL;
@@ -31210,6 +31218,16 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
     c->entering_kind = CALL_OPERATOR;
+    /* x == or != mappingproxy y, x declining it, is y's reflected one: its
+     * mapping compared with x (proxy_compared), y kept for a chain. */
+    if (UNLIKELY(y && y->type == SPY_MAPPINGPROXY) && (rich == R_EQ || rich == R_NE) && proxy_reflects(x)) {
+        SPYValue *compared = proxy_compared(c, spy_retain(y), x);
+        if (!compared) return NULL;
+        operator_keep(c, m, ins, y);
+        function = operator_call(c, m, ins, compared, x, env);
+        spy_release(compared);
+        return function;
+    }
     /* A set operation, augmented assignment or comparison, whose lookups
      * may call a Python __eq__. */
     if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) &&
@@ -37007,6 +37025,11 @@ static SPYValue *proxy_compared(SPYContext *c, SPYValue *proxy, SPYValue *other)
     }
     return proxy;
 }
+/* What a mappingproxy's mapping gave its call, result. */
+static SPYValue *proxied(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)c; (void)m; (void)ctx;
+    return result;
+}
 static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
     const char *name = mappingproxy_methods[op];
@@ -37018,6 +37041,18 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     int64_t hash;
     size_t required = op == MP_GETITEM || op == MP_CONTAINS || (op >= MP_EQ && op <= MP_IOR) || op == MP_GET;
     if (parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, op == MP_GET ? 2 : required, required, 0, args)) return NULL;
+    /* On the step's machine an instance mapping's Python __getitem__, or
+     * its method of a mapping's own, is a call there (callk). */
+    Machine *m = mapping->type == SPY_INSTANCE ? step_machine(c) : NULL;
+    SPYValue *function = m && op == MP_GETITEM ? item_special(c, mapping, "__getitem__") : NULL;
+    if (function) return special_callk(c, m, function, mapping, 1, (SPYValue *[]){spy_retain(args[0])}, NULL, proxied, NULL);
+    if (m && op >= MP_GET) {
+        SPYValue *method = attribute(c, mapping, name), *result;
+        if (!method) return NULL;
+        size_t n = op == MP_GET ? 2 : 0;
+        result = callk(c, m, method, n, (SPYValue *[]){n ? spy_retain(args[0]) : NULL, n ? spy_retain(args[1] ? args[1] : c->none) : NULL}, proxied, NULL);
+        spy_release(method); return result;
+    }
     switch (op) {
     case MP_GETITEM: return get_index(c, mapping, args[0]);
     case MP_CONTAINS: return comparison(c, O_IN, args[0], mapping);
@@ -44283,7 +44318,7 @@ static int class_method_set(SPYContext *c, SPYValue *cls, const char *name, Nati
     method->as.native.data = (void *)data;
     method->as.native.method = kind == METHOD_INSTANCE;
     /* Its C code may leave a call to its step (step_native). */
-    method->as.native.host = call == object_method ? 2 : 0;
+    method->as.native.host = call == object_method || call == mappingproxy_method ? 2 : 0;
     /* Allocators stay bound to their type, as tp_new wrappers are. */
     method->as.native.static_method = kind == METHOD_STATIC && strcmp(name, "__new__");
     if (kind != METHOD_INSTANCE) {
