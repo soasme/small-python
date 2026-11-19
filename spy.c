@@ -542,6 +542,7 @@ static ALWAYS_INLINE int setter_object(SPYValue *v) { return v->type == SPY_INST
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static SPYValue *contained_base(SPYContext *, SPYValue *);
 static int special_dispatch(SPYValue *);
+static int index_defined(SPYContext *, SPYValue *);
 static int mapping_type(SPYContext *, SPYValue *);
 static SPYValue *super_new(SPYContext *, SPYValue *, SPYValue *);
 enum { R_LT, R_LE, R_EQ, R_NE, R_GT, R_GE };
@@ -9561,10 +9562,7 @@ static int slice_index(SPYContext *c, SPYValue *value, int64_t *result) {
 /* slice_index for a sequence subscript, with CPython's per-type message when
  * the key is not an integer. */
 static int subscript_index(SPYContext *c, SPYValue *v, SPYValue *key, int64_t *result) {
-    SPYValue *method = is_int(key) || !special_dispatch(key) ? NULL : special_method(c, key, "__index__");
-    spy_release(method);
-    if (!is_int(key) && !method) {
-        if (c->error_type[0]) return -1;
+    if (!is_int(key) && !index_defined(c, key)) {
         int type = v->type == SPY_INSTANCE && v->as.map.base ? v->as.map.base->type : v->type;
         if (type == SPY_STRING) errorf(c, "TypeError", "string indices must be integers, not '%s'", type_name(key));
         else errorf(c, "TypeError", "%s indices must be integers or slices, not %s",
@@ -10187,12 +10185,7 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
     }
     if (op == '*' && (sequence || text) && !is_int(b)) {
         /* sq_repeat takes any object with __index__. */
-        SPYValue *method = special_dispatch(b) ? special_method(c, b, "__index__") : NULL;
-        if (!method) {
-            if (c->error_type[0]) return NULL;
-            return errorf(c, "TypeError", "can't multiply sequence by non-int of type '%s'", type_name(b));
-        }
-        spy_release(method);
+        if (!index_defined(c, b)) return errorf(c, "TypeError", "can't multiply sequence by non-int of type '%s'", type_name(b));
         /* An overflow names the object, not its int. */
         SPYValue *count = index_object(c, b), *result = !count ? NULL : count->as.integer_data.big ?
             errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(b)) : sequence_binary(c, op, a, count);
@@ -11098,6 +11091,11 @@ static SPYValue *contained_base(SPYContext *c, SPYValue *v) {
 static int special_dispatch(SPYValue *v) {
     return v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || v->type == SPY_SENTINEL ||
         v->type == SPY_CELL || v->type == SPY_INSTANCE || (v->type == SPY_CLASS && v->as.map.meta);
+}
+/* Whether v's type defines __index__ (_PyIndex_Check), read from no
+ * descriptor. */
+static int index_defined(SPYContext *c, SPYValue *v) {
+    return special_dispatch(v) && class_lookup(value_class(c, v), "__index__");
 }
 static int subclass(SPYValue *cls, SPYValue *base) {
     if (cls && cls->type == SPY_CLASS && cls->as.map.mro) {
@@ -13673,10 +13671,8 @@ static int buffer_exporter(SPYValue *v) {
 }
 /* _PyEval_SliceIndex: a search bound is an integer, None, or __index__. */
 static int search_bound(SPYContext *c, SPYValue *value, int64_t *result) {
-    SPYValue *method = is_int(value) || !special_dispatch(value) ? NULL : special_method(c, value, "__index__");
-    spy_release(method);
-    if (!is_int(value) && !method) {
-        if (!c->error_type[0]) spy_error(c, "TypeError", "slice indices must be integers or have an __index__ method");
+    if (!is_int(value) && !index_defined(c, value)) {
+        spy_error(c, "TypeError", "slice indices must be integers or have an __index__ method");
         return -1;
     }
     return slice_index(c, value, result);
@@ -17936,6 +17932,12 @@ static SPYValue *callk_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(result);
     return k_resume(c, m, state, self);
 }
+static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
+static SPYValue *item_special(SPYContext *, SPYValue *, const char *);
+static SPYValue *rich_special(SPYContext *, SPYValue *, int, int *);
+static SPYValue *index_special(SPYContext *, SPYValue *);
+static SPYValue *special_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *special_env(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, int, SPYValue **);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
 /* A class's __new__ that callk called returned result, state the class
  * and the arguments' tuple: as type_call, an instance of the class runs
@@ -22202,10 +22204,7 @@ static void deletion_error(SPYContext *c, SPYValue *object, SPYValue *key) {
     default: break;
     }
     if (sequence && !is_int(key)) {
-        SPYValue *method = special_dispatch(key) ? special_method(c, key, "__index__") : NULL;
-        sequence = method != NULL;
-        spy_release(method);
-        if (c->error_type[0]) return;
+        sequence = index_defined(c, key);
     }
     errorf(c, "TypeError", sequence ? "'%s' object doesn't support item deletion" : "'%s' object does not support item deletion",
            type_name(object));
@@ -27522,12 +27521,12 @@ static SPYValue *buffered_call(SPYContext *, Machine *, SPYValue *, int, SPYValu
  * bytes of the size (index_bytes). */
 static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args, size_t i, unsigned mask) {
     for (; i < args->as.seq.len; i++) {
-        SPYValue *item = args->as.seq.items[i], *function = index_marked(mask, i) ? index_function(c, item) : NULL;
+        SPYValue *item = args->as.seq.items[i], *function = index_marked(mask, i) ? index_special(c, item) : NULL;
         if (function) {
             SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)i), int_value(c, mask)};
             SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
             release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
-            return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(item)}, index_argued, state) : NULL;
+            return state ? special_callk(c, m, function, item, 0, NULL, index_argued, state) : NULL;
         }
         /* A search bound may be None. */
         if (index_marked(mask, i) && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE || !searches(callee))) break;
@@ -27538,7 +27537,7 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)i), int_value(c, mask)};
         SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
         release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
-        return state ? callk(c, m, index_function(c, part), 1, (SPYValue *[]){spy_retain(part)}, index_argued, state) : NULL;
+        return state ? special_callk(c, m, index_special(c, part), part, 0, NULL, index_argued, state) : NULL;
     }
     if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, args->as.seq.len, args->as.seq.items)) {
         /* enumerate() goes on to its iterable's Python __iter__ (adapter_call). */
@@ -30217,9 +30216,9 @@ static SPYValue *slice_part(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *list_index_rest(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
     SPYValue *base = object->type == SPY_INSTANCE ? builtin_base(c, object, name, NULL) : object;
     if (base && base->type == SPY_MEMORYVIEW)
-        return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ? index_function(c, key) : NULL;
-    if (key->type == SPY_SLICE) return base && base->type == SPY_LIST ? index_function(c, slice_part(c, key)) : NULL;
-    return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_function(c, key) : NULL;
+        return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ? index_special(c, key) : NULL;
+    if (key->type == SPY_SLICE) return base && base->type == SPY_LIST ? index_special(c, slice_part(c, key)) : NULL;
+    return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_special(c, key) : NULL;
 }
 /* list_index_rest of an instance, a list, a bytearray or a memoryview. */
 static ALWAYS_INLINE SPYValue *list_index(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
@@ -30237,7 +30236,7 @@ static NO_INLINE int memory_key_calls_rest(SPYContext *c, SPYValue *view, SPYVal
     int calls = 0;
     for (size_t i = 0; i < key->as.seq.len; i++) {
         SPYValue *item = key->as.seq.items[i];
-        if (index_function(c, item)) calls = 1;
+        if (index_special(c, item)) calls = 1;
         else if (!is_int(item)) return 0;
     }
     return calls;
@@ -30279,7 +30278,7 @@ static NO_INLINE SPYValue *memory_key_call(SPYContext *c, Machine *m, SPYValue *
     SPYValue *count = int_value(c, (int64_t)d), *state = count ? spy_tuple(c, 3, (SPYValue *[]){view, key, count}) : NULL;
     spy_release(count);
     if (!state) return NULL;
-    callk(c, m, index_function(c, key->as.seq.items[d]), 1, (SPYValue *[]){spy_retain(key->as.seq.items[d])}, memory_key_returned, state);
+    special_callk(c, m, index_special(c, key->as.seq.items[d]), key->as.seq.items[d], 0, NULL, memory_key_returned, state);
     return c->k_fn ? c->unbound : NULL;
 }
 /* What a view[key]'s __index__ (memory_key_call) returned in result:
@@ -30304,14 +30303,14 @@ static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, 
     /* A view's tuple key, from its first instance (memory_key_next). */
     if (!function && count == 3 && memory_key_calls(c, operands[0], key, 1)) {
         if (memory_key_next(c, operands[0], key, &d) < 0) return NULL;
-        function = index_function(c, key->as.seq.items[d]);
+        function = index_special(c, key->as.seq.items[d]);
     }
     if (!function) return NULL;
     for (size_t i = 0; i < count; i++) if (machine_push(c, m, spy_retain(operands[i]))) return NULL;
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_INDEX;
     SPYValue *argument = key->type == SPY_TUPLE ? key->as.seq.items[d] : key->type == SPY_SLICE ? slice_part(c, key) : key;
-    if ((*env = function_env(c, function, 1, &argument, NULL, 0))) return spy_retain(function);
+    if ((function = special_env(c, m, function, argument, NULL, 0, env))) return function;
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
 }
@@ -30503,9 +30502,6 @@ static int set_plain(const Operator *o, int rich, SPYValue *v) {
     return o ? !class_lookup(cls, o->direct) && !class_lookup(cls, o->reflected) && !class_lookup(cls, o->inplace) :
                !class_lookup(cls, rich_names[rich]) && !class_lookup(cls, rich_names[rich_reflected[rich]]);
 }
-static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
-static SPYValue *item_special(SPYContext *, SPYValue *, const char *);
-static SPYValue *rich_special(SPYContext *, SPYValue *, int, int *);
 /* The call of special method function, found on self's class, that a
  * step makes on self and other (NULL for none), its state on m's stack:
  * function itself when it is on the machine; else the descriptor's read
@@ -30571,6 +30567,40 @@ static SPYValue *special_env(SPYContext *c, Machine *m, SPYValue *function, SPYV
     while (m->len > depth) spy_release(machine_pop(m));
     return NULL;
 }
+/* What a special method's descriptor read (special_callk) returned in
+ * bound: its call on the arguments of state's tuple, then the
+ * continuation state holds (callk). */
+static SPYValue *special_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *bound) {
+    SPYValue *args = state->as.seq.items[0], *argv[8];
+    size_t n = state->as.seq.len, argc = args->as.seq.len;
+    Continuation k = (Continuation)(void (*)(void))state->as.seq.items[n - 2]->as.native.call;
+    SPYValue *ctx = state->as.seq.items[n - 1] == c->unbound ? NULL : spy_retain(state->as.seq.items[n - 1]);
+    for (size_t i = 0; i < argc; i++) argv[i] = spy_retain(args->as.seq.items[i]);
+    spy_release(state);
+    if (!bound) { release_all(argc, argv); return k(c, m, ctx, NULL); }
+    SPYValue *result = callk(c, m, bound, argc, argv, k, ctx);
+    spy_release(bound);
+    return result;
+}
+/* callk of special method function, found on self's class, on self, then
+ * the argc (at most 8) arguments argv, which it takes, then k with ctx:
+ * function itself, or the descriptor's read (descriptor_getter) first,
+ * on m too, what it returns then called (special_read), its errors the
+ * call's. */
+static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+    SPYValue *get = machine_function(c, function) ? NULL : descriptor_getter(c, function), *all[9];
+    if (!get) {
+        all[0] = spy_retain(self);
+        if (argc) memcpy(all + 1, argv, argc * sizeof(*argv));
+        return callk(c, m, function, argc + 1, all, k, ctx);
+    }
+    SPYValue *tuple = tuple_of(c, argc, argv);
+    release_all(argc, argv);
+    SPYValue *state = tuple ? k_state(c, 1, (SPYValue *[]){tuple, NULL, NULL}, k, ctx) : (spy_release(ctx), NULL);
+    if (!state) return NULL;
+    if (function->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, special_read, state);
+    return callk(c, m, get, 3, (SPYValue *[]){spy_retain(function), spy_retain(self), spy_retain(value_class(c, self))}, special_read, state);
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -30629,21 +30659,17 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     if (kind == OPERATE_INDEX && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_STRING ||
         x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE ||
         (x->type == SPY_MEMORYVIEW && !x->as.memory.released && x->as.memory.ndim)) &&
-        (function = index_function(c, part = y->type == SPY_SLICE ? slice_part(c, y) : y)) && !operator_push(c, m, x, y, OPERATOR_INDEX)) {
-        *env = function_env(c, function, 1, &part, NULL, 0);
-        return *env ? spy_retain(function) : NULL;
-    }
+        (function = index_special(c, part = y->type == SPY_SLICE ? slice_part(c, y) : y)) && !operator_push(c, m, x, y, OPERATOR_INDEX))
+        return special_env(c, m, function, part, NULL, 0, env);
     /* A builtin sequence repeated by an instance whose class multiplies
      * neither way: its Python __index__ first, then the repetition by its
      * int (operator_returned); in place, only of the sequence x. */
     SPYValue *count = kind == OPERATE_BINARY && op == '*' ? (repeats(x) ? y : repeats(y) ? x : NULL) :
                       kind == OPERATE_INPLACE && op == T_MULEQ && repeats(x) ? y : NULL;
     if (count && count->type == SPY_INSTANCE && !class_lookup(value_class(c, count), "__mul__") &&
-        !class_lookup(value_class(c, count), "__rmul__") && (function = index_function(c, count)) &&
-        !operator_push(c, m, count == y ? x : y, count, OPERATOR_INDEX)) {
-        *env = function_env(c, function, 1, &count, NULL, 0);
-        return *env ? spy_retain(function) : NULL;
-    }
+        !class_lookup(value_class(c, count), "__rmul__") && (function = index_special(c, count)) &&
+        !operator_push(c, m, count == y ? x : y, count, OPERATOR_INDEX))
+        return special_env(c, m, function, count, NULL, 0, env);
     if (contains) {
         /* A list's or tuple's items, in any test but one inside a chain;
          * a generator's or an iterable instance's, in an expression. */
@@ -31104,16 +31130,17 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             key = slice_new(c, part == y->as.slice.start ? index : y->as.slice.start, part == y->as.slice.stop ? index : y->as.slice.stop,
                             part == y->as.slice.step ? index : y->as.slice.step);
         if (key != index) spy_release(index);
-        SPYValue *function = key && y->type == SPY_SLICE ? index_function(c, slice_part(c, key)) : NULL, *next = function ? slice_part(c, key) : NULL;
+        SPYValue *function = key && y->type == SPY_SLICE ? index_special(c, slice_part(c, key)) : NULL, *next = function ? slice_part(c, key) : NULL;
+        size_t depth = m->len;
         if (function && !operator_push(c, m, x, key, OPERATOR_INDEX)) {
-            SPYValue *env = function_env(c, function, 1, &next, NULL, 0);
-            Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
+            SPYValue *env = NULL, *entered = special_env(c, m, function, next, NULL, 0, &env);
+            Call *call = entered ? call_enter(c, entered, env, m) : NULL;
             if (call) {
                 spy_release(key); spy_release(x); spy_release(y);
                 call->m.outermost = CALL_OPERATOR;
                 return &call->m;
             }
-            for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+            while (m->len > depth) spy_release(machine_pop(m));
             result = NULL;
         } else if (key && key->type == SPY_INT && key->as.integer_data.big && x->type != SPY_RANGE) {
             /* An item's index, or a repetition's count, fits a Py_ssize_t
@@ -31146,17 +31173,18 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             if (m->len && m->stack[m->len - 1] == c->augmenting) spy_release(machine_pop(m));
             result = function || c->error_type[0] ? NULL : binary(c, o->token, x, y);
         } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_BINARY && op == '*' && repeats(x) && y->type == SPY_INSTANCE &&
-                   index_function(c, y)) {
+                   index_special(c, y)) {
             /* The repetition then takes y's Python __index__ (operator_call). */
+            size_t depth = m->len;
             int pushed = !operator_push(c, m, x, y, OPERATOR_INDEX);
-            SPYValue *function = index_function(c, y), *env = pushed ? function_env(c, function, 1, &y, NULL, 0) : NULL;
-            Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
+            SPYValue *env = NULL, *entered = pushed ? special_env(c, m, index_special(c, y), y, NULL, 0, &env) : NULL;
+            Call *call = entered ? call_enter(c, entered, env, m) : NULL;
             if (call) {
                 spy_release(x); spy_release(y);
                 call->m.outermost = CALL_OPERATOR;
                 return &call->m;
             }
-            for (int i = 0; pushed && i < 3; i++) spy_release(machine_pop(m));
+            while (m->len > depth) spy_release(machine_pop(m));
             result = NULL;
         } else {
             int negated = 0;
@@ -31249,6 +31277,11 @@ static SPYValue *item_special(SPYContext *c, SPYValue *object, const char *name)
 static SPYValue *index_function(SPYContext *c, SPYValue *v) {
     return v && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_INT) ? item_function(c, v, "__index__") : NULL;
 }
+/* index_function, or a descriptor whose read an operator step makes
+ * first (special_env). */
+static SPYValue *index_special(SPYContext *c, SPYValue *v) {
+    return v && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_INT) ? item_special(c, v, "__index__") : NULL;
+}
 /* The part of slice s whose Python __index__ a subscript calls first, as
  * slice_bounds takes them: the step, the start, then the stop, unless one
  * before it is no None or int, an int's subclass its int, which
@@ -31256,7 +31289,7 @@ static SPYValue *index_function(SPYContext *c, SPYValue *v) {
 static SPYValue *slice_part(SPYContext *c, SPYValue *s) {
     SPYValue *parts[] = {s->as.slice.step, s->as.slice.start, s->as.slice.stop};
     for (int i = 0; i < 3; i++) {
-        if (index_function(c, parts[i])) return parts[i];
+        if (index_special(c, parts[i])) return parts[i];
         SPYValue *part = parts[i]->type == SPY_NONE ? parts[i] : builtin_value(c, parts[i], SPY_INT);
         if (!part || (!i && part->type != SPY_NONE && !integer_sign(part))) return NULL;
     }
@@ -33548,7 +33581,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE ||
                 ((a->type == SPY_DICT || a->type == SPY_FROZENDICT) && UNLIKELY(eq_keyed(a))) ||
                 (b->type == SPY_TUPLE && (key_reaches(c, b) || a->type == SPY_MEMORYVIEW)) ||
-                (b->type == SPY_SLICE && index_function(c, slice_part(c, b)))) { x = a; y = b; goto operator_step; }
+                (b->type == SPY_SLICE && index_special(c, slice_part(c, b)))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);

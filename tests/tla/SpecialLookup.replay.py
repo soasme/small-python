@@ -5,11 +5,11 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 IMPLEMENTATIONS = {"__len__": lambda self: 5, "__iter__": lambda self: iter([5]), "__bool__": lambda self: False,
-                   "__call__": lambda self: 5, "__neg__": lambda self: 5}
+                   "__call__": lambda self: 5, "__neg__": lambda self: 5, "__index__": lambda self: 5}
 SIXES = {"__len__": lambda self: 6, "__iter__": lambda self: iter([6]), "__bool__": lambda self: True,
-         "__call__": lambda self: 6, "__neg__": lambda self: 6}
+         "__call__": lambda self: 6, "__neg__": lambda self: 6, "__index__": lambda self: 6}
 IMPLICIT = {"__len__": len, "__iter__": lambda x: list(iter(x)), "__bool__": bool, "__call__": lambda x: x(),
-            "__neg__": lambda x: -x}
+            "__neg__": lambda x: -x, "__index__": lambda x: range(9)[x]}
 
 
 def result(m, v):

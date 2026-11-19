@@ -10,8 +10,8 @@
 (* access.                                                                 *)
 (*                                                                         *)
 (* A program, for M one of __len__, __iter__, __bool__, __call__, __neg__, *)
-(* with an implementation giving 5 (iter([5]) and False for __iter__ and   *)
-(* __bool__), defines M                                                    *)
+(* __index__, with an implementation giving 5 (iter([5]) and False for     *)
+(* __iter__ and __bool__), defines M                                       *)
 (*                                                                         *)
 (*     instance   on c = C() only: c.M = lambda: ...                       *)
 (*     class      on C             base       on B, with class C(B)        *)
@@ -19,7 +19,7 @@
 (*     deleted    on C, then del C.M                                       *)
 (*     metaclass  on Meta, with class C(metaclass=Meta)                    *)
 (*     failing    on C, as a property whose getter raises AttributeError   *)
-(*     descriptor on C, as an instance whose class's __get__ loops, then    *)
+(*     descriptor on C, as an instance whose class's __get__ loops, then   *)
 (*                returns the implementation bound to the object           *)
 (*                                                                         *)
 (* A failing descriptor makes M absent for the operations with a fallback  *)
@@ -28,13 +28,13 @@
 (*                                                                         *)
 (* where C may also define __getattribute__ recording the names it looks   *)
 (* up, then invokes M implicitly on c (len(c), list(iter(c)), bool(c),     *)
-(* c(), -c) or on C, or explicitly as c.M(). The outcome is the result (a  *)
-(* list for iterators), or the exception, and whether __getattribute__     *)
-(* saw M.                                                                  *)
+(* c(), -c, range(9)[c]) or on C, or explicitly as c.M(). The outcome is   *)
+(* the result (a list for iterators), or the exception, and whether        *)
+(* __getattribute__ saw M.                                                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__"}
+Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__", "__index__"}
 Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass", "failing", "descriptor"}
 
 \* The methods looked up with LookupSpecialMaybe here.
