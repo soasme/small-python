@@ -512,11 +512,12 @@ struct SPYContext {
     SPYValue *descripting;
     /* Whether k_fn is a unit whose module body k_enter enters (intrinsics_k). */
     int k_unit;
-    /* While a call step's native callee runs given keywords a str
-     * subclass's instance names, the step's machine and the depth of
-     * machines it runs at (spelled_call). */
-    Machine *keywords_m;
-    int keywords_level;
+    /* While a call step's callee runs natively, the step's machine, the
+     * depth of machines it runs at and the call depth of the step
+     * (step_native). */
+    Machine *step_m;
+    int step_level;
+    size_t step_depth;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -15974,15 +15975,18 @@ static int keywords_set(SPYContext *c, SPYValue *d, SPYValue *keywords) {
     }
     return 0;
 }
+static Machine *step_machine(SPYContext *);
+static SPYValue *keys_from(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t);
 /* frozendict(...) of argc arguments and keywords, set again when rehash
  * (keywords_set), else merged with their hashes as by __new__. */
 static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, int rehash) {
     if (argc > 1) return errorf(c, "TypeError", "frozendict expected at most 1 argument, got %zu", argc);
     SPYValue *dict = value_new(c, SPY_FROZENDICT);
     if (!dict) return NULL;
-    if ((argc && dict_update(c, dict, argv[0])) || (keywords && (rehash ? keywords_set : extend_display)(c, dict, keywords))) {
-        spy_release(dict); return NULL;
-    }
+    Machine *m = rehash && keywords ? step_machine(c) : NULL;
+    if (argc && dict_update(c, dict, argv[0])) { spy_release(dict); return NULL; }
+    if (m) return keys_from(c, m, dict, spy_retain(keywords), 0);
+    if (keywords && (rehash ? keywords_set : extend_display)(c, dict, keywords)) { spy_release(dict); return NULL; }
     return dict;
 }
 /* The bookkeeping before evaluating node n: tick for the common case, and
@@ -17530,12 +17534,11 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
 static Machine *binding_machine(SPYContext *c, SPYValue *fn) {
     return c->bind_entries == c->entries && !fn->as.function.signature ? c->bind_machine : NULL;
 }
-/* The machine of the call step whose native callee runs here, given
- * keywords a str subclass's instance names (spelled_call), or NULL: a
- * Python __eq__ comparing one is a call there (callk), the callee
- * returning failure with no error. */
-static Machine *keywords_machine(SPYContext *c) {
-    return c->keywords_m && c->keywords_level == c->machines ? c->keywords_m : NULL;
+/* The machine of the call step whose callee runs natively here
+ * (step_native), or NULL: a Python call its C code would make last may be
+ * left there instead (callk), the callee returning NULL with no error. */
+static Machine *step_machine(SPYContext *c) {
+    return c->step_m && c->step_level == c->machines && c->step_depth + 1 == c->depth ? c->step_m : NULL;
 }
 /* Binding fn into env after argc positional arguments stops at keyword i
  * of keywords for function's call on its argc arguments args on m (callk),
@@ -18463,22 +18466,21 @@ static NO_INLINE SPYValue *host_call(SPYContext *c, Machine *m, SPYValue *fn, si
 static ALWAYS_INLINE SPYValue *step_call(SPYContext *c, Machine *m, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv) {
     return UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host) ? host_call(c, m, fn, argc, argv, NULL) : call_plain(c, fn, method, n, argc, argv);
 }
-/* call_keywords of fn by a call step on m given keywords a str
- * subclass's instance names: its C code may leave a call to the step
- * (keywords_machine). */
-static NO_INLINE SPYValue *spelled_call(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    Machine *machine = c->keywords_m;
-    int level = c->keywords_level;
-    c->keywords_m = m; c->keywords_level = c->machines;
-    SPYValue *result = call_keywords(c, fn, argc, argv, keywords);
-    c->keywords_m = machine; c->keywords_level = level;
+/* call_plain of fn and method, or call_keywords of fn with keywords, as
+ * the call step on m: its C code may leave a call there (step_machine). */
+static NO_INLINE SPYValue *step_native(SPYContext *c, Machine *m, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv,
+                                       SPYValue *keywords) {
+    Machine *machine = c->step_m;
+    int level = c->step_level;
+    size_t depth = c->step_depth;
+    c->step_m = m; c->step_level = c->machines; c->step_depth = c->depth;
+    SPYValue *result = keywords ? call_keywords(c, fn, argc, argv, keywords) : call_plain(c, fn, method, n, argc, argv);
+    c->step_m = machine; c->step_level = level; c->step_depth = depth;
     return result;
 }
 static ALWAYS_INLINE SPYValue *step_keywords(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host)) return host_call(c, m, fn, argc, argv, keywords);
-    for (size_t i = 0; i < keywords->as.map.len; i++)
-        if (UNLIKELY(map_items(keywords)[i].key->type == SPY_INSTANCE)) return spelled_call(c, m, fn, argc, argv, keywords);
-    return call_keywords(c, fn, argc, argv, keywords);
+    return step_native(c, m, fn, -1, NULL, argc, argv, keywords);
 }
 /* A spy_callk's call returned result on m: its continuation, in
  * c->k_host, gives the native function's value (callk), and may call
@@ -36632,9 +36634,9 @@ static int unknown_from(SPYContext *c, Machine *m, const char *function, SPYValu
 }
 /* _PyArg_UnpackKeywords' report of keywords spelling none of the n names
  * (unknown_from), on the machine of the call step whose callee reports it
- * (keywords_machine). */
+ * (step_machine). */
 static int unknown_keywords(SPYContext *c, const char *function, SPYValue *keywords, const char *const *names, size_t n) {
-    return unknown_from(c, keywords_machine(c), function, keywords, names, n, 0, 0);
+    return unknown_from(c, step_machine(c), function, keywords, names, n, 0, 0);
 }
 /* The comparison unknown_from left on m found result, the truth of a
  * keyword's equality with a name, or NULL with an error: the report goes
@@ -42393,6 +42395,76 @@ static SPYValue *exception_text_method(SPYContext *c, SPYValue *fn, size_t argc,
     SPYValue *result = exception_text(&out, argv[0], repr, cls) ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     mem_free(out.data); return result;
 }
+static SPYValue *keys_hashed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *keys_stored(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The store of keywords' entry i, of hash, into d (keywords_set): at the
+ * entry a search finds, a Python __eq__ comparing its name with a stored
+ * one a call on m (map_findk) whose continuation goes on (keys_stored).
+ * 0 when it is stored, 1 when the search goes on, -1 on an error; d and
+ * keywords taken but when 0. */
+static int keys_put(SPYContext *c, Machine *m, SPYValue *d, SPYValue *keywords, size_t i, int64_t hash) {
+    Entry *entry = &map_items(keywords)[i];
+    SPYValue *storage = namespace_map(d), *state;
+    MapCursor cursor = map_cursor(storage, hash);
+    ptrdiff_t found = map_first(storage, hash);
+    if (found >= 0 && storage->as.map.items[found].key != entry->key && map_scan(c, storage, entry->key, hash, &cursor, &found)) {
+        if ((state = parts_tuple(c, 4, (SPYValue *[]){d, keywords, int_value(c, (int64_t)i), int_value(c, hash)})))
+            map_findk(c, m, storage, entry->key, hash, cursor, keys_stored, state);
+        return c->error_type[0] ? -1 : 1;
+    }
+    if (!c->error_type[0] && !map_put(c, storage, found, entry->key, entry->value, hash)) return 0;
+    spy_release(d); spy_release(keywords);
+    return -1;
+}
+/* keywords_set of keywords from entry i into d, both taken, on m: a
+ * name's Python __hash__ (keys_hashed) or a Python __eq__ comparing it
+ * with a stored name (keys_put) a call there (callk) whose continuation
+ * goes on, NULL returned with no error; else d, or NULL on an error. */
+static SPYValue *keys_from(SPYContext *c, Machine *m, SPYValue *d, SPYValue *keywords, size_t i) {
+    for (; i < keywords->as.map.len; i++) {
+        Entry *entry = &map_items(keywords)[i];
+        SPYValue *function = hash_function(c, entry->key), *state;
+        int64_t hash;
+        if (function) {
+            if (!(state = parts_tuple(c, 4, (SPYValue *[]){d, keywords, int_value(c, (int64_t)i), spy_none(c)}))) return NULL;
+            return callk(c, m, function, 1, (SPYValue *[]){spy_retain(entry->key)}, keys_hashed, state);
+        }
+        if (map_hash(c, d, entry->key, &hash)) { spy_release(d); spy_release(keywords); return NULL; }
+        if (keys_put(c, m, d, keywords, i, hash)) return NULL;
+    }
+    spy_release(keywords);
+    return d;
+}
+/* The Python __hash__ keys_from called on the name of state's entry
+ * returned result: the entry stored with it (keys_put), or the error
+ * named as map_hash names it; the entries after it go on. */
+static SPYValue *keys_hashed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *d = spy_retain(state->as.seq.items[0]), *keywords = spy_retain(state->as.seq.items[1]);
+    size_t i = (size_t)state->as.seq.items[2]->as.integer_data.small;
+    int64_t hash;
+    spy_release(state);
+    if (!result || hash_result(c, result, &hash)) {
+        hash_failed(c, d, map_items(keywords)[i].key);
+        spy_release(d); spy_release(keywords);
+        return NULL;
+    }
+    return keys_put(c, m, d, keywords, i, hash) ? NULL : keys_from(c, m, d, keywords, i + 1);
+}
+/* The search keys_put left for state's entry found entry result, or -1:
+ * the value is stored there, and the entries after it go on. */
+static SPYValue *keys_stored(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *d = spy_retain(state->as.seq.items[0]), *keywords = spy_retain(state->as.seq.items[1]);
+    size_t i = (size_t)state->as.seq.items[2]->as.integer_data.small;
+    int64_t hash = state->as.seq.items[3]->as.integer_data.small;
+    Entry *entry = &map_items(keywords)[i];
+    spy_release(state);
+    if (!result || map_put(c, namespace_map(d), (ptrdiff_t)result->as.integer_data.small, entry->key, entry->value, hash)) {
+        spy_release(result); spy_release(d); spy_release(keywords);
+        return NULL;
+    }
+    spy_release(result);
+    return keys_from(c, m, d, keywords, i + 1);
+}
 static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, SPYValue *owner) {
     switch (id) {
     case B_EXCEPTION_REPR: case B_EXCEPTION_STR: return exception_text_method(c, owner, argc, argv, keywords, id == B_EXCEPTION_REPR);
@@ -42633,6 +42705,9 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
                           owner->as.native.name ? owner->as.native.name->as.string.data : "builtin");
     }
     SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
+    Machine *m = value && id == B_DICT && keywords ? step_machine(c) : NULL;
+    /* On the machine of the call step, a name's Python __hash__ or __eq__ is a call there (keys_from). */
+    if (m) return keys_from(c, m, value, spy_retain(keywords), 0);
     if (value && id == B_DICT && keywords && keywords_set(c, value, keywords)) { spy_release(value); return NULL; }
     return value;
 }
