@@ -6,7 +6,7 @@
 # next source searching the previous intersection; intersection_update
 # changes the set only at the end. A source's error stops the method,
 # later sources unread, inside generators as at module level; so with
-# more sources.
+# more sources, any number of them, given starred too.
 from harness import *
 
 log = []
@@ -78,3 +78,14 @@ assert_eq(results(), expected)
 def gen():
     yield results()
 assert_eq(next(gen()), expected)
+
+# Any number of sources, given starred too, each in turn.
+for count in 4, 5:
+    target = t = {K(1), K(2)}
+    del log[:]
+    t.intersection_update(*[[Watch(1)] for _ in range(count)])
+    assert_eq((log, values(t)), ([("hash", 1), ("len", 2), ("eq", 1, 1)] * count, [1]))
+# Four sources, one item each in its own hash bucket (hash & 3).
+del log[:]
+assert_eq(values(set().union(*[items(v) for v in range(4)])), [0, 1, 2, 3])
+assert_eq(log, [("hash", v) for v in range(4)])

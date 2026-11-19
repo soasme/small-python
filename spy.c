@@ -25504,13 +25504,13 @@ static SPYValue *slotted_next(SPYContext *c, SPYValue *callee, size_t argc, SPYV
            slot->as.native.owner == value_class(c, self) && !strcmp(slot->as.native.name->as.string.data, "__next__") ? self : NULL;
 }
 /* Whether set method which of set, given argc sources argv, two or
- * three, is a union, intersection, difference or one of their updates
+ * more, is a union, intersection, difference or one of their updates
  * the machine runs as one consumer of each source in turn (set_source):
  * none a set or dict, whose operations differ, and one whose items may
  * call Python. */
 static NO_INLINE int set_sources(SPYContext *c, SPYValue *set, int which, size_t argc, SPYValue *const *argv) {
     int calls = 0;
-    if (argc < 2 || argc > 3 || (which & 3) == SET_SYMMETRIC || which >= 8) return 0;
+    if (argc < 2 || (which & 3) == SET_SYMMETRIC || which >= 8) return 0;
     for (size_t i = 0; i < argc; i++) {
         if (set_like(argv[i]) || is_dict(argv[i]) || dictionary_value(c, argv[i])) return 0;
         calls = calls || machine_source(c, argv[i]) || hashed_items(c, argv[i]) || compared_items(c, set, argv[i], which) || zip_hashed(c, argv[i]);
@@ -25614,7 +25614,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN && id != B_BYTES && id != B_BYTEARRAY &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
         (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0]) || zip_of_generator(argv[0]) || adapted_generator(argv[0])))) return -1;
-    if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : updates != -1 ? 3u : 1u)) return -1;
+    if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : updates != -1 ? SIZE_MAX : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
                       builtin_value(c, argv[1], SPY_BYTEARRAY))) return -1;
@@ -25707,6 +25707,9 @@ static SPYValue *join_listed(SPYContext *c, Machine *m, SPYValue *it) {
     return result;
 }
 static void consume_traced(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *, SPYValue *);
+/* A set method's sources after its first two or more, a tuple that
+ * consume_traced takes with c->unbound for its traceback (set_source). */
+static SPYValue *set_rest(SPYContext *c, size_t argc, SPYValue *const *argv) { return tuple_of(c, argc - 1, (SPYValue **)argv + 1); }
 static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
     consume_traced(c, m, id, callee, method, name, generator, start, NULL);
 }
@@ -25830,7 +25833,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     }
     /* A set method's further sources follow its first (set_source). */
     SPYValue *sources = NULL;
-    if (start && callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE && callee->as.method.function->as.native.kwcall == set_method) {
+    if (traceback == c->unbound) { sources = start; start = traceback = NULL; }
+    else if (start && callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE && callee->as.method.function->as.native.kwcall == set_method) {
         sources = tuple_of(c, traceback ? 2 : 1, (SPYValue *[]){start, traceback});
         spy_release(start); start = traceback = NULL;
         if (!sources) { spy_release(generator); return; }
@@ -27614,7 +27618,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     if (id >= 0)
         consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
-                       argc > 1 ? spy_retain(argv[1]) : NULL, argc > 2 ? argv[2] : NULL);
+                       argc > 3 ? set_rest(c, argc, argv) : argc > 1 ? spy_retain(argv[1]) : NULL, argc > 3 ? c->unbound : argc > 2 ? argv[2] : NULL);
     /* A builtin function runs as the step (step_native). */
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : c->error_type[0] ? NULL :
              method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin ? step_native(c, m, callee, method, n, argc, argv, NULL) :
@@ -28871,8 +28875,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
     id = consumer_of(c, callee, -1, argc, argv);
-    SPYValue *generator = id >= 0 && argc ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
-    SPYValue *traceback = id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
+    SPYValue *generator = id >= 0 && argc ? spy_retain(argv[0]) : NULL;
+    SPYValue *start = id >= 0 && argc > 3 ? set_rest(c, argc, argv) : id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
+    SPYValue *traceback = id >= 0 && argc > 3 ? c->unbound : id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
     SPYValue *getter = id < 0 && calls ? native_entered(c, m, callee, argc, argv, env) : NULL;
     int plain = 0;
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
@@ -28880,7 +28885,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
              init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-    if (id >= 0) { consume_traced(c, m, id, callee, -1, NULL, generator, start, traceback); spy_release(callee); spy_release(traceback); }
+    if (id >= 0) { consume_traced(c, m, id, callee, -1, NULL, generator, start, traceback); spy_release(callee); if (traceback != c->unbound) spy_release(traceback); }
     return result;
 }
 /* BC_CALLN of method call node n: its object, then its arguments, on the
@@ -29039,8 +29044,9 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     id = bound ? consumer_of(c, bound, -1, given - 1, argv + 1) : callee ? consumer_of(c, callee, method, given, argv + from) : -1;
     if (bound && id >= 0) { spy_release(callee); callee = bound; from = 1; given--; }
     else spy_release(bound);
-    SPYValue *generator = id >= 0 && given ? spy_retain(argv[from]) : NULL, *start = id >= 0 && given > 1 ? spy_retain(argv[from + 1]) : NULL;
-    SPYValue *traceback = id >= 0 && given > 2 ? spy_retain(argv[from + 2]) : NULL;
+    SPYValue *generator = id >= 0 && given ? spy_retain(argv[from]) : NULL;
+    SPYValue *start = id >= 0 && given > 3 ? set_rest(c, given, argv + from) : id >= 0 && given > 1 ? spy_retain(argv[from + 1]) : NULL;
+    SPYValue *traceback = id >= 0 && given > 3 ? c->unbound : id >= 0 && given > 2 ? spy_retain(argv[from + 2]) : NULL;
     SPYValue *key;
     if (callee && id < 0 && calls && may_hash(callee, method, argc + !skip, argv + skip) && hashing_call(c, callee, method, argc + !skip, argv + skip, &key)) {
         /* The object and arguments leave the stack for the key's __hash__ (hash_call_step). */
@@ -29058,7 +29064,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start, traceback);
-    spy_release(callee); spy_release(traceback);
+    spy_release(callee); if (traceback != c->unbound) spy_release(traceback);
     return result;
 }
 /* round() of a number atop m's stack, under its callee, by its ndigits
@@ -29325,7 +29331,9 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
     else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
         /* As a stack call's consumer, a starred call's (stack_call). */
         consume_traced(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
-                       args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL, args->as.seq.len > 2 ? args->as.seq.items[2] : NULL);
+                       args->as.seq.len > 3 ? set_rest(c, args->as.seq.len, args->as.seq.items) :
+                       args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL,
+                       args->as.seq.len > 3 ? c->unbound : args->as.seq.len > 2 ? args->as.seq.items[2] : NULL);
     else if (calls && print_instances(c, callee, args->as.seq.len, args->as.seq.items, entries_file(map_items(keywords), keywords->as.map.len)) &&
              string_keys(c, keywords)) {
         /* print takes its objects atop m's stack, as a plain call's (stack_call). */

@@ -131,9 +131,9 @@ def sources(p):
             log.append("y%d" % v)
             yield K(v, log, "no")
         return generator()
-    first, second = source(1), source(2)
+    given = [source(v) for v in range(1, p["count"] + 1)]
     del log[:]
-    r = getattr(a, p["method"])(first, second)
+    r = getattr(a, p["method"])(*given) if p["count"] > 2 else getattr(a, p["method"])(given[0], given[1])
     if r is None:
         r = a
     return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))

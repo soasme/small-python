@@ -79,7 +79,7 @@ Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : 
                                               "symmetric_difference", "symmetric_difference_update", "update"},
                   source : {"list", "generator", "iterator"}, kind : {"set", "S"}, form : {"statement", "argument"}]
             \cup [op : {"sources"}, method : {"union", "intersection", "difference", "update", "intersection_update", "difference_update"},
-                  source : {"list", "generator"}]
+                  source : {"list", "generator"}, count : {2, 4}]
             \cup [op : {"setkey"}, key : {"set", "S", "SH"}, use : {"in", "not in", "discard", "remove", "add"}, present : BOOLEAN]
 
 VARIABLES program, outcome
@@ -136,12 +136,14 @@ RunIterable(p) ==
           [] p.method \in {"symmetric_difference", "symmetric_difference_update"} -> <<made, log, {2}>>
           [] OTHER -> <<"bool", log, {}>>
 
-\* {K(1)}'s method of two sources, [K(1)] then [K(2)], takes each in turn:
-\* each item hashed and compared with the result so far's, an
-\* intersection's second searching the first's intersection, {K(1)}.
+\* {K(1)}'s method of two or four sources, [K(1)], [K(2)], ..., takes each
+\* in turn: each item hashed and compared with the result so far's, an
+\* intersection's next searching the previous intersection, {K(1)}.
 RunSources(p) ==
     LET y(v) == IF p.source = "generator" THEN "y" \o v \o " " ELSE ""
-    IN  <<"set", y("1") \o "h1 e1 " \o y("2") \o "h2", IF p.method \in {"union", "update"} THEN {1, 2} ELSE {}>>
+        rest == IF p.count = 4 THEN " " \o y("3") \o "h3 " \o y("4") \o "h4" ELSE ""
+    IN  <<"set", y("1") \o "h1 e1 " \o y("2") \o "h2" \o rest,
+          IF p.method \in {"union", "update"} THEN IF p.count = 4 THEN {1, 2, 3, 4} ELSE {1, 2} ELSE {}>>
 
 \* A set key is looked up as its frozenset: 1 stands for frozenset({1}).
 RunSetKey(p) ==
@@ -196,8 +198,9 @@ FormFree == Done /\ program.op = "iterable" => outcome = Run([program EXCEPT !.f
 Decided == Done /\ program.op = "iterable" /\ program.method \in {"intersection", "isdisjoint", "issubset"} =>
            outcome[2] \in {"h1 e1", "y1 h1 e1"}
 
-\* A method's second source is taken after its first.
-InTurn == Done /\ program.op = "sources" => outcome[2] \in {"h1 e1 h2", "y1 h1 e1 y2 h2"}
+\* A method's sources are taken in turn.
+InTurn == Done /\ program.op = "sources" =>
+          outcome[2] \in {"h1 e1 h2", "y1 h1 e1 y2 h2", "h1 e1 h2 h3 h4", "y1 h1 e1 y2 h2 y3 h3 y4 h4"}
 
 \* Numbers equal as numbers are one element.
 Unique == Done /\ program.op = "build" => Cardinality(outcome[3]) <= 2
