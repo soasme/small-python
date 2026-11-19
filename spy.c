@@ -41098,7 +41098,8 @@ static int dict_getitem(SPYValue *function) {
 /* The dict or set a call of callee, method number method of it or -1,
  * with argc arguments argv looks argv[*at] up in: a dict's get,
  * setdefault or pop, a dict subclass's instance's its storage, a set's
- * add, discard or remove, or dict.__getitem__ of a dict or a dict
+ * add, discard or remove, a set subclass's instance's its storage, or
+ * dict.__getitem__ of a dict or a dict
  * subclass's instance, bound or given the set or dict first; borrowed,
  * else NULL. */
 static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue *const *argv, size_t *at) {
@@ -41110,8 +41111,9 @@ static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue 
     else if (method < 0 && argc == 2) { self = argv[0]; *at = 1; }
     if (!self || function->type != SPY_NATIVE || argc != 1 + *at) return NULL;
     if (dict_getitem(function)) return storage(self) && storage(self)->type == SPY_DICT ? storage(self) : NULL;
-    return function->as.native.kwcall == set_item_method && ((intptr_t)function->as.native.data & 255) <= SET_REMOVE &&
-           (self->type == SPY_SET || self->type == SPY_FROZENSET || callee->type == SPY_METHOD) ? self : NULL;
+    /* A set subclass's instance's storage, as its method searches it (method_self). */
+    SPYValue *set = callee->type == SPY_METHOD ? set_storage(self) : self;
+    return function->as.native.kwcall == set_item_method && ((intptr_t)function->as.native.data & 255) <= SET_REMOVE && is_set(set) ? set : NULL;
 }
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv hashes a key that enters a Python __hash__ (hash_calls)

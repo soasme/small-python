@@ -54,7 +54,9 @@
 (*     without present, and key {1} a set, an S, or an SH, a set subclass  *)
 (*     whose Python __hash__ logs "h" and raises TypeError: a set key is   *)
 (*     looked up as the equal frozenset, its hash called once, and         *)
-(*     remove's KeyError has the key itself; add refuses it.               *)
+(*     remove's KeyError has the key itself; add refuses it; or            *)
+(*   - S({K(1)}).add, discard or remove of K(1) or of K(2): the key hashed *)
+(*     and compared with the entry of its hash, as an exact set's.         *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -81,6 +83,7 @@ Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : 
             \cup [op : {"sources"}, method : {"union", "intersection", "difference", "update", "intersection_update", "difference_update"},
                   source : {"list", "generator"}, count : {2, 4}]
             \cup [op : {"setkey"}, key : {"set", "S", "SH"}, use : {"in", "not in", "discard", "remove", "add"}, present : BOOLEAN]
+            \cup [op : {"sublookup"}, use : {"add", "discard", "remove"}, present : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -154,8 +157,17 @@ RunSetKey(p) ==
           [] p.use = "remove" -> <<"KeyError", log, {}>>          \* of the key itself
           [] p.use = "add" -> <<"TypeError", log, {}>>
 
+\* S({K(1)}).add, discard or remove of K(1), or of K(2), absent: the key
+\* hashed, then compared with the entry of its hash, as an exact set's.
+RunSubLookup(p) ==
+    LET log == IF p.present THEN "h1 e1" ELSE "h2"
+    IN  CASE p.use = "add" -> <<"S", log, IF p.present THEN {1} ELSE {1, 2}>>
+          [] p.use = "remove" /\ ~p.present -> <<"KeyError", log, {}>>
+          [] OTHER -> <<"S", log, IF p.present THEN {} ELSE {1}>>
+
 Run(p) ==
     IF p.op = "setkey" THEN RunSetKey(p)
+    ELSE IF p.op = "sublookup" THEN RunSubLookup(p)
     ELSE IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>
     ELSE IF p.op = "iterable" THEN RunIterable(p)
     ELSE IF p.op = "sources" THEN RunSources(p)

@@ -166,9 +166,23 @@ def setkey(p):
     return (type(r).__name__, " ".join(log), frozenset(1 if v == frozenset({1}) else v for v in r))
 
 
+def sublookup(p):
+    log = []
+    a = S([K(1, log, "no")])
+    key = K(1 if p["present"] else 2, log, "no")
+    del log[:]
+    try:
+        getattr(a, p["use"])(key)
+    except KeyError:
+        return ("KeyError", " ".join(log), frozenset())
+    return (type(a).__name__, " ".join(log), frozenset(v.v for v in a))
+
+
 def outcome(p):
     if p["op"] == "setkey":
         return setkey(p)
+    if p["op"] == "sublookup":
+        return sublookup(p)
     if p["op"] == "iterable":
         return iterable(p)
     if p["op"] == "sources":

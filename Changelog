@@ -573,6 +573,7 @@ Unreleased (0.10.0):
 - `next()` of such a subclass, its `super().__next__()` and a builtin iterator's own `__next__` resume its generators without nesting on the C stack
 - `next()` of a `filter` by truth or a builtin calls its items' Python methods without nesting on the C stack
 - `==` of tuples, lists or dicts holding sets compares the sets' elements by Python `__eq__` without nesting on the C stack
+- `add`, `discard` and `remove` of a set subclass's instance compare by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
