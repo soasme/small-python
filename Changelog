@@ -527,6 +527,7 @@ Unreleased (0.10.0):
 - tuples and lists holding dicts whose keys have a Python `__eq__` compare them without nesting on the C stack
 - an instance's attribute read, method call, `getattr()` and `hasattr()` search a `__dict__` holding keys with a Python `__eq__` without nesting on the C stack
 - an ordering of lists or tuples, and a sort of keys holding them, call an `int` or `str` subclass's Python ordering method without nesting on the C stack
+- `map()` of `sorted()`, `min()`, `max()`, `sum()`, `divmod()`, `pow()`, `any()`, `all()`, `isinstance()` or `issubclass()` calls the Python methods they reach without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
 
 2026-11-10 0.9.0:

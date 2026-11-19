@@ -41,7 +41,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_int_sub_iter", "contains_list_sub_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_scalar_order", "view_calls", "builtin_declines",
+          "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_scalar_order", "map_builtin_calls", "view_calls", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected",
           "builtin_sub_unordered"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
@@ -180,6 +180,9 @@ Case(c) ==
       \* lists ordered by an int subclass's __lt__, equal pairs skipped by
       \* int's ==, a list subclass's items so too
       [] c = "seq_scalar_order" -> <<"(False, True, True)", <<"'2<3'", "'3<4'">>>>
+      \* map() of sorted(), isinstance() or min() calls the comparisons and
+      \* the __instancecheck__ its builtin reaches, in order
+      [] c = "map_builtin_calls" -> <<"([1, 2], [True, False], [3])", <<"'1<2'", "'is1'", "'is2'", "'3<4'">>>>
       \* a dict view's in and comparisons look keys up by their __hash__ and
       \* __eq__, an items view comparing the value found with the pair's
       [] c = "view_calls" -> <<"(True, False, True, False, False)",

@@ -132,6 +132,13 @@ SOURCES = {
                         "        t('%d<%d' % (s, o)); return int.__lt__(s, o)\n"
                         "class L(list): pass\n"
                         "result = ([W(1), W(5)] <= [W(1), W(3)], [3] > [W(2)], L([W(3)]) < L([W(4)]))",
+    "map_builtin_calls": "class N:\n    def __init__(s, n): s.n = n\n    def __lt__(s, o):\n        for _ in (): pass\n"
+                         "        t('%d<%d' % (s.n, o.n)); return s.n < o.n\n"
+                         "class M(type):\n    def __instancecheck__(cls, x):\n        for _ in (): pass\n"
+                         "        t('is%d' % x); return x == 1\n"
+                         "class A(metaclass=M): pass\n"
+                         "result = ([x.n for x in next(map(sorted, [[N(2), N(1)]]))], list(map(isinstance, [1, 2], [A, A])),\n"
+                         "          [x.n for x in map(min, [[N(4), N(3)]])])",
     "view_calls": "class K:\n    def __init__(s, n): s.n = n\n"
                   "    def __hash__(s):\n        for _ in (): pass\n        t('h' + s.n); return 1\n"
                   "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"

@@ -529,6 +529,9 @@ struct SPYContext {
      * each of the six (compare_enter), and the comparisons running. */
     Program *compare_code;
     size_t comparing;
+    /* compare_code's call nodes of each count of arguments, their
+     * callee's, which names no attribute, and their arguments' (compare_enter). */
+    Node *call_nodes;
     /* Borrowed: the instance whose __dict__ a read searched on the machine
      * without finding its name (search_begin), whose next search, of that
      * read, finds nothing (instance_dict_search), and its class's
@@ -18217,23 +18220,37 @@ static ALWAYS_INLINE Machine *call_leave(SPYContext *c, Call *call, SPYValue *va
     return caller;
 }
 static int machine_push(SPYContext *, Machine *, SPYValue *);
-/* The operators compare_enter runs: the rich comparisons by rich_kind, then in. */
-enum { COMPARE_IN = 6 };
+/* The operators compare_enter runs: the rich comparisons by rich_kind, then
+ * in, then a native's call of up to COMPARE_ARGS arguments, COMPARE_CALL
+ * plus their count, and as a keyword call step, COMPARE_KEYWORD plus it. */
+enum { COMPARE_IN = 6, COMPARE_CALL = 7, COMPARE_ARGS = 8, COMPARE_KEYWORD = COMPARE_CALL + COMPARE_ARGS + 1, COMPARE_END = COMPARE_KEYWORD + COMPARE_ARGS + 1 };
 static const int compare_tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE, O_IN};
 /* Enter on m the rich comparison rich of x and y, or x in y (COMPARE_IN), which it takes, as a
  * call that returns into kind, with no frame of its own: its steps tick
- * on m's node and its errors' traceback is m's. NULL, x and y released,
- * on an error; nested past the recursion limit, RecursionError. */
+ * on m's node and its errors' traceback is m's. Past COMPARE_CALL, the
+ * call of native x with the items of tuple y, as a call step's (stack_call),
+ * whose machine paths it takes. NULL, x and y released, on an error;
+ * nested past the recursion limit, RecursionError. */
 static NO_INLINE Call *compare_enter(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int rich, int kind) {
-    if (!c->compare_code && (c->compare_code = allocate(c, sizeof(Program)))) {
+    enum { CALLEE = COMPARE_ARGS + 1, ARGS = CALLEE + 1, NODES = ARGS + COMPARE_ARGS };
+    if (!c->call_nodes && (c->call_nodes = allocate(c, NODES * sizeof(Node)))) {
+        Node *nodes = c->call_nodes;
+        memset(nodes, 0, NODES * sizeof(Node));
+        for (int i = 0; i <= COMPARE_ARGS; i++) nodes[i] = (Node){.kind = N_CALL, .a = &nodes[CALLEE], .args = i ? &nodes[NODES - i] : NULL};
+        for (int i = CALLEE; i < NODES; i++) { nodes[i].kind = N_NAME; nodes[i].next = i > CALLEE && i + 1 < NODES ? &nodes[i + 1] : NULL; }
+    }
+    if (!c->compare_code && c->call_nodes && (c->compare_code = allocate(c, sizeof(Program)))) {
         *c->compare_code = (Program){0};
-        for (int r = 0; r < COMPARE_IN + 1; r++) {
-            emit(c, c->compare_code, BC_BINARY, NULL, compare_tokens[r]);
+        for (int r = 0; r < COMPARE_END; r++) {
+            if (r < COMPARE_CALL) emit(c, c->compare_code, BC_BINARY, NULL, compare_tokens[r]);
+            else if (r < COMPARE_KEYWORD) emit(c, c->compare_code, BC_CALLN, &c->call_nodes[r - COMPARE_CALL], r - COMPARE_CALL);
+            else emit(c, c->compare_code, BC_CALLK, &c->call_nodes[r - COMPARE_KEYWORD], r - COMPARE_KEYWORD);
             emit(c, c->compare_code, BC_FLOW, NULL, FLOW_RETURN);
         }
-        if (c->compare_code->len < 2 * (COMPARE_IN + 1)) { free_program(c->compare_code); c->compare_code = NULL; }
+        if (c->compare_code->len < 2 * COMPARE_END) { free_program(c->compare_code); c->compare_code = NULL; }
     }
-    if (c->comparing >= (size_t)c->recursion_limit) errorf(c, "RecursionError", "maximum recursion depth exceeded in comparison");
+    if (c->comparing >= (size_t)c->recursion_limit)
+        errorf(c, "RecursionError", "maximum recursion depth exceeded %s", rich < COMPARE_CALL ? "in comparison" : "while calling a Python object");
     if (c->error_type[0] || !c->compare_code || !((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c))) {
         if (!c->error_type[0]) spy_error(c, "MemoryError", "");
         spy_release(x); spy_release(y);
@@ -18246,7 +18263,12 @@ static NO_INLINE Call *compare_enter(SPYContext *c, Machine *m, SPYValue *x, SPY
     call->caller = m; call->fn = NULL; call->caller_env = c->eval_env;
     c->comparing++;
     machine_push(c, &call->m, x);
-    machine_push(c, &call->m, y);
+    if (rich < COMPARE_CALL) machine_push(c, &call->m, y);
+    else {
+        c->call_nodes[y->as.seq.len].line = c->line;
+        for (size_t i = 0; i < y->as.seq.len; i++) machine_push(c, &call->m, spy_retain(y->as.seq.items[i]));
+        spy_release(y);
+    }
     return call;
 }
 /* Leave call, a comparison of compare_enter's or a function's, which
@@ -25493,6 +25515,7 @@ static int called_iterator(SPYValue *v) {
  * adapts a map's, or a map or filter whose function is Python. */
 static SPYValue *bound_function(SPYContext *, SPYValue *);
 static int filter_fetches(SPYContext *, SPYValue *);
+static int map_steps(SPYValue *);
 static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
@@ -25500,7 +25523,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
     if (kind == I_CALLABLE) return !v->as.iterator.done && machine_function(c, v->as.iterator.source);
     if (kind == I_FILTER && !v->as.iterator.done && filter_fetches(c, v)) return 1;
     SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
-    return function && (machine_function(c, function) || (kind == I_MAP && bound_function(c, function)));
+    return function && (machine_function(c, function) || (kind == I_MAP && (bound_function(c, function) || map_steps(function))));
 }
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
  * Python, or it is a tuple whose items' __hash__ or __eq__ may be
@@ -27858,6 +27881,11 @@ static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
                                    UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL |
                                    UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS | UINT64_C(1) << B_AITER | UINT64_C(1) << B_ANEXT))) ||
             callee->as.native.kwcall == open_builtin);
+}
+/* Whether a map's builtin callee may go on on the machine, its call a call
+ * step's (map_convert): machine_builtin's, sorted(), min() or max(). */
+static int map_steps(SPYValue *callee) {
+    return machine_builtin(callee) || is_builtin(callee, B_SORTED) || is_builtin(callee, B_MIN) || is_builtin(callee, B_MAX);
 }
 static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
@@ -34566,6 +34594,15 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         spy_release(items);
         return status;
     }
+    if (!c->error_type[0] && items->as.seq.len <= COMPARE_ARGS && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] && map_steps(callee)) {
+        /* A builtin whose call may go on on the machine is a call step of
+         * its own (compare_enter), sorted()'s a keyword call's (key_consumer),
+         * the call of c->unbound left in c->k_fn. */
+        c->k_fn = spy_retain(callee); c->k_env = items; c->k = NULL; c->k_ctx = NULL;
+        c->k_unit = 2 + (is_builtin(callee, B_SORTED) ? COMPARE_KEYWORD : COMPARE_CALL) + (int)items->as.seq.len;
+        *fn = spy_retain(c->unbound);
+        return 1;
+    }
     SPYValue *mapped = c->error_type[0] ? NULL : call(c, callee, items->as.seq.len, items->as.seq.items);
     spy_release(items);
     /* As iterator_next: a StopIteration from the function ends the map. */
@@ -34711,7 +34748,7 @@ static ALWAYS_INLINE int next_call(SPYContext *c, Machine *m, SPYValue *v, SPYVa
  * machine for its item (next_call_of). */
 static NO_INLINE int map_calls(SPYContext *c, SPYValue *v) {
     SPYValue *callee = v->type == SPY_ITERATOR && v->as.iterator.kind == I_MAP && !v->as.iterator.removed ? v->as.iterator.source->as.seq.items[0] : NULL;
-    return callee && (machine_function(c, callee) || bound_function(c, callee));
+    return callee && (machine_function(c, callee) || bound_function(c, callee) || map_steps(callee));
 }
 /* The next step of generator machine m's yield from of a delegate it
  * does not resume as a generator, resumed by m's resumer or not: a call
@@ -34882,6 +34919,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             if (again) {
                                 /* It takes more: its next call, entered as delegate_step's, or its item. */
                                 SPYValue *item, *env = NULL, *call = delegate_next(c, m, 0, &again, &env, &item);
+                                if (call == c->unbound) { spy_release(call); c->k_kind = again; goto enter_k; }
                                 if (call) { c->k_fn = call; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = again; goto enter_k; }
                                 if (item) YIELD(item);
                                 pc = m->pc;
@@ -35897,6 +35935,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             goto switch_call;
         }
     enter_special:
+        /* A call left in c->k_fn (map_convert). */
+        if (UNLIKELY(value == c->unbound)) { spy_release(value); c->k_kind = special; goto enter_k; }
         m->pc = pc;
         {
             Call *call = special >= CALL_EXEC ? unit_enter(c, value, callee_env, m) : call_enter(c, value, callee_env, m);
@@ -45727,6 +45767,7 @@ void spy_context_free(SPYContext *c) {
     if (c->spare_machine) { mem_free(c->spare_machine->blocks); mem_free(c->spare_machine->stack); mem_free(c->spare_machine); }
     calls_free(c, 0);
     free_program(c->compare_code);
+    mem_free(c->call_nodes);
     mem_free(c->calls);
     for (int k = 0; k < 16; k++)
         for (MemHead *b = c->spare_blocks[k], *next; b; b = next) { cache_take(b, sizeof(*b) + (k + 1) * 16); next = b->next; free(b); }
