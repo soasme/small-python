@@ -39,7 +39,10 @@ class Bare:
 def outcome(p):
     def gen():
         yield 1
-    it = gen() if p["delegate"] == "generator" else Throws() if p["delegate"] == "throws" else Bare()
+    def chain(inner):
+        yield from inner
+    first = gen()
+    it = first if p["delegate"] == "generator" else chain(first) if p["delegate"] == "chain" else Throws() if p["delegate"] == "throws" else Bare()
 
     def handling():
         try:
@@ -52,7 +55,7 @@ def outcome(p):
     g = handling() if p["handles"] else plain()
     next(g)
     args = {"instance": (KeyError("k"),), "invalid": (1,), "exit": (GeneratorExit, 1, 2), "made": (Made, 3), "exit_made": (Exit,), "exit_class": (GeneratorExit,)}[p["args"]]
-    closed[:] = [lambda: it.gi_frame is None if p["delegate"] == "generator" else p["delegate"] == "bare" or it.closed]
+    closed[:] = [lambda: it.gi_frame is None and first.gi_frame is None if p["delegate"] in ("generator", "chain") else p["delegate"] == "bare" or it.closed]
     try:
         result = repr(g.throw(*args))
     except Exit as e:

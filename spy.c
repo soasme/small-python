@@ -24835,10 +24835,11 @@ static int made_natively(SPYValue *k) {
 /* Whether a close, or a throw of k with argc arguments, into generator
  * machine m raises on the machine: a value at its innermost yield
  * (raises_at), a yield from of a generator passing it on as given. A
- * GeneratorExit class whose making runs Python (made_natively) is made
- * only after a yield from's delegates close, in C. */
+ * GeneratorExit class whose making runs Python (made_natively), given a
+ * value, is made only after a yield from's delegates close, in C; with
+ * none, on the machine (thrown_late). */
 static NO_INLINE int thrown_at(SPYContext *c, Machine *m, size_t argc, SPYValue *k) {
-    if (k && k->type == SPY_CLASS && m->awaiting == AWAIT_DELEGATE && subclass(k, c->exceptions[X_GENERATOR_EXIT]) && !made_natively(k))
+    if (argc > 1 && k->type == SPY_CLASS && m->awaiting == AWAIT_DELEGATE && subclass(k, c->exceptions[X_GENERATOR_EXIT]) && !made_natively(k))
         return 0;
     return argc < 2 || raises_at(innermost(m));
 }
@@ -25586,6 +25587,16 @@ static NO_INLINE int thrown_raw(SPYContext *c, SPYValue *g, SPYValue *k) {
     return m && m->awaiting == AWAIT_DELEGATE && !m->operation && m->delegate->type == SPY_INSTANCE &&
            !method_absent(m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
 }
+/* Whether class k thrown into generator g is a GeneratorExit made by
+ * Python (made_natively) after g's yield from's delegates close, as
+ * given until then (delegate_closed). */
+static NO_INLINE int thrown_late(SPYContext *c, SPYValue *g, SPYValue *k) {
+    if (g->type == SPY_BOUND_METHOD) g = g->as.bound.self;
+    if (g->type == SPY_COROUTINE_ITERATOR) g = g->as.iterator.source;
+    return (g->type == SPY_GENERATOR || g->type == SPY_COROUTINE) && g->as.generator.machine &&
+           g->as.generator.machine->awaiting == AWAIT_DELEGATE && !g->as.generator.machine->operation &&
+           subclass(k, c->exceptions[X_GENERATOR_EXIT]) && !made_natively(k);
+}
 /* An unkeyed min or max compares each item with the best on the machine,
  * as a key_consumer's own keys (key_took). */
 static void min_max_fed(Consumer *s) {
@@ -25632,7 +25643,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     }
     SPYValue *init = NULL, *made = NULL, *built = method < 0 ? built_type(c, callee) : NULL, *wrap = built ? spy_retain(callee) : NULL;
     if (built) callee = built;
-    int raw = id == B_THROW && generator->type == SPY_CLASS && thrown_raw(c, callee, generator);
+    int late = id == B_THROW && generator->type == SPY_CLASS && !start && thrown_late(c, callee, generator),
+        raw = late || (id == B_THROW && generator->type == SPY_CLASS && thrown_raw(c, callee, generator));
     if (id == B_THROW && generator->type == SPY_CLASS && !raw) {
         /* The value is the instance, the tuple of arguments, none, or the
          * one argument (thrown_exception). */
@@ -25752,7 +25764,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         /* A throw of a GeneratorExit closes a yield from's delegates, a
          * new one raised at the innermost yield, and raises at the
          * outermost (delegate_closed). */
-        int closing = id == B_CLOSE || subclass(sent->as.map.parent, c->exceptions[X_GENERATOR_EXIT]);
+        int closing = id == B_CLOSE || late || subclass(sent->as.map.parent, c->exceptions[X_GENERATOR_EXIT]);
         if (id == B_THROW && closing && g->awaiting == AWAIT_DELEGATE) { consumer->made = sent; consumer->sent = close_exception(c); }
         for (; g->awaiting == AWAIT_DELEGATE && g->delegate->type != SPY_INSTANCE && g->delegate->type != SPY_ITERATOR; g = g->delegate->as.generator.machine)
             g->throwing = closing ? CLOSING : THROWING;
@@ -34849,6 +34861,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!(resumer = delegate_left(c, resumer, &g, &flow))) return flow;
             if (flow.flow == FLOW_NORMAL) {
                 m = resumer; f = m->frame; code = m->code->items; pc = m->pc;
+                if (UNLIKELY(c->k_fn)) goto enter_k;
                 continue;
             }
         }
@@ -35111,6 +35124,17 @@ static SPYValue *generator_end(SPYContext *c, SPYValue *g, Result result) {
  * or a RuntimeError when the delegate yielded; its other exceptions raise
  * there, chained again to the exception m handles (13.16.3). */
 static void operation_closed(SPYContext *, Machine *, SPYValue *, Result);
+/* The GeneratorExit delegate_closed made, exit, raised at m's yield from,
+ * chained as there to inheriting's exception (None for none). */
+static SPYValue *exit_made(SPYContext *c, Machine *m, SPYValue *inheriting, SPYValue *exit) {
+    (void)m;
+    SPYValue *inherited = c->inherited_exception, *chained = inheriting->as.seq.items[0];
+    c->inherited_exception = chained == c->none ? NULL : chained;
+    if (exit) raise_thrown(c, exit, c->handled);
+    c->inherited_exception = inherited;
+    spy_release(exit); spy_release(inheriting);
+    return NULL;
+}
 static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     SPYValue *d = m->delegate;
     int ignored = flow.flow == FLOW_YIELD;
@@ -35134,6 +35158,11 @@ static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     if (ignored) {
         spy_error(c, "RuntimeError", d->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
         materialize_error(c);
+    } else if (thrown && thrown->type == SPY_CLASS && !c->error_type[0]) {
+        /* A GeneratorExit class made by Python (thrown_late) is m's call
+         * now (exit_made). */
+        SPYValue *inheriting = tuple_of(c, 1, (SPYValue *[]){c->inherited_exception ? c->inherited_exception : c->none});
+        if (inheriting) callk(c, m, thrown, 0, NULL, exit_made, inheriting);
     } else if (thrown && !c->error_type[0]) raise_thrown(c, thrown, c->handled);
     else if (!c->error_type[0]) {
         SPYValue *exit = exception_create(c, c->exceptions[X_GENERATOR_EXIT], 0, NULL);

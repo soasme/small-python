@@ -19,14 +19,15 @@
 (* traceback, (Made, 3), Made's Python __init__ making the exception, or   *)
 (* Exit, a GeneratorExit class whose Python __init__ notes whether the     *)
 (* delegate is closed yet, or GeneratorExit itself, made with no Python    *)
-(* code. it is a generator suspended at a yield, an iterator whose throw   *)
+(* code. it is a generator suspended at a yield, or in a yield from of    *)
+(* one (a chain, both closed before Exit is made), an iterator whose throw *)
 (* returns "thrown" and whose close returns, or one with neither. The      *)
 (* outcome is the throw()'s result or exception, and whether g is still    *)
 (* suspended.                                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [delegate : {"generator", "throws", "bare"},
+Programs == [delegate : {"generator", "chain", "throws", "bare"},
              args : {"instance", "invalid", "exit", "made", "exit_made", "exit_class"}, handles : BOOLEAN]
 
 VARIABLES program, outcome
