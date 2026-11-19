@@ -1,6 +1,7 @@
 # Replays OperationClose.tla: each case makes the program's awaitable, begun
 # when the program says so, suspending its async generator in an await,
-# closes it or throws KeyError into it, and writes what the call did.
+# closes it, throws KeyError into it or steps it with next(), and writes
+# what the call did.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -38,7 +39,7 @@ def outcome(p):
     if p["begun"]:
         a.send(None)
     try:
-        result = a.close() if p["how"] == "close" else a.throw(KeyError)
+        result = a.close() if p["how"] == "close" else a.throw(KeyError) if p["how"] == "throw" else next(a)
         return "None" if result is None else "suspended"
     except (StopIteration, StopAsyncIteration, RuntimeError, LookupError, KeyError) as e:
         return type(e).__name__

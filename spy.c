@@ -26003,6 +26003,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* An athrow's or aclose's first send, or next() of it, throws its
      * exception into its async generator (athrow_args). */
     if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW && is_builtin(callee, B_NEXT)) {
+        /* Once begun, next() of it resumes it as an asend's does. */
+        if (argv[0]->as.async_operation.state == 1) return asend_resumes(argv[0], M_NEXT, 0, NULL) ? B_NEXT : -1;
         callee = argv[0]; method = M_NEXT; argc = 0;
     }
     if (method >= 0 && callee->type == SPY_ASYNC_GENERATOR_ATHROW) {
@@ -26372,7 +26374,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     if (!awaited)
         awaited = id != B_NEXT && id != B_THROW ? NULL :
                   method >= 0 ? (callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ? spy_retain(callee) : NULL) :
-                  generator && generator->type == SPY_ASYNC_GENERATOR_ASEND ? generator : NULL;
+                  generator && (generator->type == SPY_ASYNC_GENERATOR_ASEND ||
+                                (generator->type == SPY_ASYNC_GENERATOR_ATHROW && generator->as.async_operation.state == 1)) ? generator : NULL;
     if (awaited && method >= 0) callee = awaited->as.async_operation.generator;
     else if (awaited) generator = spy_retain(awaited->as.async_operation.generator);
     /* A generator's send takes its argument first, and __next__ none. */
