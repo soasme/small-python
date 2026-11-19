@@ -38,7 +38,7 @@ Module(n) == CASE n = "GenericAlias" -> "types" [] n = "UnionType" -> "typing" [
 
 
 Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name", "cell_empty", "cell_set",
-          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy",
+          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare",
           "class_dict_proxy", "function_ctor", "code_replace", "notimplemented_ctor", "none_ctor",
           "classmethod_descr_repr", "classmethod_descr_call", "classmethod_descr_get",
           "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg",
@@ -67,6 +67,8 @@ Case(c) ==
       [] c = "proxy_bad" -> "TypeError: mappingproxy() argument must be a mapping, not list"
       [] c = "proxy_or" -> "{'a': 1, 'b': 2}"
       [] c = "proxy_copy" -> "('dict', {'a': 1})"
+      \* == and != compare the mapping, an exact dict reaching the other operand as a copy.
+      [] c = "proxy_compare" -> "('eq', 'dict', False)"
       [] c = "class_dict_proxy" -> "TypeError: 'mappingproxy' object does not support item assignment"
       [] c = "function_ctor" -> "(5, 'g')"
       [] c = "code_replace" -> "'g'"

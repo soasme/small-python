@@ -98,6 +98,9 @@ SOURCES = {
     "proxy_bad": 'types.MappingProxyType([1])',
     "proxy_or": "result = types.MappingProxyType({'a': 1}) | {'b': 2}",
     "proxy_copy": "c = types.MappingProxyType({'a': 1}).copy()\nresult = (type(c).__name__, c)",
+    "proxy_compare": "class M(dict):\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return 'eq'\n"
+                     "class O:\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return type(other).__name__\n"
+                     "result = (types.MappingProxyType(M()) == {}, types.MappingProxyType({'a': 1}) == O(), types.MappingProxyType({}) != {})",
     "class_dict_proxy": "class A:\n    x = 1\nA.__dict__['x'] = 2",
     "function_ctor": "def f(): return x\ng = types.FunctionType(f.__code__, {'x': 5}, 'g')\nresult = (g(), g.__name__)",
     "code_replace": "def f(): pass\nresult = f.__code__.replace(co_name='g').co_name",

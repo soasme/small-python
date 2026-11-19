@@ -10427,7 +10427,13 @@ static NO_INLINE int values_python(SPYContext *c, SPYValue *x, SPYValue *y) {
     }
     return 0;
 }
-static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+static SPYValue *proxy_compared(SPYContext *, SPYValue *, SPYValue *);
+/* A step's comparison op of *left, owned, and b, done natively, or NULL
+ * for the machine to dispatch, or with an error. A mappingproxy's == and
+ * != compare its mapping instead, which replaces *left (proxy_compared). */
+static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **left, SPYValue *b) {
+    if (UNLIKELY((*left)->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && !(*left = proxy_compared(c, *left, b))) return NULL;
+    SPYValue *a = *left;
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
     if ((op == O_IN || op == O_NOTIN) && ((b->type == SPY_ITERATOR && iterated_python(c, a, b)) ||
                                           (b->type == SPY_DICT_VALUES && values_python(c, a, b)))) return NULL;
@@ -10496,7 +10502,8 @@ static SPYValue *instance_exporter(SPYContext *, SPYValue *);
 static ALWAYS_INLINE SPYValue *machine_exporter(SPYContext *c, SPYValue *v) {
     return v->type == SPY_INSTANCE ? instance_exporter(c, v) : NULL;
 }
-static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left, SPYValue *b) {
+    SPYValue *a = *left;
     /* An operand's Python __buffer__ is a call on the machine (buffered_step). */
     if (machine_exporter(c, a) || machine_exporter(c, b)) return NULL;
     /* A lone in, whose container may be a generator the machine searches,
@@ -10507,7 +10514,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
                (b->type == SPY_ITERATOR && iterated_python(c, a, b)) || (b->type == SPY_DICT_VALUES && values_python(c, a, b)) ||
                (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
-    if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
+    if (op == T_EQ || op == T_NE) return compare_operand(c, op, left, b);
     return (python_kinds(a, b) && (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) ||
                                     (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b))) ||
            (op == '|' && merges(a, b)) || (op == '%' && percent_converts(c, a, b)) ? NULL : binary(c, op, a, b);
@@ -32279,6 +32286,13 @@ static NO_INLINE SPYValue *sequence_test(SPYContext *c, Instruction *ins, SPYVal
     return found == 2 ? c->unbound : found < 0 ? NULL : spy_bool(c, (op == O_IN) == found);
 }
 static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
+    int op = 0;
+    if (UNLIKELY(x->type == SPY_MAPPINGPROXY) && step_operation(ins, &op) == OPERATE_COMPARE && (op == T_EQ || op == T_NE)) {
+        /* A mappingproxy's == and != compare its mapping (proxy_compared). */
+        SPYValue *compared = proxy_compared(c, spy_retain(x), y), *value = compared ? operate_step(c, m, ins, compared, y, env) : NULL;
+        spy_release(compared);
+        return value;
+    }
     /* Builtin operands call no Python method on the machine but the items'
      * an in searches in a list or tuple (sequence_test) or an iterator. */
     if (x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && y->type != SPY_ITERATOR) {
@@ -33392,7 +33406,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_BINARY)
             b = machine_pop(m); a = machine_pop(m);
             value = number_fast(c, ins->arg, a, b, 0);
-            if (!value && !c->error_type[0] && !(value = binary_operand(c, ins->arg, a, b)) && !c->error_type[0]) { x = a; y = b; goto operator_step; }
+            if (!value && !c->error_type[0] && !(value = binary_operand(c, ins->arg, &a, b)) && !c->error_type[0]) { x = a; y = b; goto operator_step; }
             machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
@@ -33409,7 +33423,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_COMPARE) {
             b = machine_pop(m); a = machine_pop(m);
             int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
-            value = order >= 0 ? spy_bool(c, order) : compare_operand(c, n->op, a, b);
+            value = order >= 0 ? spy_bool(c, order) : compare_operand(c, n->op, &a, b);
             if (!value && !c->error_type[0]) { x = a; y = b; goto operator_step; }
             if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(b); }
             else {
@@ -35973,6 +35987,27 @@ static const char *const mappingproxy_methods[] = {
     "__new__", "__getitem__", "__contains__", "__iter__", "__len__", "__reversed__", "__hash__",
     "__eq__", "__ne__", "__or__", "__ror__", "__ior__", "__repr__", "__str__", "get", "keys", "values", "items", "copy"
 };
+/* What == or != of proxy, a mappingproxy, which it takes, with other
+ * compares instead, as mappingproxy_richcompare does: its mapping, or a
+ * proxy's again; owned, or NULL on an error. Match descrobject.c:
+ * arbitrary reflected comparisons must not get the mutable exact dict
+ * behind a class namespace (gh-152405), so other, unless a dict or a
+ * mappingproxy, gets a copy of one. */
+static SPYValue *proxy_compared(SPYContext *c, SPYValue *proxy, SPYValue *other) {
+    while (proxy && proxy->type == SPY_MAPPINGPROXY) {
+        SPYValue *mapping = proxy->as.bound.self, *copy = spy_retain(mapping);
+        if (mapping->type == SPY_DICT && !is_dict(other) && other->type != SPY_MAPPINGPROXY) {
+            spy_release(copy);
+            copy = value_new(c, SPY_DICT);
+            for (size_t i = 0; copy && i < mapping->as.map.len; i++) {
+                Entry *entry = &map_items(mapping)[i];
+                if (map_append(c, copy, entry->key, entry->value, entry->hash)) { spy_release(copy); copy = NULL; }
+            }
+        }
+        spy_release(proxy); proxy = copy;
+    }
+    return proxy;
+}
 static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
     const char *name = mappingproxy_methods[op];
@@ -35992,19 +36027,9 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     case MP_REVERSED: return builtin(c, 1, &mapping, (void *)(intptr_t)B_REVERSED);
     case MP_HASH: return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
     case MP_EQ: case MP_NE: {
-        /* Match descrobject.c: arbitrary reflected comparisons must not get
-         * the mutable exact dict behind a class namespace (gh-152405). */
-        SPYValue *other = args[0], *copy = NULL;
-        if (mapping->type == SPY_DICT && !is_dict(other) && other->type != SPY_MAPPINGPROXY) {
-            copy = value_new(c, SPY_DICT);
-            if (!copy) return NULL;
-            for (size_t i = 0; i < mapping->as.map.len; i++) {
-                Entry *entry = &map_items(mapping)[i];
-                if (map_append(c, copy, entry->key, entry->value, entry->hash)) { spy_release(copy); return NULL; }
-            }
-        }
-        SPYValue *result = comparison(c, op == MP_EQ ? T_EQ : T_NE, copy ? copy : mapping, other);
-        spy_release(copy); return result;
+        SPYValue *compared = proxy_compared(c, spy_retain(proxy), args[0]);
+        SPYValue *result = compared ? comparison(c, op == MP_EQ ? T_EQ : T_NE, compared, args[0]) : NULL;
+        spy_release(compared); return result;
     }
     case MP_OR: case MP_ROR: {
         SPYValue *other = args[0]->type == SPY_MAPPINGPROXY ? args[0]->as.bound.self : args[0];

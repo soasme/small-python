@@ -472,6 +472,7 @@ Unreleased (0.10.0):
 - exception groups' `split()` and `subgroup()` call a Python condition or `derive` without nesting on the C stack
 - `complex(real, imag)`, and `complex()` naming its parts, call their Python `__complex__`, `__float__` and
   `__index__` without nesting on the C stack
+- `==` and `!=` of a mappingproxy compare its mapping's Python methods without nesting on the C stack
 
 2026-11-10 0.9.0:
 
