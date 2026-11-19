@@ -8,7 +8,9 @@
 (* they were merged; a call's duplicate raises TypeError there, a          *)
 (* display's keeps the first key with the later value. A call's merge     *)
 (* looks a key up twice, to refuse it and then to insert it, a display's  *)
-(* once. A function's **kw, dict() and frozendict() then set each keyword *)
+(* once; a dict merged into keywords or a display that hold none is taken *)
+(* as it is, its distinct keys compared with none (Annex D). A function's  *)
+(* **kw, dict() and frozendict() then set each keyword                     *)
 (* by DictSetItem, hashing its name once and comparing it with each       *)
 (* earlier name equal in hash; a subclass's construction, dict.update and *)
 (* a display merge without hashing. A function with a parameter z first   *)
@@ -17,7 +19,8 @@
 (* A program is a target, a call of a function taking only **kw, or z=None *)
 (* and **kw, dict(), a dict subclass, dict.update, frozendict(), a         *)
 (* frozendict subclass or a dict display, given one or two ** dicts of one *)
-(* key each, a, b, or A, whose hash is a's, and a=0 first, last or not at  *)
+(* key each, a, b, or A, whose hash is a's, or when joined one dict of two *)
+(* such keys, and a=0 first, last or not at                                *)
 (* all; a=0 last merges as a ** of it does. The outcome is the result's    *)
 (* items in order with the log, or TypeError with the log.                 *)
 (***************************************************************************)
@@ -25,7 +28,8 @@ EXTENDS Integers, Sequences, FiniteSets
 
 Targets == {"call", "parameter call", "dict", "dict subclass", "update", "frozendict", "frozendict subclass", "display"}
 Keys == UNION {[1..n -> {"a", "b", "A"}] : n \in 1..2}
-Programs == [target : Targets, explicit : {"none", "first", "last"}, keys : Keys]
+Programs == {p \in [target : Targets, explicit : {"none", "first", "last"}, keys : Keys, joined : BOOLEAN] :
+                p.joined => Len(p.keys) = 2 /\ p.keys[1] # p.keys[2]}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -37,13 +41,16 @@ Eqs(n) == [j \in 1..n |-> "eq"]
 \* The positions of items, in order, whose names are equal in hash to k.
 Collides(items, k) == SelectSeq([j \in DOMAIN items |-> j], LAMBDA j : Fold(items[j][1]) = Fold(k))
 
-\* Merge the ** dicts in order: a key is compared with each merged one
+\* Merge the ** dicts in order: the keys of the first, merged into none,
+\* are taken as they are (Copied); a key is compared with each merged one
 \* equal in hash, up to one spelled as it is; a call refuses that one, a
 \* display replaces its value. A key equal to none is compared with them
 \* again as a call inserts it.
+Copied == IF program.explicit = "first" THEN 0 ELSE IF program.joined THEN 2 ELSE 1
 RECURSIVE Merge(_, _, _, _)
 Merge(items, log, keys, i) ==
     IF i > Len(keys) THEN <<"ok", items, log>>
+    ELSE IF i <= Copied THEN Merge(Append(items, <<keys[i], i>>), log, keys, i + 1)
     ELSE LET k == keys[i]
              at == Collides(items, k)
              same == {n \in DOMAIN at : items[at[n]][1] = k}

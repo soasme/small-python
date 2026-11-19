@@ -507,6 +507,7 @@ Unreleased (0.10.0):
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`
+- a call's first `**` of a dict merges into the keywords without comparing its keys, as CPython does
 
 2026-11-10 0.9.0:
 

@@ -36,7 +36,10 @@ def g(z=None, **kw):
 
 def outcome(p):
     first = {"a": 0} if p["explicit"] == "first" else {}
-    sources = [{Name(k): i} for i, k in enumerate(p["keys"], 1)]
+    if p["joined"]:
+        sources = [{Name(k): i for i, k in enumerate(p["keys"], 1)}]
+    else:
+        sources = [{Name(k): i} for i, k in enumerate(p["keys"], 1)]
     second = sources[1] if len(sources) > 1 else {}
     last = p["explicit"] == "last"
     del log[:]

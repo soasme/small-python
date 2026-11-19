@@ -15939,9 +15939,10 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
             return c->error_type[0] ? -1 : 0;
         }
         if (source == result && !callable) return 0;
-        if (!callable && !result->as.map.len) {
-            /* An empty dict takes the entries as they are: their keys are
-             * distinct, so none is compared (dict_merge). */
+        if (!result->as.map.len) {
+            /* An empty dict, a call's keywords too, takes the entries as
+             * they are: their keys are distinct, so none is compared
+             * (dict_merge). */
             if (spend(c, source->as.map.len)) return -1;
             for (size_t i = 0; i < source->as.map.len; i++) {
                 Entry entry = map_items(source)[i];
