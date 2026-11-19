@@ -317,7 +317,7 @@ Contents | - navigation
 19 The Built-in Namespace > 19.3 Function properties > 19.3.25 locals ( ) | DynamicScopes
 19 The Built-in Namespace > 19.3 Function properties > 19.3.26 max ( *iterable*, *, *key*=None, *default* ) and max ( *a*, *b*, *args, *key*=None ) | BuiltinsNumeric
 19 The Built-in Namespace > 19.3 Function properties > 19.3.27 next ( *iterator* [, *default*] ) | BuiltinsIter
-19 The Built-in Namespace > 19.3 Function properties > 19.3.28 open ( *file*, *mode*=`'r'`, … ) | - host hook HostOpen (Annex B)
+19 The Built-in Namespace > 19.3 Function properties > 19.3.28 open ( *file*, *mode*=`'r'`, … ) | OpenFirst
 19 The Built-in Namespace > 19.3 Function properties > 19.3.29 ord ( *character*, / ) | BuiltinsText
 19 The Built-in Namespace > 19.3 Function properties > 19.3.30 pow ( *base*, *exp*, *mod*=None ) | BuiltinsNumeric, BinaryArith
 19 The Built-in Namespace > 19.3 Function properties > 19.3.31 print ( *objects, *sep*=`' '`, *end*=`'\n'`, *file*=None, *flush*=False ) | BuiltinsText

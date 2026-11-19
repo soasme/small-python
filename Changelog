@@ -516,6 +516,7 @@ Unreleased (0.10.0):
 - a closure no longer keeps alive the locals of its defining call that no nested scope reads
 - `co_cellvars` lists the names a nested definition's annotations read
 - a set's `union()`, `intersection()`, `difference()` and their updates of any number of iterables call items' Python `__hash__` and `__eq__` without nesting on the C stack
+- `open()` given keyword arguments as a program's first call loads its intrinsics without nesting on the C stack
 
 2026-11-10 0.9.0:
 

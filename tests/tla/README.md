@@ -12,6 +12,7 @@ agree on their distinct-state counts), in about half TLC's time.
 | `Exceptions.tla` | try/except/else/finally and with, under return, break, continue, raise, and bare raise, with `__context__` chains | yes |
 | `Scopes.tla` | local, global, nonlocal, free, and class-scope name resolution, late binding, comprehension scopes | yes |
 | `ClosureCells.tla` | a completed call keeps only the locals its closures read (a lambda, def, class body or generator expression), or all of them while a traceback's frame lives | yes |
+| `OpenFirst.tla` | `open()` of a mounted directory's file given its file and mode positionally or by keyword, a rejected mode, or an unknown keyword, the first call of a program as any later one | yes |
 | `IntArith.tla` | int `+ - * // % divmod ** << >> & \| ^`, unary `- ~ abs`: floor division, remainder signs, two's complement bitwise operations | yes |
 | `Calls.tla` | binding arguments to positional-only, positional-or-keyword, `*args`, keyword-only, and `**kw` parameters with defaults | yes |
 | `Unpacking.tla` | assignment to target lists with starred and nested targets | yes |

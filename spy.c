@@ -18226,19 +18226,20 @@ static SPYValue *class_callk(SPYContext *c, Machine *m, SPYValue *cls, size_t ar
     memcpy(args + 1, argv, argc * sizeof(*argv));
     return callk(c, m, allocate, argc + 1, args, callk_newed, state);
 }
-/* Call fn on argc arguments argv, which it takes, then continuation k
- * with ctx, which it takes, as Lua's lua_callk. On machine m, a function
+/* Call fn on argc arguments argv, which it takes, and keywords, then
+ * continuation k with ctx, which it takes, as Lua's lua_callk. On machine m, a function
  * of the machine, or a method, an instance's __call__ or a metaclass's
  * __call__ of one (bound_function), or a class's Python __init__ or
  * __new__ (class_callk), is m's call: callk leaves it in c->k_fn and
  * returns NULL with no error, and the step that called enters it
  * (CALL_K), calling k when it returns, so that no Python code runs on
  * the C stack. Otherwise fn runs here and callk returns what k does. */
-static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+static NO_INLINE SPYValue *callk_keywords(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, SPYValue *keywords,
+                                          Continuation k, SPYValue *ctx) {
     SPYValue *function = machine_function(c, fn) || !m ? fn : bound_function(c, fn);
     if (!function) function = fn;
     size_t n = fn != function;
-    if (m && !n && fn->type == SPY_CLASS && argc < 9) {
+    if (m && !n && !keywords && fn->type == SPY_CLASS && argc < 9) {
         SPYValue *result = class_callk(c, m, fn, argc, argv, k, ctx);
         if (result || c->k_fn || c->error_type[0]) return result;
     }
@@ -18246,13 +18247,17 @@ static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t
         SPYValue *args[9];
         if (n) args[0] = spy_retain(fn->type == SPY_METHOD ? fn->as.method.self : fn);
         if (argc) memcpy(args + n, argv, argc * sizeof(*argv));
-        if (!(c->k_env = function_env(c, function, n + argc, args, NULL, 1))) return k(c, m, ctx, NULL);
+        if (!(c->k_env = function_env(c, function, n + argc, args, keywords, 1))) return k(c, m, ctx, NULL);
         c->k_fn = spy_retain(function); c->k = k; c->k_ctx = ctx;
         return NULL;
     }
-    SPYValue *result = call(c, fn, argc, argv);
+    SPYValue *result = keywords ? call_keywords(c, fn, argc, argv, keywords) : call(c, fn, argc, argv);
     release_all(argc, argv);
     return k(c, m, ctx, result);
+}
+/* callk with keywords, a dict or NULL, borrowed. */
+static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+    return callk_keywords(c, m, fn, argc, argv, NULL, k, ctx);
 }
 /* The call callk left on m, its continuation's (CALL_K), or a repr job's
  * first left with none (CALL_CHECKED): the machine to run on. */
@@ -27636,6 +27641,12 @@ static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *open_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *open_loaded(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *intrinsics_k(SPYContext *, Machine *, Continuation, SPYValue *);
+/* What open_loaded calls open's intrinsic with: (arguments, keywords or None), owned. */
+static SPYValue *open_context(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *args = tuple_of(c, argc, argv), *ctx = args ? tuple_of(c, 2, (SPYValue *[]){args, keywords ? keywords : c->none}) : NULL;
+    spy_release(args);
+    return ctx;
+}
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
     _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64 &&
                    B_ISINSTANCE < 64 && B_ISSUBCLASS < 64 && B_AITER < 64 && B_ANEXT < 64, "builtin mask");
@@ -28263,7 +28274,7 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
     SPYValue *result, *function = NULL;
     if (callee->as.native.kwcall == open_builtin) {
         /* open() calls its intrinsic on m, loading the intrinsics first (intrinsics_k). */
-        SPYValue *ctx = argc && argc <= 8 ? tuple_of(c, argc, argv) : NULL;
+        SPYValue *ctx = argc && argc <= 8 ? open_context(c, argc, argv, NULL) : NULL;
         if (!ctx) {
             result = c->error_type[0] ? NULL : call_plain(c, callee, -1, n, argc, argv);
             release_all(argc, argv); spy_release(callee);
@@ -43448,14 +43459,16 @@ static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYV
  * set. A group's split() or subgroup() leaves its call so, or gives the
  * call's value, *env unset (split_run). */
 /* The intrinsics open() needs are loaded, given result, or NULL with an
- * error: its intrinsic is called on m with the arguments ctx holds. */
+ * error: its intrinsic is called on m with the arguments and keywords ctx
+ * holds (open_context). */
 static SPYValue *open_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
-    SPYValue *fn = result ? intrinsic(c, "open") : NULL, *args[8];
-    size_t argc = ctx->as.seq.len;
+    SPYValue *fn = result ? intrinsic(c, "open") : NULL, *args[8], *given = ctx->as.seq.items[0], *keywords = ctx->as.seq.items[1];
+    size_t argc = given->as.seq.len;
     spy_release(result);
-    for (size_t i = 0; fn && i < argc; i++) args[i] = spy_retain(ctx->as.seq.items[i]);
+    for (size_t i = 0; fn && i < argc; i++) args[i] = spy_retain(given->as.seq.items[i]);
+    result = fn ? callk_keywords(c, m, fn, argc, args, keywords == c->none ? NULL : keywords, method_called, NULL) : NULL;
     spy_release(ctx);
-    return fn ? callk(c, m, fn, argc, args, method_called, NULL) : NULL;
+    return result;
 }
 static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     SPYValue *self = NULL, *function, *native = callee->type == SPY_METHOD ? callee->as.method.function : callee;
@@ -45280,6 +45293,12 @@ static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv,
     (void)data;
     if (!argc && !(keywords && name_local(keywords, "file")))
         return spy_error(c, "TypeError", "open() missing required argument 'file' (pos 1)");
+    /* A step's open() with keywords calls its intrinsic on its machine,
+     * loading the intrinsics there first, as builtin_call's does. */
+    Machine *m = argc > 8 ? NULL : step_machine(c);
+    SPYValue *ctx = m ? open_context(c, argc, argv, keywords) : NULL;
+    if (ctx) return intrinsics_k(c, m, open_loaded, ctx);
+    if (c->error_type[0]) return NULL;
     SPYValue *fn = intrinsic(c, "open");
     return fn ? call_keywords(c, fn, argc, argv, keywords) : NULL;
 }
