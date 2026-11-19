@@ -28,6 +28,13 @@ def outcome(p):
     base_body = {m: IMPLEMENTATIONS[m]} if where == "base" else {}
     B = type("B", (), base_body)
     body = {m: IMPLEMENTATIONS[m]} if where in ("class", "replaced", "deleted") else {}
+    if where == "descriptor":
+        class Reads:
+            def __get__(self, obj, owner):
+                for _ in range(2):
+                    pass
+                return IMPLEMENTATIONS[m].__get__(obj, owner)
+        body[m] = Reads()
     if where == "failing":
         def fail(self):
             raise AttributeError(m)

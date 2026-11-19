@@ -475,6 +475,8 @@ Unreleased (0.10.0):
 - `==` and `!=` of a mappingproxy compare its mapping's Python methods without nesting on the C stack
 - a weak reference's Python callback runs without nesting on the C stack; one that takes no argument is
   reported instead of raising into the code that dropped the target
+- an operator's special method held as a descriptor or property is read and called without nesting on
+  the C stack
 
 2026-11-10 0.9.0:
 

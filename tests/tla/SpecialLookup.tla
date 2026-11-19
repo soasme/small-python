@@ -19,6 +19,8 @@
 (*     deleted    on C, then del C.M                                       *)
 (*     metaclass  on Meta, with class C(metaclass=Meta)                    *)
 (*     failing    on C, as a property whose getter raises AttributeError   *)
+(*     descriptor on C, as an instance whose class's __get__ loops, then    *)
+(*                returns the implementation bound to the object           *)
 (*                                                                         *)
 (* A failing descriptor makes M absent for the operations with a fallback  *)
 (* (bool and iter here, PLS-315 7.3.2 LookupSpecialMaybe), and raises its  *)
@@ -33,7 +35,7 @@
 EXTENDS Naturals, Sequences
 
 Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__"}
-Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass", "failing"}
+Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass", "failing", "descriptor"}
 
 \* The methods looked up with LookupSpecialMaybe here.
 Optional == {"__bool__", "__iter__"}
@@ -56,7 +58,7 @@ Missing(m, onclass) == CASE m = "__bool__" -> "True"                 \* everythi
 
 \* Where the object's type has M: the class (or its base) for c, the metaclass for C.
 Implicit(p, onclass) ==
-    LET found == IF onclass THEN p.where = "metaclass" ELSE p.where \in {"class", "base", "replaced"}
+    LET found == IF onclass THEN p.where = "metaclass" ELSE p.where \in {"class", "base", "replaced", "descriptor"}
     IN  IF found THEN Gives(p.method, p.where = "replaced")
         ELSE IF p.where = "failing" /\ ~onclass /\ p.method \notin Optional THEN "AttributeError"
         ELSE Missing(p.method, onclass)
