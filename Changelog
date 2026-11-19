@@ -561,6 +561,7 @@ Unreleased (0.10.0):
 - A dict subclass with its own `__iter__` merges into `**` and `dict.update()` by its Python `keys()` and `__getitem__` without nesting on the C stack
 - A sequence's explicit `__mul__`, `__rmul__` or `__imul__` calls its count's Python `__index__` without nesting on the C stack
 - `map()` of `dir`, `str`, `repr`, `len` or `hash` over classes calls their metaclass's Python method without nesting on the C stack
+- A class whose `__new__` is a classmethod, a function set after creation, or a descriptor with a Python `__get__` is created without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair

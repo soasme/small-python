@@ -7,7 +7,9 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 # Each method loops, so that it runs on the machine.
 LOOP = "        for _ in (): pass\n"
 NEW = {"none": "", "self": "    def __new__(cls, *args, **kw):\n" + LOOP + "        return super().__new__(cls)\n",
-       "other": "    def __new__(cls, *args, **kw):\n" + LOOP + "        return 5\n"}
+       "other": "    def __new__(cls, *args, **kw):\n" + LOOP + "        return 5\n",
+       "classmethod": "    @classmethod\n    def __new__(owner, cls, *args, **kw):\n" + LOOP + "        return super(owner, cls).__new__(cls)\n",
+       "descriptor": "    __new__ = type('Get', (), {'__get__': lambda self, inst, owner: lambda cls, *a, **k: super(owner, cls).__new__(cls)})()\n"}
 INIT = {"none": "", "records": "    def __init__(self, *args, **kw):\n" + LOOP + "        self.args = args + tuple(kw.items())\n",
         "returns": "    def __init__(self, *args, **kw):\n" + LOOP + "        return 1\n"}
 CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": "", "super": "", "unbound": ""}

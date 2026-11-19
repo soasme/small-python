@@ -14,6 +14,8 @@
 (* A program defines class C, of base object, list or Exception, with      *)
 (*                                                                         *)
 (*     new   none | self (super().__new__(cls)) | other (returns 5)        *)
+(*           | classmethod (one doing the same, the class bound first)     *)
+(*           | descriptor (an instance whose Python __get__ gives one)     *)
 (*     init  none | records (self.args = args) | returns (returns 1)       *)
 (*     call  none | class (def __call__(self, *a): return a)               *)
 (*                | instance (c.__call__ = a function, after creation)     *)
@@ -31,7 +33,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other"},
+Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other", "classmethod", "descriptor"},
              init : {"none", "records", "returns"}, call : {"none", "class", "instance", "meta", "super", "unbound"},
              op : {"C()", "C(1)", "C(k=1)", "C()(2)"}]
 
