@@ -11,6 +11,7 @@ agree on their distinct-state counts), in about half TLC's time.
 | `Generators.tla` | next/send/throw/close on generators and coroutines, including re-entry, ignored GeneratorExit, and finished objects | yes |
 | `Exceptions.tla` | try/except/else/finally and with, under return, break, continue, raise, and bare raise, with `__context__` chains | yes |
 | `Scopes.tla` | local, global, nonlocal, free, and class-scope name resolution, late binding, comprehension scopes | yes |
+| `ClosureCells.tla` | a completed call keeps only the locals its closures read (a lambda, def, class body or generator expression), or all of them while a traceback's frame lives | yes |
 | `IntArith.tla` | int `+ - * // % divmod ** << >> & \| ^`, unary `- ~ abs`: floor division, remainder signs, two's complement bitwise operations | yes |
 | `Calls.tla` | binding arguments to positional-only, positional-or-keyword, `*args`, keyword-only, and `**kw` parameters with defaults | yes |
 | `Unpacking.tla` | assignment to target lists with starred and nested targets | yes |

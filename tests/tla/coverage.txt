@@ -111,7 +111,7 @@ Contents | - navigation
 9 Executable Code and Execution Contexts > 9.2 Execution contexts | = sections
 9 Executable Code and Execution Contexts > 9.2 Execution contexts > 9.2.1 Frames | Frames
 9 Executable Code and Execution Contexts > 9.2 Execution contexts > 9.2.2 The execution context stack | Frames, Tracebacks
-9 Executable Code and Execution Contexts > 9.2 Execution contexts > 9.2.3 RunFrame ( *frame* ) | Evaluation, Frames
+9 Executable Code and Execution Contexts > 9.2 Execution contexts > 9.2.3 RunFrame ( *frame* ) | Evaluation, Frames, ClosureCells
 9 Executable Code and Execution Contexts > 9.3 Name resolution | = sections
 9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.1 LoadName ( *n* ) | Scopes, DynamicScopes
 9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.2 LoadGlobal ( *n* ) | Scopes, BuiltinsScope

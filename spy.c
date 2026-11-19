@@ -103,7 +103,7 @@ typedef struct Pool Pool;
 typedef struct Scope Scope;
 typedef struct { uint64_t len; int sign; uint32_t digits[]; } BigInt; /* One layout on every target. */
 typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]; } IntView;
-enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32 };
+enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32, S_CELL = 64 /* a nested scope reads it (closed_locals) */ };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 /* key: the name's str, made when the name is first bound and traced
  * through the unit that owns the scope. */
@@ -120,7 +120,7 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
  * its first build. */
 struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
-enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4 };
+enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
@@ -16312,7 +16312,9 @@ static int closure_walk(ClosureNames *w, Node *n, int depth) {
     for (; n && depth < 1000; n = n->next) {
         if (n->scope && n->scope != w->self && scope_within(n->scope, w->self) && closure_scope(w, n->scope)) return -1;
         if (closure_walk(w, n->a, depth + 1) || closure_walk(w, n->b, depth + 1) || closure_walk(w, n->c, depth + 1) ||
-            closure_walk(w, n->args, depth + 1) || closure_walk(w, n->decorators, depth + 1) || closure_walk(w, n->params, depth + 1))
+            closure_walk(w, n->args, depth + 1) || closure_walk(w, n->decorators, depth + 1) || closure_walk(w, n->params, depth + 1) ||
+            /* A definition's annotation function, not the owner it points back to. */
+            (!(n->flags & F_ANNOTATE) && closure_walk(w, n->annotate, depth + 1)))
             return -1;
     }
     return 0;
@@ -17179,8 +17181,10 @@ static ALWAYS_INLINE SPYValue *kept_env(SPYContext *c, Scope *scope) {
  * that only its call holds, as most do, drops its locals from the last, as
  * CPython clears a frame, and then its parent and unit, without the general
  * walk over a value's edges; a plain one is kept at its call's depth. */
-static ALWAYS_INLINE void release_locals(SPYValue *env) {
+static void closed_locals(SPYValue *);
+static ALWAYS_INLINE void release_left(SPYValue *env, int left) {
     if (env->refs != 1 || env->weak || env->as.map.index || env->as.map.namespace || env->as.map.class_cell || env->as.map.base) {
+        if (left && env->refs > 1) closed_locals(env);
         spy_release(env); return;
     }
     SPYContext *c = env->ctx;
@@ -17201,6 +17205,36 @@ static ALWAYS_INLINE void release_locals(SPYValue *env) {
     }
     /* Released last: freeing the unit drops a kept environment of its scope. */
     spy_release(parent); spy_release(unit);
+}
+static ALWAYS_INLINE void release_locals(SPYValue *env) { release_left(env, 0); }
+/* A function's environment, not a generator's, that outlives its call (release_left),
+ * held by a closure, drops the locals no nested scope reads (its
+ * co_cellvars), as CPython's frame keeps only its cells; unless a frame
+ * object saw it (map.native), which keeps them all. */
+static NO_INLINE void closed_locals(SPYValue *env) {
+    SPYContext *c = env->ctx;
+    Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
+    if (!scope || env->as.map.namespace || env->as.map.class_cell || env->as.map.base || env->as.map.native || (env->as.map.flags & ~2) ||
+        scope->kind != S_FUNCTION || !scope->owner || scope->owner->code || c->error_type[0]) return;
+    if (!(scope->cells & CELLS_MARKED)) {
+        SPYValue *names = closure_names(c, scope->owner, 1);
+        if (!names) { spy_clear_error(c); return; }
+        for (size_t i = 0; i < names->as.seq.len; i++) {
+            Symbol *symbol = scope_symbol(scope, names->as.seq.items[i]->as.string.data);
+            if (symbol) symbol->flags |= S_CELL;
+        }
+        spy_release(names);
+        scope->cells |= CELLS_MARKED;
+    }
+    Entry *items = env->as.map.items;
+    for (size_t i = map_used(env); i--;) {
+        if (!items[i].key || items[i].value == c->unbound || items[i].key->type != SPY_STRING) continue;
+        Symbol *symbol = scope_symbol(scope, items[i].key->as.string.data);
+        if (!symbol || (symbol->flags & S_CELL)) continue;
+        SPYValue *value = items[i].value;
+        items[i].value = spy_retain(c->unbound);
+        spy_release(value);
+    }
 }
 static int declare_locals(SPYContext *c, SPYValue *env) {
     if (fresh_locals(env) && !env->as.map.len) return open_locals(c, env, 0, NULL, 0);
@@ -18086,7 +18120,7 @@ static ALWAYS_INLINE Machine *call_leave(SPYContext *c, Call *call, SPYValue *va
     c->eval_env = call->caller_env;
     while (call->m.len) spy_release(call->m.stack[--call->m.len]);
     leave_frame(c, value);
-    release_locals(env);
+    release_left(env, 1);
     spy_release(fn);
     return caller;
 }
@@ -18260,7 +18294,7 @@ static ALWAYS_INLINE SPYValue *run_function(SPYContext *c, SPYValue *fn, SPYValu
         if (r.flow == FLOW_RETURN) result = r.value;
         else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
     }
-    release_locals(env);
+    release_left(env, 1);
     return result;
 }
 static SPYValue *replayed_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
@@ -36331,7 +36365,7 @@ static SPYValue *frame_object(SPYContext *c, size_t i) {
         if (!frame) return NULL;
         if (!kept) {
             if (generator) frame->as.frame.generator = owner;
-            else frame->as.frame.owner = spy_retain(owner), frame->as.frame.env = spy_retain(entry->env);
+            else frame->as.frame.owner = spy_retain(owner), frame->as.frame.env = spy_retain(entry->env), entry->env->as.map.native = 1;
             if (generator) owner->as.generator.frame = spy_retain(frame);
         }
         frame->as.frame.index = i + 1;
