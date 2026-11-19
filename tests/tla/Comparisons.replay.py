@@ -124,6 +124,10 @@ SOURCES = {
                         "    def __lt__(s, o): return t(s.n + '<' + o.n)\n"
                         "class L(list):\n    def __lt__(s, o): t('L<'); return NotImplemented\n"
                         "result = L([E('a'), E('b')]) < L([E('a'), E('c')])",
+    "seq_dict_pair": "class K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n"
+                     "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"
+                     "result = (({K('a'): 1},) == ({K('a'): 1},), [{K('b'): {K('c'): 2}}] != [{K('b'): {K('c'): 2}}],\n"
+                     "          ({K('d'): 1},) in [({K('e'): 1},)])",
     "view_calls": "class K:\n    def __init__(s, n): s.n = n\n"
                   "    def __hash__(s):\n        for _ in (): pass\n        t('h' + s.n); return 1\n"
                   "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"

@@ -29795,7 +29795,8 @@ static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at, si
             /* Nesting too deep for C is the native comparison's error. */
             size_t inner = 0, found = stack_excess(c) ? SIZE_MAX : python_pair(c, x, y, 0, &inner);
             c->depth--;
-            if (found != SIZE_MAX) return at;
+            /* Two dicts whose keys' lookups call Python compare whole (equal_call). */
+            if (found != SIZE_MAX || (x->type == SPY_DICT && dict_walks(x, y, inner))) return at;
             if (inner == pair_length(x) && inner == pair_length(y)) continue;
             break;
         }
@@ -29867,18 +29868,27 @@ static int sequence_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t a
  * __eq__ that comparing their items at a pair python_pair found calls
  * first, owned, with its env; x, y, the next pair's index, the two
  * operands in the order of the call and c->pairing pushed on m's stack
- * (pair_returned). */
+ * (pair_returned). Two dicts whose keys' lookups call Python (dict_walks)
+ * compare as that call, left in c->k_fn (compare_enter): c->unbound, *env unset,
+ * entered by pair_enter or the step. */
 static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, size_t at, SPYValue **env) {
     SPYValue *a, *b, *function;
     size_t len = m->len, end;
     pair_at(x, y, at, &a, &b);
     /* A pair of sequences compares its own pairs, each sequence's x, y
      * and next pair's index under them with c->nesting. */
-    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE) {
+    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE && (a->type != SPY_DICT || !dict_walks(a, b, 0))) {
         if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
             machine_push(c, m, spy_retain(c->nesting))) goto fail;
         x = a; y = b; at = python_pair(c, x, y, 0, &end);
         pair_at(x, y, at, &a, &b);
+    }
+    if (a->type == SPY_DICT) {
+        if (machine_push_all(c, m, 6, (SPYValue *[]){spy_retain(x), spy_retain(y), int_value(c, (int64_t)at + 1), spy_retain(a), spy_retain(b),
+                                                     spy_retain(c->pairing)})) goto fail;
+        c->k_fn = spy_retain(a); c->k_env = spy_retain(b); c->k_unit = 2 + R_EQ; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_OPERATOR;
+        *env = NULL;
+        return c->unbound;
     }
     function = rich_function(c, a, b, R_EQ);
     SPYValue *left = function ? a : b, *right = function ? b : a;
@@ -29892,6 +29902,14 @@ static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SP
 fail:
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
+}
+/* call_enter of function, a Python method an operator calls with env, or
+ * equal_call's comparison of two dicts (compare_enter). */
+static Call *pair_enter(SPYContext *c, Machine *m, SPYValue *function, SPYValue *env) {
+    if (function != c->unbound) return call_enter(c, function, env, m);
+    Call *call = compare_enter(c, m, c->k_fn, c->k_env, c->k_unit - 2, CALL_OPERATOR);
+    c->k_fn = c->k_env = NULL; c->k_unit = 0; c->k_kind = 0;
+    return call;
 }
 static SPYValue *operator_call(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
 static NO_INLINE SPYValue *order_decide(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t, int, SPYValue **, SPYValue **);
@@ -30500,7 +30518,7 @@ static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYVa
  * the step ended with entry found (lookup_finish). */
 static Machine *lookup_enter(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash,
                              SPYValue *function, SPYValue *env, ptrdiff_t found, size_t pc) {
-    Call *call = function ? call_enter(c, function, env, m) : NULL;
+    Call *call = function ? pair_enter(c, m, function, env) : NULL;
     if (call) {
         call->m.outermost = CALL_OPERATOR;
         return &call->m;
@@ -30921,7 +30939,7 @@ static NO_INLINE SPYValue *set_call(SPYContext *c, Machine *m, SPYValue *callee,
  * what the call pushed above the walk popped. */
 static Machine *walk_resume(SPYContext *c, Machine *m, Instruction *ins, SPYValue *function, SPYValue *env, size_t pc) {
     if (function || (function = walk_next(c, m, &env))) {
-        Call *call = call_enter(c, function, env, m);
+        Call *call = pair_enter(c, m, function, env);
         if (call) {
             call->m.outermost = CALL_OPERATOR;
             return &call->m;
@@ -31535,7 +31553,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     /* A set operation, augmented assignment or comparison, whose lookups
      * may call a Python __eq__. */
     if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) &&
-        (set_like(x) || (kind == OPERATE_COMPARE && x->type == SPY_DICT))) {
+        (set_like(x) || (rich >= 0 && x->type == SPY_DICT))) {
         static const int tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
         int token = kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : op;
         /* A comparison with an instance of a subclass of x's class is its reflected one. */
@@ -32171,7 +32189,7 @@ static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instructi
     SPYValue *iterator = machine_pop(m), *x = machine_pop(m), *env = NULL;
     size_t len = m->len;
     SPYValue *function = contains_call(c, m, x, iterator, &env);
-    Call *call = function ? call_enter(c, function, env, m) : NULL;
+    Call *call = function ? pair_enter(c, m, function, env) : NULL;
     if (call) {
         spy_release(x); spy_release(iterator);
         call->m.outermost = CALL_OPERATOR;
@@ -32269,7 +32287,7 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
                next = found && !c->error_type[0] ? python_pair(c, x, y, at, &end) : SIZE_MAX;
         spy_release(index);
         size_t len = m->len;
-        Call *call = next != SIZE_MAX && (function = equal_call(c, m, x, y, next, &env)) ? call_enter(c, function, env, m) : NULL;
+        Call *call = next != SIZE_MAX && (function = equal_call(c, m, x, y, next, &env)) ? pair_enter(c, m, function, env) : NULL;
         if (call) {
             spy_release(x); spy_release(y);
             call->m.outermost = CALL_OPERATOR;
@@ -32310,7 +32328,7 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
         if (reflecting) reflected = reflected_step(ins);
         if (ordered && same >= 0) {
             function = order_decide(c, m, reflecting ? &reflected : ins, x, y, found ? end : at - 1, !found, &env, &value);
-            call = function ? call_enter(c, function, env, m) : NULL;
+            call = function ? pair_enter(c, m, function, env) : NULL;
             if (call) {
                 spy_release(x); spy_release(y);
                 call->m.outermost = CALL_OPERATOR;
@@ -33756,6 +33774,7 @@ static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *
         return unit;
     }
     SPYValue *function = operator_call(c, m, ins, x, y, env);
+    if (function == c->unbound && c->k_fn) return NULL;
     if (function || c->error_type[0]) return function;
     if (c->looked) return looked(c);
     /* An operand's Python __buffer__ or __index__ is a call on m (machine_operand). */
