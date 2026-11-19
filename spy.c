@@ -26060,6 +26060,12 @@ static int next_calls(SPYContext *c, SPYValue *v) {
     if (kind == I_CALLABLE) return !v->as.iterator.done && (machine_function(c, v->as.iterator.source) || next_resumes(v->as.iterator.source));
     if (kind == I_FILTER && !v->as.iterator.done && filter_fetches(c, v)) return 1;
     SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
+    /* A filter testing by truth or a builtin may call an item's Python
+     * method (filter_truth, filter_builtin), but not a range's ints. */
+    if (kind == I_FILTER && function && !v->as.iterator.done && !machine_function(c, function) &&
+        (function->type == SPY_NONE || (function->type == SPY_NATIVE && function->as.native.call == builtin) ||
+         (function->type == SPY_CLASS && builtin_class(c, function))))
+        return v->as.iterator.source->as.seq.items[1]->type != SPY_ITERATOR || v->as.iterator.source->as.seq.items[1]->as.iterator.kind != I_RANGE;
     return function && (machine_function(c, function) || (kind == I_MAP && (bound_function(c, function) || map_steps(function))));
 }
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is

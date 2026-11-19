@@ -62,7 +62,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 Cases == {"iter_sequence_protocol", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
-          "map_shortest", "map_none", "map_bound", "map_generator", "map_repr", "map_metaclass", "callable_generator", "iterator_subclass", "iterator_subclass_next", "adapter_subclass_iter", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next", "filter_adapted",
+          "map_shortest", "map_none", "map_bound", "map_generator", "map_repr", "map_metaclass", "callable_generator", "iterator_subclass", "iterator_subclass_next", "adapter_subclass_iter", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next", "filter_adapted", "filter_next_truth",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
@@ -206,6 +206,8 @@ Case(c) ==
       [] c = "filter_next" -> "([1, 2], [1], [-3], 2, 11)"
       \* filter of a __getitem__ iterator, iter(f, sentinel) or a map takes each item by its call.
       [] c = "filter_adapted" -> "([1, 1], [1, 2], [1], 8)"
+      \* next() of a filter by truth or a builtin calls the items' Python methods until one is kept.
+      [] c = "filter_next_truth" -> "(2, 3, 'end', 4)"
       [] c = "sort_builtin_keys" -> "([k0, 'a', k2], k3, k4, [k1, k2, k3], [3, 1, 2, 2, 0, 4, 5])"
       [] c = "builtin_key_iterators" -> "([k1, k2, k3], k3, [k1, k2], [k4, k5], [3, 1, 2, 3, 1, 2, 1, 2, 5, 4])"
       [] c = "key_sources" -> "([1, 0], 0, 'd', [0, 1, 'k0', 'k1', 0, 'k0', 1, 'k1'])"
