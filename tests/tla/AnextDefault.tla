@@ -1,7 +1,9 @@
 ----------------------------- MODULE AnextDefault -----------------------------
 (***************************************************************************)
 (* An await of anext(it, "d"), as PLS-315 19.3.4 specifies it, where it's  *)
-(* __anext__ is a coroutine with the body                                  *)
+(* __anext__ is a coroutine with the body below, or it is an async         *)
+(* generator with that body, whose return "caught" is a yield of it and    *)
+(* whose raise StopAsyncIteration is a return, yielding got at its end:    *)
 (*                                                                         *)
 (*     try: got = await Pause()                                            *)
 (*     except KeyError: after: return "caught" | raise StopAsyncIteration  *)
@@ -17,7 +19,7 @@
 (***************************************************************************)
 EXTENDS Naturals
 
-Programs == [after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"}]
+Programs == [source : {"coroutine", "agen"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -25,7 +27,8 @@ vars == <<program, outcome>>
 Pending == "pending"
 
 \* The coroutine's end ends the await: a value as its value,
-\* StopAsyncIteration as the default; a suspension keeps cr_await.
+\* StopAsyncIteration as the default; a suspension keeps cr_await; an async
+\* generator's yield is a coroutine's return.
 Run(p) == CASE p.resume = "send" -> "value sent awaiting=False"
             [] p.resume = "close" -> "closed awaiting=False"
             [] p.resume = "other" -> "raised IndexError awaiting=False"
