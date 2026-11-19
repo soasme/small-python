@@ -1,6 +1,6 @@
 # Replays Attributes.tla: each case makes an object of the spec's class and
 # performs the spec's steps on it, comparing every result with the model's.
-FIELDS = ("kind", "getattr", "hook", "spelling", "op", "result")
+FIELDS = ("kind", "getattr", "hook", "spelling", "keyed", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
@@ -37,6 +37,17 @@ class Data:
 
     def __delete__(self, obj):
         object.__getattribute__(obj, "__dict__").pop("a", None)
+
+
+# A key of the name's hash that is not equal to it (keyed).
+class Unequal:
+    def __hash__(self):
+        return hash("a")
+
+    def __eq__(self, other):
+        for _ in ():
+            pass
+        return False
 
 
 class SubProperty(property):
@@ -116,6 +127,8 @@ for walk in walks():
     steps = states(walk)
     start = next(steps)
     o = make(start["kind"], start["getattr"], start["hook"])
+    if start["keyed"] and start["kind"] != "slot":
+        object.__getattribute__(o, "__dict__")[Unequal()] = Value("unequal")
     name = Name("a") if start["spelling"] == "named" else None
     recent = []
     for state in steps:
@@ -123,7 +136,7 @@ for walk in walks():
         recent = (recent + [state["op"]])[-8:]
         if actual != state["result"]:
             failures += 1
-            print("MISMATCH", start["kind"], start["getattr"], start["hook"], start["spelling"], "after", recent[:-1], "at", state["op"],
+            print("MISMATCH", start["kind"], start["getattr"], start["hook"], start["spelling"], start["keyed"], "after", recent[:-1], "at", state["op"],
                   "expected", state["result"], "got", actual)
             break
 if failures:

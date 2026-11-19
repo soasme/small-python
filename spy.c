@@ -529,6 +529,12 @@ struct SPYContext {
      * each of the six (compare_enter), and the comparisons running. */
     Program *compare_code;
     size_t comparing;
+    /* Borrowed: the instance whose __dict__ a read searched on the machine
+     * without finding its name (search_begin), whose next search, of that
+     * read, finds nothing (instance_dict_search), and its class's
+     * attribute and __getattr__ the read found before the search, which
+     * its reads of that instance take. */
+    SPYValue *searched, *searched_class, *searched_hook;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -12006,6 +12012,7 @@ static SPYValue *class_namespace(SPYContext *, SPYValue *);
 /* An instance __dict__ holding keys other than str is searched as a dict:
  * an equal-hashed key's __eq__ runs. A new reference, or NULL. */
 static SPYValue *instance_dict_search(SPYContext *c, SPYValue *v, const char *name) {
+    if (UNLIKELY(v == c->searched)) { c->searched = NULL; return NULL; }
     SPYValue *dict = v->type == SPY_INSTANCE && v->as.map.namespace ? dictionary_value(c, v->as.map.namespace) : NULL;
     int other = 0;
     for (size_t i = 0; dict && i < dict->as.map.len; i++) other |= map_items(dict)[i].key->type != SPY_STRING;
@@ -12540,7 +12547,9 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 return params ? spy_retain(params) : value_new(c, SPY_TUPLE);
             }
         }
-        SPYValue *value = v->type == SPY_INSTANCE ? instance_lookup(v->as.map.parent, name) : NULL;
+        /* Past a search of its __dict__ on the machine, what the class had before (search_begin). */
+        int searched = UNLIKELY(v == c->searched);
+        SPYValue *value = searched ? c->searched_class : v->type == SPY_INSTANCE ? instance_lookup(v->as.map.parent, name) : NULL;
         if (data_descriptor_get(value)) return descriptor_get(c, value, v, v->as.map.parent);
         SPYValue *meta = v->type == SPY_CLASS ? v->as.map.meta : NULL;
         SPYValue *meta_value = meta ? class_lookup(meta, name) : NULL;
@@ -12557,7 +12566,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (value) { spy_release(held); return v->type == SPY_CLASS ? descriptor_get(c, value, NULL, v) : spy_retain(value); }
         value = instance_dict_search(c, v, name);
         if (value || c->error_type[0]) { spy_release(held); return value; }
-        value = v->type == SPY_CLASS ? class_lookup(v, name) : instance_lookup(v->as.map.parent, name);
+        value = searched ? NULL : v->type == SPY_CLASS ? class_lookup(v, name) : instance_lookup(v->as.map.parent, name);
         /* The class attribute found before the dict search, which may delete it. */
         if (!value) value = held;
         /* A builtin base before the defining class in the MRO provides its own slot. */
@@ -12859,7 +12868,7 @@ static void getter_args(SPYContext *c, SPYValue *v, const char *name, SPYValue *
  * (PyObject_GenericGetAttr); else NULL, with *own that entry when the
  * search, which may compare keys, found it. */
 static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, const char *name, SPYValue **own) {
-    SPYValue *descriptor = class_lookup(owner, name);
+    SPYValue *descriptor = UNLIKELY(v == c->searched) ? c->searched_class : class_lookup(owner, name);
     *own = NULL;
     if (descriptor && descriptor->type == SPY_PROPERTY) return machine_function(c, descriptor->as.property.get) ? spy_retain(descriptor) : NULL;
     SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c && plain_mro(c, owner) ? descriptor->as.map.parent : NULL;
@@ -12908,8 +12917,10 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
         return NULL;
     }
     SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : v->type == SPY_CLASS ? v->as.map.meta : NULL;
-    SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL, *own = NULL, *descriptor;
-    SPYValue *definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
+    /* Past a search of its __dict__ on the machine, the hooks the read had before (search_begin). */
+    int searched = UNLIKELY(v == c->searched);
+    SPYValue *fallback = searched ? c->searched_hook : owner ? class_lookup(owner, "__getattr__") : NULL, *own = NULL, *descriptor;
+    SPYValue *definition = owner && !searched ? class_lookup(owner, "__getattribute__") : NULL;
     if (!owner || (fallback && !machine_function(c, fallback))) return attribute(c, v, name);
     if (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
         if (!machine_function(c, definition)) return attribute(c, v, name);
@@ -12926,6 +12937,60 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
     spy_clear_error(c);
     c->fallback = fallback;
     return NULL;
+}
+/* Whether an attribute step's read of name from instance v searches its
+ * __dict__, which holds keys other than str, by a Python __eq__ on the
+ * machine (instance_dict_search, rich_function): its class's
+ * __getattribute__ is object's, name is no data descriptor's, no str entry
+ * holds it, and a key of its hash has one; comparing none. */
+static NO_INLINE int dict_searches(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *dict = dictionary_value(c, v->as.map.namespace), *definition = class_lookup(v->as.map.parent, "__getattribute__");
+    if (!dict || v == c->searched || !eq_keyed(dict) || (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) ||
+        !strcmp(name, "__dict__") || data_descriptor_get(instance_lookup(v->as.map.parent, name)) || name_local(v, name)) return 0;
+    SPYValue *key = spy_string(c, name, strlen(name)), *storage = namespace_map(dict);
+    int64_t hash;
+    int calls = 0;
+    if (key && !hash_value(c, key, &hash)) {
+        MapCursor cursor = map_cursor(storage, hash);
+        for (ptrdiff_t i; !calls && (i = map_next(storage, hash, &cursor)) >= 0;)
+            calls = rich_function(c, storage->as.map.items[i].key, key, R_EQ) != NULL;
+    }
+    spy_release(key);
+    return calls;
+}
+/* The search's state (search_begin): the instance, its __dict__, the
+ * name, its class's attribute and __getattr__ before the search, or
+ * c->unbound, and what its read keeps. */
+enum { SEARCH_OBJECT, SEARCH_DICT, SEARCH_KEY, SEARCH_CLASS, SEARCH_HOOK, SEARCH_KEPT };
+static SPYValue *map_findk(SPYContext *, Machine *, SPYValue *, SPYValue *, int64_t, MapCursor, Continuation, SPYValue *);
+/* The search of instance v's __dict__ for name on m (dict_searches,
+ * map_findk), then k with its state, kept the read's own: the entry's
+ * index or -1, as map_findk gives it. */
+static NO_INLINE SPYValue *search_begin(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *kept, Continuation k) {
+    SPYValue *cls = v->as.map.parent, *dict = dictionary_value(c, v->as.map.namespace), *key = spy_string(c, name, strlen(name));
+    SPYValue *before = instance_lookup(cls, name), *hook = class_lookup(cls, "__getattr__"), *state = NULL;
+    int64_t hash;
+    if (dict && key && !hash_value(c, key, &hash))
+        state = spy_tuple(c, 6, (SPYValue *[]){v, dict, key, before ? before : c->unbound, hook ? hook : c->unbound, kept});
+    spy_release(key);
+    return state ? map_findk(c, m, dict, state->as.seq.items[SEARCH_KEY], hash, map_cursor(namespace_map(dict), hash), k, state) : NULL;
+}
+/* What search state's search found, result, which it takes: its entry's
+ * value, the read's; else NULL, *again set when the read goes on past it,
+ * its reads of the instance taking what state found before (searched_go). */
+static SPYValue *search_found(SPYValue *state, SPYValue *result, int *again) {
+    ptrdiff_t i = result ? (ptrdiff_t)result->as.integer_data.small : -1;
+    *again = result && i < 0;
+    spy_release(result);
+    return result && i >= 0 ? spy_retain(namespace_map(state->as.seq.items[SEARCH_DICT])->as.map.items[i].value) : NULL;
+}
+/* Make the reads of search state's instance take what it found before the
+ * search (c->searched), or with state NULL, read anew. */
+static void searched_go(SPYContext *c, SPYValue *state) {
+    SPYValue **items = state ? state->as.seq.items : NULL;
+    c->searched = items ? items[SEARCH_OBJECT] : NULL;
+    c->searched_class = items && items[SEARCH_CLASS] != c->unbound ? items[SEARCH_CLASS] : NULL;
+    c->searched_hook = items && items[SEARCH_HOOK] != c->unbound ? items[SEARCH_HOOK] : NULL;
 }
 /* The attribute node n read from v, with n remembering how v's class
  * answers; or, when calls is set, NULL with no error for a property whose
@@ -12955,6 +13020,11 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
             n->attr_class = v; n->attr_epoch = ~c->classes_changed;
         }
         return attribute(c, v, n->b->text);
+    }
+    /* A __dict__ whose search calls a Python __eq__ is searched on the machine (getter_call, method_getter). */
+    if (calls && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, n->b->text)) {
+        c->annotating = 2;
+        return NULL;
     }
     return calls ? attribute_step(c, v, n->b->text) : attribute(c, v, n->b->text);
 }
@@ -12989,10 +13059,12 @@ static ALWAYS_INLINE int node_set_own(SPYContext *c, SPYValue *v, Node *n, SPYVa
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     /* An instance's class, or a class's metaclass, may customize lookup. */
     SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : metaclassed(v) ? v->as.map.meta : NULL;
-    SPYValue *definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
+    int searched = UNLIKELY(v == c->searched);
+    SPYValue *definition = owner && !searched ? class_lookup(owner, "__getattribute__") : NULL;
     /* slot_tp_getattr_hook finds __getattr__ before the lookup runs and binds
-     * it only after an AttributeError, so the lookup cannot change it. */
-    SPYValue *fallback = owner ? spy_retain(class_lookup(owner, "__getattr__")) : NULL;
+     * it only after an AttributeError, so the lookup cannot change it; a
+     * search of the __dict__ on the machine found it before (search_begin). */
+    SPYValue *fallback = searched ? spy_retain(c->searched_hook) : owner ? spy_retain(class_lookup(owner, "__getattr__")) : NULL;
     SPYValue *result;
     if (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
         SPYValue *method = descriptor_get(c, definition, v, owner);
@@ -28672,15 +28744,58 @@ static SPYValue *method_got(SPYContext *c, Machine *m, SPYValue *state, SPYValue
  * __getattribute__, then the __getattr__ after its AttributeError, then
  * the attribute (method_got), with the stacked arguments above the object
  * on m's stack, or, for -1, those of the call node. */
+static SPYValue *method_getter_of(SPYContext *, Machine *, const char *, SPYValue *, SPYValue *, int);
+/* What a method call's __dict__ search (method_getter) found, result,
+ * state kept the call's stacked argument count: the call of the entry's
+ * value (method_got); else the read goes on past the search
+ * (search_found), to the attribute or a Python getter or __getattr__
+ * (method_getter_of). */
+static SPYValue *method_searched(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *object = spy_retain(state->as.seq.items[SEARCH_OBJECT]), *key = spy_retain(state->as.seq.items[SEARCH_KEY]), *count = spy_retain(state->as.seq.items[SEARCH_KEPT]);
+    const char *name = key->as.string.data;
+    int stacked = (int)count->as.integer_data.small, again;
+    SPYValue *value = search_found(state, result, &again);
+    if (again) {
+        searched_go(c, state);
+        value = attribute_step(c, object, name);
+        searched_go(c, NULL);
+    }
+    spy_release(state);
+    SPYValue *call = NULL;
+    if (again && !value && !c->error_type[0] && c->fallback) {
+        SPYValue *function = c->fallback;
+        c->fallback = NULL;
+        result = method_getter_of(c, m, name, function, object, stacked);
+    } else {
+        call = spy_tuple(c, 4, (SPYValue *[]){object, c->none, key, count});
+        spy_release(object);
+        if (!call) { spy_release(value); method_drop(m, stacked); result = NULL; }
+        else result = method_got(c, m, call, value);
+    }
+    spy_release(key); spy_release(count);
+    return result;
+}
 static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, SPYValue *object, int stacked) {
-    SPYValue *function = c->fallback ? c->fallback : spy_retain(attr->attr_method), *argv[3] = {object, NULL, NULL};
-    SPYValue *fallback = getter_fallback(object, function);
+    if (UNLIKELY(c->annotating == 2)) {
+        /* Its __dict__ searched on m first (dict_searches, method_searched). */
+        c->annotating = 0;
+        SPYValue *count = int_value(c, stacked), *result = count ? search_begin(c, m, object, attr->b->text, count, method_searched) : NULL;
+        spy_release(count); spy_release(object);
+        if (!result && !c->k_fn) method_drop(m, stacked);
+        return result;
+    }
+    return method_getter_of(c, m, attr->b->text, c->fallback ? c->fallback : spy_retain(attr->attr_method), object, stacked);
+}
+/* method_getter's call of function, which it takes, the getter for name
+ * of object, which it owns. */
+static SPYValue *method_getter_of(SPYContext *c, Machine *m, const char *name, SPYValue *function, SPYValue *object, int stacked) {
+    SPYValue *argv[3] = {object, NULL, NULL}, *fallback = getter_fallback(object, function);
     size_t argc = 1;
     c->fallback = NULL;
-    SPYValue *items[4] = {object, fallback ? fallback : c->none, spy_string(c, attr->b->text, strlen(attr->b->text)), int_value(c, stacked)};
+    SPYValue *items[4] = {object, fallback ? fallback : c->none, spy_string(c, name, strlen(name)), int_value(c, stacked)};
     SPYValue *state = items[2] && items[3] ? spy_tuple(c, 4, items) : NULL;
     spy_release(items[2]); spy_release(items[3]); spy_release(object);
-    if (!state || !(function = getter_function(c, object, attr->b->text, function, argv, &argc))) {
+    if (!state || !(function = getter_function(c, object, name, function, argv, &argc))) {
         if (!state) spy_release(function);
         spy_release(state);
         method_drop(m, stacked);
@@ -33017,12 +33132,62 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
     argv[0] = spy_retain(v);
     return get;
 }
+/* The call of function, which it takes, that c->fallback gave for a read
+ * of name from v, which it owns, on m: v and the __getattr__ that follows
+ * the call (getter_fallback) pushed on m's stack (CALL_CHECKED), the
+ * function to enter with *env (getter_function); else NULL. */
+static SPYValue *getter_enter(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *function, SPYValue **env) {
+    SPYValue *argv[3] = {v, NULL, NULL}, *fallback = getter_fallback(v, function);
+    size_t argc = 1;
+    c->entering_kind = CALL_CHECKED;
+    if (machine_push(c, m, v) || (fallback && machine_push(c, m, spy_retain(fallback))) ||
+        !(function = getter_function(c, v, name, function, argv, &argc))) {
+        spy_release(function);
+        return NULL;
+    }
+    if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
+    spy_release(function);
+    return NULL;
+}
+static SPYValue *attribute_searched(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* What an attribute step's __dict__ search (getter_call) found, result:
+ * its value; else the read goes on past the search (search_found), a
+ * Python getter or __getattr__ it leaves entered on m as the step's
+ * (getter_enter, CALL_CHECKED). */
+static SPYValue *attribute_searched(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *v = state->as.seq.items[SEARCH_OBJECT], *env = NULL, *function;
+    const char *name = state->as.seq.items[SEARCH_KEY]->as.string.data;
+    int again;
+    SPYValue *value = search_found(state, result, &again);
+    if (again) {
+        searched_go(c, state);
+        value = attribute_step(c, v, name);
+        searched_go(c, NULL);
+        if (!value && !c->error_type[0] && c->fallback) {
+            function = c->fallback;
+            c->fallback = NULL;
+            if ((function = getter_enter(c, m, spy_retain(v), name, function, &env))) {
+                c->k_fn = function; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
+            }
+        }
+    }
+    spy_release(state);
+    return value;
+}
 /* Attribute step n's call on v, which it owns: its property's getter
  * (CALL_MACHINE); else, with v and the __getattr__ that follows the call
  * (getter_fallback) on m's stack (CALL_CHECKED), the call c->fallback
  * gives (getter_function). The function to enter, its kind
  * c->entering_kind, else NULL. */
 static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYValue *v, SPYValue **env) {
+    if (UNLIKELY(c->annotating == 2)) {
+        /* A __dict__ search on m (dict_searches), the read going on after it (attribute_searched). */
+        c->annotating = 0;
+        SPYValue *result = search_begin(c, m, v, n->b->text, c->none, attribute_searched);
+        spy_release(v);
+        if (result) machine_push(c, m, result);
+        return NULL;
+    }
     if (UNLIKELY(c->annotating)) {
         /* __annotate__(1), its dict kept (annotations_made), m's call (callk). */
         SPYValue *format = spy_int(c, 1), *result;
@@ -33031,20 +33196,12 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
         if ((result = callk(c, m, annotate_pending(c, v), 1, &format, annotations_made, v))) machine_push(c, m, result);
         return NULL;
     }
-    SPYValue *function = c->fallback, *argv[3] = {v, NULL, NULL}, *fallback;
+    SPYValue *function = c->fallback, *argv[3] = {v, NULL, NULL};
     size_t argc = 1;
     c->fallback = NULL;
     c->entering_kind = CALL_MACHINE;
-    if (!function) function = spy_retain(n->attr_method->as.property.get);
-    else {
-        fallback = getter_fallback(v, function);
-        c->entering_kind = CALL_CHECKED;
-        if (machine_push(c, m, v) || (fallback && machine_push(c, m, spy_retain(fallback))) ||
-            !(function = getter_function(c, v, n->b->text, function, argv, &argc))) {
-            spy_release(function);
-            return NULL;
-        }
-    }
+    if (function) return getter_enter(c, m, v, n->b->text, function, env);
+    function = spy_retain(n->attr_method->as.property.get);
     if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
     spy_release(function);
     return NULL;
@@ -33068,12 +33225,42 @@ static SPYValue *getattr_returned(SPYContext *c, SPYValue *fallback, SPYValue *r
     spy_release(result);
     return spy_bool(c, !!result);
 }
+static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
+/* What getattr() or hasattr() gives, the call's slots on m's stack, its
+ * default when defaulted, once its __dict__ search (getattr_named) found
+ * result: the entry's value; else the read goes on past the search
+ * (search_found), a Python getter or __getattr__ it leaves entered on m as
+ * the call's (CALL_CHECKED). */
+static SPYValue *getattr_searched(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *env = NULL;
+    int defaulted = state->as.seq.items[SEARCH_KEPT] == c->booleans[1], again;
+    size_t n = 3 + (size_t)defaulted;
+    SPYValue *value = search_found(state, result, &again);
+    if (value && (value = getattr_returned(c, defaulted ? m->stack[m->len - 1] : NULL, value))) {
+        m->len -= n;
+        release_all(n, &m->stack[m->len]);
+    } else if (again) {
+        searched_go(c, state);
+        value = getattr_call(c, m, defaulted, &env);
+        searched_go(c, NULL);
+        if (value == c->types[SPY_STRING]) {
+            spy_release(value); value = NULL;
+            c->k_fn = spy_retain(c->entering_init); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
+        }
+    }
+    spy_release(state);
+    return value;
+}
 static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulted, SPYValue **env, const char *text) {
     size_t n = 3 + (size_t)defaulted;
     SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, NULL, NULL}, *fallback = NULL;
     size_t argc = 1;
-    int kind = plain_instance(v) ? instance_access(c, v->as.map.parent, text, &method) & ATTR_READ : ATTR_SLOW;
+    /* Past its __dict__ search, the read takes what the class had before (attribute_step). */
+    int kind = plain_instance(v) && v != c->searched ? instance_access(c, v->as.map.parent, text, &method) & ATTR_READ : ATTR_SLOW;
     SPYValue *own = kind == ATTR_OWN ? name_local(v, text) : NULL;
+    /* A __dict__ search by a Python __eq__ is m's call, the read going on after it (getattr_searched). */
+    if (!own && kind != ATTR_PROPERTY && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, text))
+        return search_begin(c, m, v, text, c->booleans[defaulted], getattr_searched);
     if (kind == ATTR_PROPERTY && machine_function(c, method->as.property.get)) { function = spy_retain(method->as.property.get); spy_retain(v); }
     else {
         /* An own entry, or its miss with a default, is read without an
