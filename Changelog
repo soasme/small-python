@@ -567,6 +567,7 @@ Unreleased (0.10.0):
 - `iter(f, sentinel)` of a generator's `__next__` resumes the generator without nesting on the C stack
 - A slice store into or deletion from a `bytearray` or `memoryview` calls its bounds' Python `__index__` without nesting on the C stack
 - `dict()` and `dict.update()` list a pair that is a generator or Python iterator without nesting on the C stack
+- Consumers and `next()` of an `enumerate`, `zip`, `map` or `filter` subclass instance take its items without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair

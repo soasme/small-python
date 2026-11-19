@@ -26124,9 +26124,16 @@ static int iterator_subclass(SPYContext *c, SPYValue *v) {
     return v->type == SPY_INSTANCE && v->as.map.base && v->as.map.base->type == SPY_ITERATOR && builtin_base(c, v, "__iter__", NULL) &&
            next_function(c, v);
 }
+/* The builtin iterator of v, an instance of its subclass overriding
+ * neither __iter__ nor __next__, which iterate it; else NULL. */
+static SPYValue *iterator_base(SPYContext *c, SPYValue *v) {
+    SPYValue *base = builtin_base(c, v, "__iter__", "__next__");
+    return base && base->type == SPY_ITERATOR ? base : NULL;
+}
 static int machine_source(SPYContext *c, SPYValue *v) {
+    SPYValue *base;
     return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(v) || iter_function(c, v) || getitem_iterated(c, v) ||
-           iterator_subclass(c, v);
+           iterator_subclass(c, v) || ((base = iterator_base(c, v)) && machine_source(c, base));
 }
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -26239,6 +26246,10 @@ static NO_INLINE int set_sources(SPYContext *c, SPYValue *set, int which, size_t
     }
     return calls;
 }
+/* Whether next() of v resumes a generator or calls Python on the machine. */
+static int next_steps(SPYContext *c, SPYValue *v) {
+    return resumable(v) || next_calls(c, v) || zip_of_generator(v) || adapted_generator(v);
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
     if (built) callee = built;
@@ -26337,7 +26348,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
          (id == B_BYTES && class_lookup(argv[0]->as.map.parent, "__bytes__")))) return -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN && id != B_BYTES && id != B_BYTEARRAY &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
-        (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0]) || zip_of_generator(argv[0]) || adapted_generator(argv[0])))) return -1;
+        (id != B_NEXT || !(next_steps(c, argv[0]) || (iterator_base(c, argv[0]) && next_steps(c, iterator_base(c, argv[0])))))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : updates != -1 ? SIZE_MAX : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
@@ -26407,11 +26418,17 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
  * __iter__ is on the machine stays, its call the consumer's first
  * (KEY_ITER); one whose __iter__ is a generator function gives its
  * generator, and one of __getitem__ alone its iterator, as a set's list
- * or tuple (hashed_items). The consumer's keyed. */
+ * or tuple (hashed_items), and a builtin iterator's subclass its
+ * iterator (iterator_base). The consumer's keyed. */
 static int consumer_source(SPYContext *c, SPYValue **v) {
     if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && (*v)->type != SPY_DICT_VALUES && !is_dict(*v) &&
         !metaclassed(*v)) return 0;
-    SPYValue *iter = iter_function(c, *v);
+    SPYValue *iter = iterator_base(c, *v);
+    if (iter) {
+        spy_retain(iter); spy_release(*v); *v = iter;
+        return 0;
+    }
+    iter = iter_function(c, *v);
     if (iter && machine_function(c, iter)) return KEY_ITER;
     SPYValue *iterator = get_iterator(c, *v);
     spy_release(*v);
