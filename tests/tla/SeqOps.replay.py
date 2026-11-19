@@ -32,7 +32,7 @@ class Index:
 
 
 def by(p, v):
-    return Index(v) if p["by"] == "index" else v
+    return Index(v) if p["by"] in ("index", "method") else v
 
 
 def bound(v):
@@ -63,7 +63,7 @@ def outcome(p):
         elif op == "concat list":
             r = s + [2]
         elif op == "repeat":
-            r = s * by(p, p["n"])
+            r = s.__mul__(by(p, p["n"])) if p["by"] == "method" else s * by(p, p["n"])
         else:
             hash(s)
             return ("hashable", "", ())

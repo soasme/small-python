@@ -21,7 +21,7 @@
 (*     hash(s)                                                             *)
 (*                                                                         *)
 (* where i and n are ints, or instances whose Python __index__ returns     *)
-(* them.                                                                   *)
+(* them, n also given to s.__mul__ (by "method").                          *)
 (*                                                                         *)
 (* The outcome is the result as <<kind, type, items>>, or the exception.   *)
 (***************************************************************************)
@@ -36,7 +36,7 @@ Op == {[op |-> "index", i |-> i, by |-> b] : i \in -4..3, b \in {"int", "index"}
       \cup {[op |-> o, x |-> x] : o \in {"in", "count", "find"}, x \in {1, 3}}
       \cup {[op |-> "find from", x |-> x, start |-> a, stop |-> b] : x \in {1, 3}, a \in {-4, -1, 1, 4}, b \in {None, -1, 2, 4}}
       \cup {[op |-> o] : o \in {"concat", "concat list", "hash"}}
-      \cup {[op |-> "repeat", n |-> n, by |-> b] : n \in -1..2, b \in {"int", "index"}}
+      \cup {[op |-> "repeat", n |-> n, by |-> b] : n \in -1..2, b \in {"int", "index", "method"}}
 Programs == {[type |-> t, items |-> s] @@ o : t \in Types, s \in Items, o \in Op}
 
 VARIABLES program, outcome

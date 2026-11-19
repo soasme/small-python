@@ -45107,6 +45107,27 @@ static SPYValue *open_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue 
     spy_release(ctx);
     return result;
 }
+static int builtin_type_id(SPYContext *, SPYValue *);
+/* Whether native slot callee, given self, is a list's, tuple's, str's,
+ * bytes' or bytearray's repetition, __mul__, __rmul__ or __imul__, of
+ * one, which takes its count by __index__ (index_object). */
+static int repeat_slot(SPYContext *c, SPYValue *callee, SPYValue *self) {
+    const char *name = callee->as.native.name->as.string.data;
+    int type = builtin_type_id(c, callee->as.native.owner);
+    return (type == SPY_LIST || type == SPY_TUPLE || type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY) &&
+           builtin_value(c, self, type) && (!strcmp(name, "__mul__") || !strcmp(name, "__rmul__") || !strcmp(name, "__imul__"));
+}
+/* What a repetition's count's __index__ returned (repeat_slot): the
+ * slot, state's first, called on its sequence and that int. */
+static SPYValue *repeat_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    SPYValue **items = state->as.seq.items, *index = index_result(c, items[2], result), *value = NULL;
+    /* The count's overflow names its own type, as the slot's does (sequence_binary). */
+    if (index && index->as.integer_data.big) errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(items[2]));
+    else if (index) value = call(c, items[0], 2, (SPYValue *[]){items[1], index});
+    spy_release(index); spy_release(state);
+    return value;
+}
 static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     SPYValue *self = NULL, *function, *native = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     /* One that may leave a call to its step runs as the step, bound too,
@@ -45121,6 +45142,11 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
     if (callee->type != SPY_NATIVE || (!self && !argc--)) return NULL;
     if (!self) self = *argv++;
+    if (callee->as.native.kwcall == slot_call && argc == 1 && repeat_slot(c, callee, self) && (function = index_special(c, argv[0]))) {
+        /* A sequence's repetition by a count with a Python __index__ converts it on m first (repeat_indexed). */
+        SPYValue *state = spy_tuple(c, 3, (SPYValue *[]){callee, self, argv[0]});
+        return state ? special_callk(c, m, function, argv[0], 0, NULL, NULL, repeat_indexed, state) : NULL;
+    }
     if (callee->as.native.kwcall == memory_method) {
         intptr_t op = (intptr_t)callee->as.native.data;
         SPYValue *released = NULL;
