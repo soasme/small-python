@@ -54,6 +54,10 @@ SOURCES = {
                        "result = [dict(P([('a', 1), ['b', 2], ('a', 3)])), d]",
     "ctor_iter_bad_pair": "class P:\n    def __iter__(s):\n        for _ in (): pass\n        return iter([('a', 1), (1, 2, 3)])\n"
                           "result = dict(P())",
+    "ctor_listed_pairs": "def g(k, v):\n    for _ in (): pass\n    yield k\n    yield v\n"
+                         "def bad():\n    yield 1\n    raise TypeError('t')\n"
+                         "d = {'x': 0}\nd.update([g('y', 3)])\ntry: dict([('a', 1), bad()])\nexcept TypeError as e: notes = e.__notes__\n"
+                         "result = [dict([g('a', 1), g('b', 2)]), d, notes]",
     "ctor_iter_keywords": "class P:\n    def __iter__(s):\n        for _ in (): pass\n        return iter([('a', 1), ('b', 2)])\n"
                           "d = {}\nd.update(P(), b=3, **{'c': 4})\nresult = [dict(P(), a=0), d]",
     "ctor_iter_keywords_fails": "class G:\n    def __iter__(s):\n        for _ in (): pass\n        yield 'a', 1\n        raise LookupError('g')\n"

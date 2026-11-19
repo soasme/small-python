@@ -15317,8 +15317,10 @@ static int consumer_lookup(SPYContext *, Machine *, Consumer *, SPYValue *, int6
  * list of count targets with a star at index star (unpack_step); a
  * display's starred item, adding them to result, the display, which it
  * seals as a tuple when count is set (extend_step); an in, or a not in
- * when count is set, seeking best among them (contains_step). */
-enum { UNPACK_ITEMS = -2, EXTEND_ITEMS = -3, CONTAINS_ITEMS = -4 };
+ * when count is set, seeking best among them (contains_step); a dict
+ * update's element, listing them in result for the consumer below
+ * (pair_listing). */
+enum { UNPACK_ITEMS = -2, EXTEND_ITEMS = -3, CONTAINS_ITEMS = -4, PAIR_ITEMS = -5 };
 /* A set's method of one other iterable (set_items), its items each
  * looked up on the machine (consumer_lookup): union adds them to a copy;
  * difference and difference_update discard them from a copy or the set;
@@ -26060,14 +26062,20 @@ static int hashed_items(SPYContext *c, SPYValue *v) {
         if (hashed_item(c, v->as.seq.items[i])) return 1;
     return 0;
 }
+/* Whether a dict update's element v is listed on the machine
+ * (pair_listing): one the machine iterates, not an exact list or tuple. */
+static int machine_source(SPYContext *, SPYValue *);
+static int listed_pair(SPYContext *c, SPYValue *v) {
+    return v->type != SPY_LIST && v->type != SPY_TUPLE && machine_source(c, v);
+}
 /* Whether a dict takes v's items on the machine, a list or tuple holding
- * a hashed_pair. */
+ * a hashed_pair or a listed_pair. */
 static NO_INLINE int hashed_pairs(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
     /* The scan changes no list. */
     SPYValue *const *items = v->as.seq.items;
     for (size_t i = 0, len = v->as.seq.len; i < len; i++)
-        if (hashed_pair(c, items[i])) return 1;
+        if (hashed_pair(c, items[i]) || listed_pair(c, items[i])) return 1;
     return 0;
 }
 /* Whether a set or dict takes zip v's items on the machine: a list or
@@ -26919,6 +26927,32 @@ static NO_INLINE int set_source(SPYContext *c, Block *top) {
     top->value = source;
     return source != NULL;
 }
+/* The note of a TypeError converting element index of a dict update to
+ * a sequence (dict_pair). */
+static void pair_noted(SPYContext *c, size_t index) {
+    if (!error_is(c, "TypeError")) return;
+    char note[96];
+    snprintf(note, sizeof(note), "Cannot convert dictionary update sequence element #%zu to a sequence", index);
+    error_note(c, note);
+}
+/* A dict update's element, item, which it takes, that the machine
+ * iterates (listed_pair): a list of its items, collected on m as
+ * SequenceFast lists them (join_listed), the consumer below then takes
+ * as the pair (consumer_took); whether the consumer began, else an error
+ * is pending. */
+static SPYValue *join_listed(SPYContext *, Machine *, SPYValue *);
+static NO_INLINE int pair_listing(SPYContext *c, Machine *m, SPYValue *item) {
+    size_t index = m->blocks[m->block_len - 1].consumer->count;
+    Consumer *s = allocate(c, sizeof(*s));
+    SPYValue *items = s ? spy_list(c) : NULL;
+    int keyed = items ? consumer_source(c, &item) : 0;
+    Block *block = items && item ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (!block) { mem_free(s); spy_release(items); spy_release(item); pair_noted(c, index); return 0; }
+    *s = (Consumer){.id = PAIR_ITEMS, .result = items, .keyed = keyed};
+    block->value = item; block->consumer = s;
+    if (!keyed && item->type == SPY_INSTANCE) join_listed(c, m, spy_retain(item));
+    return 1;
+}
 static NO_INLINE size_t operator_finish(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t);
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
@@ -26957,7 +26991,18 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
      * StopAsyncIteration or GeneratorExit (operation_close_end). */
     if (!item && top->consumer->closes && (error_is(c, "StopIteration") || error_is(c, "StopAsyncIteration") || error_is(c, "GeneratorExit")))
         spy_clear_error(c);
-    int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;
+    Consumer *s = top->consumer;
+    if (item && (s->id == B_DICT || (s->id == B_EXTEND && s->result->type == SPY_DICT)) && listed_pair(c, item))
+        return pair_listing(c, m, item);
+    int status = item ? consumer_add(c, s, item) : c->error_type[0] ? -1 : 1;
+    if (status && s->id == PAIR_ITEMS) {
+        /* A dict update's pair, listed (pair_listing). */
+        SPYValue *pair = status > 0 ? consumer_end(c, s) : NULL;
+        pop_block(c, m, f);
+        top = &m->blocks[m->block_len - 1];
+        if (!pair) { pair_noted(c, top->consumer->count); return 0; }
+        status = consumer_add(c, top->consumer, pair);
+    }
     if (status > 0 && top->consumer->id == B_LIST && top->consumer->searched) {
         /* A slice's store takes the list of its value's items (slice_listing). */
         Consumer *s = top->consumer;
@@ -27694,7 +27739,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         if (s->hints) length_hint(c, m, source);
         else {
             spy_release(source);
-            if (s->id == B_JOIN && iterator->type == SPY_INSTANCE) join_listed(c, m, spy_retain(iterator));
+            if ((s->id == B_JOIN || s->id == PAIR_ITEMS) && iterator->type == SPY_INSTANCE) join_listed(c, m, spy_retain(iterator));
         }
         return c->error_type[0] ? -1 : 0;
     }
@@ -42702,7 +42747,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(index); spy_release(item);
         return c->error_type[0] ? -1 : 0;
     }
-    if (s->id == B_LIST || s->id == B_TUPLE || s->callee || s->id == UNPACK_ITEMS || s->id == B_EXTEND) {
+    if (s->id == B_LIST || s->id == B_TUPLE || s->callee || s->id == UNPACK_ITEMS || s->id == PAIR_ITEMS || s->id == B_EXTEND) {
         int status = sequence_append(c, s->result, item);
         spy_release(item);
         return status ? status : s->id == UNPACK_ITEMS && s->star == SIZE_MAX && s->result->as.seq.len > s->count;
