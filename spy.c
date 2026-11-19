@@ -586,6 +586,7 @@ static SPYValue *tuple_next(SPYContext *, Machine *, SPYValue **, int64_t *);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
 static int abstract_reaches(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *abstract_from(SPYContext *, Machine *, int, SPYValue *, SPYValue *, SPYValue *, size_t);
+static SPYValue *object_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
 static int unknown_keywords(SPYContext *, const char *, SPYValue *, const char *const *, size_t);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
@@ -27389,7 +27390,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
                        argc > 1 ? spy_retain(argv[1]) : NULL, argc > 2 ? argv[2] : NULL);
     /* A builtin function runs as the step (step_native). */
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : c->error_type[0] ? NULL :
-             method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin ? step_native(c, m, callee, method, n, argc, argv, NULL) :
+             method < 0 && callee->type == SPY_NATIVE && (callee->as.native.call == builtin || callee->as.native.kwcall == object_method) ?
+             step_native(c, m, callee, method, n, argc, argv, NULL) :
              step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
@@ -43942,6 +43944,10 @@ static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv
     case OBJ_DIR: case TYPE_DIR: return directory_of(c, argv[0], 1);
     case OBJ_SIZEOF: return spy_int(c, (int64_t)sizeof(SPYValue));
     case TYPE_INSTANCECHECK: case TYPE_SUBCLASSCHECK: {
+        /* Its reads may call Python on the step's machine (abstract_from). */
+        Machine *m = step_machine(c);
+        int sub = op == TYPE_SUBCLASSCHECK;
+        if (m && abstract_reaches(c, sub, args[0], argv[0])) return abstract_from(c, m, sub, args[0], argv[0], NULL, 0);
         int result = op == TYPE_INSTANCECHECK ? object_isinstance(c, args[0], argv[0]) : recursive_issubclass(c, args[0], argv[0]);
         return result < 0 ? NULL : spy_bool(c, result);
     }

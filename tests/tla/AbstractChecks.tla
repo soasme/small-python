@@ -15,14 +15,16 @@
 (* gives (Loop, Loop); int and K are classes. A program calls              *)
 (* issubclass(S, T), or isinstance(I, T) for an I whose __class__          *)
 (* property logs "class" and gives S, where T is A, C, Z, N, K, or the     *)
-(* tuple (Z, A), with its arguments given in turn or starred, alike.     *)
+(* tuple (Z, A), with its arguments given in turn or starred, alike, or  *)
+(* calls type.__subclasscheck__(T, S) or type.__instancecheck__(T, I),    *)
+(* the same check of a class T without its hook, refusing another T.     *)
 (* The outcome is the result or exception, then the log.                   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Subjects == {"A", "B", "D", "G", "N", "int", "Loop"}
 Targets == {"A", "C", "Z", "N", "K", "pair"}
-Programs == [check : {"isinstance", "issubclass"}, subject : Subjects, target : Targets, starred : BOOLEAN]
+Programs == [check : {"isinstance", "issubclass"}, subject : Subjects, target : Targets, via : {"direct", "starred", "type"}]
 Limit == 4  \* stands for the recursion limit
 
 Bases(x) == CASE x = "B" -> <<"A">>
@@ -66,7 +68,8 @@ Instance(s, t) ==
 One(p, t) == IF p.check = "issubclass" THEN Subclass(p.subject, t) ELSE Instance(p.subject, t)
 
 \* A tuple tries its items in order until one is true or raises.
-Run(p) == IF p.target # "pair" THEN One(p, p.target)
+Run(p) == IF p.via = "type" /\ ~IsClass(p.target) THEN Res("TypeError:d", "")
+          ELSE IF p.target # "pair" THEN One(p, p.target)
           ELSE LET z == One(p, "Z") IN IF z.r = "False" THEN After(z.log, One(p, "A")) ELSE z
 
 Show(w) == IF w.r = "RecursionError" THEN w.r ELSE w.r \o w.log
@@ -85,13 +88,16 @@ Spec == Init /\ [][Execute]_vars
 -----------------------------------------------------------------------------
 Done == outcome # Pending
 
-Verdicts == Done => verdict \in {"True", "False", "TypeError:1", "TypeError:2", "RecursionError"}
+Verdicts == Done => verdict \in {"True", "False", "TypeError:1", "TypeError:2", "TypeError:d", "RecursionError"}
+
+\* type's methods check only a class target.
+TypeTarget == Done /\ program.via = "type" => (verdict = "TypeError:d") = ~IsClass(program.target)
 
 \* Searching a cycle of several bases exhausts the recursion depth.
-LoopRaises == Done /\ program.subject = "Loop" /\ program.target \in {"A", "C", "Z"}
+LoopRaises == Done /\ program.subject = "Loop" /\ program.target \in {"A", "C", "Z"} /\ program.via # "type"
     => verdict = "RecursionError"
 
 \* What D reaches through __bases__ it is a subclass of.
-Reaches == Done /\ program.check = "issubclass" /\ program.subject = "D" /\ program.target \in {"A", "C"}
+Reaches == Done /\ program.check = "issubclass" /\ program.subject = "D" /\ program.target \in {"A", "C"} /\ program.via # "type"
     => verdict = "True"
 =============================================================================

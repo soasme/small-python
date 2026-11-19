@@ -495,6 +495,7 @@ Unreleased (0.10.0):
 - A set's `union()`, `intersection()`, `difference()` and their updates of two or three iterables call items' Python `__hash__` and `__eq__` without nesting on the C stack
 - `intersection_update()` of several iterables changes the set only once all are intersected
 - `pow()` with a modulus and `divmod()` read an operand's method through a Python `__get__` without nesting on the C stack
+- `type.__instancecheck__()` and `type.__subclasscheck__()` read a Python `__class__` or `__bases__` without nesting on the C stack
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

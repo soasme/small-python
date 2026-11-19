@@ -55,11 +55,14 @@ def outcome(p):
     try:
         args = (s, t) if p["check"] == "issubclass" else (Inst(s), t)
         f = issubclass if p["check"] == "issubclass" else isinstance
-        r = repr(f(*args) if p["starred"] else f(args[0], args[1]))
+        if p["via"] == "type":
+            f = type.__subclasscheck__ if p["check"] == "issubclass" else type.__instancecheck__
+            args = args[::-1]
+        r = repr(f(*args) if p["via"] == "starred" else f(args[0], args[1]))
     except RecursionError:
         return "RecursionError"
     except TypeError as e:
-        r = "TypeError:" + str(e).split(" arg ")[1][0]
+        r = "TypeError:d" if "descriptor" in str(e) else "TypeError:" + str(e).split(" arg ")[1][0]
     return " ".join([r] + log)
 
 
