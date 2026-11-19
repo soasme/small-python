@@ -16,7 +16,9 @@
 (*     subproperty, subraising   the same of a subclass of property       *)
 (*     slot       __slots__ = ('a',)                                       *)
 (*                                                                         *)
-(* with or without a __getattr__ returning 'ga', and with no Python       *)
+(* with no __getattr__, a function returning 'ga', or a property whose    *)
+(* getter gives such a function (getattr none, function, descriptor),    *)
+(* and with no Python                                                     *)
 (* __getattribute__ (hook none), one passing the name to object's (pass), *)
 (* or to super()'s (super), or one raising AttributeError (refuse). The   *)
 (* steps are o.a,                                                          *)
@@ -40,6 +42,8 @@ Values == {"v1", "v2"}
 Missing == "missing"
 
 Hooks == {"none", "pass", "super", "refuse"}
+\* The class's __getattr__: none, a function, or a property giving one.
+Getattrs == {"none", "function", "descriptor"}
 
 Spellings == {"attr", "named"}
 
@@ -59,7 +63,7 @@ Lookup ==
       [] kind = "nondata" -> "nget"
       [] kind = "value" -> "cls"
       [] OTHER -> Missing
-Read == IF hook # "refuse" /\ Lookup # Missing THEN Lookup ELSE IF getattr THEN "ga" ELSE "AttributeError"
+Read == IF hook # "refuse" /\ Lookup # Missing THEN Lookup ELSE IF getattr # "none" THEN "ga" ELSE "AttributeError"
 Get == /\ op' = "get"
        /\ result' = Read
        /\ UNCHANGED <<kind, getattr, hook, spelling, keyed, stored>>
@@ -84,12 +88,12 @@ Del == /\ op' = "del"
             [] OTHER -> result' = "AttributeError" /\ UNCHANGED stored
        /\ UNCHANGED <<kind, getattr, hook, spelling, keyed>>
 
-Init == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ spelling \in Spellings /\ keyed \in BOOLEAN /\ stored = Missing /\ op = "new" /\ result = "ok"
+Init == kind \in Kinds /\ getattr \in Getattrs /\ hook \in Hooks /\ spelling \in Spellings /\ keyed \in BOOLEAN /\ stored = Missing /\ op = "new" /\ result = "ok"
 Next == Get \/ Call \/ Del \/ \E v \in Values : Set(v)
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
-TypeOK == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ spelling \in Spellings /\ keyed \in BOOLEAN /\ stored \in Values \cup {Missing}
+TypeOK == kind \in Kinds /\ getattr \in Getattrs /\ hook \in Hooks /\ spelling \in Spellings /\ keyed \in BOOLEAN /\ stored \in Values \cup {Missing}
 
 \* A data descriptor's __get__ answers whatever the instance holds, unless
 \* __getattribute__ refuses before it.
@@ -100,7 +104,7 @@ SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in
                  => result' = stored]_vars
 
 \* __getattr__ is only consulted when lookup fails, so o.a never fails with it.
-GetattrFallback == op \in {"get", "call"} /\ getattr => result # "AttributeError"
+GetattrFallback == op \in {"get", "call"} /\ getattr # "none" => result # "AttributeError"
 
 \* A read-only property cannot change.
 ReadOnly == kind \in Getters => stored = Missing

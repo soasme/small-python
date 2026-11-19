@@ -13029,6 +13029,7 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
  * AttributeError from any of them (getter_call, getattr_call). A
  * module's Python __getattr__ answers a name it lacks (PEP 562). */
 static SPYValue *super_getter(SPYContext *, SPYValue *, const char *);
+static int special_function(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_MODULE) {
         SPYValue *fallback = name_local(v, "__getattr__"), *submodule;
@@ -13056,13 +13057,15 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
     int searched = UNLIKELY(v == c->searched);
     SPYValue *fallback = searched ? c->searched_hook : owner ? class_lookup(owner, "__getattr__") : NULL, *own = NULL, *descriptor;
     SPYValue *definition = owner && !searched ? class_lookup(owner, "__getattribute__") : NULL;
-    if (!owner || (fallback && !machine_function(c, fallback))) return attribute(c, v, name);
+    if (!owner || (fallback && !special_function(c, fallback))) return attribute(c, v, name);
     if (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
         if (!machine_function(c, definition)) return attribute(c, v, name);
         c->fallback = spy_retain(definition);
         return NULL;
     }
     descriptor = v->type == SPY_CLASS ? spy_retain(class_getter(c, v, name)) : instance_getter(c, v, owner, name, &own);
+    /* A descriptor __getattr__ that is also the attribute is read natively, its call not taken for the hook's (fallback_described). */
+    if (descriptor && UNLIKELY(descriptor == fallback) && !machine_function(c, fallback)) { spy_release(descriptor); return attribute(c, v, name); }
     if (descriptor) { c->fallback = descriptor; return NULL; }
     if (own || c->error_type[0] || !fallback) return own ? own : c->error_type[0] ? NULL : attribute(c, v, name);
     /* As attribute_lookup: __getattr__ is found before the lookup runs. */
@@ -28424,6 +28427,7 @@ static SPYValue *check_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue
     return value;
 }
 static SPYValue *getter_fallback(SPYValue *, SPYValue *);
+static int fallback_described(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *getter_function(SPYContext *, SPYValue *, const char *, SPYValue *, SPYValue **, size_t *);
 /* Whether isinstance() of a, or issubclass() for sub, against target, not
  * a tuple (a subclass's included), follows the abstract protocol
@@ -28466,10 +28470,10 @@ static SPYValue *attribute_called(SPYContext *c, Machine *m, SPYValue *state, SP
     SPYValue **items = state->as.seq.items, *fallback = items[2];
     if (result || fallback == c->none || !error_is(c, "AttributeError")) return k_resume(c, m, state, result);
     spy_clear_error(c);
-    SPYValue *argv[] = {spy_retain(items[0]), spy_retain(items[1])};
+    SPYValue *name = spy_retain(items[1]);
     spy_retain(fallback);
     slot_put(state, 2, spy_none(c));
-    result = callk(c, m, fallback, 2, argv, attribute_called, state);
+    result = special_callk(c, m, fallback, items[0], 1, &name, NULL, attribute_called, state);
     spy_release(fallback);
     return result;
 }
@@ -28484,6 +28488,11 @@ static SPYValue *attribute_callk(SPYContext *c, Machine *m, SPYValue *v, const c
     if (!(state = k_state(c, 3, (SPYValue *[]){spy_retain(v), text, spy_retain(fallback ? fallback : c->none), NULL, NULL}, k, ctx))) {
         spy_release(function);
         return NULL;
+    }
+    if (fallback_described(c, v, function)) {
+        SPYValue *result = special_callk(c, m, function, v, 1, (SPYValue *[]){spy_retain(text)}, NULL, attribute_called, state);
+        spy_release(function);
+        return result;
     }
     if (!(get = getter_function(c, v, name, function, argv, &argc))) return k_resume(c, m, state, NULL);
     SPYValue *result = callk(c, m, get, argc, argv, attribute_called, state);
@@ -29187,8 +29196,8 @@ static SPYValue *method_got(SPYContext *c, Machine *m, SPYValue *state, SPYValue
         SPYValue *fallback = items[1];
         spy_clear_error(c);
         items[1] = spy_retain(c->none);
-        args[0] = spy_retain(items[0]); args[1] = spy_retain(items[2]);
-        result = callk(c, m, fallback, 2, args, method_got, state);
+        args[0] = spy_retain(items[2]);
+        result = special_callk(c, m, fallback, items[0], 1, args, NULL, method_got, state);
         spy_release(fallback);
         return result;
     }
@@ -29260,6 +29269,11 @@ static SPYValue *method_getter_of(SPYContext *c, Machine *m, const char *name, S
     SPYValue *items[4] = {object, fallback ? fallback : c->none, spy_string(c, name, strlen(name)), int_value(c, stacked)};
     SPYValue *state = items[2] && items[3] ? spy_tuple(c, 4, items) : NULL;
     spy_release(items[2]); spy_release(items[3]); spy_release(object);
+    if (state && fallback_described(c, object, function)) {
+        SPYValue *result = special_callk(c, m, function, object, 1, (SPYValue *[]){spy_retain(state->as.seq.items[2])}, NULL, method_got, state);
+        spy_release(function);
+        return result;
+    }
     if (!state || !(function = getter_function(c, object, name, function, argv, &argc))) {
         if (!state) spy_release(function);
         spy_release(state);
@@ -33717,6 +33731,17 @@ static SPYValue *getter_fallback(SPYValue *v, SPYValue *function) {
     SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
     return fallback == function ? NULL : fallback;
 }
+/* Whether function, the call c->fallback gave for a read of v, is v's
+ * __getattr__ descriptor itself (attribute_step): read, then what that
+ * gives called on the name (special_env, special_callk). */
+static int fallback_described(SPYContext *c, SPYValue *v, SPYValue *function) {
+    return getter_fallback(v, NULL) == function && !machine_function(c, function);
+}
+/* Pushes fallback, the __getattr__ that follows a read's call on m
+ * (checked_returned), a descriptor's above c->descripting; 1 on an error. */
+static int fallback_push(SPYContext *c, Machine *m, SPYValue *fallback) {
+    return (!machine_function(c, fallback) && machine_push(c, m, spy_retain(c->descripting))) || machine_push(c, m, spy_retain(fallback));
+}
 /* The definition bound super object v's read of name finds, as
  * attribute_value's walk of the classes after its type, when its Python
  * getter is called: a property's of an instance, or a descriptor
@@ -33781,7 +33806,13 @@ static SPYValue *getter_enter(SPYContext *c, Machine *m, SPYValue *v, const char
     SPYValue *argv[3] = {v, NULL, NULL}, *fallback = getter_fallback(v, function);
     size_t argc = 1;
     c->entering_kind = CALL_CHECKED;
-    if (machine_push(c, m, v) || (fallback && machine_push(c, m, spy_retain(fallback))) ||
+    if (fallback_described(c, v, function)) {
+        SPYValue *text = machine_push(c, m, v) ? NULL : spy_string(c, name, strlen(name)), *get;
+        get = text ? special_env(c, m, function, v, text, NULL, env) : NULL;
+        spy_release(text); spy_release(function);
+        return get;
+    }
+    if (machine_push(c, m, v) || (fallback && fallback_push(c, m, fallback)) ||
         !(function = getter_function(c, v, name, function, argv, &argc))) {
         spy_release(function);
         return NULL;
@@ -33895,6 +33926,7 @@ static SPYValue *getattr_searched(SPYContext *c, Machine *m, SPYValue *state, SP
 static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulted, SPYValue **env, const char *text) {
     size_t n = 3 + (size_t)defaulted;
     SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, NULL, NULL}, *fallback = NULL;
+    SPYValue *described = NULL;
     size_t argc = 1;
     /* Past its __dict__ search, the read takes what the class had before (attribute_step). */
     int kind = plain_instance(v) && v != c->searched ? instance_access(c, v->as.map.parent, text, &method) & ATTR_READ : ATTR_SLOW;
@@ -33917,15 +33949,20 @@ static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulte
         function = c->fallback;
         c->fallback = NULL;
         fallback = getter_fallback(v, function);
-        if (!(function = getter_function(c, v, text, function, argv, &argc))) return NULL;
+        if (fallback_described(c, v, function)) described = function;
+        else if (!(function = getter_function(c, v, text, function, argv, &argc))) return NULL;
     }
     spy_release(slots[0]);
     slots[0] = name;
     if (defaulted) { slots[2] = slots[3]; slots[3] = spy_retain(c->defaulting); }
     else slots[2] = spy_retain(c->unbound);
     /* The __getattr__ that follows the call is above them (checked_returned). */
-    if (fallback && machine_push(c, m, spy_retain(fallback))) { release_all(argc, argv); spy_release(function); return NULL; }
-    *env = function_env(c, function, argc, argv, NULL, 1);
+    if (fallback && fallback_push(c, m, fallback)) { release_all(argc, argv); spy_release(function); return NULL; }
+    if (described) {
+        function = special_env(c, m, described, v, slots[0], NULL, env);
+        spy_release(described);
+        if (!function) return NULL;
+    } else *env = function_env(c, function, argc, argv, NULL, 1);
     c->entering_init = function; c->entering_kind = CALL_CHECKED;
     spy_release(function);
     return *env ? spy_retain(c->types[SPY_STRING]) : NULL;
@@ -34493,11 +34530,15 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         return m;
     }
     SPYValue *below = m->len > 1 ? m->stack[m->len - 2] : NULL;
+    int described = below == c->descripting;
+    if (described) below = m->stack[m->len - 3];
     int getattr = below == c->unbound || below == c->defaulting;
-    if ((ins->op == BC_ATTR || getattr) && m->stack[m->len - 1]->type == SPY_FUNCTION) {
+    if ((ins->op == BC_ATTR || getattr) && (described || m->stack[m->len - 1]->type == SPY_FUNCTION)) {
         /* A getter returned before __getattr__ (getter_call,
-         * getattr_call), which its AttributeError calls. */
+         * getattr_call), which its AttributeError calls, a descriptor's
+         * read first (fallback_push, special_env). */
         SPYValue *fallback = machine_pop(m), *args[2];
+        if (described) spy_release(machine_pop(m));
         if (result || !error_is(c, "AttributeError")) spy_release(fallback);
         else {
             /* getattr()'s slots: the name, v, and c->unbound, or the default and c->defaulting. */
@@ -34505,9 +34546,9 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
             spy_clear_error(c);
             args[0] = spy_retain(m->stack[getattr ? at : m->len - 1]);
             args[1] = getattr ? spy_retain(m->stack[at - 1]) : spy_string(c, ins->node->b->text, strlen(ins->node->b->text));
-            SPYValue *env = args[1] ? function_env(c, fallback, 2, args, NULL, 1) : NULL;
-            if (!args[1]) spy_release(args[0]);
-            Call *call = env ? call_enter(c, fallback, env, m) : (spy_release(fallback), NULL);
+            SPYValue *env = NULL, *function = args[1] ? special_env(c, m, fallback, args[0], args[1], NULL, &env) : NULL;
+            spy_release(args[0]); spy_release(args[1]); spy_release(fallback);
+            Call *call = function ? call_enter(c, function, env, m) : NULL;
             if (!call) return m;
             call->m.outermost = CALL_CHECKED;
             return &call->m;

@@ -88,8 +88,11 @@ def make(kind, getattr, hook):
         namespace["a"] = SubProperty(refuse)
     elif kind == "slot":
         namespace["__slots__"] = ("a",)
-    if getattr:
-        namespace["__getattr__"] = lambda self, n: Value("ga" if given(n) else "wrong name")
+    answer = lambda self, n: Value("ga" if given(n) else "wrong name")
+    if getattr == "function":
+        namespace["__getattr__"] = answer
+    elif getattr == "descriptor":
+        namespace["__getattr__"] = property(lambda self: lambda n: answer(self, n))
     if hook != "none":
         namespace["__getattribute__"] = passing if hook == "pass" else supering if hook == "super" else refusing
     return type("C", (), namespace)()
