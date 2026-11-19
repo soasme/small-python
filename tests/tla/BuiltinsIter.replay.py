@@ -110,6 +110,9 @@ SOURCES = {
     "map_strict": 'result = list(map(pow, [1, 2], [3], strict=True))',
     "map_shortest": 'result = list(map(pow, [2, 3, 4], [1, 2]))',
     "map_none": 'result = list(map(None, [1]))',
+    "map_generator": "log = []\ndef g():\n    try:\n        x = yield 0\n        log.append((x, 0))\n        yield x\n    finally:\n        log.append('fin')\n"
+                     "gs = [g(), g()]\nh = g()\nnext(h)\n"
+                     "result = (list(map(next, gs)), list(map(type(h).send, gs, 'ab')), list(map(type(h).close, [h])), log)",
     "map_bound": "class K:\n    def __init__(s, k): s.k = k\n    def add(s, v): return s.k + v\n    def __call__(s, v, w): return s.k * v + w\n"
                  "result = (list(map(K(2).add, [1, 3])), list(map(K(10), [1, 2], [2])))",
     "map_convert": "log = []\nclass K:\n    def __init__(s, v): s.v = v\n    def __str__(s):\n        for _ in (): pass\n"

@@ -26234,6 +26234,13 @@ static NO_INLINE int generator_method_slot(SPYContext *c, SPYValue *callee, SPYV
     const char *name = callee->as.native.name->as.string.data;
     return !strcmp(name, "send") || !strcmp(name, "throw") || !strcmp(name, "close") || !strcmp(name, "__next__");
 }
+/* Whether native callee is a method from a generator's, coroutine's or
+ * async generator operation's type (generator_method_slot). */
+static int generator_owned(SPYContext *c, SPYValue *callee) {
+    SPYValue *owner = callee->as.native.kwcall == slot_call ? callee->as.native.owner : NULL;
+    return owner && (owner == c->types[SPY_GENERATOR] || owner == c->types[SPY_COROUTINE] || owner == c->types[SPY_ASYNC_GENERATOR_ASEND] ||
+                     owner == c->types[SPY_ASYNC_GENERATOR_ATHROW]);
+}
 static ALWAYS_INLINE int generator_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
     return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR_ASEND ||
             v->type == SPY_ASYNC_GENERATOR_ATHROW) && generator_method_slot(c, callee, v);
@@ -35284,7 +35291,8 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         spy_release(items);
         return status;
     }
-    if (!c->error_type[0] && items->as.seq.len <= COMPARE_ARGS && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] && map_steps(callee)) {
+    if (!c->error_type[0] && items->as.seq.len <= COMPARE_ARGS && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] &&
+        (map_steps(callee) || is_builtin(callee, B_NEXT) || (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])))) {
         /* A builtin whose call may go on on the machine is a call step of
          * its own (compare_enter), sorted()'s a keyword call's (key_consumer),
          * the call of c->unbound left in c->k_fn. */
@@ -35409,7 +35417,8 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
         if (!callee) return 0;
         if (!(function = machine_function(c, callee) ? callee : bound_function(c, callee)))
-            return (callee->type == SPY_NATIVE && (callee->as.native.call == builtin || callee->as.native.host == 2)) || callee->type == SPY_CLASS ?
+            return (callee->type == SPY_NATIVE && (callee->as.native.call == builtin || callee->as.native.host == 2 || generator_owned(c, callee))) ||
+                   callee->type == SPY_CLASS ?
                    map_convert(c, m, v, fn, env) : 0;
         if (!(args = zip_items(c, v))) return -1;
         /* A bound method or callable instance's self goes first. */
