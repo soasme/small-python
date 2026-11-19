@@ -25555,7 +25555,7 @@ static NO_INLINE int delegating(Machine *m) {
         /* An iterator's Python __next__ is a call (delegate_next). */
         if ((d->type != SPY_GENERATOR && d->type != SPY_COROUTINE && !m->operation) || d->as.generator.running || d->as.generator.done ||
             !d->as.generator.machine)
-            return d->type == SPY_INSTANCE ? next_method(m->generator->ctx, d) : d->type == SPY_ITERATOR && m->generator->type == SPY_GENERATOR;
+            return d->type == SPY_INSTANCE ? next_method(m->generator->ctx, d) : d->type == SPY_ITERATOR && m->generator->type != SPY_ASYNC_GENERATOR;
         if ((m = d->as.generator.machine)->awaiting < AWAIT_DELEGATE) return 1;
     }
     return 0;
@@ -35889,8 +35889,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     spy_release(a); a = NULL; value = m->delegate; goto resume_generator;
                 }
                 if (m->delegate) {
-                    value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
-                    if (value) { spy_release(a); m->pc = pc; YIELD(value); }
+                    /* Any other it steps as a yield from's (delegate_next),
+                     * an end of the loop's at the await's target. */
+                    m->awaiting = AWAIT_DELEGATE; m->await_target = ins->target;
+                    spy_release(a); a = NULL; value = NULL;
+                    goto delegate_step;
                 }
                 m->pc = pc; finish_delegate(c, m); pc = m->pc;
             } else {

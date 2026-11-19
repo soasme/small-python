@@ -537,6 +537,7 @@ Unreleased (0.10.0):
 - `send()`, `throw()` and `close()` through a `yield from` of an object whose `send`, `throw` or `close` comes from its Python `__getattr__` run without nesting on the C stack
 - Sorting tuples or lists whose items pair a builtin value with an instance calls the instance's reflected Python comparison without nesting on the C stack
 - `async for` calls the Python `__await__` of what `__anext__` returns without nesting on the C stack
+- A coroutine awaiting an iterator that is no generator resumes on `send()` and `throw()` without nesting on the C stack, its iterator's Python `__next__` too
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair

@@ -36,6 +36,22 @@ async def chain():
     return await Gen() + 1
 
 
+class Counter:
+    def __init__(self):
+        self.i = 0
+
+    def __next__(self):
+        self.i += 1
+        if self.i > 2:
+            raise StopIteration(300)
+        return self.i
+
+
+class Counted:
+    def __await__(self):
+        return Counter()
+
+
 class Bad:
     def __await__(self):
         return 5
@@ -56,7 +72,7 @@ def awaited():
 def await_program(x):
     if x == "reused":
         return drive(awaited())
-    target = {"coroutine": inner, "iter": Iter, "gen": Gen, "chain": chain, "bad": Bad, "int": lambda: 5, "generator": generator}[x]
+    target = {"coroutine": inner, "iter": Iter, "gen": Gen, "chain": chain, "bad": Bad, "next": Counted, "int": lambda: 5, "generator": generator}[x]
 
     async def main():
         return await target()
@@ -72,7 +88,22 @@ async def closing(again):
         return 3
 
 
+async def caught_iter():
+    try:
+        await Iter()
+    except ValueError:
+        return 4
+
+
 def object_program(op):
+    if op == "iterthrow":
+        c = caught_iter()
+        c.send(None)
+        try:
+            c.throw(ValueError)
+        except StopIteration as stop:
+            return repr(stop.value)
+        return "no StopIteration"
     if op in ("closed", "ignored"):
         c = closing(op == "ignored")
         c.send(None)

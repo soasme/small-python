@@ -19,11 +19,15 @@
 (* send(None) until it finishes, where X is a coroutine returning 7, an    *)
 (* object whose __await__ returns iter([1, 2]), one whose __await__ yields *)
 (* 1 and returns 5, a coroutine awaiting that one and returning its value  *)
-(* plus 1, one whose __await__ returns 5, the int 5, a generator, or a     *)
-(* coroutine awaited once already. An object program, on a fresh           *)
+(* plus 1, one whose __await__ returns 5, the int 5, a generator, a        *)
+(* coroutine awaited once already, or an object whose __await__ returns an *)
+(* instance with a Python __next__ giving 1 and 2 and then raising         *)
+(* StopIteration(300). An object program, on a fresh                       *)
 (* coroutine, calls iter(), sends 1, closes it and sends None, or throws   *)
 (* ValueError and then sends None; or, suspended in await Gen() catching   *)
-(* GeneratorExit, closes it as it returns 3 or awaits Gen() again. A       *)
+(* GeneratorExit, closes it as it returns 3 or awaits Gen() again; or,     *)
+(* suspended in an await of iter([1, 2]) catching ValueError and returning *)
+(* 4, throws ValueError, which raises at the await. A                     *)
 (* wrapper program drives the chain coroutine through its __await__()      *)
 (* wrapper with next() and send(None), throws ValueError through the       *)
 (* wrapper into a coroutine returning 4 on it, or drops a coroutine        *)
@@ -36,8 +40,8 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "chain", "bad", "int", "generator", "reused"}]
-            \cup [part : {"object"}, op : {"iter", "send1", "close", "throw", "closed", "ignored"}]
+Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "chain", "bad", "int", "generator", "reused", "next"}]
+            \cup [part : {"object"}, op : {"iter", "send1", "close", "throw", "closed", "ignored", "iterthrow"}]
             \cup [part : {"wrapper"}, op : {"drive", "throw", "dropped"}]
             \cup [part : {"agen"}, op : {"send", "throw"}]
 
@@ -51,11 +55,13 @@ Await(p) == CASE p.x = "coroutine" -> "[] 7"
               [] p.x = "gen" -> "[1] 5"
               [] p.x = "chain" -> "[1] 6"   \* the inner await's value passes out
               [] p.x = "reused" -> "[] RuntimeError"
+              [] p.x = "next" -> "[1, 2] 300"
               [] OTHER -> "[] TypeError"
 
 Object(p) == CASE p.op \in {"iter", "send1"} -> "TypeError"
                [] p.op \in {"close", "ignored"} -> "RuntimeError"
                [] p.op = "closed" -> "3"
+               [] p.op = "iterthrow" -> "4"
                [] p.op = "throw" -> "ValueError RuntimeError"
 
 \* A wrapper's methods are its coroutine's; a dropped suspended coroutine closes.
