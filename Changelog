@@ -512,6 +512,7 @@ Unreleased (0.10.0):
 - a collection calls the weak reference callbacks of the cycles it finds before their `__del__` methods
 - a collection leaves cycles that its finalizers and callbacks make or drop to the next one
 - `await anext(it, default)` runs a Python `__anext__` coroutine without nesting on the C stack
+- a module or class body run by exec() reads globals that are a dict subclass past its locals by their storage, without calling `__getitem__`
 
 2026-11-10 0.9.0:
 

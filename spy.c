@@ -3242,12 +3242,20 @@ static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
 static int inlined_comprehension(SPYValue *);
 static SPYValue *name_find(SPYContext *, SPYValue *, Name);
 /* name's value in env, looked up from env from on (name_find), annotation
- * whether the envs before from are annotation scopes. */
+ * whether the envs before from are annotation scopes. A module or class
+ * body's lookup past its locals reads exec()'s globals by their dictionary
+ * storage, never their __getitem__ (9.3.1); a global name its body
+ * declares is read as a function's (9.3.2). */
 static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name name, int annotation) {
     const char *text = name.text;
+    Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
+    int locals = env->type == V_ENV && (env->as.map.flags == 1 || (scope && (scope->kind == S_MODULE || scope->kind == S_CLASS)));
     for (SPYValue *e = from; e; e = e->as.map.parent) {
+        SPYValue *at = e, *namespace;
         e = binding_env(c, e, name);
-        SPYValue *v = name_lookup(c, e, name);
+        SPYValue *v = locals && at != env && e == at && e->type == V_ENV && e->as.map.flags == 3 &&
+                      (namespace = e->as.map.namespace) && namespace->type != SPY_DICT ?
+                      spy_retain(dict_name(c, dictionary_value(c, namespace), name)) : name_lookup(c, e, name);
         if (!v && c->error_type[0]) return NULL;
         if (!v && annotation && e->type == V_ENV && e->as.map.flags == 5 && e->as.map.class_cell) {
             SPYValue *value = name_lookup(c, e->as.map.class_cell, name);
@@ -3259,7 +3267,7 @@ static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name na
         if (!v && e->type == V_ENV && e->as.map.scope && e->as.map.scope->kind == S_CLASS) {
             Symbol *symbol = scope_find(e->as.map.scope, name);
             if (symbol && (symbol->flags & S_LOCAL) && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)))
-                return name_find(c, module_env(c, e), name);
+                return name_from(c, env, module_env(c, e), name, 1);
         }
         if (v) {
             if (v->type == V_UNBOUND) {
@@ -32241,7 +32249,7 @@ static SPYValue *name_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         Name name = name_of(state->as.string.data);
         Symbol *symbol = scope_find(env->as.map.scope, name);
         spy_clear_error(c);
-        result = symbol && (symbol->flags & S_LOCAL) ? name_find(c, module_env(c, env), name) :
+        result = symbol && (symbol->flags & S_LOCAL) ? name_from(c, env, module_env(c, env), name, 1) :
                  name_from(c, env, env->as.map.parent, name, annotation_env(env));
     }
     spy_release(state);
@@ -32776,7 +32784,7 @@ static SPYValue *class_names_stored(SPYContext *c, Machine *m, SPYValue *state, 
     int64_t where = items[1] == c->none ? 0 : items[1]->as.integer_data.small;
     if (!where) {
         SPYValue *names = NULL;
-        if (!result && error_is(c, "KeyError")) { spy_clear_error(c); result = name_get(c, env->as.map.parent, "__name__"); }
+        if (!result && error_is(c, "KeyError")) { spy_clear_error(c); result = name_from(c, env, env->as.map.parent, name_of("__name__"), 1); }
         if (result) names = class_names_before(c, env->as.map.scope->owner, result, NULL);
         spy_release(result);
         for (size_t i = 0; names && i < names->as.seq.len; i++) sequence_append(c, state, names->as.seq.items[i]);

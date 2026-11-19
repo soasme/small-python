@@ -127,6 +127,21 @@ def exec_custom_loop():
     return m.log
 
 
+class Hiding(dict):
+    def __getitem__(self, key):
+        self.log.append(key)
+        if key == "z":
+            raise KeyError(key)
+        return dict.__getitem__(self, key)
+
+
+def exec_globals_storage():
+    g = Hiding(q=2, z=4)
+    g.log = []
+    exec("r = (q, z, len('ab'))\nclass C:\n    w = q\ns = C.w\ndef f(): return q\nt = f()", g)
+    return tuple(dict.__getitem__(g, k) for k in "rst") + (g.log,)
+
+
 def outcome(p):
     try:
         return repr(globals()[p["case"]]())

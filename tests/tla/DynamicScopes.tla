@@ -11,7 +11,9 @@
 (* and a function's locals() is an independent snapshot, while a frame's   *)
 (* f_locals writes through; and a class body's eval() sees the names       *)
 (* bound so far in the body. A locals mapping's own __getitem__ loads     *)
-(* exec()'s names, a KeyError falling back to the globals.                 *)
+(* exec()'s names, a KeyError falling back to the globals; past its        *)
+(* locals, a module or class body reads globals that are a dict subclass   *)
+(* by their storage, while a function calls their __getitem__.             *)
 (*                                                                         *)
 (* A program runs one of these in a function with local x = 1 (or in a     *)
 (* class body with a = 1): exec("x = 2") then x; exec("y = 3") then        *)
@@ -24,13 +26,17 @@
 (* __getitem__ has q = 3, has no q, or raises LookupError; or exec("for i  *)
 (* in (1, 2): pass\nfor i in (x for x in (3,)): pass\nk = j = 0\ndel k,    *)
 (* j", {}, m) for m a mapping whose Python __setitem__ and __delitem__ log *)
-(* each binding, in order. The outcome is the result or the exception.     *)
+(* each binding, in order; or exec("r = (q, z, len('ab'))\nclass C:\n    *)
+(* w = q\ns = C.w\ndef f(): return q\nt = f()", g) for g a dict subclass  *)
+(* with q = 2 and z = 4 whose __getitem__ logs each key and raises         *)
+(* KeyError for z, then r, s, t and the log. The outcome is the result or  *)
+(* the exception.                                                          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Cases == {"exec_rebind", "exec_new", "exec_mapping", "eval_local", "eval_free", "eval_free_referenced",
           "locals_write", "locals_snapshot", "frame_locals", "eval_mappings", "class_eval", "exec_custom_hit",
-          "exec_custom_miss", "exec_custom_error", "exec_custom_loop"}
+          "exec_custom_miss", "exec_custom_error", "exec_custom_loop", "exec_globals_storage"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -54,6 +60,8 @@ Run(p) == CASE p.case = "exec_rebind" -> "1"                   \* the snapshot c
             [] p.case = "exec_custom_error" -> "LookupError"
             [] p.case = "exec_custom_loop" ->
                  "[('set', 'i', 1), ('set', 'i', 2), ('set', 'i', 3), ('set', 'k', 0), ('set', 'j', 0), ('del', 'k'), ('del', 'j')]"
+            \* The module body's misses (z, len) and the class body read the storage.
+            [] p.case = "exec_globals_storage" -> "((2, 4, 2), 2, 2, ['q', 'z', 'len', 'C', 'f', 'q'])"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -68,4 +76,7 @@ LocalsProtected == Done /\ program.case \in {"exec_rebind", "locals_write", "loc
 
 \* A locals mapping is searched before the globals, by its own __getitem__.
 LocalsFirst == Done /\ program.case \in {"eval_mappings", "exec_custom_hit"} => outcome = "3"
+
+\* A body's lookup past its locals never calls the globals' __getitem__ again.
+StorageAfterLocals == Done /\ program.case = "exec_globals_storage" => outcome = Run(program)
 =============================================================================
