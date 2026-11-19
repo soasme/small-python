@@ -94,6 +94,10 @@ SOURCES = {
                   "        log.append(s.v)\n        if not s.v: raise KeyError('k')\n        return iter(s.v)\n"
                   "try: zip(C(1), C(), C(2))\nexcept KeyError: pass\n"
                   "result = (list(zip(C(1), [2], C(3))), list(map(abs, C(4))), list(enumerate(C(5))), list(filter(None, C(0, 6))), log)",
+    "adapt_iter_strict": "log = []\nclass C:\n    def __init__(s, *v): s.v = v\n    def __iter__(s):\n        for _ in (): pass\n"
+                         "        log.append(s.v)\n        return iter(s.v)\n"
+                         "try: list(zip(C(1), C(2, 3), strict=True))\nexcept ValueError as e: r = str(e)\n"
+                         "result = (r, list(map(max, C(4), C(5), strict=1)), log)",
     "next_stop": 'result = next(iter([]))',
     "next_non_iterator": 'result = next([1])',
     "iter_sentinel_noncallable": 'result = iter(1, 2)',

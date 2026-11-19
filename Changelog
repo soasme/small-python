@@ -541,6 +541,7 @@ Unreleased (0.10.0):
 - `next()` of an `athrow()` or `aclose()` awaitable already begun resumes its async generator without nesting on the C stack
 - `enumerate()` calls its start's Python `__index__`, and with `iterable=` or `start=` named its iterable's `__iter__`, without nesting on the C stack
 - An await of `anext()` of an async generator, with a default or not, resumes the generator, and a throw into the awaiting coroutine raises in it, without nesting on the C stack
+- `zip()` and `map()` given `strict=` call their iterables' Python `__iter__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair

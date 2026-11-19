@@ -25669,13 +25669,17 @@ static SPYValue *adapter_step(SPYContext *c, Machine *m, SPYValue *state) {
         if (status) { spy_release(state); return NULL; }
     }
     SPYValue *counter = id == B_ENUMERATE ? spy_retain(state->as.seq.items[2]) : NULL, *source;
+    /* A strict zip's or map's counter is True (zip_named). */
+    int strict = state->as.seq.items[2] == c->booleans[1];
     if (id == B_ENUMERATE) source = spy_retain(state->as.seq.items[3]);
     else if ((source = id == B_FILTER ? value_new(c, SPY_TUPLE) : spy_list(c)))
         for (size_t i = 3; i < state->as.seq.len; i++)
             if (sequence_append(c, source, state->as.seq.items[i])) { spy_release(source); source = NULL; break; }
     spy_release(state);
     if (!source) { spy_release(counter); return NULL; }
-    return adapter_new(c, id, source, counter);
+    SPYValue *adapter = adapter_new(c, id, source, counter);
+    if (adapter && strict) adapter->as.iterator.size = 1;
+    return adapter;
 }
 /* What an iterable's Python __iter__ returned for adapter_step (callk). */
 static SPYValue *adapter_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
@@ -25707,7 +25711,11 @@ static NO_INLINE int adapter_iterates(SPYContext *c, SPYValue *callee, size_t ar
 /* That call (adapter_iterates) on machine m, which takes callee and the
  * arguments: the iterators are m's calls (adapter_step). */
 static SPYValue *adapter_indexed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static NO_INLINE SPYValue *adapter_strict(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, int);
 static NO_INLINE SPYValue *adapter_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    return adapter_strict(c, m, callee, argc, argv, 0);
+}
+static NO_INLINE SPYValue *adapter_strict(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, int strict) {
     int id = callee->as.map.native - 1;
     SPYValue *args = tuple_of(c, argc, argv), *state = args ? spy_list(c) : NULL, *index;
     release_all(argc, argv);
@@ -25721,7 +25729,7 @@ static NO_INLINE SPYValue *adapter_call(SPYContext *c, Machine *m, SPYValue *cal
         spy_release(args);
         return callk(c, m, index, 1, &start, adapter_indexed, state);
     }
-    SPYValue *counter = id != B_ENUMERATE ? spy_none(c) : args->as.seq.len == 2 ? index_object(c, args->as.seq.items[1]) : spy_int(c, 0);
+    SPYValue *counter = id != B_ENUMERATE ? spy_bool(c, strict) : args->as.seq.len == 2 ? index_object(c, args->as.seq.items[1]) : spy_int(c, 0);
     status = !counter || sequence_append(c, state, counter) || ((id == B_MAP || id == B_FILTER) && sequence_append(c, state, args->as.seq.items[0]));
     spy_release(counter); spy_release(args);
     if (status) { spy_release(state); return NULL; }
@@ -29681,6 +29689,14 @@ static int round_keywords(size_t positional, SPYValue **argv, const Entry *kw, s
 /* BC_CALLK: call node n of argc arguments, positional and then keyword
  * ones, taken from the stack after its callee; a generator's machine
  * (calls 0) enters no call. A keyword's name is kept on its node. */
+/* Whether callee is zip or map given only strict, by the kwc keywords
+ * kw, a bool or an int, whose truth runs no Python: that truth; else -1. */
+static int zip_named(SPYValue *callee, const Entry *kw, size_t kwc) {
+    if (callee->type != SPY_CLASS || (callee->as.map.native != B_ZIP + 1 && callee->as.map.native != B_MAP + 1) || kwc != 1 ||
+        strcmp(kw[0].key->as.string.data, "strict")) return -1;
+    SPYValue *v = kw[0].value;
+    return v->type == SPY_BOOL || v->type == SPY_INT ? truthy(v) : -1;
+}
 /* Whether callee is enumerate, given its iterable, and its start or not,
  * by position or by name, each once, the first argc of argv positional,
  * the kwc keywords kw named: those two in named, borrowed, named[1] NULL
@@ -29815,6 +29831,15 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
             block.depth = m->len; m->blocks[m->block_len++] = block;
             return NULL;
         }
+    }
+    int strict;
+    if (calls && positional <= 8 && (strict = zip_named(callee, kw, kwc)) >= 0 && adapter_iterates(c, callee, positional, argv)) {
+        /* zip() or map() given strict, a bool or int, as a positional call (adapter_strict). */
+        SPYValue *args[8];
+        spy_retain(callee);
+        for (size_t i = 0; i < positional; i++) args[i] = spy_retain(argv[i]);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return adapter_strict(c, m, callee, positional, args, strict);
     }
     SPYValue *named[2];
     if (calls && enumerate_named(callee, positional, argv, kw, kwc, named) && adapter_iterates(c, callee, 1 + !!named[1], named)) {
