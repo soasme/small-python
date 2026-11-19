@@ -293,7 +293,7 @@ Contents | - navigation
 19 The Built-in Namespace > 19.3 Function properties > 19.3.1 abs ( *x*, / ) | BuiltinsNumeric
 19 The Built-in Namespace > 19.3 Function properties > 19.3.2 aiter ( *async_iterable*, / ) | AsyncFor, AsyncLookup
 19 The Built-in Namespace > 19.3 Function properties > 19.3.3 all ( *iterable*, / ) and any ( *iterable*, / ) | BuiltinsIter
-19 The Built-in Namespace > 19.3 Function properties > 19.3.4 anext ( *async_iterator*, *default*, / ) | AsyncFor, AsyncLookup
+19 The Built-in Namespace > 19.3 Function properties > 19.3.4 anext ( *async_iterator*, *default*, / ) | AsyncFor, AsyncLookup, AnextDefault
 19 The Built-in Namespace > 19.3 Function properties > 19.3.5 ascii ( *obj*, / ) | BuiltinsText
 19 The Built-in Namespace > 19.3 Function properties > 19.3.6 bin ( *integer*, / ), oct ( *integer*, / ), hex ( *integer*, / ) | BuiltinsNumeric
 19 The Built-in Namespace > 19.3 Function properties > 19.3.7 breakpoint ( *args, **kws ) | - host hook HostBreakpoint (Annex B)

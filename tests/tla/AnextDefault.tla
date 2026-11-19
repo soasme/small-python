@@ -1,0 +1,49 @@
+----------------------------- MODULE AnextDefault -----------------------------
+(***************************************************************************)
+(* An await of anext(it, "d"), as PLS-315 19.3.4 specifies it, where it's  *)
+(* __anext__ is a coroutine with the body                                  *)
+(*                                                                         *)
+(*     try: got = await Pause()                                            *)
+(*     except KeyError: after: return "caught" | raise StopAsyncIteration  *)
+(*                             | await Pause() | raise ValueError          *)
+(*     return got                                                          *)
+(*                                                                         *)
+(* The awaiting coroutine, suspended at Pause's yield, its cr_await then   *)
+(* the anext awaitable, is resumed by a send of "sent", a throw of         *)
+(* KeyError("k"), of the class KeyError, of IndexError, or a close. The    *)
+(* outcome is what that did: the await's value (StopIteration), a          *)
+(* suspension, the exception, or a close's None; then whether cr_await is  *)
+(* None after it.                                                          *)
+(***************************************************************************)
+EXTENDS Naturals
+
+Programs == [after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"}]
+
+VARIABLES program, outcome
+vars == <<program, outcome>>
+
+Pending == "pending"
+
+\* The coroutine's end ends the await: a value as its value,
+\* StopAsyncIteration as the default; a suspension keeps cr_await.
+Run(p) == CASE p.resume = "send" -> "value sent awaiting=False"
+            [] p.resume = "close" -> "closed awaiting=False"
+            [] p.resume = "other" -> "raised IndexError awaiting=False"
+            [] p.after = "return" -> "value caught awaiting=False"
+            [] p.after = "stop" -> "value d awaiting=False"
+            [] p.after = "await" -> "suspended awaiting=True"
+            [] p.after = "raise" -> "raised ValueError awaiting=False"
+
+Init == program \in Programs /\ outcome = Pending
+Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
+Spec == Init /\ [][Execute]_vars
+
+-----------------------------------------------------------------------------
+Done == outcome # Pending
+
+\* A class thrown acts as its instance.
+ClassAsInstance == Done /\ program.resume = "class" => outcome = Run([program EXCEPT !.resume = "instance"])
+
+\* StopAsyncIteration ending the coroutine is the default, never raised.
+Default == Done /\ program.after = "stop" /\ program.resume \in {"instance", "class"} => outcome = "value d awaiting=False"
+=============================================================================

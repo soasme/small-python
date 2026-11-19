@@ -24866,7 +24866,7 @@ static void finish_delegate(SPYContext *c, Machine *m) {
         spy_clear_error(c); m->pc = m->await_target;
     }
     if (UNLIKELY(m->operation)) {
-        m->operation->as.async_operation.state = 2; m->delegate->as.generator.async_running = 0;
+        if (m->operation->type != SPY_ANEXT_AWAITABLE) { m->operation->as.async_operation.state = 2; m->delegate->as.generator.async_running = 0; }
         spy_release(m->operation); m->operation = NULL;
     }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE; m->throwing = 0; m->await_target = 0;
@@ -24899,6 +24899,17 @@ static NO_INLINE int operation_entered(SPYContext *c, Machine *m) {
     if (throws) g->as.generator.machine->drop = 0;
     op->as.async_operation.state = 1; g->as.generator.async_running = 1;
     m->operation = op; m->delegate = spy_retain(g); m->await_target = 0;
+    return 1;
+}
+/* Whether the await of anext() awaitable op, m's delegate, resumes the
+ * coroutine its __anext__ returned there (delegable): the coroutine
+ * becomes m's delegate, op its operation, which delegate_left ends at its
+ * end, its StopAsyncIteration giving the default. */
+static int delegable(SPYValue *);
+static NO_INLINE int anext_entered(Machine *m) {
+    SPYValue *op = m->delegate, *source = op->as.iterator.source;
+    if (source->type != SPY_COROUTINE || !delegable(source)) return 0;
+    m->operation = op; m->delegate = spy_retain(source); m->await_target = 0;
     return 1;
 }
 /* The call of finalizer's __del__, which m's next step waits for
@@ -25021,7 +25032,8 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
      * (throws_in), the operation ending as an await of it does
      * (delegate_left), or as its close (operation_closed). */
     if (m->operation)
-        return m->operation->as.async_operation.state == 1 && throws_in(c, m->delegate, exception ? exception : c->exceptions[X_GENERATOR_EXIT]);
+        return (m->operation->type == SPY_ANEXT_AWAITABLE || m->operation->as.async_operation.state == 1) &&
+               throws_in(c, m->delegate, exception ? exception : c->exceptions[X_GENERATOR_EXIT]);
     if (m->awaiting != AWAIT_DELEGATE) return m->awaiting == AWAIT_YIELD;
     /* Or at a yield from of a builtin iterator, which has neither close
      * nor throw, or of an instance with a Python close, or throw, which
@@ -34689,7 +34701,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                  * into this machine (generator_left). */
                 if (delegable(m->delegate) ||
                     (ins->arg == DELEGATE_AWAITABLE && (m->delegate->type == SPY_ASYNC_GENERATOR_ASEND || m->delegate->type == SPY_ASYNC_GENERATOR_ATHROW) &&
-                     operation_entered(c, m))) {
+                     operation_entered(c, m)) ||
+                    (ins->arg == DELEGATE_AWAITABLE && m->delegate->type == SPY_ANEXT_AWAITABLE && anext_entered(m))) {
                     spy_release(a); a = NULL; value = m->delegate; goto resume_generator;
                 }
                 spy_release(a); a = NULL; value = NULL;
@@ -35359,6 +35372,23 @@ static void operation_closed(SPYContext *c, Machine *m, SPYValue *g, Result flow
     SPYValue *op = m->operation;
     int awaits = flow.flow == FLOW_YIELD && g->as.generator.machine->awaiting != AWAIT_YIELD;
     m->operation = NULL;
+    if (op->type == SPY_ANEXT_AWAITABLE) {
+        /* An anext() coroutine's close: its StopAsyncIteration is a
+         * StopIteration of the default (awaitable_method). */
+        if (flow.flow == FLOW_YIELD) { spy_release(flow.value); spy_error(c, "RuntimeError", "coroutine ignored GeneratorExit"); }
+        else {
+            generator_end(c, g, flow);
+            if (error_is(c, "StopIteration") || error_is(c, "GeneratorExit")) spy_clear_error(c);
+            else if (error_is(c, "StopAsyncIteration")) {
+                spy_clear_error(c);
+                SPYValue *exception = exception_create(c, c->exceptions[X_STOP_ITERATION], 1, &op->as.iterator.counter);
+                if (exception) { raise_value(c, exception); spy_release(exception); }
+            }
+        }
+        if (c->error_type[0]) materialize_error(c);
+        spy_release(op);
+        return;
+    }
     if (flow.flow == FLOW_YIELD) {
         spy_release(flow.value);
         if (awaits) spy_error(c, "RuntimeError", "coroutine ignored GeneratorExit");
@@ -35385,15 +35415,18 @@ static NO_INLINE Machine *delegate_left(SPYContext *c, Machine *m, SPYValue **g,
             if (throwing == CLOSING) { delegate_closed(c, m, *flow); *flow = (Result){FLOW_NORMAL, NULL}; return m; }
         }
         /* An operation's generator yields the await's value, or ends it
-         * raising StopAsyncIteration, which ends an async for. */
+         * raising StopAsyncIteration, which ends an async for; an anext()
+         * coroutine's (a coroutine never yields itself) gives the default. */
         if (UNLIKELY(m->operation) && (flow->flow != FLOW_YIELD || m->delegate->as.generator.machine->awaiting == AWAIT_YIELD)) {
             /* An aclose's generator must not yield, and its end gives None. */
-            int closing = m->operation->as.async_operation.method == M_ACLOSE;
+            int anext = m->operation->type == SPY_ANEXT_AWAITABLE, closing = !anext && m->operation->as.async_operation.method == M_ACLOSE;
             if (flow->flow == FLOW_YIELD && closing) { spy_release(flow->value); spy_error(c, "RuntimeError", "async generator ignored GeneratorExit"); }
             else if (flow->flow == FLOW_YIELD) machine_push(c, m, flow->value);
             else {
                 generator_end(c, m->delegate, *flow);
                 if (closing && (error_is(c, "StopAsyncIteration") || error_is(c, "GeneratorExit"))) { spy_clear_error(c); machine_push(c, m, spy_none(c)); }
+                if (anext && error_is(c, "StopAsyncIteration")) { spy_clear_error(c); machine_push(c, m, spy_retain(m->operation->as.iterator.counter)); }
+                if (anext && throwing && c->handled && c->error_type[0]) delegate_raised(c);
             }
             finish_delegate(c, m);
             *flow = (Result){FLOW_NORMAL, NULL};

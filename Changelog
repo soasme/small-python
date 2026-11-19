@@ -511,6 +511,7 @@ Unreleased (0.10.0):
 - an `AttributeError` reading `__aiter__`, `__anext__` or `__await__` through a descriptor becomes "object T does not have M method"
 - a collection calls the weak reference callbacks of the cycles it finds before their `__del__` methods
 - a collection leaves cycles that its finalizers and callbacks make or drop to the next one
+- `await anext(it, default)` runs a Python `__anext__` coroutine without nesting on the C stack
 
 2026-11-10 0.9.0:
 
