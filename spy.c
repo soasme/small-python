@@ -519,6 +519,9 @@ struct SPYContext {
     Machine *step_m;
     int step_level;
     size_t step_depth;
+    /* Whether weak_calls, which a collection began, goes ahead of the
+     * finalizers until it empties (weak_next). */
+    int weak_first;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -1412,7 +1415,21 @@ static int weak_push(SPYContext *c, SPYValue ***items, size_t *len, size_t *cap,
  * liveness is the collector's mark; otherwise a reference with a zero count is
  * already queued to be freed by the running release. */
 static SPYValue *name_local(SPYValue *, const char *);
-static void attend(SPYContext *c) { if (c->weak_calls_len || c->finalize_calls_len || c->stopped) c->quiet_unit = NULL; }
+static void attend(SPYContext *c) {
+    if (c->weak_calls_len || c->finalize_calls_len || c->stopped) c->quiet_unit = NULL;
+    if (!c->weak_calls_len) c->weak_first = 0;
+}
+/* Whether a dead weak reference's callback is next in line, not a
+ * finalizer: those a collection queued, and those their callbacks queue,
+ * go ahead of them, as CPython clears weak references before it
+ * finalizes (weak_first). */
+static int weak_next(SPYContext *c) { return c->weak_calls_len && (c->weak_first || !c->finalize_calls_len); }
+/* The dead weak reference first in line, taken off it, owned. */
+static SPYValue *weak_pop(SPYContext *c) {
+    SPYValue *ref = c->weak_calls[0];
+    memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+    return ref;
+}
 static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
     v->weak = 0;
     for (size_t i = c->weak_len; i--;) {
@@ -1611,25 +1628,36 @@ static void release_live_edge(SPYValue *v, void *unused) {
     else if (!v->listed) spy_release(v);
 }
 /* One collection. After marking, the unmarked values are gathered in one
- * walk at the back of the work array, and only they are visited again. */
-static size_t collect_once(SPYContext *c) {
-    if (!c->live) return 0;
+ * walk at the back of the work array, and only they are visited again.
+ * With *only, it collects only the garbage the last one kept for its
+ * finalizers (marked 2), as CPython's collection frees what they leave
+ * unreachable: what they made or dropped waits for the next collection.
+ * *only is then whether this one kept garbage. */
+static size_t collect_once(SPYContext *c, int *only) {
+    if (!c->live) return *only = 0;
     Work work = { mem_block(c, NULL, c->live * sizeof(SPYValue *), ARRAY(sizeof(SPYValue *))), 0 };
-    if (!work.items) return 0;
+    if (!work.items) return *only = 0;
     size_t listed = 0;
-    for (SPYValue *v = c->values; v; v = v->next) { v->trial = v->refs; v->marked = 0; listed++; }
-    for (SPYValue *v = c->values; v; v = v->next) edges(v, subtract_edge, NULL);
+    for (SPYValue *v = c->values; v; v = v->next) {
+        if (*only && v->marked != 2) { v->marked = 1; continue; }
+        v->trial = v->refs; v->marked = 0; listed++;
+    }
+    for (SPYValue *v = c->values; v; v = v->next) if (!v->marked) edges(v, subtract_edge, NULL);
     for (SPYValue *v = c->values; v; v = v->next) if (v->trial) mark_edge(v, &work);
     for (size_t i = 0; i < work.len; i++) edges(work.items[i], mark_edge, &work);
     SPYValue **end = work.items + c->live, **dead = end - (listed - work.len), **at = dead;
     for (SPYValue *v = c->values; at < end; v = v->next) if (!v->marked) *at++ = v;
+    /* The callbacks of their weak references go ahead of the finalizers
+     * queued with them (weak_next). */
+    size_t queued = c->weak_calls_len;
     for (at = dead; at < end; at++) if ((*at)->weak) weak_doomed(c, *at);
+    if (c->weak_calls_len > queued) c->weak_first = 1;
     /* Unreachable values awaiting a finalizer (__del__, or close() of a
      * suspended generator) survive with everything they reach; a later
      * collection frees them unless the finalizer resurrected them. The rest
      * of the garbage is freed now. */
     Work kept = { dead < end ? mem_block(c, NULL, (size_t)(end - dead) * sizeof(SPYValue *), ARRAY(sizeof(SPYValue *))) : NULL, 0 };
-    if (!kept.items) { mem_free(work.items); return 0; }
+    if (!kept.items) { mem_free(work.items); return *only = 0; }
     for (at = dead; at < end; at++)
         if (!(*at)->marked && finalize_later(*at) == 1) { (*at)->refs++; (*at)->marked = 1; kept.items[kept.len++] = *at; }
     for (size_t i = 0; i < kept.len; i++) edges(kept.items[i], mark_edge, &kept);
@@ -1647,8 +1675,12 @@ static size_t collect_once(SPYContext *c) {
         for (size_t i = start; i < kept.len; i++) edges(kept.items[i], mark_edge, &kept);
     }
     mem_free(kept.items);
+    *only = 0;
     SPYValue **last = dead;
-    for (at = dead; at < end; at++) if (!(*at)->marked) *last++ = *at;
+    for (at = dead; at < end; at++) {
+        if (!(*at)->marked) *last++ = *at;
+        else (*at)->marked = 2, *only = 1;
+    }
     /* Inspect edges while every dead object still exists, then free storage. */
     for (at = dead; at < last; at++) {
         if ((*at)->weak) weak_dead(c, *at, 1);
@@ -1684,7 +1716,7 @@ static ALWAYS_INLINE int stress_waits(SPYContext *c) {
 #endif
 }
 /* A pass that finds garbage awaiting finalizers only finalizes it; collect
- * again to free what the finalizers left unreachable. The finalizers run
+ * that garbage again to free what the finalizers left unreachable. The finalizers run
  * Python, which does not start another collection meanwhile. */
 /* Whether finalizers and weak reference callbacks wait: while they run,
  * in C or on the machine (finalizer_call), whose call may not have begun. */
@@ -1693,10 +1725,11 @@ static int finalizers_wait(SPYContext *c) {
 }
 static size_t collect(SPYContext *c) {
     c->collect_memory = SIZE_MAX;
-    size_t count = collect_once(c);
-    while (c->finalize_calls_len && !finalizers_wait(c)) {
+    int kept = 0;
+    size_t count = collect_once(c, &kept);
+    while (kept && c->finalize_calls_len && !finalizers_wait(c)) {
         weak_callbacks(c);
-        count += collect_once(c);
+        count += collect_once(c, &kept);
     }
     schedule_collection(c);
     return count;
@@ -16112,14 +16145,14 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
     if (c->collect_due && !finalizers_wait(c) && !stress_waits(c)) collect(c);
     /* Dead generators that close running nothing close here, in line,
      * so that one after them the machine closes is first. */
-    while (machine && c->finalize_calls_len && !finalizer(c) && closes_quietly(c, c->finalize_first)) {
+    while (machine && c->finalize_calls_len && !weak_next(c) && !finalizer(c) && closes_quietly(c, c->finalize_first)) {
         SPYValue *g = finalize_pop(c);
         size_t waiting = c->finalize_calls_len;
         generator_close(g);
         spy_release(g);
         finalize_ahead(c, waiting);
     }
-    int machined = machine && (c->finalize_calls_len ? finalizer(c) != NULL : c->weak_calls_len && weak_machined(c));
+    int machined = machine && (weak_next(c) ? weak_machined(c) : c->finalize_calls_len && finalizer(c) != NULL);
     if (machined && machine != TICK_DEFER) return 1;
     if (!machined && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
     c->line = n->line;
@@ -18744,8 +18777,7 @@ static void finalize_one(SPYContext *c) {
 }
 /* The first dead weak reference's callback, run (weak_callbacks). */
 static void weak_one(SPYContext *c) {
-    SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
-    memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+    SPYValue *ref = weak_pop(c), *callback = spy_retain(name_local(ref, "__callback__"));
     if (callback && callback->type != SPY_NONE && !name_set(c, ref, "__callback__", c->none))
         spy_release(call(c, callback, 1, &ref));
     if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling weakref callback ", callback, NULL);
@@ -18754,8 +18786,7 @@ static void weak_one(SPYContext *c) {
 static void weak_callbacks(SPYContext *c) {
     if (finalizers_wait(c)) return;
     c->weak_running = 1;
-    while (c->finalize_calls_len) finalize_one(c);
-    while (c->weak_calls_len) weak_one(c);
+    while (c->finalize_calls_len || c->weak_calls_len) weak_next(c) ? weak_one(c) : finalize_one(c);
     c->weak_running = 0;
     attend(c);
 }
@@ -18794,7 +18825,8 @@ static int gc_tracked(SPYContext *c, SPYValue *v) {
     }
 }
 /* collect() on m, state its count so far and whether a round of
- * finalizers runs (weak_callbacks), which it takes: an instance's Python
+ * finalizers runs (weak_callbacks), True, or the last pass kept garbage
+ * for one, False, or None, which it takes: an instance's Python
  * __del__ first in line, or a dead weak reference's Python callback, is
  * m's call (callk), its error unraisable (collect_called); another runs
  * here; after each round the collector passes again. The count. */
@@ -18814,35 +18846,36 @@ static SPYValue *collect_called(SPYContext *c, Machine *m, SPYValue *held, SPYVa
 static SPYValue *collect_go(SPYContext *c, Machine *m, SPYValue *state) {
     SPYValue **items = state->as.seq.items;
     for (;;) {
-        if (items[1] == c->booleans[0]) {
-            if (!c->finalize_calls_len || finalizers_wait(c)) break;
+        if (items[1] != c->booleans[1]) {
+            if (items[1] == c->none || !c->finalize_calls_len || finalizers_wait(c)) break;
             items[1] = spy_retain(c->booleans[1]); spy_release(c->booleans[0]);
         }
-        SPYValue *self = c->finalize_calls_len ? c->finalize_first : c->weak_calls_len ? c->weak_calls[0] : NULL, *held = NULL;
-        SPYValue *function = !self ? NULL : c->finalize_calls_len ? (self->type == SPY_INSTANCE ? finalizer(c) : NULL) :
+        int weak = weak_next(c);
+        SPYValue *self = weak ? c->weak_calls[0] : c->finalize_calls_len ? c->finalize_first : NULL, *held = NULL;
+        SPYValue *function = !self ? NULL : !weak ? (self->type == SPY_INSTANCE ? finalizer(c) : NULL) :
                              finalizers_wait(c) ? NULL : name_local(self, "__callback__");
         if (!self) {
-            /* The round ended: the collector passes again. */
-            SPYValue *count = int_value(c, items[0]->as.integer_data.small + (int64_t)collect_once(c));
+            /* The round ended: the collector passes again over what it kept. */
+            int kept = 1;
+            SPYValue *count = int_value(c, items[0]->as.integer_data.small + (int64_t)collect_once(c, &kept));
             if (!count) { spy_release(state); return NULL; }
             spy_release(items[0]); items[0] = count;
-            items[1] = spy_retain(c->booleans[0]); spy_release(c->booleans[1]);
+            items[1] = spy_retain(kept ? c->booleans[0] : c->none); spy_release(c->booleans[1]);
             continue;
         }
         if (!function || !machine_function(c, function)) {
             /* One that runs in C runs here, as weak_callbacks runs it. */
             c->weak_running = 1;
-            if (c->finalize_calls_len) finalize_one(c);
-            else weak_one(c);
+            weak ? weak_one(c) : finalize_one(c);
             c->weak_running = 0;
             attend(c);
             continue;
         }
-        if (c->finalize_calls_len) {
+        if (!weak) {
             finalize_pop(c);
             held = parts_tuple(c, 3, (SPYValue *[]){spy_retain(state), spy_retain(self), int_value(c, (int64_t)c->finalize_calls_len)});
         } else {
-            memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+            weak_pop(c);
             spy_retain(function);
             if (name_set(c, self, "__callback__", c->none)) {
                 report_unraisable(c, "Exception ignored while calling weakref callback ", function, NULL);
@@ -18872,7 +18905,9 @@ static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     Machine *m = id ? NULL : step_machine(c);
     if (m) {
         c->collect_memory = SIZE_MAX;
-        SPYValue *state = parts_tuple(c, 2, (SPYValue *[]){int_value(c, (int64_t)collect_once(c)), spy_retain(c->booleans[0])});
+        int kept = 0;
+        SPYValue *count = int_value(c, (int64_t)collect_once(c, &kept));
+        SPYValue *state = parts_tuple(c, 2, (SPYValue *[]){count, spy_retain(kept ? c->booleans[0] : c->none)});
         return state ? collect_go(c, m, state) : NULL;
     }
     if (!id) return spy_int(c, (int64_t)collect(c));
@@ -24875,12 +24910,11 @@ static NO_INLINE int operation_entered(SPYContext *c, Machine *m) {
 static void finalize_close(SPYContext *, Machine *);
 static NO_INLINE void finalized(SPYContext *, Machine *, SPYValue *);
 static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
-    if (!c->finalize_calls_len) {
+    if (weak_next(c)) {
         /* A dead target's weak reference, its Python callback cleared,
          * takes the call (weak_machined); the reference and the callback
          * go on m's stack (finalized). */
-        SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
-        memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+        SPYValue *ref = weak_pop(c), *callback = spy_retain(name_local(ref, "__callback__"));
         if (name_set(c, ref, "__callback__", c->none) || machine_push(c, m, spy_retain(ref)) || machine_push(c, m, spy_retain(callback))) {
             spy_release(ref); spy_release(callback); return NULL;
         }

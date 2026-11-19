@@ -32,8 +32,10 @@
 (*    the rest is freed, after their references into live objects are      *)
 (*    dropped (release_live_edge) without recursion. Its work arrays are   *)
 (*    allocated, and a pass whose allocation fails does nothing.           *)
-(*  - spy_collect repeats collect_once after running the queue until no    *)
-(*    finalizer is pending.                                                *)
+(*  - spy_collect repeats collect_once after running the queue while the   *)
+(*    last pass kept garbage for a finalizer, each repetition over that    *)
+(*    garbage only (marked 2): what else is unreachable waits for the next *)
+(*    collection, as in CPython.                                           *)
 (*  - Automatic collection: an allocation that takes a new pool (pool_new, *)
 (*    a choice here, also inside a finalizer) makes a collection due once  *)
 (*    the listed values exceed the last collection's survivors by          *)
@@ -153,10 +155,13 @@ RunOne(s, grow) ==
 RECURSIVE Callbacks(_, _)
 Callbacks(s, grow) == IF s.queue = <<>> THEN s ELSE Callbacks(RunOne(s, grow), grow)
 
-\* collect_once; with fail, its allocation fails and it does nothing.
-CollectOnce(s, fail) ==
-    LET internal(o) == Cardinality({e \in s.alive \X Slots : s.ref[e[1]][e[2]] = o}) + Owned(s, o)
-        live == Closure(s, {o \in s.alive : s.refs[o] - internal(o) > 0})
+\* collect_once over scope, the objects it may find dead: each one's count
+\* minus the references from scope leaves its external ones, and every
+\* object outside scope is live; with fail, its allocation fails and it
+\* does nothing. The garbage it kept for a finalizer is Kept.
+Pass(s, fail, scope) ==
+    LET internal(o) == Cardinality({e \in scope \X Slots : s.ref[e[1]][e[2]] = o}) + (IF "f" \in scope THEN Owned(s, o) ELSE 0)
+        live == Closure(s, (s.alive \ scope) \cup {o \in scope : s.refs[o] - internal(o) > 0})
         waiting == {o \in (s.alive \ live) \cap Obj : o \notin s.finalized}
         marked == Closure(s, live \cup waiting)
         take == "g" \in s.alive \ marked /\ s.ref["g"]["ref"] = "f" /\ "f" \in marked
@@ -168,16 +173,17 @@ CollectOnce(s, fail) ==
         refs == [o \in Things |-> IF o \in kept
                                   THEN t.refs[o] + (IF o \in waiting THEN 1 ELSE 0) - from(o)
                                   ELSE 0]
-    IN  IF fail THEN [s EXCEPT !.failed = TRUE]
-        ELSE [t EXCEPT !.refs = refs, !.finalized = (@ \cup waiting) \ dead,
+    IN  IF fail THEN <<[s EXCEPT !.failed = TRUE], {}>>
+        ELSE <<[t EXCEPT !.refs = refs, !.finalized = (@ \cup waiting) \ dead,
                        !.queue = @ \o SelectSeq(G!Order, LAMBDA o : o \in waiting),
                        !.alive = @ \ dead, !.ref = [q \in Things |-> IF q \in dead THEN G!Empty ELSE @[q]],
                        !.weak = @ \ dead, !.taken = @ \ dead,
-                       !.broken = @ \/ \E o \in kept : refs[o] = 0]
+                       !.broken = @ \/ \E o \in kept : refs[o] = 0], kept \ live>>
 
-\* The repetition of collect, after its first collect_once.
+\* The repetition of collect, after its first collect_once kept r[2].
 RECURSIVE Repeat(_, _)
-Repeat(s, fail) == IF s.queue = <<>> THEN s ELSE Repeat(CollectOnce(Callbacks(s, {}), fail = "repeat"), fail)
+Repeat(r, fail) == IF r[2] = {} \/ r[1].queue = <<>> THEN r[1]
+                   ELSE Repeat(Pass(Callbacks(r[1], {}), fail = "repeat", r[2]), fail)
 
 \* schedule_collection.
 Schedule(s) ==
@@ -186,7 +192,7 @@ Schedule(s) ==
                   !.collectMemory = 2 * live]
 
 \* collect, as spy_collect and the automatic collection run it.
-Collect(s, fail) == Schedule(Repeat(CollectOnce([s EXCEPT !.collectMemory = Never], fail = "first"), fail))
+Collect(s, fail) == Schedule(Repeat(Pass([s EXCEPT !.collectMemory = Never], fail = "first", s.alive), fail))
 
 \* tick_full, at the boundary after a statement and again whenever the
 \* machine ran a finalizer: it collects when due, else runs the queue, on

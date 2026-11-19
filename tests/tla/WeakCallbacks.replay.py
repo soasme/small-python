@@ -21,7 +21,10 @@ class Finalized:
         log.append("del")
 
 
-def callback(name, held, fails):
+made = []
+
+
+def callback(name, held, fails, makes=False):
     def called(ref):
         for _ in range(2):
             pass
@@ -29,6 +32,10 @@ def callback(name, held, fails):
             log.append(name)
         if held:
             held.pop()
+        if makes:
+            cycle = Plain()
+            cycle.me = cycle
+            made.append(host.weak_reference(cycle, callback("made", None, False)))
         if fails:
             raise LookupError(name)
     return called
@@ -37,7 +44,7 @@ def callback(name, held, fails):
 def drop(p):
     target = (Finalized if p["finalizer"] else Plain)()
     held = [Plain()] if p["chains"] else []
-    refs = [host.weak_reference(target, callback("callback", held, p["fails"]))]
+    refs = [host.weak_reference(target, callback("callback", held, p["fails"], p["makes"]))]
     if held:
         refs.append(host.weak_reference(held[0], callback("second", None, False)))
     if p["cyclic"]:
@@ -46,11 +53,14 @@ def drop(p):
     if p["cyclic"]:
         host.collect()
     log.append("after")
+    if p["makes"]:
+        host.collect()
+        log.append("again")
     yield refs
 
 
 def outcome(p):
-    del log[:]
+    del log[:], made[:]
     if p["place"] == "function":
         list(drop(p))
     else:

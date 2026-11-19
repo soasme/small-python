@@ -94,14 +94,15 @@ Release(s, o) ==
                   IN  Release([other EXCEPT !.ref[o]["ref"] = None], t.ref[o]["ref"])
 
 \* gc.collect(): every unreachable object's finalizer runs if it has not
-\* yet; then whatever is still unreachable is freed.
+\* yet; then whatever of those is still unreachable is freed (9.7).
 Collect(s) ==
-    LET pending == ((s.alive \ Reach(s)) \cap Obj) \ s.finalized
+    LET unreachable == s.alive \ Reach(s)
+        pending == (unreachable \cap Obj) \ s.finalized
         ran == [s EXCEPT !.finalized = @ \cup pending,
                          !.log = SelectSeq(Order, LAMBDA o : o \in pending),
                          !.root = IF "p" \in pending THEN [@ EXCEPT !["saved"] = "p"] ELSE @,
                          !.ref = IF "g" \in pending THEN [@ EXCEPT !["g"]["ref"] = None] ELSE @]
-        dead == ran.alive \ Reach(ran)
+        dead == unreachable \ Reach(ran)
     IN  [ran EXCEPT !.alive = @ \ dead, !.finalized = @ \ dead,
                     !.ref = [q \in Things |-> IF q \in dead THEN Empty ELSE @[q]]]
 

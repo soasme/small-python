@@ -509,6 +509,8 @@ Unreleased (0.10.0):
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`
 - a call's first `**` of a dict merges into the keywords without comparing its keys, as CPython does
 - an `AttributeError` reading `__aiter__`, `__anext__` or `__await__` through a descriptor becomes "object T does not have M method"
+- a collection calls the weak reference callbacks of the cycles it finds before their `__del__` methods
+- a collection leaves cycles that its finalizers and callbacks make or drop to the next one
 
 2026-11-10 0.9.0:
 
