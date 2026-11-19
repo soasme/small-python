@@ -508,6 +508,7 @@ Unreleased (0.10.0):
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`
 - a call's first `**` of a dict merges into the keywords without comparing its keys, as CPython does
+- an `AttributeError` reading `__aiter__`, `__anext__` or `__await__` through a descriptor becomes "object T does not have M method"
 
 2026-11-10 0.9.0:
 

@@ -71,6 +71,7 @@ agree on their distinct-state counts), in about half TLC's time.
 | `TypeAliases.tla` | the `type` statement: lazy, single evaluation of `__value__` (forward and self references), alias attributes, subscription, and read-only attributes | yes |
 | `Awaitables.tla` | `await` on coroutines, `__await__` iterators and generators, and non-awaitables; reusing an awaited coroutine; and coroutine `send`, `close`, and `throw` | yes |
 | `AsyncFor.tla` | `async for` over async generators and `__aiter__`/`__anext__` classes with `else`, `break`, and exceptions; protocol errors; asynchronous comprehensions; and async constructs outside async functions | yes |
+| `AsyncLookup.tla` | `__aiter__`, `__anext__` and `__await__` read through a descriptor whose read raises: `AttributeError` becomes "does not have" for `aiter()`, `anext()`, `async for` and `await`; other exceptions propagate | yes |
 | `AsyncWith.tla` | `async with`: awaited `__aenter__` and `__aexit__`, suppression, raising methods, and protocol errors with their hints | yes |
 | `ScopeErrors.tla` | `global` and `nonlocal` after a use, assignment, annotation, or parameter, annotated declared names, both declarations, module and class placement, and missing bindings, with their lines | yes |
 | `BuiltinsScope.tla` | builtins lookup through `__builtins__` as a module or a dictionary, shadowing globals, an extended builtins module, restricted `__import__`, and `__builtins__` insertion | yes |

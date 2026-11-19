@@ -53,7 +53,7 @@ Contents | - navigation
 7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.5 RichCompareBool ( *v*, *w*, *op* ) | Comparisons, Containers
 7 Abstract Operations > 7.3 Attribute and special method operations | = sections
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.1 LookupInMRO ( *T*, *name* ) | MRO, Attributes
-7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.2 LookupSpecial ( *o*, *name* ) | SpecialLookup
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.2 LookupSpecial ( *o*, *name* ) | SpecialLookup, AsyncLookup
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.3 CallSpecial ( *o*, *name*, *args* ) | SpecialLookup
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.4 GetAttribute ( *o*, *name* ) | Attributes
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.5 GenericGetAttr ( *o*, *name* ) | Attributes, Descriptors
@@ -85,8 +85,8 @@ Contents | - navigation
 7 Abstract Operations > 7.7 Iteration > 7.7.1 GetIterator ( *o* ) | Iterators, Containers
 7 Abstract Operations > 7.7 Iteration > 7.7.2 IteratorStep ( *it* ) | Iterators, Iteration
 7 Abstract Operations > 7.7 Iteration > 7.7.3 IterateToList ( *o* ) | Iterators, Unpacking
-7 Abstract Operations > 7.7 Iteration > 7.7.4 GetAsyncIterator ( *o* ) | AsyncFor
-7 Abstract Operations > 7.7 Iteration > 7.7.5 GetAwaitable ( *o* ) | Awaitables
+7 Abstract Operations > 7.7 Iteration > 7.7.4 GetAsyncIterator ( *o* ) | AsyncFor, AsyncLookup
+7 Abstract Operations > 7.7 Iteration > 7.7.5 GetAwaitable ( *o* ) | Awaitables, AsyncLookup
 7 Abstract Operations > 7.7 Iteration > 7.7.6 ListExtend ( *l*, *o* ) | Iterators
 7 Abstract Operations > 7.7 Iteration > 7.7.7 LengthHint ( *o* ) | Iterators
 7 Abstract Operations > 7.7 Iteration > 7.7.8 SequenceFast ( *o*, *message* ) | Iterators
@@ -291,9 +291,9 @@ Contents | - navigation
 19 The Built-in Namespace > 19.2 Constructor properties | IntrinsicTypes
 19 The Built-in Namespace > 19.3 Function properties | = sections
 19 The Built-in Namespace > 19.3 Function properties > 19.3.1 abs ( *x*, / ) | BuiltinsNumeric
-19 The Built-in Namespace > 19.3 Function properties > 19.3.2 aiter ( *async_iterable*, / ) | AsyncFor
+19 The Built-in Namespace > 19.3 Function properties > 19.3.2 aiter ( *async_iterable*, / ) | AsyncFor, AsyncLookup
 19 The Built-in Namespace > 19.3 Function properties > 19.3.3 all ( *iterable*, / ) and any ( *iterable*, / ) | BuiltinsIter
-19 The Built-in Namespace > 19.3 Function properties > 19.3.4 anext ( *async_iterator*, *default*, / ) | AsyncFor
+19 The Built-in Namespace > 19.3 Function properties > 19.3.4 anext ( *async_iterator*, *default*, / ) | AsyncFor, AsyncLookup
 19 The Built-in Namespace > 19.3 Function properties > 19.3.5 ascii ( *obj*, / ) | BuiltinsText
 19 The Built-in Namespace > 19.3 Function properties > 19.3.6 bin ( *integer*, / ), oct ( *integer*, / ), hex ( *integer*, / ) | BuiltinsNumeric
 19 The Built-in Namespace > 19.3 Function properties > 19.3.7 breakpoint ( *args, **kws ) | - host hook HostBreakpoint (Annex B)

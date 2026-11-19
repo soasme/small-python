@@ -11568,6 +11568,29 @@ static SPYValue *special_method_maybe(SPYContext *c, SPYValue *v, const char *na
     if (!method && error_is(c, "AttributeError")) spy_clear_error(c);
     return method;
 }
+/* The AttributeError a descriptor of __aiter__, __anext__ or __await__
+ * raised for v becomes "object T does not have name method" (7.3.2),
+ * raised; or as a read on the machine leaves it (special_read), its
+ * message and class name in a tuple. */
+static SPYValue *async_absent(SPYContext *c, SPYValue *v, const char *name) {
+    if (error_is(c, "AttributeError")) {
+        spy_clear_error(c);
+        errorf(c, "AttributeError", "object %.50s does not have %s method", type_name(v), name);
+    }
+    return NULL;
+}
+static SPYValue *parts_tuple(SPYContext *, size_t, SPYValue **);
+static SPYValue *async_absence(SPYContext *c, SPYValue *v, const char *name) {
+    char text[160];
+    snprintf(text, sizeof text, "object %.50s does not have %s method", type_name(v), name);
+    return parts_tuple(c, 2, (SPYValue *[]){spy_string(c, text, strlen(text)), spy_string(c, "AttributeError", 14)});
+}
+/* What an absent method's tuple (async_absence, conversion_absent)
+ * raises: its message, as a TypeError but where it names a class. */
+static void absence_error(SPYContext *c, SPYValue *absent) {
+    SPYValue **items = absent->as.seq.items;
+    spy_error(c, absent->as.seq.len > 1 ? items[1]->as.string.data : "TypeError", items[0]->as.string.data);
+}
 static SPYValue *rich_method(SPYContext *c, int op, SPYValue *self, SPYValue *other) {
     /* An instance's Python method is called with self, unbound. */
     SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, rich_names[op]) : NULL;
@@ -11746,7 +11769,7 @@ static SPYValue *special_tried(SPYContext *c, Machine *m, SPYValue *state, SPYVa
 static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size_t argc, SPYValue *const *argv) {
     SPYValue *method = special_method(c, v, name);
     if (!method) {
-        if (c->error_type[0]) return NULL;
+        if (c->error_type[0]) return strcmp(name, "__anext__") ? NULL : async_absent(c, v, name);
         /* Each caller names one of these, or checks for the method first. */
         static const char *const missing[][2] = {
             {"__neg__", "bad operand type for unary -: '%s'"}, {"__pos__", "bad operand type for unary +: '%s'"},
@@ -24759,6 +24782,7 @@ static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *meth
     }
     SPYValue *method = special_method(c, value, "__await__");
     if (!method) {
+        if (c->error_type[0]) return async_absent(c, value, "__await__");
         if (method_name) return errorf(c, "TypeError", "'async with' received an object from %s that does not implement __await__: %s", method_name, type_name(value));
         return errorf(c, "TypeError", "'%s' object can't be awaited", type_name(value));
     }
@@ -24771,7 +24795,7 @@ static SPYValue *async_returned(SPYContext *, SPYValue *, SPYValue *, int);
 static SPYValue *async_iterator(SPYContext *c, SPYValue *value, int statement) {
     SPYValue *method = special_method(c, value, "__aiter__");
     if (!method) {
-        if (c->error_type[0]) return NULL;
+        if (c->error_type[0]) return async_absent(c, value, "__aiter__");
         if (statement) return errorf(c, "TypeError", "'async for' requires an object with __aiter__ method, got %s", type_name(value));
         return errorf(c, "TypeError", "'%s' object is not an async iterable", type_name(value));
     }
@@ -31071,7 +31095,7 @@ static NO_INLINE Machine *descripted(SPYContext *c, Machine *m, int kind, SPYVal
     if (!bound) {
         if (absent != c->unbound && error_is(c, "AttributeError")) {
             spy_clear_error(c);
-            if (absent->type == SPY_TUPLE) spy_error(c, "TypeError", absent->as.seq.items[0]->as.string.data);
+            if (absent->type == SPY_TUPLE) absence_error(c, absent);
             else *result = spy_retain(absent);
         }
         spy_release(absent); spy_release(other);
@@ -31174,7 +31198,7 @@ static SPYValue *special_read(SPYContext *c, Machine *m, SPYValue *state, SPYVal
         release_all(argc, argv);
         if (absent != c->none && error_is(c, "AttributeError")) {
             spy_clear_error(c);
-            if (absent->type == SPY_TUPLE) spy_error(c, "TypeError", absent->as.seq.items[0]->as.string.data);
+            if (absent->type == SPY_TUPLE) absence_error(c, absent);
             else result = spy_retain(absent);
         }
         spy_release(state);
@@ -41470,7 +41494,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *function = m ? item_special(c, a, id == B_AITER ? "__aiter__" : "__anext__") : NULL;
         SPYValue *fallback = id == B_AITER ? spy_retain(a) : argc == 2 ? tuple_of(c, 1, &argv[1]) : NULL;
         if (argc == 2 && !fallback) return NULL;
-        if (function) return special_callk(c, m, function, a, 0, NULL, NULL, id == B_AITER ? aiter_made : anext_made, fallback);
+        if (function) return special_callk(c, m, function, a, 0, NULL, machine_function(c, function) ? NULL : async_absence(c, a, id == B_AITER ? "__aiter__" : "__anext__"),
+                                           id == B_AITER ? aiter_made : anext_made, fallback);
         if (id == B_AITER) { spy_release(fallback); return async_iterator(c, a, 0); }
         return anext_made(c, NULL, fallback, call_special(c, a, "__anext__", 0, NULL));
     }
