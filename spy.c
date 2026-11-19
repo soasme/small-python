@@ -24705,8 +24705,12 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     /* A yield from passes on a throw of what is no exception, which
      * raises there (generator_throw). */
     if (g->as.generator.machine->awaiting == AWAIT_DELEGATE && !(k && subclass(k, c->exceptions[X_BASE_EXCEPTION]))) return 0;
-    /* An operation takes a close or throw in C (awaitable_method). */
-    if (m->awaiting != AWAIT_DELEGATE || m->operation) return m->awaiting == AWAIT_YIELD;
+    /* A throw into an asend's or athrow's generator raises as one into
+     * that generator does (throws_in), the operation ending as an await
+     * of it does (delegate_left); an operation takes a close in C
+     * (awaitable_method). */
+    if (m->operation) return exception && m->operation->as.async_operation.state == 1 && throws_in(c, m->delegate, exception);
+    if (m->awaiting != AWAIT_DELEGATE) return m->awaiting == AWAIT_YIELD;
     /* Or at a yield from of a builtin iterator, which has neither close
      * nor throw, or of an instance with a Python close, or throw, which
      * takes an exception, or a class as given (delegate_next). */
