@@ -1,4 +1,4 @@
-# spec: PLS-315 27.5.1, 27.4.2, 13.4.2
+# spec: PLS-315 27.5.1, 27.5.2, 27.4.2, 13.4
 # description: throw() into a coroutine suspended in an await of an async
 # generator's asend() or athrow() awaitable, whose generator is suspended
 # in an await of its own, raises the exception there: the generator may

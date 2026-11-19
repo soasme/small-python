@@ -1,4 +1,4 @@
-# spec: PLS-315 27.5.1, 27.4.2
+# spec: PLS-315 27.5.1, 27.5.2, 27.4.2
 # description: An asend(), athrow() or aclose() awaitable in progress, its
 # async generator suspended in an await of its own: close(), or close
 # from its type, throws GeneratorExit there; a value the generator yields,
