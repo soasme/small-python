@@ -1,4 +1,4 @@
-# spec: PLS-315 7.2.4, 26.4, 26.5.1
+# spec: PLS-315 7.2.4, 26.1.2, 26.4
 # description: tuples and lists holding dicts compare those dicts as
 # dicts compare: each key of the left looked up in the right by its
 # Python __eq__, then the values by theirs, in the left dict's order;
