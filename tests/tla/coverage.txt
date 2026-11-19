@@ -524,7 +524,7 @@ Contents | - navigation
 29 Typing Objects > 29.3 TypeVarTuple | Generics
 29 Typing Objects > 29.4 ParamSpec | Generics
 29 Typing Objects > 29.5 Union types | = sections
-29 Typing Objects > 29.5 Union types > 29.5.1 MakeUnion ( *x*, *y* ) | TypeAnnotations
+29 Typing Objects > 29.5 Union types > 29.5.1 MakeUnion ( *x*, *y* ) | TypeAnnotations, Sentinels
 29 Typing Objects > 29.5 Union types > 29.5.2 Operations | TypeAnnotations
 29 Typing Objects > 29.6 TypeAliasType | TypeAliases
 29 Typing Objects > 29.7 Generic | Generics, ClassObjects

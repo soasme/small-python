@@ -10480,11 +10480,13 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **lef
     return is_set(a) ? set_compared(c, op, a, b) : comparison(c, op, a, b);
 }
 static int class_union(int, SPYValue *, SPYValue *);
-/* Whether a or b is an instance, a class or a set, which an operator may
- * reach Python code or a set's walk through: tested before anything slower. */
+/* Whether a or b is an instance, a class, a set or a sentinel, which an
+ * operator may reach Python code or a set's walk through: tested before
+ * anything slower. */
 static ALWAYS_INLINE int python_kinds(SPYValue *a, SPYValue *b) {
     return (UINT64_C(1) << a->type | UINT64_C(1) << b->type) &
-           (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET) ? 1 : 0;
+           (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET |
+            UINT64_C(1) << SPY_SENTINEL) ? 1 : 0;
 }
 static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
 /* Whether str or bytes % y may convert an argument by a Python method on the
@@ -30984,14 +30986,15 @@ static NO_INLINE int operator_intrinsic(SPYContext *c, Instruction *ins, SPYValu
 /* Whether x | y is type.__or__ of classes or None, one a class, whose
  * metaclasses take __or__ and __ror__ from type (unionable), the intrinsic
  * _union's call (union_call). */
-/* Whether v is None or a class whose metaclass takes its method name,
- * __or__ or __ror__, from type. */
+/* Whether v is None, a sentinel or a class whose metaclass takes its
+ * method name, __or__ or __ror__, from type. */
 static int unionable(SPYValue *v, const char *name) {
-    return v->type == SPY_NONE || (v->type == SPY_CLASS && (!v->as.map.meta ||
+    return v->type == SPY_NONE || v->type == SPY_SENTINEL || (v->type == SPY_CLASS && (!v->as.map.meta ||
            class_lookup(v->as.map.meta, name) == class_lookup(v->ctx->types[SPY_CLASS], name)));
 }
 static int class_union(int op, SPYValue *x, SPYValue *y) {
-    return op == '|' && (x->type == SPY_CLASS || y->type == SPY_CLASS) && unionable(x, "__or__") && unionable(y, "__ror__");
+    return op == '|' && (x->type == SPY_CLASS || y->type == SPY_CLASS || x->type == SPY_SENTINEL || y->type == SPY_SENTINEL) &&
+           unionable(x, "__or__") && unionable(y, "__ror__");
 }
 static NO_INLINE SPYValue *union_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *function = intrinsic(c, "_union");
