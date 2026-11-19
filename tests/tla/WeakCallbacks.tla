@@ -11,12 +11,16 @@
 (* A program drops an object, with or without a __del__ logging "del",    *)
 (* with one weak reference whose callback logs "callback", then, when     *)
 (* chains, drops a second object, whose callback logs "second", and, when *)
-(* fails, raises. Each runs in a function or in a suspended generator.    *)
+(* fails, raises. When cyclic, the first object, which has no __del__,  *)
+(* refers to itself, and a collection the program asks for reclaims it,  *)
+(* the callbacks running before it returns. Each runs in a function or   *)
+(* in a suspended generator.                                              *)
 (* The outcome is the log, ending with "after".                           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [finalizer : BOOLEAN, chains : BOOLEAN, fails : BOOLEAN, place : {"function", "generator"}]
+Programs == {p \in [finalizer : BOOLEAN, chains : BOOLEAN, fails : BOOLEAN, cyclic : BOOLEAN, place : {"function", "generator"}] :
+                ~(p.cyclic /\ p.finalizer)}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

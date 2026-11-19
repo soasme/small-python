@@ -2,6 +2,8 @@
 # looping weak-reference callback and compares the log with the model's.
 from harness import host
 
+host.disable_automatic_collection()
+
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -14,6 +16,8 @@ class Plain:
 
 class Finalized:
     def __del__(self):
+        for _ in range(2):
+            pass
         log.append("del")
 
 
@@ -36,7 +40,11 @@ def drop(p):
     refs = [host.weak_reference(target, callback("callback", held, p["fails"]))]
     if held:
         refs.append(host.weak_reference(held[0], callback("second", None, False)))
+    if p["cyclic"]:
+        target.me = target
     del target
+    if p["cyclic"]:
+        host.collect()
     log.append("after")
     yield refs
 

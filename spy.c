@@ -202,7 +202,8 @@ struct SPYValue {
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
-        /* host: made by spy_define or spy_native (host_call). */
+        /* host: 1 made by spy_define or spy_native (host_call); 2 an
+         * engine native whose C code may leave a call to its step (step_native). */
         struct { SPYNative call; void *data; int method, static_method, host; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
                  SPYValue *module; /* An assigned __module__, or NULL for the default. */
@@ -18532,9 +18533,12 @@ static NO_INLINE SPYValue *host_call(SPYContext *c, Machine *m, SPYValue *fn, si
     return result;
 }
 /* call_plain from a call step on m, of a host native function by
- * host_call. */
+ * host_call, or of one that may leave a call by step_native. */
+static NO_INLINE SPYValue *step_native(SPYContext *, Machine *, SPYValue *, int, Node *, size_t, SPYValue *const *, SPYValue *);
 static ALWAYS_INLINE SPYValue *step_call(SPYContext *c, Machine *m, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv) {
-    return UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host) ? host_call(c, m, fn, argc, argv, NULL) : call_plain(c, fn, method, n, argc, argv);
+    if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host))
+        return fn->as.native.host == 1 ? host_call(c, m, fn, argc, argv, NULL) : step_native(c, m, fn, method, n, argc, argv, NULL);
+    return call_plain(c, fn, method, n, argc, argv);
 }
 /* call_plain of fn and method, or call_keywords of fn with keywords, as
  * the call step on m: its C code may leave a call there (step_machine). */
@@ -18549,7 +18553,7 @@ static NO_INLINE SPYValue *step_native(SPYContext *c, Machine *m, SPYValue *fn, 
     return result;
 }
 static ALWAYS_INLINE SPYValue *step_keywords(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host)) return host_call(c, m, fn, argc, argv, keywords);
+    if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host == 1)) return host_call(c, m, fn, argc, argv, keywords);
     return step_native(c, m, fn, -1, NULL, argc, argv, keywords);
 }
 /* A spy_callk's call returned result on m: its continuation, in
@@ -18682,38 +18686,42 @@ static void finalize_ahead(SPYContext *c, size_t waiting) {
  * callbacks of references whose targets died, at a statement boundary. Their
  * exceptions are unraisable, reported without disturbing the interrupted code.
  * While stopped they wait for the next outermost call. */
+/* The first finalizer in line, run (weak_callbacks). */
+static void finalize_one(SPYContext *c) {
+    SPYValue *self = finalize_pop(c);
+    size_t waiting = c->finalize_calls_len;
+    /* A Python __del__ takes the instance; another binds to it first. */
+    SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, "__del__") : NULL, *method;
+    if (function && function->type == SPY_FUNCTION) method = spy_retain(function);
+    else method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
+    const char *failure = "Exception ignored while closing generator ";
+    if (method) {
+        spy_release(method == function ? call(c, method, 1, &self) : call(c, method, 0, NULL));
+        if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling deallocator ", class_lookup(self->as.map.parent, "__del__"), NULL);
+    } else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
+    else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
+        spy_release(call(c, self->as.generator.origin, 1, &self));
+        failure = "Exception ignored while finalizing generator ";
+    } else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
+    if (c->error_type[0]) report_unraisable(c, failure, self, NULL);
+    if (c->error_type[0]) spy_clear_error(c);
+    spy_release(method); spy_release(self);
+    finalize_ahead(c, waiting);
+}
+/* The first dead weak reference's callback, run (weak_callbacks). */
+static void weak_one(SPYContext *c) {
+    SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
+    memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+    if (callback && callback->type != SPY_NONE && !name_set(c, ref, "__callback__", c->none))
+        spy_release(call(c, callback, 1, &ref));
+    if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling weakref callback ", callback, NULL);
+    spy_release(callback); spy_release(ref);
+}
 static void weak_callbacks(SPYContext *c) {
     if (finalizers_wait(c)) return;
     c->weak_running = 1;
-    while (c->finalize_calls_len) {
-        SPYValue *self = finalize_pop(c);
-        size_t waiting = c->finalize_calls_len;
-        /* A Python __del__ takes the instance; another binds to it first. */
-        SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, "__del__") : NULL, *method;
-        if (function && function->type == SPY_FUNCTION) method = spy_retain(function);
-        else method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
-        const char *failure = "Exception ignored while closing generator ";
-        if (method) {
-            spy_release(method == function ? call(c, method, 1, &self) : call(c, method, 0, NULL));
-            if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling deallocator ", class_lookup(self->as.map.parent, "__del__"), NULL);
-        } else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
-        else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
-            spy_release(call(c, self->as.generator.origin, 1, &self));
-            failure = "Exception ignored while finalizing generator ";
-        } else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
-        if (c->error_type[0]) report_unraisable(c, failure, self, NULL);
-        if (c->error_type[0]) spy_clear_error(c);
-        spy_release(method); spy_release(self);
-        finalize_ahead(c, waiting);
-    }
-    while (c->weak_calls_len) {
-        SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
-        memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
-        if (callback && callback->type != SPY_NONE && !name_set(c, ref, "__callback__", c->none))
-            spy_release(call(c, callback, 1, &ref));
-        if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling weakref callback ", callback, NULL);
-        spy_release(callback); spy_release(ref);
-    }
+    while (c->finalize_calls_len) finalize_one(c);
+    while (c->weak_calls_len) weak_one(c);
     c->weak_running = 0;
     attend(c);
 }
@@ -18751,11 +18759,88 @@ static int gc_tracked(SPYContext *c, SPYValue *v) {
     default: return 1;
     }
 }
+/* collect() on m, state its count so far and whether a round of
+ * finalizers runs (weak_callbacks), which it takes: an instance's Python
+ * __del__ first in line, or a dead weak reference's Python callback, is
+ * m's call (callk), its error unraisable (collect_called); another runs
+ * here; after each round the collector passes again. The count. */
+static SPYValue *collect_go(SPYContext *, Machine *, SPYValue *);
+static SPYValue *collect_called(SPYContext *c, Machine *m, SPYValue *held, SPYValue *result) {
+    SPYValue **items = held->as.seq.items, *state = spy_retain(items[0]);
+    int finalizer = items[2]->type == SPY_INT;
+    if (!result) report_unraisable(c, finalizer ? "Exception ignored while calling deallocator " : "Exception ignored while calling weakref callback ",
+                                   finalizer ? class_lookup(items[1]->as.map.parent, "__del__") : items[2], NULL);
+    if (c->error_type[0]) spy_clear_error(c);
+    c->finalizing = 0;
+    if (finalizer) finalize_ahead(c, (size_t)items[2]->as.integer_data.small);
+    spy_release(result); spy_release(held);
+    attend(c);
+    return collect_go(c, m, state);
+}
+static SPYValue *collect_go(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items;
+    for (;;) {
+        if (items[1] == c->booleans[0]) {
+            if (!c->finalize_calls_len || finalizers_wait(c)) break;
+            items[1] = spy_retain(c->booleans[1]); spy_release(c->booleans[0]);
+        }
+        SPYValue *self = c->finalize_calls_len ? c->finalize_first : c->weak_calls_len ? c->weak_calls[0] : NULL, *held = NULL;
+        SPYValue *function = !self ? NULL : c->finalize_calls_len ? (self->type == SPY_INSTANCE ? finalizer(c) : NULL) :
+                             finalizers_wait(c) ? NULL : name_local(self, "__callback__");
+        if (!self) {
+            /* The round ended: the collector passes again. */
+            SPYValue *count = int_value(c, items[0]->as.integer_data.small + (int64_t)collect_once(c));
+            if (!count) { spy_release(state); return NULL; }
+            spy_release(items[0]); items[0] = count;
+            items[1] = spy_retain(c->booleans[0]); spy_release(c->booleans[1]);
+            continue;
+        }
+        if (!function || !machine_function(c, function)) {
+            /* One that runs in C runs here, as weak_callbacks runs it. */
+            c->weak_running = 1;
+            if (c->finalize_calls_len) finalize_one(c);
+            else weak_one(c);
+            c->weak_running = 0;
+            attend(c);
+            continue;
+        }
+        if (c->finalize_calls_len) {
+            finalize_pop(c);
+            held = parts_tuple(c, 3, (SPYValue *[]){spy_retain(state), spy_retain(self), int_value(c, (int64_t)c->finalize_calls_len)});
+        } else {
+            memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+            spy_retain(function);
+            if (name_set(c, self, "__callback__", c->none)) {
+                report_unraisable(c, "Exception ignored while calling weakref callback ", function, NULL);
+                spy_clear_error(c);
+                spy_release(function); spy_release(self);
+                continue;
+            }
+            held = parts_tuple(c, 3, (SPYValue *[]){spy_retain(state), spy_retain(self), spy_retain(function)});
+            spy_release(function);
+        }
+        spy_release(state);
+        if (!held) { spy_release(self); return NULL; }
+        /* While it runs, no collection runs finalizers (finalizers_wait). */
+        c->finalizing = c->calls_len + 1;
+        return callk(c, m, function, 1, &self, collect_called, held);
+    }
+    schedule_collection(c);
+    SPYValue *count = spy_retain(items[0]);
+    spy_release(state);
+    return count;
+}
 /* _collect() runs the collector, as spy_collect; _tracked(value);
  * _collection_limit(n) sets SPY_LIMIT_COLLECTION and returns the old one. */
 static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     if (argc != (id != 0)) return spy_error(c, "TypeError", id ? "expected one argument" : "expected no arguments");
+    Machine *m = id ? NULL : step_machine(c);
+    if (m) {
+        c->collect_memory = SIZE_MAX;
+        SPYValue *state = parts_tuple(c, 2, (SPYValue *[]){int_value(c, (int64_t)collect_once(c)), spy_retain(c->booleans[0])});
+        return state ? collect_go(c, m, state) : NULL;
+    }
     if (!id) return spy_int(c, (int64_t)collect(c));
     if (id == 1) return spy_bool(c, gc_tracked(c, argv[0]));
     size_t old = c->collection_limit;
@@ -18766,9 +18851,11 @@ static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     return spy_int(c, (int64_t)old);
 }
 static int gc_natives(SPYContext *c, SPYValue *module) {
-    return define_native(c, module, "_collect", gc_native, (void *)0) ||
-        define_native(c, module, "_tracked", gc_native, (void *)1) ||
-        define_native(c, module, "_collection_limit", gc_native, (void *)2);
+    if (define_native(c, module, "_collect", gc_native, (void *)0) || define_native(c, module, "_tracked", gc_native, (void *)1) ||
+        define_native(c, module, "_collection_limit", gc_native, (void *)2)) return -1;
+    /* _collect's finalizers may be calls on its step's machine (collect_go). */
+    name_local(module, "_collect")->as.native.host = 2;
+    return 0;
 }
 /* The sys module's runtime state. Constant metadata is Python in modules/sys.py. */
 enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_MAX_STR_DIGITS, SYS_WRITE, SYS_FLUSH, SYS_GETFRAME, SYS_FRAME_MODULE,
