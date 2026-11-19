@@ -17936,8 +17936,9 @@ static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
 static SPYValue *item_special(SPYContext *, SPYValue *, const char *);
 static SPYValue *rich_special(SPYContext *, SPYValue *, int, int *);
 static SPYValue *index_special(SPYContext *, SPYValue *);
-static SPYValue *special_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
-static SPYValue *special_env(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, int, SPYValue **);
+static SPYValue *special_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, Continuation, SPYValue *);
+static SPYValue *conversion_absent(SPYContext *, SPYValue *, SPYValue *);
+static SPYValue *special_env(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
 /* A class's __new__ that callk called returned result, state the class
  * and the arguments' tuple: as type_call, an instance of the class runs
@@ -23339,7 +23340,8 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
     release_all(9, parts);
     /* A __buffer__ takes the flags (conversion_method). */
     if (!job || !function) spy_release(found[1]);
-    if (job && function) callk(c, m, function, 1 + (found[1] != NULL), (SPYValue *[]){spy_retain(v), found[1]}, percent_converted, job);
+    if (job && function) special_callk(c, m, function, v, found[1] != NULL, &found[1], machine_function(c, function) ? NULL : conversion_absent(c, found[0], v),
+                                                percent_converted, job);
     else if (!machine_push(c, m, job) && !machine_push(c, m, spy_retain(c->replacing)) && !machine_push(c, m, spy_retain(callee)) &&
              !machine_push(c, m, spy_retain(v)) && (*piece = repr_call(c, m, &env))) {
         if (!env) {
@@ -26577,6 +26579,9 @@ static NO_INLINE SPYValue *numeric_named(SPYContext *c, int id, size_t argc, SPY
     c->entering_kind = CALL_CHECKED;
     return function;
 }
+static SPYValue *truth_special(SPYContext *, SPYValue *, int *);
+static int special_function(SPYContext *, SPYValue *);
+static SPYValue *conversion_env(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **);
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
     /* object.__format__ of an empty spec is str() of its argument. */
@@ -26595,7 +26600,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         (callee == c->types[SPY_MEMORYVIEW] || array || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")))) {
         SPYValue *function = class_lookup(argv[0]->as.map.parent, "__buffer__");
         const char *made = callee == c->types[SPY_MEMORYVIEW] ? "__buffer__" : array ? "bytearray" : "bytes";
-        if (!function || !machine_function(c, function) || !(*spec = spy_int(c, BUFFER_FLAGS))) return NULL;
+        if (!function || !special_function(c, function) || !(*spec = spy_int(c, BUFFER_FLAGS))) return NULL;
         if (!(*name = spy_string(c, made, strlen(made)))) { spy_release(*spec); return NULL; }
         c->entering_kind = CALL_CHECKED;
         return function;
@@ -26620,7 +26625,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
          * returns, named by the builtin. */
         const char *builtin = id == B_HEX ? "hex" : id == B_OCT ? "oct" : id == B_BIN ? "bin" : "chr";
         *spec = NULL;
-        if (!(function = index_function(c, argv[0])) || !machine_function(c, function) || !(*name = spy_string(c, builtin, 3))) return NULL;
+        if (!(function = index_special(c, argv[0])) || !special_function(c, function) || !(*name = spy_string(c, builtin, 3))) return NULL;
         c->entering_kind = CALL_CHECKED;
         return function;
     }
@@ -26635,7 +26640,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
             goto converted;
         }
         function = class_lookup(cls, "__format__");
-        if (function && machine_function(c, function)) {
+        if (function && special_function(c, function)) {
             if (!(*spec = text ? spy_retain(text) : spy_string(c, "", 0)) || !(*name = spy_string(c, "__format__", 10))) { spy_release(*spec); *spec = NULL; return NULL; }
             c->entering_kind = CALL_CHECKED;
             return function;
@@ -26648,7 +26653,7 @@ converted:
         /* False names a __len__ bool() takes the truth of. */
         int length = 0;
         *spec = NULL;
-        if (!(function = truth_function(c, argv[0], &length)) ||
+        if (!(function = truth_special(c, argv[0], &length)) ||
             !(*name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8))) return NULL;
         c->entering_kind = CALL_CHECKED;
         return function;
@@ -26679,7 +26684,7 @@ converted:
         function = class_lookup(cls, "__len__"), method = "reversed";
     /* ascii() escapes the __repr__'s text, named "ascii". */
     if (id == B_ASCII) method = "ascii";
-    if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
+    if (!function || !special_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
     /* round() passes ndigits but None; next() keeps its default. */
     *spec = argc == 2 && id == B_ROUND && argv[1]->type != SPY_NONE ? spy_retain(argv[1]) : NULL;
     c->entering_kind = CALL_CHECKED;
@@ -26869,9 +26874,10 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
         if (machine_push(c, m, argv[0])) { if (defaults) spy_release(argv[1]); spy_release(found[1]); return NULL; }
         /* next()'s default, marked, waits for a StopIteration. */
         if (defaults && (machine_push(c, m, argv[1]) || machine_push(c, m, spy_retain(c->stopping)))) return NULL;
-        found[0] = spy_retain(argv[0]->type == SPY_ITERATOR ? argv[0]->as.iterator.source : argv[0]);
-        if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
-        c->entering_init = convert;
+        /* A descriptor's read comes first (conversion_env). */
+        if (!(convert = conversion_env(c, m, convert, argv[0]->type == SPY_ITERATOR ? argv[0]->as.iterator.source : argv[0], found[0], found[1], env)))
+            return NULL;
+        c->entering_init = convert; spy_release(convert);
         return spy_retain(c->types[SPY_STRING]);
     }
     /* zip(), map(), enumerate() and filter() call a Python __iter__ (adapter_call). */
@@ -26892,7 +26898,7 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
  * builtin calls it; else the builtin's value. */
 static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *next = argv[0]->as.map.base ? NULL : class_lookup(argv[0]->as.map.parent, "__next__"), *result;
-    if (next && machine_function(c, next) && (result = instance_call(c, m, n, callee, -1, argc, argv, env)) != c->unbound) return result;
+    if (next && special_function(c, next) && (result = instance_call(c, m, n, callee, -1, argc, argv, env)) != c->unbound) return result;
     if (next && next->type == SPY_FUNCTION) {
         if (!(result = call_plain(c, next, -1, n, 1, argv)) && argc == 2 && error_is(c, "StopIteration")) {
             spy_clear_error(c);
@@ -27526,7 +27532,7 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
             SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)i), int_value(c, mask)};
             SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
             release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
-            return state ? special_callk(c, m, function, item, 0, NULL, index_argued, state) : NULL;
+            return state ? special_callk(c, m, function, item, 0, NULL, NULL, index_argued, state) : NULL;
         }
         /* A search bound may be None. */
         if (index_marked(mask, i) && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE || !searches(callee))) break;
@@ -27537,7 +27543,7 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)i), int_value(c, mask)};
         SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
         release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
-        return state ? special_callk(c, m, index_special(c, part), part, 0, NULL, index_argued, state) : NULL;
+        return state ? special_callk(c, m, index_special(c, part), part, 0, NULL, NULL, index_argued, state) : NULL;
     }
     if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, args->as.seq.len, args->as.seq.items)) {
         /* enumerate() goes on to its iterable's Python __iter__ (adapter_call). */
@@ -28242,9 +28248,10 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         argv[-1] = found[0];
         if (argc == 2 && !defaults) spy_release(machine_pop(m));
         if (defaults && machine_push(c, m, spy_retain(c->stopping))) return NULL;
-        found[0] = spy_retain(argv[0]->type == SPY_ITERATOR ? argv[0]->as.iterator.source : argv[0]);
-        if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
-        c->entering_init = convert;
+        /* A descriptor's read comes first (conversion_env). */
+        if (!(convert = conversion_env(c, m, convert, argv[0]->type == SPY_ITERATOR ? argv[0]->as.iterator.source : argv[0], found[0], found[1], env)))
+            return NULL;
+        c->entering_init = convert; spy_release(convert);
         return spy_retain(c->types[SPY_STRING]);
     }
     if (calls && machine_builtin(callee) && argc <= 3) {
@@ -30349,7 +30356,7 @@ static NO_INLINE SPYValue *memory_key_call(SPYContext *c, Machine *m, SPYValue *
     SPYValue *count = int_value(c, (int64_t)d), *state = count ? spy_tuple(c, 3, (SPYValue *[]){view, key, count}) : NULL;
     spy_release(count);
     if (!state) return NULL;
-    special_callk(c, m, index_special(c, key->as.seq.items[d]), key->as.seq.items[d], 0, NULL, memory_key_returned, state);
+    special_callk(c, m, index_special(c, key->as.seq.items[d]), key->as.seq.items[d], 0, NULL, NULL, memory_key_returned, state);
     return c->k_fn ? c->unbound : NULL;
 }
 /* What a view[key]'s __index__ (memory_key_call) returned in result:
@@ -30381,7 +30388,7 @@ static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, 
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_INDEX;
     SPYValue *argument = key->type == SPY_TUPLE ? key->as.seq.items[d] : key->type == SPY_SLICE ? slice_part(c, key) : key;
-    if ((function = special_env(c, m, function, argument, NULL, 0, env))) return function;
+    if ((function = special_env(c, m, function, argument, NULL, NULL, env))) return function;
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
 }
@@ -30577,27 +30584,33 @@ static int set_plain(const Operator *o, int rich, SPYValue *v) {
  * step makes on self and other (NULL for none), its state on m's stack:
  * function itself when it is on the machine; else the descriptor's read
  * (descriptor_getter), a __get__ called first on function, self and
- * self's class, a property's getter on self, with other, maybe and
+ * self's class, a property's getter on self, with other, absent and
  * c->descripting pushed for the call of what it returns, the step's own
- * (descripted); maybe whether the operation takes a read's AttributeError
- * for an absent method (special_method_maybe). The function to enter,
- * owned, with *env; else NULL with an error, what it pushed popped. */
+ * (descripted); absent, for an operation that takes a read's
+ * AttributeError for an absent method (special_method_maybe), what it
+ * then gives, or a 1-tuple of the TypeError's message it then raises;
+ * else NULL. The function to enter, owned, with *env; else NULL with an
+ * error, what it pushed popped. */
 /* What a special method's descriptor read (special_env) returned to m,
  * in *result, which it takes: its call on the argument under
  * c->descripting, if any, entered on m as kind when its function is on
  * the machine, the machine returned; else made here, its value in
  * *result, and m. A read's AttributeError where the method may be absent
- * is NotImplemented, its operation going on without it. */
+ * gives what its absence does (special_env). */
 static NO_INLINE Machine *descripted(SPYContext *c, Machine *m, int kind, SPYValue **result) {
     SPYValue *bound = *result, *args[2];
     spy_release(machine_pop(m));
-    SPYValue *maybe = machine_pop(m), *other = machine_pop(m);
+    SPYValue *absent = machine_pop(m), *other = machine_pop(m);
     if (!bound) {
-        if (maybe == c->booleans[1] && error_is(c, "AttributeError")) { spy_clear_error(c); *result = spy_retain(c->not_implemented); }
-        spy_release(maybe); spy_release(other);
+        if (absent != c->unbound && error_is(c, "AttributeError")) {
+            spy_clear_error(c);
+            if (absent->type == SPY_TUPLE) spy_error(c, "TypeError", absent->as.seq.items[0]->as.string.data);
+            else *result = spy_retain(absent);
+        }
+        spy_release(absent); spy_release(other);
         return m;
     }
-    spy_release(maybe);
+    spy_release(absent);
     SPYValue *function = machine_function(c, bound) ? bound : bound_function(c, bound);
     size_t argc = 0;
     *result = NULL;
@@ -30616,14 +30629,55 @@ static NO_INLINE Machine *descripted(SPYContext *c, Machine *m, int kind, SPYVal
     release_all(argc, args); spy_release(bound);
     return m;
 }
-static SPYValue *special_env(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, SPYValue *other, int maybe, SPYValue **env) {
+/* Whether special method function is one a step calls: on the machine,
+ * or a descriptor whose read is (descriptor_getter). */
+static int special_function(SPYContext *c, SPYValue *function) { return machine_function(c, function) || descriptor_getter(c, function); }
+/* truth_function, or a descriptor __bool__, of a class with no __len__,
+ * whose read a step makes first (special_env). */
+static SPYValue *truth_special(SPYContext *c, SPYValue *v, int *length) {
+    SPYValue *function = truth_function(c, v, length), *cls = value_class(c, v);
+    if (function || builtin_base(c, v, "__bool__", "__len__")) return function;
+    function = class_lookup(cls, "__bool__");
+    return function && !class_lookup(cls, "__len__") && descriptor_getter(c, function) ? function : NULL;
+}
+/* What converting self by the special method of its class that name
+ * names (conversion_method), read as a descriptor, gives when an
+ * AttributeError makes it absent (special_env): repr() and ascii(), and
+ * str() by __repr__, the default text; bool() True; hash() and round()
+ * their TypeError's message in a tuple; else NULL. */
+static SPYValue *conversion_absent(SPYContext *c, SPYValue *name, SPYValue *self) {
+    const char *method = name && name->type == SPY_STRING ? name->as.string.data : "";
+    SPYValue *whole = NULL, *message;
+    char text[320];
+    if (!strcmp(method, "__repr__") || !strcmp(method, "ascii") || (!strcmp(method, "__str__") && !class_lookup(value_class(c, self), "__str__"))) {
+        Buffer b = { .ctx = c, .whole = &whole };
+        return whole_text(&b, bare_repr(&b, self));
+    }
+    if (!strcmp(method, "__bool__")) return spy_bool(c, 1);
+    if (!strcmp(method, "__hash__")) snprintf(text, sizeof text, "unhashable type: '%s'", type_name(self));
+    else if (!strcmp(method, "__round__")) snprintf(text, sizeof text, "type %s doesn't define __round__ method", type_name(self));
+    else return NULL;
+    SPYValue *tuple = (message = spy_string(c, text, strlen(text))) ? spy_tuple(c, 1, &message) : NULL;
+    spy_release(message);
+    return tuple;
+}
+/* special_env of conversion function of self, which name names
+ * (conversion_method), with spec, which it takes, NULL for none, and the
+ * function's absence (conversion_absent). */
+static SPYValue *conversion_env(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, SPYValue *name, SPYValue *spec, SPYValue **env) {
+    SPYValue *absent = machine_function(c, function) ? NULL : conversion_absent(c, name, self);
+    SPYValue *entered = c->error_type[0] ? NULL : special_env(c, m, function, self, spec, absent, env);
+    spy_release(absent); spy_release(spec);
+    return entered;
+}
+static SPYValue *special_env(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, SPYValue *other, SPYValue *absent, SPYValue **env) {
     SPYValue *get = machine_function(c, function) ? NULL : descriptor_getter(c, function);
     if (!get) {
         SPYValue *args[] = {spy_retain(self), spy_retain(other)};
         return (*env = function_env(c, function, 1 + !!other, args, NULL, 1)) ? spy_retain(function) : NULL;
     }
     size_t depth = m->len;
-    if (machine_push(c, m, spy_retain(other ? other : c->unbound)) || machine_push(c, m, spy_retain(c->booleans[maybe])) ||
+    if (machine_push(c, m, spy_retain(other ? other : c->unbound)) || machine_push(c, m, spy_retain(absent ? absent : c->unbound)) ||
         machine_push(c, m, spy_retain(c->descripting))) {
         while (m->len > depth) spy_release(machine_pop(m));
         return NULL;
@@ -30647,8 +30701,19 @@ static SPYValue *special_read(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     Continuation k = (Continuation)(void (*)(void))state->as.seq.items[n - 2]->as.native.call;
     SPYValue *ctx = state->as.seq.items[n - 1] == c->unbound ? NULL : spy_retain(state->as.seq.items[n - 1]);
     for (size_t i = 0; i < argc; i++) argv[i] = spy_retain(args->as.seq.items[i]);
+    if (!bound) {
+        /* What an absent method gives (special_env). */
+        SPYValue *absent = state->as.seq.items[1], *result = NULL;
+        release_all(argc, argv);
+        if (absent != c->none && error_is(c, "AttributeError")) {
+            spy_clear_error(c);
+            if (absent->type == SPY_TUPLE) spy_error(c, "TypeError", absent->as.seq.items[0]->as.string.data);
+            else result = spy_retain(absent);
+        }
+        spy_release(state);
+        return k(c, m, ctx, result);
+    }
     spy_release(state);
-    if (!bound) { release_all(argc, argv); return k(c, m, ctx, NULL); }
     SPYValue *result = callk(c, m, bound, argc, argv, k, ctx);
     spy_release(bound);
     return result;
@@ -30657,17 +30722,21 @@ static SPYValue *special_read(SPYContext *c, Machine *m, SPYValue *state, SPYVal
  * the argc (at most 8) arguments argv, which it takes, then k with ctx:
  * function itself, or the descriptor's read (descriptor_getter) first,
  * on m too, what it returns then called (special_read), its errors the
- * call's. */
-static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+ * call's but an AttributeError for an absent method's (special_env),
+ * absent, which it takes, NULL for none. */
+static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, size_t argc, SPYValue **argv, SPYValue *absent,
+                               Continuation k, SPYValue *ctx) {
     SPYValue *get = machine_function(c, function) ? NULL : descriptor_getter(c, function), *all[9];
     if (!get) {
+        spy_release(absent);
         all[0] = spy_retain(self);
         if (argc) memcpy(all + 1, argv, argc * sizeof(*argv));
         return callk(c, m, function, argc + 1, all, k, ctx);
     }
     SPYValue *tuple = tuple_of(c, argc, argv);
     release_all(argc, argv);
-    SPYValue *state = tuple ? k_state(c, 1, (SPYValue *[]){tuple, NULL, NULL}, k, ctx) : (spy_release(ctx), NULL);
+    SPYValue *state = tuple ? k_state(c, 2, (SPYValue *[]){tuple, absent ? absent : spy_none(c), NULL, NULL}, k, ctx) :
+                      (spy_release(ctx), spy_release(absent), NULL);
     if (!state) return NULL;
     if (function->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, special_read, state);
     return callk(c, m, get, 3, (SPYValue *[]){spy_retain(function), spy_retain(self), spy_retain(value_class(c, self))}, special_read, state);
@@ -30731,7 +30800,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE ||
         (x->type == SPY_MEMORYVIEW && !x->as.memory.released && x->as.memory.ndim)) &&
         (function = index_special(c, part = y->type == SPY_SLICE ? slice_part(c, y) : y)) && !operator_push(c, m, x, y, OPERATOR_INDEX))
-        return special_env(c, m, function, part, NULL, 0, env);
+        return special_env(c, m, function, part, NULL, NULL, env);
     /* A builtin sequence repeated by an instance whose class multiplies
      * neither way: its Python __index__ first, then the repetition by its
      * int (operator_returned); in place, only of the sequence x. */
@@ -30740,7 +30809,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     if (count && count->type == SPY_INSTANCE && !class_lookup(value_class(c, count), "__mul__") &&
         !class_lookup(value_class(c, count), "__rmul__") && (function = index_special(c, count)) &&
         !operator_push(c, m, count == y ? x : y, count, OPERATOR_INDEX))
-        return special_env(c, m, function, count, NULL, 0, env);
+        return special_env(c, m, function, count, NULL, NULL, env);
     if (contains) {
         /* A list's or tuple's items, in any test but one inside a chain;
          * a generator's or an iterable instance's, in an expression. */
@@ -30867,7 +30936,7 @@ found:
     if (!function || (!machine_function(c, function) && !descriptor_getter(c, function)) ||
         operator_push(c, m, x, y, ins->node ? phase : phase | op << 2) || (negated && machine_push(c, m, spy_retain(c->negating)))) return NULL;
     int maybe = kind == OPERATE_BINARY || kind == OPERATE_COMPARE || (kind == OPERATE_INPLACE && function != class_lookup(value_class(c, x), o->inplace));
-    if ((function = special_env(c, m, function, self, kind == OPERATE_UNARY ? NULL : other, maybe, env))) return function;
+    if ((function = special_env(c, m, function, self, kind == OPERATE_UNARY ? NULL : other, maybe ? c->not_implemented : NULL, env))) return function;
     for (int i = 0; i < 3 + negated; i++) spy_release(machine_pop(m));
     return NULL;
 }
@@ -31204,7 +31273,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         SPYValue *function = key && y->type == SPY_SLICE ? index_special(c, slice_part(c, key)) : NULL, *next = function ? slice_part(c, key) : NULL;
         size_t depth = m->len;
         if (function && !operator_push(c, m, x, key, OPERATOR_INDEX)) {
-            SPYValue *env = NULL, *entered = special_env(c, m, function, next, NULL, 0, &env);
+            SPYValue *env = NULL, *entered = special_env(c, m, function, next, NULL, NULL, &env);
             Call *call = entered ? call_enter(c, entered, env, m) : NULL;
             if (call) {
                 spy_release(key); spy_release(x); spy_release(y);
@@ -31248,7 +31317,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             /* The repetition then takes y's Python __index__ (operator_call). */
             size_t depth = m->len;
             int pushed = !operator_push(c, m, x, y, OPERATOR_INDEX);
-            SPYValue *env = NULL, *entered = pushed ? special_env(c, m, index_special(c, y), y, NULL, 0, &env) : NULL;
+            SPYValue *env = NULL, *entered = pushed ? special_env(c, m, index_special(c, y), y, NULL, NULL, &env) : NULL;
             Call *call = entered ? call_enter(c, entered, env, m) : NULL;
             if (call) {
                 spy_release(x); spy_release(y);
@@ -31261,7 +31330,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             int negated = 0;
             SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result, &negated);
             if (function && !operator_push(c, m, x, y, OPERATOR_LAST | called) && !(negated && machine_push(c, m, spy_retain(c->negating)))) {
-                SPYValue *env = NULL, *entered = special_env(c, m, function, self, self == x ? y : x, 1, &env);
+                SPYValue *env = NULL, *entered = special_env(c, m, function, self, self == x ? y : x, c->not_implemented, &env);
                 Call *call = entered ? call_enter(c, entered, env, m) : NULL;
                 if (call) {
                     spy_release(x); spy_release(y);
@@ -32781,7 +32850,7 @@ static NO_INLINE int filter_truth(SPYContext *c, Machine *m, SPYValue *v, SPYVal
     int status;
     while ((item = filter_next(c, m, v, fn, env, &status))) {
         int length = 0;
-        SPYValue *function = item->type == SPY_INSTANCE || metaclassed(item) ? truth_function(c, item, &length) : NULL, *name;
+        SPYValue *function = item->type == SPY_INSTANCE || metaclassed(item) ? truth_special(c, item, &length) : NULL, *name;
         if (function) {
             v->as.iterator.counter = item;
             name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8);
@@ -33013,14 +33082,11 @@ static NO_INLINE int next_ended(SPYContext *c, SPYValue *v) {
  * with *env, item and name on m's stack under c->converting; 1, or -1 on
  * an error. */
 static int convert_call(SPYContext *c, Machine *m, SPYValue *function, SPYValue *item, SPYValue *name, SPYValue *spec, SPYValue **fn, SPYValue **env) {
-    SPYValue *args[] = {spy_retain(item), spec};
     if (machine_push_all(c, m, 3, (SPYValue *[]){spy_retain(item), name, spy_retain(c->converting)})) {
-        spy_release(args[0]); spy_release(spec);
+        spy_release(spec);
         return -1;
     }
-    if (!(*env = function_env(c, function, 1 + (spec != NULL), args, NULL, 1))) return -1;
-    *fn = spy_retain(function);
-    return 1;
+    return (*fn = conversion_env(c, m, function, item, name, spec, env)) ? 1 : -1;
 }
 /* What the Python __new__ of class cls, a map's call (init_convert) of
  * the arguments' tuple args, returned in result, which it takes: as
@@ -35970,15 +36036,17 @@ invalid:
 static const char *const complex_kinds[] = {"__complex__", "__float__", "__index__"};
 /* role names the argument of complex(real, imag), or is NULL for complex(x). */
 /* The number value converts by, with its kind: itself or its builtin
- * value (NULL), or the method of its __complex__ (allow_complex), its
- * __float__ or its __index__; an error naming role when it has none. */
+ * value (NULL), or its type's __complex__ (allow_complex), __float__ or
+ * __index__, owned and not yet read (complex_go); an error naming role
+ * when it has none. */
 static int complex_method(SPYContext *c, SPYValue **value, int allow_complex, const char *role, SPYValue **method, const char **kind) {
     SPYValue *v = *value, *base = builtin_base(c, v, allow_complex ? "__complex__" : "__float__", "__float__");
     if (base && (base->type == SPY_COMPLEX || is_number(base))) v = *value = base;
     *method = NULL;
     if (v->type == SPY_COMPLEX || is_number(v)) return 0;
-    for (int i = !allow_complex; i < 3 && !*method && !c->error_type[0]; i++) *method = special_method(c, v, *kind = complex_kinds[i]);
-    if (*method || c->error_type[0]) return *method ? 0 : -1;
+    SPYValue *cls = value_class(c, v);
+    for (int i = !allow_complex; i < 3 && !*method; i++) *method = spy_retain(class_lookup(cls, *kind = complex_kinds[i]));
+    if (*method) return 0;
     char fq[256];
     if (role) errorf(c, "TypeError", "complex() argument '%s' must be a real number, not %s", role, type_fqname(v, fq, sizeof(fq)));
     else errorf(c, "TypeError", "complex() argument must be a string or a number, not %s", type_fqname(v, fq, sizeof(fq)));
@@ -36008,8 +36076,8 @@ static int as_complex(SPYContext *c, SPYValue *value, double complex *number, in
     if (complex_method(c, &value, allow_complex, role, &method, &kind)) return -1;
     *was_complex = value->type == SPY_COMPLEX;
     if (!method) { *number = numeric_complex(c, value); return c->error_type[0] ? -1 : 0; }
-    SPYValue *converted = call(c, method, 0, NULL);
-    spy_release(method);
+    SPYValue *bound = special_method(c, value, kind), *converted = bound ? call(c, bound, 0, NULL) : NULL;
+    spy_release(bound); spy_release(method);
     SPYValue *part = converted ? complex_result(c, value, kind, converted) : NULL;
     if (!part) return -1;
     *number = numeric_complex(c, part); *was_complex = part->type == SPY_COMPLEX;
@@ -36081,7 +36149,8 @@ static SPYValue *complex_go(SPYContext *c, Machine *m, SPYValue *job) {
             spy_release(method); spy_release(job); return NULL;
         }
         if (method) {
-            SPYValue *result = callk(c, m, method, 0, NULL, complex_called, job);
+            /* A descriptor's read comes first (special_callk). */
+            SPYValue *result = special_callk(c, m, method, value, 0, NULL, NULL, complex_called, job);
             spy_release(method);
             return result;
         }
@@ -41065,10 +41134,12 @@ static int print_unit(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPY
     int read = file && !writer ? print_attribute(c, m, state, at, file, "write", &writer) : 0;
     if (read) return read;
     if (value->type == SPY_INSTANCE && (*function = conversion_method(c, c->types[SPY_STRING], 1, &value, found))) {
-        SPYValue *self = spy_retain(value);
-        return machine_push_all(c, m, 6, (SPYValue *[]){writer ? writer : spy_none(c), spy_retain(state), int_value(c, (int64_t)at + 1),
-                                                        spy_retain(c->replacing), found[0], self}) ||
-               !(*env = function_env(c, *function, 1, &self, NULL, 0)) ? -1 : 1;
+        if (machine_push_all(c, m, 6, (SPYValue *[]){writer ? writer : spy_none(c), spy_retain(state), int_value(c, (int64_t)at + 1),
+                                                     spy_retain(c->replacing), found[0], spy_retain(value)}) ||
+            !(*function = conversion_env(c, m, *function, value, found[0], NULL, env)))
+            return -1;
+        spy_release(*function);
+        return 1;
     }
     if (c->error_type[0]) { spy_release(writer); return -1; }
     if (repr_job(c, c->types[SPY_STRING], value)) {
@@ -41408,12 +41479,11 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         }
         if (!parts[0] || !parts[1] || !parts[2] || machine_push(c, m, spy_retain(state)) ||
             machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, name ? name : spy_string(c, "__format__", 10)) ||
-            machine_push(c, m, spy_retain(object)) ||
-            !(*env = function_env(c, method, 1 + !!spec, (SPYValue *[]){spy_retain(object), spy_retain(spec)}, NULL, 1))) {
+            machine_push(c, m, spy_retain(object)) || !(*function = conversion_env(c, m, method, object, name, spy_retain(spec), env))) {
             spy_release(object); spy_release(spec);
             return NULL;
         }
-        *function = method;
+        spy_release(*function);
         spy_release(object); spy_release(spec);
         c->entering_init = *function; c->entering_kind = CALL_CHECKED;
         return spy_retain(c->types[SPY_STRING]);

@@ -10,8 +10,8 @@
 (* access.                                                                 *)
 (*                                                                         *)
 (* A program, for M one of __len__, __iter__, __bool__, __call__, __neg__, *)
-(* __index__, with an implementation giving 5 (iter([5]) and False for     *)
-(* __iter__ and __bool__), defines M                                       *)
+(* __index__, __repr__, with an implementation giving 5 (iter([5]),       *)
+(* False and "5" for __iter__, __bool__ and __repr__), defines M           *)
 (*                                                                         *)
 (*     instance   on c = C() only: c.M = lambda: ...                       *)
 (*     class      on C             base       on B, with class C(B)        *)
@@ -23,22 +23,22 @@
 (*                returns the implementation bound to the object           *)
 (*                                                                         *)
 (* A failing descriptor makes M absent for the operations with a fallback  *)
-(* (bool and iter here, PLS-315 7.3.2 LookupSpecialMaybe), and raises its  *)
-(* AttributeError for the rest.                                            *)
+(* (bool, iter and repr here, PLS-315 7.3.2 LookupSpecialMaybe; repr then  *)
+(* gives the default text), and raises its AttributeError for the rest.    *)
 (*                                                                         *)
 (* where C may also define __getattribute__ recording the names it looks   *)
 (* up, then invokes M implicitly on c (len(c), list(iter(c)), bool(c),     *)
-(* c(), -c, range(9)[c]) or on C, or explicitly as c.M(). The outcome is   *)
-(* the result (a list for iterators), or the exception, and whether        *)
-(* __getattribute__ saw M.                                                 *)
+(* c(), -c, range(9)[c], repr(c)) or on C, or explicitly as c.M(). The     *)
+(* outcome is the result (a list for iterators, "default" for a default    *)
+(* repr), or the exception, and whether __getattribute__ saw M.            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__", "__index__"}
+Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__", "__index__", "__repr__"}
 Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass", "failing", "descriptor"}
 
 \* The methods looked up with LookupSpecialMaybe here.
-Optional == {"__bool__", "__iter__"}
+Optional == {"__bool__", "__iter__", "__repr__"}
 Programs == [method : Methods, where : Wheres, getattribute : BOOLEAN, op : {"implicit", "onclass", "explicit"}]
 
 VARIABLES program, outcome
@@ -53,6 +53,7 @@ Gives(m, six) == CASE m = "__iter__" -> IF six THEN "[6]" ELSE "[5]"
 
 \* An implicit invocation on an object whose type does not define M.
 Missing(m, onclass) == CASE m = "__bool__" -> "True"                 \* everything is true by default
+                         [] m = "__repr__" -> "default"            \* object's or type's repr
                          [] m = "__call__" /\ onclass -> "a C"       \* calling a class makes an instance
                          [] OTHER -> "TypeError"
 
@@ -64,7 +65,9 @@ Implicit(p, onclass) ==
         ELSE Missing(p.method, onclass)
 
 \* c.M through ordinary attribute access: instance dict, then the class.
-Explicit(p) == IF p.where \in {"deleted", "metaclass", "failing"} THEN "AttributeError" ELSE Gives(p.method, p.where = "replaced")
+\* object's __repr__ serves c.__repr__ when C has none.
+Explicit(p) == IF p.method = "__repr__" /\ p.where \in {"deleted", "metaclass"} THEN "default"
+               ELSE IF p.where \in {"deleted", "metaclass", "failing"} THEN "AttributeError" ELSE Gives(p.method, p.where = "replaced")
 
 Run(p) ==
     CASE p.op = "implicit" -> Implicit(p, FALSE) \o " seen=False"
