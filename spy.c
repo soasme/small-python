@@ -2835,19 +2835,22 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
     else if (map->as.map.index) index_insert(map, used);
     return 0;
 }
+/* Store value in entry found of map, or under key, of hash, in a new
+ * one when found is -1. */
+static int map_put(SPYContext *c, SPYValue *map, ptrdiff_t found, SPYValue *key, SPYValue *value, int64_t hash) {
+    if (found < 0) return map_append(c, map, key, value, hash);
+    SPYValue *old = map->as.map.items[found].value;
+    class_changed(map);
+    map->as.map.items[found].value = spy_retain(value);
+    spy_release(old);
+    return 0;
+}
 static int map_set_hash(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value, int64_t hash) {
     map = namespace_map(map);
     int pending_error = c->error_type[0] != 0;
     ptrdiff_t i = map_find_hash(map, key, hash);
     if (!pending_error && c->error_type[0]) return -1;
-    if (i >= 0) {
-        SPYValue *old = map->as.map.items[i].value;
-        class_changed(map);
-        map->as.map.items[i].value = spy_retain(value);
-        spy_release(old);
-        return 0;
-    }
-    return map_append(c, map, key, value, hash);
+    return map_put(c, map, i, key, value, hash);
 }
 static int map_set(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value) {
     int64_t hash;
@@ -17560,6 +17563,32 @@ static SPYValue *kwargs_of(SPYValue *fn, SPYValue *env) {
     for (Node *arg = function_parameters(fn); arg; arg = arg->next) if (arg->op == P_KWARGS) return bound_local(env, arg->text);
     return NULL;
 }
+static int map_scan(SPYContext *, SPYValue *, SPYValue *, int64_t, MapCursor *, ptrdiff_t *);
+static SPYValue *map_findk(SPYContext *, Machine *, SPYValue *, SPYValue *, int64_t, MapCursor, Continuation, SPYValue *);
+static SPYValue *keyword_stored(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* Store keyword i of keywords, of hash, in the **kwargs dict extra of fn
+ * binding into env after argc positional arguments: 0, or -1 with an
+ * error; 2 when comparing it with a stored name by a Python __eq__ goes
+ * on on the call step's machine (map_findk, keyword_stored). */
+static int keyword_put(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i, SPYValue *extra,
+                       int64_t hash) {
+    Entry *entry = &map_items(keywords)[i];
+    SPYValue *storage = namespace_map(extra);
+    Machine *m = binding_machine(c, fn);
+    ptrdiff_t found = map_first(storage, hash);
+    if (found >= 0 && storage->as.map.items[found].key != entry->key) {
+        MapCursor cursor = map_cursor(storage, hash);
+        if (!m) found = map_find_hash(storage, entry->key, hash);
+        else if (map_scan(c, storage, entry->key, hash, &cursor, &found)) {
+            SPYValue *state = parts_tuple(c, 7, (SPYValue *[]){spy_retain(fn), spy_retain(env), spy_retain(keywords), int_value(c, (int64_t)i),
+                                                                int_value(c, hash), spy_none(c), int_value(c, (int64_t)argc)});
+            if (state) map_findk(c, m, storage, entry->key, hash, cursor, keyword_stored, state);
+            return c->error_type[0] ? -1 : 2;
+        }
+        if (c->error_type[0]) return -1;
+    }
+    return map_put(c, storage, found, entry->key, entry->value, hash);
+}
 /* bind_arguments's keywords into env from keyword i: the one at i bound
  * to parameter from when matched, else compared from from's next one, or
  * from the first when from is NULL. 0 when they are bound, -1 with an
@@ -17586,8 +17615,11 @@ static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, S
             }
             if (name_set(c, env, arg->text, entry->value)) return -1;
         } else if (extra) {
+            int64_t hash;
             if (entry->key->type != SPY_STRING && keyword_hash(c, fn, env, argc, keywords, i)) return c->error_type[0] ? -1 : 2;
-            if (map_set(c, extra, entry->key, entry->value)) return -1;
+            if (map_hash(c, extra, entry->key, &hash)) return -1;
+            int status = keyword_put(c, fn, env, argc, keywords, i, extra, hash);
+            if (status) return status;
         } else {
             Buffer names = {.ctx = c};
             for (Node *param = params; param && param->op == P_POSONLY; param = param->next)
@@ -27936,7 +27968,26 @@ static SPYValue *keyword_hashed(SPYContext *c, Machine *m, SPYValue *state, SPYV
     int64_t hash;
     /* A failed hash is named as map_hash names it. */
     if (!result || hash_result(c, result, &hash)) hash_failed(c, extra, entry->key);
-    else map_set_hash(c, extra, entry->key, entry->value, hash);
+    else {
+        Machine *machine = c->bind_machine;
+        size_t entries = c->bind_entries;
+        c->bind_machine = m; c->bind_entries = c->entries;
+        int status = keyword_put(c, items[0], items[1], (size_t)items[6]->as.integer_data.small, items[2], i, extra, hash);
+        c->bind_machine = machine; c->bind_entries = entries;
+        if (status == 2) { spy_release(state); return NULL; }
+    }
+    return keyword_resume(c, m, state, i + 1, NULL, 0);
+}
+/* The search of **kwargs for keyword state's name (keyword_put) found
+ * entry result, or -1: it is stored there, and the binding goes on with
+ * the next keyword (keyword_resume). */
+static SPYValue *keyword_stored(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items;
+    size_t i = (size_t)items[3]->as.integer_data.small;
+    Entry *entry = &map_items(items[2])[i];
+    if (result) map_put(c, namespace_map(kwargs_of(items[0], items[1])), (ptrdiff_t)result->as.integer_data.small, entry->key,
+                        entry->value, items[4]->as.integer_data.small);
+    spy_release(result);
     return keyword_resume(c, m, state, i + 1, NULL, 0);
 }
 /* The truth that the comparison's result's Python __bool__ or __len__
@@ -31141,30 +31192,42 @@ static SPYValue *equalk(SPYContext *c, Machine *m, SPYValue *a, SPYValue *b, Con
     return k(c, m, ctx, c->error_type[0] ? NULL : spy_bool(c, truth));
 }
 static SPYValue *map_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The search of map for key, of hash, from the entries *cursor yields on,
+ * as far as a stored key that a Python __eq__ compares with key
+ * (rich_function), *cursor left before it: 1. Else 0, the entry found in
+ * *found, or -1, or an error; a comparison that changes map starts the
+ * search again. */
+static int map_scan(SPYContext *c, SPYValue *map, SPYValue *key, int64_t hash, MapCursor *cursor, ptrdiff_t *found) {
+    SPYValue *storage = namespace_map(map);
+    *found = -1;
+    for (MapCursor before = *cursor; (*found = map_next(storage, hash, cursor)) >= 0; before = *cursor) {
+        SPYValue *candidate = storage->as.map.items[*found].key;
+        if (candidate == key) return 0;
+        if (rich_function(c, candidate, key, R_EQ) || rich_function(c, key, candidate, R_EQ)) { *cursor = before; *found = -1; return 1; }
+        spy_retain(candidate);
+        int matches = equal(candidate, key), unchanged = entry_unchanged(storage, *found, candidate, *cursor);
+        spy_release(candidate);
+        if (c->error_type[0]) return 0;
+        if (!unchanged) *cursor = map_cursor(storage, hash);
+        else if (matches) return 0;
+    }
+    return 0;
+}
 /* The search of map for key, of hash, from the entries cursor yields on,
- * comparing a stored key by Python on m (equalk): the index of the entry
- * found, or -1, as an int for continuation k with ctx, which it takes;
- * NULL for an error. A comparison that changes map starts it again. */
+ * comparing a stored key by Python on m (map_scan, equalk): the index of
+ * the entry found, or -1, as an int for continuation k with ctx, which it
+ * takes; NULL for an error. */
 static SPYValue *map_findk(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor, Continuation k,
                            SPYValue *ctx) {
     SPYValue *storage = namespace_map(map);
-    for (ptrdiff_t i; (i = map_next(storage, hash, &cursor)) >= 0;) {
-        SPYValue *candidate = storage->as.map.items[i].key;
-        if (candidate == key) return k(c, m, ctx, int_value(c, i));
-        if (rich_function(c, candidate, key, R_EQ) || rich_function(c, key, candidate, R_EQ)) {
-            SPYValue *state = k_state(c, 7, (SPYValue *[]){spy_retain(map), spy_retain(key), int_value(c, hash),
-                int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed)), int_value(c, (int64_t)cursor.changes),
-                int_value(c, i), spy_retain(candidate), NULL, NULL}, k, ctx);
-            return state ? equalk(c, m, candidate, key, map_compared, state) : NULL;
-        }
-        spy_retain(candidate);
-        int matches = equal(candidate, key), unchanged = entry_unchanged(storage, i, candidate, cursor);
-        spy_release(candidate);
-        if (c->error_type[0]) return k(c, m, ctx, NULL);
-        if (!unchanged) cursor = map_cursor(storage, hash);
-        else if (matches) return k(c, m, ctx, int_value(c, i));
-    }
-    return k(c, m, ctx, int_value(c, -1));
+    ptrdiff_t i;
+    if (!map_scan(c, storage, key, hash, &cursor, &i)) return k(c, m, ctx, c->error_type[0] ? NULL : int_value(c, i));
+    i = map_next(storage, hash, &cursor);
+    SPYValue *candidate = storage->as.map.items[i].key;
+    SPYValue *state = k_state(c, 7, (SPYValue *[]){spy_retain(map), spy_retain(key), int_value(c, hash),
+        int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed)), int_value(c, (int64_t)cursor.changes),
+        int_value(c, i), spy_retain(candidate), NULL, NULL}, k, ctx);
+    return state ? equalk(c, m, candidate, key, map_compared, state) : NULL;
 }
 /* map_findk's comparison of entry i's key returned result: the entry
  * found if it still holds that key, else the search goes on. */
