@@ -40,12 +40,16 @@ def outcome(p):
         if op == "set":
             m.new = 1
             return "ok"
+        if op == "rebind":
+            return repr(type(namespace["c"].f)(m, 2)(1))
         if op == "call":
             access = p["access"]
             return repr(m([1]) if access == "len" else m() if access == "[].__len__" else m(1))
         value = getattr(m, "tag" if op == "tag" else op)
     except AttributeError:
         return "AttributeError"
+    except TypeError:
+        return "TypeError"
     if op == "__self__":
         return names.get(id(value), repr(value))
     if op == "__func__":

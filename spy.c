@@ -27780,6 +27780,12 @@ static SPYValue *bound_function(SPYContext *c, SPYValue *v) {
 static ALWAYS_INLINE SPYValue *static_function(SPYContext *c, SPYValue *v) {
     return v->type == SPY_STATICMETHOD && machine_function(c, v->as.wrapper.function) ? v->as.wrapper.function : NULL;
 }
+/* Whether v is a method whose function is a method or an instance with
+ * a Python __call__, which a call of v calls with v's self first. */
+static int method_wrapped(SPYContext *c, SPYValue *v) {
+    SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : NULL;
+    return function && (function->type == SPY_METHOD || (function->type == SPY_INSTANCE && bound_function(c, function)));
+}
 /* Whether callee calls a function on the machine with its self
  * (bound_function); then the function, owned, replaces it, and the self
  * goes before the argc arguments argv, which have room for it. */
@@ -28314,6 +28320,15 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         result = format_job(c, m, callee, method, argc, argv, NULL, env);
         spy_release(callee);
         return result;
+    }
+    while (method < 0 && argc < 8 && method_wrapped(c, callee)) {
+        /* A method of a method or of a callable instance gives its self
+         * first to its function, which then unbinds as a method. */
+        SPYValue *inner = spy_retain(callee->as.method.function);
+        memmove(argv + 1, argv, argc++ * sizeof(*argv));
+        argv[0] = spy_retain(callee->as.method.self);
+        spy_release(callee);
+        callee = inner;
     }
     if (method < 0 && unbind(c, &callee, &argc, argv)) {
         if ((*env = function_env(c, callee, argc, argv, NULL, 1))) return callee;
@@ -29536,6 +29551,17 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         m->len--;
         spy_release(callee);
         return class_stack_call(c, m, argv[-1], argc - 1, 1, env);
+    }
+    while (calls && method_wrapped(c, callee) && !grow_array(c, (void **)&m->stack, &m->cap, m->len + 1, sizeof(*m->stack))) {
+        /* A method of a method or of a callable instance gives its self
+         * first to its function, which takes its place. */
+        argv = &m->stack[m->len - argc];
+        memmove(argv + 1, argv, argc++ * sizeof(*argv));
+        m->len++;
+        argv[0] = spy_retain(callee->as.method.self);
+        argv[-1] = spy_retain(callee->as.method.function);
+        spy_release(callee);
+        callee = argv[-1];
     }
     SPYValue *function = bound_function(c, callee);
     if (function) {

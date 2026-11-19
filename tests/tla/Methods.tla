@@ -27,14 +27,15 @@
 (* its function's name, qualified name, documentation and module and is  *)
 (* callable, calling its function; then its type, __self__, __func__, __name__, __qualname__,  *)
 (* __doc__, __module__, or tag, sets an attribute on it, or calls it with  *)
-(* 1 ([1] for len, nothing for __len__).                                   *)
+(* 1 ([1] for len, nothing for __len__), or binds it as a method of 2 and  *)
+(* calls that with 1 (rebind): the method's self goes before 1.            *)
 (*                                                                         *)
 (* The outcome is what is read or returned, or the exception.              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Accesses == {"c.f", "C.f", "c.cm", "C.cm", "c.sm", "c.attr", "[].append", "len", "[].__len__", "C.__dict__[sm]"}
-Ops == {"type", "__self__", "__func__", "__name__", "__qualname__", "__doc__", "__module__", "tag", "set", "call"}
+Ops == {"type", "__self__", "__func__", "__name__", "__qualname__", "__doc__", "__module__", "tag", "set", "call", "rebind"}
 Programs == [access : Accesses, op : Ops]
 
 VARIABLES program, outcome
@@ -75,6 +76,10 @@ Run(p) ==
                                  [] k \in {"function", "staticmethod"} -> "(1,)"
                                  [] k = "builtin method" -> "None"
                                  [] OTHER -> IF a = "len" THEN "1" ELSE "0"
+          \* The method of 2 calls the read object with 2, then 1.
+          [] p.op = "rebind" -> CASE a = "C.f" -> "(1,)"                      \* 2 is self
+                                   [] Builtin(a) -> "TypeError"                \* one argument too many
+                                   [] OTHER -> "(2, 1)"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
