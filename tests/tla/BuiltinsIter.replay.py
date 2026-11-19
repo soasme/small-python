@@ -113,6 +113,9 @@ SOURCES = {
     "adapter_subclass_iter": "log = []\nclass It:\n    def __init__(s, n): s.n = n\n    def __iter__(s):\n        for _ in (): pass\n        log.append(s.n); return iter(range(s.n))\n"
                              "class E(enumerate): pass\nclass Z(zip): pass\ne = E(It(2), 1)\n"
                              "result = (type(e).__name__, list(e), list(Z(It(1), It(1))), len(log))",
+    "iterator_subclass_next": "def gen(*items):\n    for _ in (): pass\n    yield from items\n"
+                              "class E(enumerate): pass\nclass N(enumerate):\n    def __next__(s): return super().__next__()\n"
+                              "p = enumerate(gen(2, 3))\nresult = (next(E(gen(1))), next(N(gen(2))), (p.__next__(), enumerate.__next__(p))[1], next(p, 'end'))",
     "iterator_subclass": "def gen(*items):\n    for _ in (): pass\n    yield from items\n"
                          "class E(enumerate): pass\nclass Z(zip): pass\ne = E(gen(1))\n"
                          "result = (list(E(gen(1, 2))), tuple(Z(gen(1), 'ab')), next(e), next(e, 'end'))",

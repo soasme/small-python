@@ -26321,7 +26321,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* An iterator's __next__, bound or given it, of a Python function is next() of it. */
     if (method == M_NEXT && !argc && callee->type == SPY_ITERATOR) return next_calls(c, callee) ? B_NEXT : -1;
     SPYValue *slot = method < 0 ? slotted_next(c, callee, argc, argv) : NULL;
-    if (slot) return next_calls(c, slot) ? B_NEXT : -1;
+    if (slot) return next_steps(c, slot) ? B_NEXT : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && (callee->type == SPY_GENERATOR || wrapped))) &&
@@ -28299,7 +28299,7 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
  * enters it (instance_call), a plain function's is called here, as the
  * builtin calls it; else the builtin's value. */
 static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
-    SPYValue *next = argv[0]->as.map.base ? NULL : class_lookup(argv[0]->as.map.parent, "__next__"), *result;
+    SPYValue *next = argv[0]->as.map.base && builtin_base(c, argv[0], "__next__", NULL) ? NULL : class_lookup(argv[0]->as.map.parent, "__next__"), *result;
     if (next && special_function(c, next) && (result = instance_call(c, m, n, callee, -1, argc, argv, env)) != c->unbound) return result;
     if (next && next->type == SPY_FUNCTION) {
         if (!(result = call_plain(c, next, -1, n, 1, argv)) && argc == 2 && error_is(c, "StopIteration")) {
@@ -28396,7 +28396,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return result;
     }
-    if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_INSTANCE && is_builtin(callee, B_NEXT)) return next_builtin_call(c, m, n, callee, argc, argv, env);
+    /* A builtin iterator's subclass is consumed as its iterator (iterator_base). */
+    if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_INSTANCE && is_builtin(callee, B_NEXT) && !iterator_base(c, argv[0]))
+        return next_builtin_call(c, m, n, callee, argc, argv, env);
     /* getattr() of an instance, class, super object or module and a str,
      * and a default, or hasattr() of them, as a stack call's (getattr_call). */
     int getter = method < 0 && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER ||
