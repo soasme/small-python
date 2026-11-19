@@ -44,6 +44,8 @@ def outcome(p):
             s[arg(p["start"]):arg(p["stop"]):arg(p["step"])] = (x for x in t)
         elif op == "idxslice":
             s[parts(p, "start"):parts(p, "stop"):parts(p, "step")] = t
+        elif op == "idxlistslice":
+            s[parts(p, "start"):parts(p, "stop"):parts(p, "step")] = list(t)
         elif op == "idxgenslice":
             s[parts(p, "start"):parts(p, "stop"):parts(p, "step")] = (x for x in t)
         elif op == "idxdel":

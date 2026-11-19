@@ -31887,15 +31887,16 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
 }
 /* The Python __index__ of key as the index of method name of list or
  * bytearray object, object's own or its base's (builtin_base), also of
- * the part of a list's slice key it calls first (slice_part), or of a store
+ * the part of its slice key it calls first (slice_part), or of a store
  * into a one-dimensional writable memoryview, which checks those first;
  * else NULL. */
 static SPYValue *slice_part(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *list_index_rest(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
     SPYValue *base = object->type == SPY_INSTANCE ? builtin_base(c, object, name, NULL) : object;
     if (base && base->type == SPY_MEMORYVIEW)
-        return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ? index_special(c, key) : NULL;
-    if (key->type == SPY_SLICE) return base && base->type == SPY_LIST ? index_special(c, slice_part(c, key)) : NULL;
+        return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ?
+               index_special(c, key->type == SPY_SLICE ? slice_part(c, key) : key) : NULL;
+    if (key->type == SPY_SLICE) return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_special(c, slice_part(c, key)) : NULL;
     return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_special(c, key) : NULL;
 }
 /* list_index_rest of an instance, a list, a bytearray or a memoryview. */
@@ -31976,8 +31977,15 @@ static SPYValue *memory_key_returned(SPYContext *c, Machine *m, SPYValue *state,
  * with the key over the count operands the store keeps (index_returned);
  * else NULL, with an error if the call cannot bind. */
 static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, size_t count, SPYValue *const *operands, SPYValue **env) {
-    SPYValue *function = list_index(c, operands[0], key, count == 2 ? "__delitem__" : "__setitem__");
+    SPYValue *function = list_index(c, operands[0], key, count == 2 ? "__delitem__" : "__setitem__"), *value = count == 3 ? operands[2] : NULL;
     size_t len = m->len, d = 0;
+    /* A slice store into a bytearray or a view takes its value's buffer,
+     * which only bytes, a bytearray or a view gives without Python
+     * (index_returned copies it for a bytearray). */
+    if (function && value && key->type == SPY_SLICE && value->type != SPY_BYTES && value->type != SPY_BYTEARRAY && value->type != SPY_MEMORYVIEW) {
+        SPYValue *base = operands[0]->type == SPY_INSTANCE ? builtin_base(c, operands[0], "__setitem__", NULL) : operands[0];
+        if (base && base->type != SPY_LIST) function = NULL;
+    }
     /* A view's tuple key, from its first instance (memory_key_next). */
     if (!function && count == 3 && memory_key_calls(c, operands[0], key, 1)) {
         if (memory_key_next(c, operands[0], key, &d) < 0) return NULL;
@@ -32016,6 +32024,25 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
             c->k_fn = function; c->k_env = env; c->k = NULL; c->k_kind = CALL_INDEX;
             release_all(5, (SPYValue *[]){index, object, item, value, key});
             return;
+        }
+        /* A bytearray stores a copy of a value that is no other bytearray,
+         * converting the slice as written again (bytearray_ass_subscript). */
+        SPYValue *base = !function && index && value ? builtin_value(c, object, SPY_BYTEARRAY) : NULL;
+        if (base && (value->type != SPY_BYTEARRAY || value == base)) {
+            SPYValue *owned, *bytes = buffer_bytes(c, value, &owned);
+            SPYValue *copy = bytes ? bytearray_new(c, bytes->as.string.data, bytes->as.string.len) : NULL;
+            spy_release(owned);
+            if (copy) {
+                SPYValue *again[] = {object, item, copy};
+                function = index_call(c, m, item, 3, again, &env);
+            }
+            spy_release(copy);
+            if (function) {
+                c->k_fn = function; c->k_env = env; c->k = NULL; c->k_kind = CALL_INDEX;
+                release_all(5, (SPYValue *[]){index, object, item, value, key});
+                return;
+            }
+            spy_release(index); index = NULL;
         }
         if (index && ins->op == BC_SET_TARGET && !deletion && slice_source(c, object, index, value)) {
             c->consuming = slice_list(c, m, object, index);

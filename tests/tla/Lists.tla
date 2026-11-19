@@ -18,7 +18,8 @@
 (*         __index__ returns it; insert and pop also called unbound,       *)
 (*         type(s).insert(s, i, 7), with such an instance                  *)
 (*     s[start:stop:step] = t, del s[...]    t: up to two of 7, 8          *)
-(*     s[start:stop:step] = (x for x in t)                                 *)
+(*     s[start:stop:step] = (x for x in t), or list(t), its bounds also  *)
+(*         instances whose Python __index__ returns them                   *)
 (*     s += t   s *= n   s.append(7)   s.clear()   s.copy()   s.extend(t)  *)
 (*     s.insert(i, 7)   s.pop()   s.pop(i)   s.remove(x)   s.reverse()     *)
 (*     s.__init__(x for x in t), which empties s, then extends it         *)
@@ -42,7 +43,7 @@ Op == {[op |-> o, i |-> i, by |-> b] : o \in {"set", "del"}, i \in -4..3, b \in 
       \cup {[op |-> "delslice", start |-> a, stop |-> b, step |-> c] : a \in Bounds, b \in Bounds, c \in {None, 1, 2, -1}}
       \cup {[op |-> "genslice", start |-> a, stop |-> b, step |-> c, t |-> t] :
               a \in {None, 0, 2}, b \in {None, 2, 4}, c \in {None, 2}, t \in Values}
-      \cup {[op |-> o, start |-> a, stop |-> b, step |-> c, t |-> t] : o \in {"idxslice", "idxgenslice"},
+      \cup {[op |-> o, start |-> a, stop |-> b, step |-> c, t |-> t] : o \in {"idxslice", "idxlistslice", "idxgenslice"},
               a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}, t \in Values}
       \cup {[op |-> "idxdel", start |-> a, stop |-> b, step |-> c] : a \in {None, 0, 2}, b \in {None, -1, 4}, c \in {None, 2}}
       \cup {[op |-> o, t |-> t] : o \in {"iadd", "extend", "iaddgen", "initgen"}, t \in Values}
@@ -96,7 +97,7 @@ Run(p) ==
                     ELSE Done([k \in DOMAIN s |-> IF \E j \in DOMAIN ks : ks[j] = k - 1
                                                    THEN p.t[CHOOSE j \in DOMAIN ks : ks[j] = k - 1] ELSE s[k]])
           [] p.op = "genslice" -> Run([p EXCEPT !.op = "setslice"])
-          [] p.op \in {"idxslice", "idxgenslice"} -> Run([p EXCEPT !.op = "setslice"])
+          [] p.op \in {"idxslice", "idxlistslice", "idxgenslice"} -> Run([p EXCEPT !.op = "setslice"])
           [] p.op = "idxdel" -> Run([p EXCEPT !.op = "delslice"])
           [] p.op = "delslice" /\ Step(p) = 1 -> Done(Splice(s, Start(n, p), Stop(n, p), <<>>))
           [] p.op = "delslice" -> Done(Without(s, Walk(Start(n, p), Stop(n, p), Step(p))))
