@@ -22049,6 +22049,14 @@ static NO_INLINE SPYValue *reduce_begin(SPYContext *c, Machine *m, SPYValue *sel
     spy_release(key);
     return result;
 }
+/* What a property's setter or deleter that property.__set__ or
+ * __delete__ called returned in result: None for it. */
+static SPYValue *property_called(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m; (void)ctx;
+    if (!result) return NULL;
+    spy_release(result);
+    return spy_none(c);
+}
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *native_entered_rest(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* native_entered_rest of a native callee or a method of one. */
@@ -42727,8 +42735,16 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     }
     if (argc == 1 && (is_builtin(callee, B_OBJECT_GETATTRIBUTE) || is_builtin(callee, B_TYPE_GETATTRIBUTE)))
         return getattribute_entered(c, self, argv[0], is_builtin(callee, B_TYPE_GETATTRIBUTE), env);
-    if (callee->as.native.kwcall != descriptor_method || callee->as.native.data != (void *)((intptr_t)SPY_PROPERTY << 8 | DESCR_GET)) return NULL;
+    if (callee->as.native.kwcall != descriptor_method) return NULL;
     SPYValue *p = builtin_value(c, self, SPY_PROPERTY);
+    int op = (int)((intptr_t)callee->as.native.data - ((intptr_t)SPY_PROPERTY << 8));
+    if (p && (op == DESCR_SET || op == DESCR_DELETE) && argc == (size_t)(op == DESCR_SET) + 1 &&
+        machine_function(c, (function = op == DESCR_SET ? p->as.property.set : p->as.property.del))) {
+        /* property.__set__ and __delete__ call their function on m, giving None (property_called). */
+        callk(c, m, function, argc, (SPYValue *[]){spy_retain(argv[0]), argc > 1 ? spy_retain(argv[1]) : NULL}, property_called, NULL);
+        return NULL;
+    }
+    if (op != DESCR_GET) return NULL;
     if (!p || argc < 1 || argc > 2 || argv[0]->type == SPY_NONE || !machine_function(c, p->as.property.get)) return NULL;
     return (*env = function_env(c, p->as.property.get, 1, argv, NULL, 0)) ? spy_retain(p->as.property.get) : NULL;
 }

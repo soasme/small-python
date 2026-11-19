@@ -353,7 +353,7 @@ Contents | - navigation
 20 Fundamental Objects > 20.4 Singletons > 20.4.2 `NotImplemented` | Singletons, Operators
 20 Fundamental Objects > 20.4 Singletons > 20.4.3 `Ellipsis` | Singletons
 20 Fundamental Objects > 20.5 The `property` class | = sections
-20 Fundamental Objects > 20.5 The `property` class > 20.5.1 property ( *fget*=None, *fset*=None, *fdel*=None, *doc*=None ) | Descriptors
+20 Fundamental Objects > 20.5 The `property` class > 20.5.1 property ( *fget*=None, *fset*=None, *fdel*=None, *doc*=None ) | Descriptors, PropertyMethods
 20 Fundamental Objects > 20.5 The `property` class > 20.5.2 Descriptor methods | Descriptors
 20 Fundamental Objects > 20.5 The `property` class > 20.5.3 Other members | Descriptors
 20 Fundamental Objects > 20.6 The `staticmethod` class | MethodDescriptors
