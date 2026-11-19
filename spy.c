@@ -11671,6 +11671,8 @@ static SPYValue *binary_special(SPYContext *c, const Operator *op, SPYValue *lef
     return result;
 }
 static int machine_function(SPYContext *, SPYValue *);
+static SPYValue *item_special(SPYContext *, SPYValue *, const char *);
+static SPYValue *special_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, Continuation, SPYValue *);
 static SPYValue *special_tried(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *k_state(SPYContext *, size_t, SPYValue **, Continuation, SPYValue *);
 static SPYValue *k_resume(SPYContext *, Machine *, SPYValue *, SPYValue *);
@@ -11688,11 +11690,22 @@ static SPYValue *special_from(SPYContext *c, Machine *m, SPYValue *state, int ph
     for (; phase < 3 && !result && !c->error_type[0]; phase++) {
         if (phase == 0 ? !reflected_first : phase == 2 && !(a != b && !reflected_first && (modulus || !number_takes(c, op, 0, left, right))))
             continue;
-        SPYValue *self = phase == 1 ? left : right, *other = phase == 1 ? right : left, *slot;
-        SPYValue *method = operator_method(c, self, phase == 1 ? op->direct : op->reflected, 0, &slot), *index;
+        SPYValue *self = phase == 1 ? left : right, *other = phase == 1 ? right : left, *slot, *index;
+        const char *name = phase == 1 ? op->direct : op->reflected;
+        /* A descriptor's Python __get__ reads the method on m first
+         * (special_callk); its AttributeError leaves the method absent. */
+        SPYValue *descriptor = item_special(c, self, name);
+        if (descriptor && !machine_function(c, descriptor) && (index = int_value(c, phase + 1))) {
+            spy_release(items[4]); items[4] = index;
+            return special_callk(c, m, descriptor, self, 1 + !!modulus, (SPYValue *[]){spy_retain(other), modulus ? spy_retain(modulus) : NULL},
+                                 spy_retain(c->not_implemented), special_tried, state);
+        }
+        SPYValue *method = operator_method(c, self, name, 0, &slot);
         if (method && method->type == SPY_METHOD && machine_function(c, method->as.method.function) && (index = int_value(c, phase + 1))) {
             spy_release(items[4]); items[4] = index;
-            return callk(c, m, method, 1 + !!modulus, (SPYValue *[]){spy_retain(other), modulus ? spy_retain(modulus) : NULL}, special_tried, state);
+            SPYValue *entered = callk(c, m, method, 1 + !!modulus, (SPYValue *[]){spy_retain(other), modulus ? spy_retain(modulus) : NULL}, special_tried, state);
+            spy_release(method);
+            return entered;
         }
         if (!method && !slot) continue;
         SPYValue *args[] = {self, other, modulus};
