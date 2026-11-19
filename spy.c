@@ -15976,6 +15976,7 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
  * file or a trace function needs attention; 1 on the machine when a Python
  * __del__ is due there first (finalizer). */
 static SPYValue *finalizer(SPYContext *);
+static int weak_machined(SPYContext *);
 static int closes_quietly(SPYContext *, SPYValue *);
 static void finalize_ahead(SPYContext *, size_t);
 /* A machine's tick at a step of no node (TICK_DEFER) leaves a finalizer
@@ -15995,7 +15996,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
         spy_release(g);
         finalize_ahead(c, waiting);
     }
-    int machined = machine && c->finalize_calls_len && finalizer(c);
+    int machined = machine && (c->finalize_calls_len ? finalizer(c) != NULL : c->weak_calls_len && weak_machined(c));
     if (machined && machine != TICK_DEFER) return 1;
     if (!machined && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
     c->line = n->line;
@@ -24506,9 +24507,27 @@ static NO_INLINE int operation_entered(SPYContext *c, Machine *m) {
 /* The call of finalizer's __del__, which m's next step waits for
  * (CALL_FINALIZE), with *env its environment: the instance and the number
  * of entries waiting after it go on m's stack (finalized); or c->unbound
- * when a dead generator's close began on m (finalize_close). */
+ * when a dead generator's close began on m (finalize_close); or, for a
+ * weak reference's callback, NULL without an error when it could not take
+ * the reference, reported as unraisable. */
 static void finalize_close(SPYContext *, Machine *);
+static NO_INLINE void finalized(SPYContext *, Machine *, SPYValue *);
 static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
+    if (!c->finalize_calls_len) {
+        /* A dead target's weak reference, its Python callback cleared,
+         * takes the call (weak_machined); the reference and the callback
+         * go on m's stack (finalized). */
+        SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
+        memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+        if (name_set(c, ref, "__callback__", c->none) || machine_push(c, m, spy_retain(ref)) || machine_push(c, m, spy_retain(callback))) {
+            spy_release(ref); spy_release(callback); return NULL;
+        }
+        c->finalizing = c->calls_len + 1;
+        if ((*env = function_env(c, callback, 1, &ref, NULL, 1))) return callback;
+        spy_release(callback);
+        finalized(c, m, NULL);
+        return NULL;
+    }
     SPYValue *self = c->finalize_first, *method = finalizer(c);
     if (self->type != SPY_INSTANCE) {
         finalize_close(c, m);
@@ -24525,6 +24544,14 @@ static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **
  * exception, which is unraisable. */
 static NO_INLINE void finalized(SPYContext *c, Machine *m, SPYValue *result) {
     SPYValue *waiting = machine_pop(m), *self = machine_pop(m);
+    if (waiting->type != SPY_INT) {
+        /* A weak reference's callback (finalizer_call). */
+        if (!result) report_unraisable(c, "Exception ignored while calling weakref callback ", waiting, NULL);
+        spy_release(result); spy_release(self); spy_release(waiting);
+        c->finalizing = 0;
+        attend(c);
+        return;
+    }
     if (!result) report_unraisable(c, "Exception ignored while calling deallocator ", class_lookup(self->as.map.parent, "__del__"), NULL);
     spy_release(result); spy_release(self);
     c->finalizing = 0;
@@ -25564,6 +25591,14 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
                !close_quietly(c, self) ? self : NULL;
     SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
     return method && machine_function(c, method) ? method : NULL;
+}
+/* Whether the machine calls the first callback due of a weak reference
+ * whose target died (finalizer_call): a function of the machine, where
+ * finalizer would run a __del__. */
+static int weak_machined(SPYContext *c) {
+    SPYValue *callback = name_local(c->weak_calls[0], "__callback__");
+    return callback && machine_function(c, callback) && !finalizers_wait(c) && !c->error_type[0] && !c->settings[SET_TRACE] &&
+           !c->settings[SET_PROFILE] && c->py_depth < c->recursion_limit;
 }
 /* Close the dead generator first in line for finalization on m: its
  * GeneratorExit raised at its yield (consume), the finalizers queued
@@ -34214,8 +34249,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
     finalize:
         callee_env = NULL;
-        if (!(value = finalizer_call(c, m, &callee_env))) continue;
-        /* The step runs again once a dead generator closed (finalize_close). */
+        /* The step runs again once a dead generator closed (finalize_close),
+         * or a weak reference's callback could not take it (finalizer_call). */
+        if (!(value = finalizer_call(c, m, &callee_env))) { pc -= !c->error_type[0]; continue; }
         if (value == c->unbound) { pc--; goto consume_generator; }
         special = CALL_FINALIZE;
         goto enter_special;
