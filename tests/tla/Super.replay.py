@@ -25,10 +25,14 @@ def outcome(p):
             lines.append("        log.append(%r)" % c)
             if kind == "super":
                 lines.append("        super().%s(%s)" % (p["name"], "self" if p["name"] == "__get__" else ""))
+    if p["receiver"] == "proxy":
+        # Another class's object, whose __class__ answers the called class.
+        lines += ["class Proxy:", "    @property", "    def __class__(self):", "        for _ in range(2): pass", "        return %s" % p["call"]]
+    receiver = "%s()" % ("Proxy" if p["receiver"] == "proxy" else p["call"])
     if p["name"] == "p":
-        lines.append("%s().p" % p["call"])
+        lines.append("%s.p.fget(%s)" % (p["call"], receiver))
     else:
-        lines.append("%s().%s(%s)" % (p["call"], p["name"], "None" if p["name"] == "__get__" else ""))
+        lines.append("%s.%s(%s%s)" % (p["call"], p["name"], receiver, ", None" if p["name"] == "__get__" else ""))
     log = []
     try:
         exec("\n".join(lines) + "\n", {"log": log})

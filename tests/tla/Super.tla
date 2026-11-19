@@ -22,6 +22,10 @@
 (* call passing self: a super object finds a class's __get__ before its    *)
 (* own, which answers when no class after the start has one. Or it may be *)
 (* a property p, whose getter reads super().p, as m calls super().m().     *)
+(* The receiver may instead be a proxy, an object of another class whose   *)
+(* __class__ property loops, then answers X: X's method called on it       *)
+(* (X.m(proxy), X.p.fget(proxy)) reads that __class__ at each super()     *)
+(* and runs as on an instance of X.                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -29,7 +33,7 @@ Classes == {"A", "B", "C", "D"}
 Kinds == {"none", "stop", "super"}
 MRO(x) == CASE x = "A" -> <<"A">> [] x = "B" -> <<"B", "A">> [] x = "C" -> <<"C", "A">>
              [] x = "D" -> <<"D", "B", "C", "A">>
-Programs == [kind : [Classes -> Kinds], call : Classes, name : {"m", "__get__", "p"}]
+Programs == [kind : [Classes -> Kinds], call : Classes, name : {"m", "__get__", "p"}, receiver : {"instance", "proxy"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -70,4 +74,7 @@ AllCooperate == Done /\ (\A c \in Classes : program.kind[c] = "super") =>
 
 \* A property read through super() runs its getter as a method call does.
 PropertyIsMethod == Done /\ program.name = "p" => outcome = Call([program EXCEPT !.name = "m"])
+
+\* A proxy whose __class__ answers X receives X's methods as an X does.
+ProxyIsInstance == Done /\ program.receiver = "proxy" => outcome = Call([program EXCEPT !.receiver = "instance"])
 =============================================================================

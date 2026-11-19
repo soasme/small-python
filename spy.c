@@ -545,6 +545,8 @@ static int special_dispatch(SPYValue *);
 static int index_defined(SPYContext *, SPYValue *);
 static int mapping_type(SPYContext *, SPYValue *);
 static SPYValue *super_new(SPYContext *, SPYValue *, SPYValue *);
+static SPYValue *super_call(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *implicit_super(SPYContext *, Machine *);
 enum { R_LT, R_LE, R_EQ, R_NE, R_GT, R_GE };
 static SPYValue *rich_compare(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *cell_contents(SPYValue *);
@@ -26980,6 +26982,12 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         release_all(argc, argv); spy_release(callee);
         return result;
     }
+    if (method < 0 && argc <= 2 && callee == c->types[SPY_SUPER]) {
+        /* super() reads a Python __class__ on m (super_call). */
+        result = argc ? super_call(c, m, argv[0], argc == 2 ? argv[1] : NULL) : implicit_super(c, m);
+        release_all(argc, argv); spy_release(callee);
+        return result;
+    }
     /* An exporter argument, or a list or tuple of them a join takes, too (buffer_argument). */
     if (index_arguments(c, callee, method, argc, argv) ||
         (argc <= INDEX_MOST && buffer_arguments(c, callee, method, argc, argv))) {
@@ -28135,6 +28143,12 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (calls && (argc == 1 || argc == 2) && callee == c->types[SPY_COMPLEX]) {
         /* So does complex(real[, imag]), the callee and arguments leaving the stack. */
         result = complex_construct(c, m, argv[0], argc == 2 ? argv[1] : NULL, argc == 2);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return result;
+    }
+    if (calls && argc <= 2 && callee == c->types[SPY_SUPER]) {
+        /* So does super() (super_call). */
+        result = argc ? super_call(c, m, argv[0], argc == 2 ? argv[1] : NULL) : implicit_super(c, m);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
@@ -34899,13 +34913,10 @@ static SPYValue *value_class(SPYContext *c, SPYValue *value) {
     int kind = native_kind(value);
     return kind == NATIVE_BOUND ? c->types[SPY_NATIVE] : kind ? c->native_types[kind - 1] : c->types[value->type];
 }
-static SPYValue *super_new(SPYContext *c, SPYValue *type, SPYValue *self) {
-    if (type->type != SPY_CLASS) return errorf(c, "TypeError", "super() argument 1 must be a type, not %s", type_name(type));
-    SPYValue *owner = NULL;
-    if (self && self->type != SPY_NONE) {
-        SPYValue *actual = self->type == SPY_CLASS && subclass(self, type) ? self : value_class(c, self);
-        owner = subclass(actual, type) ? spy_retain(actual) : attribute(c, self, "__class__");
-        if (!owner) return NULL;
+/* super(type, self) once self's class, or its __class__, is owner, which
+ * it takes; NULL for none. */
+static SPYValue *super_made(SPYContext *c, SPYValue *type, SPYValue *self, SPYValue *owner) {
+    if (owner) {
         if (owner->type != SPY_CLASS || !subclass(owner, type)) {
             spy_release(owner);
             const char *kind = self->type == SPY_CLASS ? "type" : "instance of";
@@ -34922,7 +34933,31 @@ static SPYValue *super_new(SPYContext *c, SPYValue *type, SPYValue *self) {
     } else spy_release(owner);
     return result;
 }
-static SPYValue *implicit_super(SPYContext *c) {
+/* What self's __class__ that super_call read returned, state its type and
+ * self: the super object (super_made). */
+static SPYValue *super_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *owner) {
+    (void)m;
+    SPYValue *result = owner ? super_made(c, state->as.seq.items[0], state->as.seq.items[1], owner) : NULL;
+    spy_release(state);
+    return result;
+}
+/* super(type, self), self NULL for none: self's class when it is, or is
+ * an instance of, a subclass of type; else its __class__, a Python read
+ * on m when m is given (attribute_callk), then super_read. */
+static SPYValue *super_call(SPYContext *c, Machine *m, SPYValue *type, SPYValue *self) {
+    if (type->type != SPY_CLASS) return errorf(c, "TypeError", "super() argument 1 must be a type, not %s", type_name(type));
+    if (!self || self->type == SPY_NONE) return super_made(c, type, self, NULL);
+    SPYValue *actual = self->type == SPY_CLASS && subclass(self, type) ? self : value_class(c, self), *owner, *state;
+    if (subclass(actual, type)) return super_made(c, type, self, spy_retain(actual));
+    if (!m) return (owner = attribute(c, self, "__class__")) ? super_made(c, type, self, owner) : NULL;
+    if ((owner = attribute_step(c, self, "__class__")) || c->error_type[0] || !c->fallback) return owner ? super_made(c, type, self, owner) : NULL;
+    SPYValue *function = c->fallback;
+    c->fallback = NULL;
+    if (!(state = tuple_of(c, 2, (SPYValue *[]){type, self}))) { spy_release(function); return NULL; }
+    return attribute_callk(c, m, self, "__class__", function, super_read, state);
+}
+static SPYValue *super_new(SPYContext *c, SPYValue *type, SPYValue *self) { return super_call(c, NULL, type, self); }
+static SPYValue *implicit_super(SPYContext *c, Machine *m) {
     SPYValue *env = c->eval_env;
     /* A list, set or dictionary comprehension runs in its function's frame. */
     while (env && env->type == V_ENV && env->as.map.flags == 2 && env->as.map.scope->owner->op != N_TUPLE) env = env->as.map.parent;
@@ -34946,7 +34981,7 @@ static SPYValue *implicit_super(SPYContext *c) {
     if (!type) return spy_error(c, "RuntimeError", "super(): __class__ cell not found");
     if (type->type == V_UNBOUND) return spy_error(c, "RuntimeError", "super(): empty __class__ cell");
     spy_retain(type);
-    SPYValue *result = super_new(c, type, self);
+    SPYValue *result = super_call(c, m, type, self);
     spy_release(type); return result;
 }
 /* The __hash__ slot wrapper of a hashable builtin type. */
@@ -40467,7 +40502,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     case B_SUPER: {
         if (argc > 2) return errorf(c, "TypeError", "super() expected at most 2 arguments, got %zu", argc);
-        return argc ? super_new(c, argv[0], argc == 2 ? argv[1] : NULL) : implicit_super(c);
+        return argc ? super_new(c, argv[0], argc == 2 ? argv[1] : NULL) : implicit_super(c, NULL);
     }
     case B_EXCEPTION_REDUCE: case B_OSERROR_REDUCE: case B_IMPORT_REDUCE: case B_ATTRIBUTE_REDUCE:
     case B_ATTRIBUTE_GETSTATE: case B_EXCEPTION_SETSTATE: return exception_reduce(c, id, argc, argv);
