@@ -492,6 +492,8 @@ Unreleased (0.10.0):
 - `dict()` and `frozendict()` hash and compare `str` subclass keyword names by their Python `__hash__` and `__eq__` without nesting on the C stack
 - `pow()` with a modulus and `divmod()` call operands' Python methods without nesting on the C stack, also given by keyword or through a metaclass
 - A builtin, or a builtin subclass's instance, declining an operator calls the other operand's reflected method once and without nesting on the C stack
+- A set's `union()`, `intersection()`, `difference()` and their updates of two or three iterables call items' Python `__hash__` and `__eq__` without nesting on the C stack
+- `intersection_update()` of several iterables changes the set only once all are intersected
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

@@ -14926,6 +14926,8 @@ typedef struct {
     SPYValue *awaited; /* An asend or __anext__ awaitable's send or __next__ (asend_resumes): the operation. */
     SPYValue *instance; /* A class call's instance whose list's or set's __init__ extends it (constructed): the value. */
     SPYValue *pair; /* A sort's comparison of two lists' items, which its call may remove (sorter_call): the two. */
+    SPYValue *sources, *updated; /* A set method's sources after its first, the next at source (set_source); intersection_update's set. */
+    size_t source;
     int updating, subset, rehash;
     int closes; /* An operation's close, a throw of GeneratorExit, ending as close() does (operation_close_end). */
     double total, compensation, imag, imag_compensation;
@@ -15020,6 +15022,8 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->awaited) visit(b->consumer->awaited, data);
         if (b->consumer && b->consumer->instance) visit(b->consumer->instance, data);
         if (b->consumer && b->consumer->pair) visit(b->consumer->pair, data);
+        if (b->consumer && b->consumer->sources) visit(b->consumer->sources, data);
+        if (b->consumer && b->consumer->updated) visit(b->consumer->updated, data);
         if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
         if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
         if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
@@ -24460,6 +24464,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords); spy_release(b.consumer->call);
         spy_release(b.consumer->awaited); spy_release(b.consumer->instance); spy_release(b.consumer->pair);
+        spy_release(b.consumer->sources); spy_release(b.consumer->updated);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
@@ -25268,6 +25273,20 @@ static SPYValue *slotted_next(SPYContext *c, SPYValue *callee, size_t argc, SPYV
     return self && self->type == SPY_ITERATOR && slot->type == SPY_NATIVE && slot->as.native.kwcall == slot_call &&
            slot->as.native.owner == value_class(c, self) && !strcmp(slot->as.native.name->as.string.data, "__next__") ? self : NULL;
 }
+/* Whether set method which of set, given argc sources argv, two or
+ * three, is a union, intersection, difference or one of their updates
+ * the machine runs as one consumer of each source in turn (set_source):
+ * none a set or dict, whose operations differ, and one whose items may
+ * call Python. */
+static NO_INLINE int set_sources(SPYContext *c, SPYValue *set, int which, size_t argc, SPYValue *const *argv) {
+    int calls = 0;
+    if (argc < 2 || argc > 3 || (which & 3) == SET_SYMMETRIC || which >= 8) return 0;
+    for (size_t i = 0; i < argc; i++) {
+        if (set_like(argv[i]) || is_dict(argv[i]) || dictionary_value(c, argv[i])) return 0;
+        calls = calls || machine_source(c, argv[i]) || hashed_items(c, argv[i]) || compared_items(c, set, argv[i], which) || zip_hashed(c, argv[i]);
+    }
+    return calls;
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
     if (built) callee = built;
@@ -25333,8 +25352,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     static const int set_ids[] = {B_SET_UNION, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE, B_EXTEND, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE,
                                   B_SET_KEEP, B_SET_SUPERSET, B_SET_DISJOINT};
     int updates = function && is_set(set_storage(callee->as.method.self)) && function->type == SPY_NATIVE && function->as.native.kwcall == set_method &&
-                  argc == 1 && (!(argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base && is_set(argv[0]->as.map.base)) ||
-                                (((intptr_t)function->as.native.data & 255) == 10 && is_set(argv[0]->as.map.base))) ?
+                  (argc == 1 ? !(argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base && is_set(argv[0]->as.map.base)) ||
+                               (((intptr_t)function->as.native.data & 255) == 10 && is_set(argv[0]->as.map.base)) :
+                   set_sources(c, set_storage(callee->as.method.self), (int)((intptr_t)function->as.native.data & 255), argc, argv)) ?
                   set_ids[(intptr_t)function->as.native.data & 255] : -1;
     /* list.__init__ and set.__init__ bound to their type's object, not another (init_extends). */
     int init = init_extends(callee);
@@ -25342,7 +25362,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates != -1 || init == SPY_SET;
     /* As do dict() and dict.update() of pairs. */
     int pairs = dicts || (method == M_UPDATE && callee->type == SPY_DICT);
-    if (!argc || (mapping ? !keys_function(c, argv[0], &(int){0}) :
+    if (!argc || (argc > 1 && updates != -1 ? 0 : mapping ? !keys_function(c, argv[0], &(int){0}) :
                   !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) &&
                   !(updates != -1 && compared_items(c, set_storage(callee->as.method.self), argv[0], (int)((intptr_t)function->as.native.data & 255))) && !(updates == B_SET_DISJOINT && set_storage(argv[0]) != argv[0]) &&
                   !(pairs && hashed_pairs(c, argv[0])) && !((sets || pairs) && zip_hashed(c, argv[0])))) return -1;
@@ -25364,7 +25384,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN && id != B_BYTES && id != B_BYTEARRAY &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
         (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0]) || zip_of_generator(argv[0]) || adapted_generator(argv[0])))) return -1;
-    if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : 1u)) return -1;
+    if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : updates != -1 ? 3u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
                       builtin_value(c, argv[1], SPY_BYTEARRAY))) return -1;
@@ -25568,6 +25588,13 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         if (!bound) { spy_release(start); return; }
         generator = start; start = NULL; callee = bound;
     }
+    /* A set method's further sources follow its first (set_source). */
+    SPYValue *sources = NULL;
+    if (start && callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE && callee->as.method.function->as.native.kwcall == set_method) {
+        sources = tuple_of(c, traceback ? 2 : 1, (SPYValue *[]){start, traceback});
+        spy_release(start); start = traceback = NULL;
+        if (!sources) { spy_release(generator); return; }
+    }
     /* A method-wrapper's or super()'s __next__ is next() of its iterator (slotted_next). */
     if (id == B_NEXT && callee->type == SPY_METHOD && !generator) generator = spy_retain(slotted_next(c, callee, 0, NULL));
     /* An athrow's or aclose's first send throws its exception (athrow_args). */
@@ -25681,11 +25708,11 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     if (given) { iterator_refused(c, id, collects, given); spy_release(given); }
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(consumer); release_all(9, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited, bound}); return; }
+    if (!block) { mem_free(consumer); release_all(10, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited, bound, sources}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
                            .searched = searched, .wrap = wrap, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
-                           .phase = id == B_SET_TOGGLE, .awaited = awaited, .closes = closes};
+                           .phase = id == B_SET_TOGGLE, .awaited = awaited, .closes = closes, .sources = sources};
     if (!keyed) min_max_fed(consumer);
     spy_release(bound);
     block->value = generator; block->consumer = consumer;
@@ -25887,6 +25914,24 @@ static NO_INLINE int set_toggled(SPYContext *c, Machine *m, Frame *f) {
     spy_release(made); spy_release(set);
     return function != NULL;
 }
+/* A set method's consumer, top's, whose source ran out, takes its next
+ * source (set_sources): an intersection's next searches its result so
+ * far, intersection_update keeping its set to swap the last into; 1, or
+ * 0 on an error. */
+static NO_INLINE int set_source(SPYContext *c, Block *top) {
+    Consumer *s = top->consumer;
+    SPYValue *source = spy_retain(s->sources->as.seq.items[s->source++]);
+    if (s->id == B_SET_KEEP) {
+        if (s->updating && !s->updated) s->updated = s->searched;
+        else spy_release(s->searched);
+        s->searched = s->result;
+        if (!(s->result = value_new(c, s->searched->type))) { spy_release(source); return 0; }
+    }
+    s->keyed = consumer_source(c, &source);
+    spy_release(top->value);
+    top->value = source;
+    return source != NULL;
+}
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
     /* A generator closes on the GeneratorExit its close threw. */
@@ -25948,6 +25993,7 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
         return began > 0;
     }
     if (status > 0 && top->consumer->id == B_SET_TOGGLE) return set_toggled(c, m, f);
+    if (status > 0 && top->consumer->sources && top->consumer->source < top->consumer->sources->as.seq.len) return set_source(c, top);
     if (status > 0) {
         int id = top->consumer->id;
         SPYValue *result = consumer_end(c, top->consumer);
@@ -28746,7 +28792,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     }
     /* A consumer takes a native method's arguments after its object. */
     size_t from = skip + (method >= 0 && !skip), given = argc + 1 - from;
-    id = callee ? consumer_of(c, callee, method, given, argv + from) : -1;
+    /* A set's method given the set first consumes its sources as the bound method does. */
+    SPYValue *bound = callee && !from && method < 0 && given >= 2 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method &&
+                      set_like(argv[0]) ? bind_method(c, argv[0], callee) : NULL;
+    id = bound ? consumer_of(c, bound, -1, given - 1, argv + 1) : callee ? consumer_of(c, callee, method, given, argv + from) : -1;
+    if (bound && id >= 0) { spy_release(callee); callee = bound; from = 1; given--; }
+    else spy_release(bound);
     SPYValue *generator = id >= 0 && given ? spy_retain(argv[from]) : NULL, *start = id >= 0 && given > 1 ? spy_retain(argv[from + 1]) : NULL;
     SPYValue *traceback = id >= 0 && given > 2 ? spy_retain(argv[from + 2]) : NULL;
     SPYValue *key;
@@ -38813,8 +38864,9 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
                       which == SET_DIFFERENCE && is_dict(argv[1]) ? self->as.map.len >> 2 > argv[1]->as.map.len ? NULL : spy_retain(argv[1]) :
                       set_operand(c, argv[1], which == SET_SYMMETRIC);
     if (!first && c->error_type[0]) return NULL;
+    /* intersection_update changes the set once all are intersected. */
     SPYValue *result = first ? which == SET_DIFFERENCE ? set_difference(c, self, first) : set_binary(c, '^', self, first) :
-                       which < 4 ? set_copy_type(c, self, self->type) : spy_retain(self);
+                       which < 4 || which == 5 ? set_copy_type(c, self, self->type) : spy_retain(self);
     spy_release(first);
     for (size_t i = first ? 2 : 1; result && i < argc; i++) {
         SPYValue *borrowed = (which & 3) == SET_INTERSECTION ? set_operand(c, argv[i], 0) : NULL;
@@ -38850,6 +38902,7 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
         spy_release(other);
     }
     if (!result || which < 4) return result;
+    if (which == 5) swap_contents(self, result);
     spy_release(result);
     return spy_none(c);
 }
@@ -40686,7 +40739,7 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
     if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
     /* intersection_update swaps its result into the set; issubset is
      * whether the intersection has all the set's entries. */
-    if (s->id == B_SET_KEEP && s->updating && !c->error_type[0]) swap_contents(s->searched, s->result);
+    if (s->id == B_SET_KEEP && s->updating && !c->error_type[0]) swap_contents(s->updated ? s->updated : s->searched, s->result);
     if (s->subset && !c->error_type[0]) {
         int all = s->result->as.map.len == s->searched->as.map.len;
         spy_release(s->result);

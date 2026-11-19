@@ -121,6 +121,24 @@ def iterable(p):
     return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
 
 
+def sources(p):
+    log = []
+    a = {K(1, log, "no")}
+    def source(v):
+        if p["source"] == "list":
+            return [K(v, log, "no")]
+        def generator():
+            log.append("y%d" % v)
+            yield K(v, log, "no")
+        return generator()
+    first, second = source(1), source(2)
+    del log[:]
+    r = getattr(a, p["method"])(first, second)
+    if r is None:
+        r = a
+    return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
+
+
 class SH(set):
     def __init__(self, items, log):
         super().__init__(items)
@@ -153,6 +171,8 @@ def outcome(p):
         return setkey(p)
     if p["op"] == "iterable":
         return iterable(p)
+    if p["op"] == "sources":
+        return sources(p)
     if p["op"] == "hashed":
         return hashed(p)
     if p["op"] == "merge":
