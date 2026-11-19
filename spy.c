@@ -9344,39 +9344,56 @@ static SPYValue *iterator_copy(SPYContext *c, SPYValue *it) {
     if (copy->as.iterator.counter) spy_retain(copy->as.iterator.counter);
     return copy;
 }
-/* __reduce__ of the intrinsic iterators of Table 27-1 other than the
- * sequence and range iterators, as CPython's dictiter, setiter, reversed,
- * listreviter, enumerate, zip, map, filter, and calliter give it; NULL with
- * no error for those that iterator_state_call reduces itself. cls is the
- * receiver's class, which enumerate, zip, map, filter, and reversed name. */
-static SPYValue *iterator_reduce(SPYContext *c, SPYValue *it, int id, SPYValue *cls) {
-    SPYValue *source = it->as.iterator.source, *head = NULL, *args = NULL, *extra = NULL, *empty = NULL;
+/* The builtins entry an intrinsic iterator's __reduce__ names first (Table
+ * 27-1), as CPython's iterators find it (_PyEval_GetBuiltin): iter, or
+ * reversed for a list's reverse iterator; NULL for those that name their
+ * own class. */
+static const char *reduce_entry(int id) {
+    return id == IT_LIST_REVERSE ? "reversed" : id >= IT_MAP && id <= IT_REVERSED ? NULL : "iter";
+}
+/* What intrinsic iterator it's __reduce__ reads before its builtins entry:
+ * the items a copy of a dict or set iterator still yields, or the rest of
+ * a range; else NULL, with no error. */
+static SPYValue *reduce_rest(SPYContext *c, SPYValue *it, int id) {
+    if (it->as.iterator.kind == I_RANGE) {
+        /* range(v, v + k * d, d) for the next value v of k left, step d */
+        SPYValue *source = it->as.iterator.source, *rest = range_new(c, it->as.iterator.counter, source->as.range.stop, source->as.range.step);
+        SPYValue *span = rest ? integer_multiply(c, rest->as.range.length, source->as.range.step) : NULL;
+        SPYValue *stop = span ? integer_add(c, it->as.iterator.counter, span, 0) : NULL;
+        SPYValue *rebased = stop ? range_new(c, it->as.iterator.counter, stop, source->as.range.step) : NULL;
+        spy_release(rest); spy_release(span); spy_release(stop);
+        return rebased;
+    }
+    if (id < IT_DICT_KEY || (id > IT_SET && id < IT_DICT_REVERSE_KEY) || id > IT_DICT_REVERSE_ITEM) return NULL;
+    SPYValue *copy = iterator_copy(c, it), *rest = copy ? spy_list(c) : NULL, *item;
+    while (rest && (item = iterator_next(c, copy))) {
+        int status = sequence_append(c, rest, item);
+        spy_release(item);
+        if (status) break;
+    }
+    spy_release(copy);
+    if (c->error_type[0]) { spy_release(rest); return NULL; }
+    return rest;
+}
+/* __reduce__ of intrinsic iterator it of class id (27.1.1), as CPython's
+ * iterators give it, from head, its builtins entry (reduce_entry) or
+ * class cls, and rest (reduce_rest), both taken. */
+static SPYValue *reduce_made(SPYContext *c, SPYValue *it, int id, SPYValue *cls, SPYValue *head, SPYValue *rest) {
+    SPYValue *source = it->as.iterator.source, *args = NULL, *extra = NULL, *empty = NULL;
+    if (!head) { spy_release(rest); return NULL; }
     switch (id) {
     case IT_CALLABLE:
         /* (iter, (callable, sentinel)), or (iter, ((),)) once exhausted. */
-        if (!(head = builtin_entry(c, "iter"))) return NULL;
         if (it->as.iterator.done) { empty = spy_tuple(c, 0, NULL); args = empty ? spy_tuple(c, 1, &empty) : NULL; }
         else { SPYValue *pair[] = {source, it->as.iterator.counter}; args = spy_tuple(c, 2, pair); }
         break;
     case IT_DICT_KEY: case IT_DICT_VALUE: case IT_DICT_ITEM: case IT_SET:
-    case IT_DICT_REVERSE_KEY: case IT_DICT_REVERSE_VALUE: case IT_DICT_REVERSE_ITEM: {
-        /* (iter, (the items a copy of the iterator still yields,)); iter is
-         * looked up after the items are listed. */
-        SPYValue *copy = iterator_copy(c, it), *rest = copy ? spy_list(c) : NULL, *item;
-        while (rest && (item = iterator_next(c, copy))) {
-            int status = sequence_append(c, rest, item);
-            spy_release(item);
-            if (status) break;
-        }
-        spy_release(copy);
-        if (rest && !c->error_type[0] && (head = builtin_entry(c, "iter"))) args = spy_tuple(c, 1, &rest);
-        spy_release(rest);
+    case IT_DICT_REVERSE_KEY: case IT_DICT_REVERSE_VALUE: case IT_DICT_REVERSE_ITEM:
+        /* (iter, (the items left,)), listed before iter is looked up. */
+        args = spy_tuple(c, 1, &rest);
         break;
-    }
     case IT_LIST_REVERSE: case IT_REVERSED:
         /* (reversed, (seq,), index), or (reversed, ([],)) or (cls, ((),)) once exhausted. */
-        head = id == IT_LIST_REVERSE ? builtin_entry(c, "reversed") : spy_retain(cls);
-        if (!head) return NULL;
         if (it->as.iterator.done || !it->as.iterator.index) {
             empty = id == IT_LIST_REVERSE ? spy_list(c) : spy_tuple(c, 0, NULL);
             args = empty ? spy_tuple(c, 1, &empty) : NULL;
@@ -9387,23 +9404,34 @@ static SPYValue *iterator_reduce(SPYContext *c, SPYValue *it, int id, SPYValue *
         }
         break;
     case IT_ENUMERATE: {
-        head = spy_retain(cls);
         SPYValue *pair[] = {source, it->as.iterator.counter};
         args = spy_tuple(c, 2, pair);
         break;
     }
     case IT_ZIP: case IT_MAP:
         /* (cls, (map's function and) iterators), with True after them when strict. */
-        head = spy_retain(cls); args = spy_tuple(c, source->as.seq.len, source->as.seq.items);
+        args = spy_tuple(c, source->as.seq.len, source->as.seq.items);
         if (it->as.iterator.size) extra = spy_bool(c, 1);
         break;
     case IT_FILTER:
-        head = spy_retain(cls); args = spy_retain(source);
+        args = spy_retain(source);
         break;
-    default: return NULL;
+    default:
+        if (it->as.iterator.kind == I_RANGE) {
+            /* (iter, (the rest of the range,), None) */
+            args = spy_tuple(c, 1, &rest);
+            extra = spy_none(c);
+        } else if (it->as.iterator.done) {
+            /* (iter, (an empty sequence,)) once exhausted. */
+            empty = id == IT_LIST ? spy_list(c) : id == IT_STR || id == IT_STR_ASCII ? spy_string(c, "", 0) : spy_tuple(c, 0, NULL);
+            args = empty ? spy_tuple(c, 1, &empty) : NULL;
+        } else if ((extra = spy_int(c, (int64_t)it->as.iterator.index)))
+            /* (iter, (seq,), index) */
+            args = spy_tuple(c, 1, it->as.iterator.kind == I_SEQUENCE && it->as.iterator.counter ? &it->as.iterator.counter : &source);
     }
+    (void)cls;
     SPYValue *items[] = {head, args, extra}, *result = args ? spy_tuple(c, extra ? 3 : 2, items) : NULL;
-    spy_release(head); spy_release(args); spy_release(extra); spy_release(empty);
+    spy_release(head); spy_release(args); spy_release(extra); spy_release(empty); spy_release(rest);
     return result;
 }
 /* __reduce__ and __setstate__ of the intrinsic iterators (27.1.1), after
@@ -9422,9 +9450,12 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
     SPYValue *source = it->as.iterator.source;
     int range = it->as.iterator.kind == I_RANGE;
     if (!set) {
-        SPYValue *cls = value_class(c, argv[0]), *reduced = iterator_reduce(c, it, id, cls);
-        if (reduced || c->error_type[0]) return reduced;
-    } else if (id == IT_ZIP || id == IT_MAP) {
+        SPYValue *cls = value_class(c, argv[0]), *rest = reduce_rest(c, it, id);
+        const char *entry = reduce_entry(id);
+        if (c->error_type[0]) return NULL;
+        return reduce_made(c, it, id, cls, entry ? builtin_entry(c, entry) : spy_retain(cls), rest);
+    }
+    if (id == IT_ZIP || id == IT_MAP) {
         /* zip_setstate and map_setstate: the state's truth is strict. */
         int strict = truthy(argv[1]);
         if (c->error_type[0]) return NULL;
@@ -9443,12 +9474,11 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
         }
         return spy_none(c);
     }
-    /* The rest of a range iteration, as a range from the current value. */
-    SPYValue *rest = range ? range_new(c, it->as.iterator.counter, source->as.range.stop, source->as.range.step) : NULL;
-    if (range && !rest) return NULL;
-    if (set && range) {
+    if (range) {
         /* rangeiter_setstate takes a C long, longrangeiter_setstate any int;
          * both clamp it to 0 .. the items left and advance by that many. */
+        SPYValue *rest = reduce_rest(c, it, id);
+        if (!rest) return NULL;
         SPYValue *state = id == IT_RANGE ? index_object(c, argv[1]) : spy_retain(builtin_value(c, argv[1], SPY_INT));
         int64_t small;
         if (!state) {
@@ -9468,47 +9498,20 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
         spy_release(it->as.iterator.counter); it->as.iterator.counter = counter;
         return spy_none(c);
     }
-    if (set) {
-        int64_t index;
-        if (iterator_state_index(c, argv[1], &index)) { spy_release(rest); return NULL; }
-        if (id == IT_ITERATOR) {
-            /* seqiter: a negative state is 0; the sequence's length is not consulted. */
-            if (!it->as.iterator.done) it->as.iterator.index = index < 0 ? 0 : (size_t)index;
-        } else if (it->as.iterator.done != 1) {
-            size_t length = source->type == SPY_STRING ? string_length(source) :
-                source->type == SPY_BYTES || source->type == SPY_BYTEARRAY ? source->as.string.len : source->as.seq.len;
-            /* listiter_setstate parks a negative state at -1 (done 2): the
-             * iterator acts exhausted but keeps its list for a later state. */
-            it->as.iterator.done = index < 0 && id == IT_LIST ? 2 : 0;
-            it->as.iterator.index = index < 0 ? 0 : (uint64_t)index > length ? length : (size_t)index;
-        }
-        return spy_none(c);
+    int64_t index;
+    if (iterator_state_index(c, argv[1], &index)) return NULL;
+    if (id == IT_ITERATOR) {
+        /* seqiter: a negative state is 0; the sequence's length is not consulted. */
+        if (!it->as.iterator.done) it->as.iterator.index = index < 0 ? 0 : (size_t)index;
+    } else if (it->as.iterator.done != 1) {
+        size_t length = source->type == SPY_STRING ? string_length(source) :
+            source->type == SPY_BYTES || source->type == SPY_BYTEARRAY ? source->as.string.len : source->as.seq.len;
+        /* listiter_setstate parks a negative state at -1 (done 2): the
+         * iterator acts exhausted but keeps its list for a later state. */
+        it->as.iterator.done = index < 0 && id == IT_LIST ? 2 : 0;
+        it->as.iterator.index = index < 0 ? 0 : (uint64_t)index > length ? length : (size_t)index;
     }
-    SPYValue *iter = builtin_entry(c, "iter"), *args = NULL, *result = NULL;
-    if (!iter) { spy_release(rest); return NULL; }
-    if (range) {
-        SPYValue *span = integer_multiply(c, rest->as.range.length, source->as.range.step);
-        SPYValue *stop = span ? integer_add(c, it->as.iterator.counter, span, 0) : NULL;
-        SPYValue *rebased = stop ? range_new(c, it->as.iterator.counter, stop, source->as.range.step) : NULL;
-        args = rebased ? spy_tuple(c, 1, &rebased) : NULL;
-        SPYValue *items[] = {iter, args, c->none};
-        if (args) result = spy_tuple(c, 3, items);
-        spy_release(span); spy_release(stop); spy_release(rebased);
-    } else if (it->as.iterator.done) {
-        SPYValue *empty = id == IT_LIST ? spy_list(c) : id == IT_STR || id == IT_STR_ASCII ? spy_string(c, "", 0) : spy_tuple(c, 0, NULL);
-        args = empty ? spy_tuple(c, 1, &empty) : NULL;
-        SPYValue *items[] = {iter, args};
-        if (args) result = spy_tuple(c, 2, items);
-        spy_release(empty);
-    } else {
-        SPYValue *index = spy_int(c, (int64_t)it->as.iterator.index);
-        args = index ? spy_tuple(c, 1, it->as.iterator.kind == I_SEQUENCE && it->as.iterator.counter ? &it->as.iterator.counter : &source) : NULL;
-        SPYValue *items[] = {iter, args, index};
-        if (args) result = spy_tuple(c, 3, items);
-        spy_release(index);
-    }
-    spy_release(iter); spy_release(args); spy_release(rest);
-    return result;
+    return spy_none(c);
 }
 /* range.__reduce__: (range, (start, stop, step)). */
 static SPYValue *range_reduce_call(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
@@ -21976,6 +21979,44 @@ static SPYValue *object_reduce(SPYContext *c, Machine *m, int id, size_t argc, S
     SPYValue *args[] = {spy_retain(argv[0]), second, spy_retain(base)};
     return callk(c, m, function, 3 - (id == B_OBJECT_GETSTATE), args, method_called, NULL);
 }
+static SPYValue *map_findk(SPYContext *, Machine *, SPYValue *, SPYValue *, int64_t, MapCursor, Continuation, SPYValue *);
+/* The builtins dict whose lookup of name compares a key other than a str
+ * with it (dict_name), its storage; else NULL. */
+static SPYValue *entry_compares(SPYContext *c, const char *name) {
+    SPYValue *map = c->builtins->type == SPY_DICT ? dictionary_value(c, c->builtins) : NULL;
+    if (!map || local_value(c->builtins, name_of(name))) return NULL;
+    for (size_t i = 0; i < map->as.map.len; i++) if (!builtin_value(c, map_items(map)[i].key, SPY_STRING)) return map;
+    return NULL;
+}
+/* The lookup of iterator self's builtins entry (reduce_entry) found entry
+ * result of the builtins dict, or -1: its __reduce__ (reduce_made), of
+ * state, self and what it read first (reduce_rest) or None. */
+static SPYValue *reduce_found(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    SPYValue *self = state->as.seq.items[0], *rest = state->as.seq.items[1], *it = builtin_value(c, self, SPY_ITERATOR), *head = NULL;
+    int id = iterator_class_id(it);
+    if (result && result->as.integer_data.small >= 0)
+        head = spy_retain(namespace_map(dictionary_value(c, c->builtins))->as.map.items[result->as.integer_data.small].value);
+    else if (result) spy_error(c, "AttributeError", reduce_entry(id));
+    spy_release(result);
+    result = reduce_made(c, it, id, value_class(c, self), head, rest == c->none ? NULL : spy_retain(rest));
+    spy_release(state);
+    return result;
+}
+/* __reduce__ of intrinsic iterator self whose builtins entry is found by
+ * a comparison (entry_compares): the lookup's Python __eq__ m's call
+ * (map_findk), NULL, c->k_fn set; or the value, or NULL with an error. */
+static NO_INLINE SPYValue *reduce_begin(SPYContext *c, Machine *m, SPYValue *self, SPYValue *map, const char *name) {
+    SPYValue *it = builtin_value(c, self, SPY_ITERATOR), *rest = reduce_rest(c, it, iterator_class_id(it)), *key, *state;
+    int64_t hash = 0;
+    if (c->error_type[0]) return NULL;
+    if (!(state = spy_tuple(c, 2, (SPYValue *[]){self, rest ? rest : c->none}))) { spy_release(rest); return NULL; }
+    spy_release(rest);
+    if (!(key = spy_string(c, name, strlen(name))) || hash_value(c, key, &hash)) { spy_release(key); spy_release(state); return NULL; }
+    SPYValue *result = map_findk(c, m, map, key, hash, map_cursor(namespace_map(map), hash), reduce_found, state);
+    spy_release(key);
+    return result;
+}
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *native_entered_rest(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* native_entered_rest of a native callee or a method of one. */
@@ -31047,6 +31088,100 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
     *result = !name ? NULL : o ? try_operator(c, *self, name, other, NULL, 0) : rich_method(c, *self == y ? rich_reflected[rich] : rich, *self, other);
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
     return NULL;
+}
+/* The continuation and context of continuation state state (k_state),
+ * the context owned, NULL for none; state taken. */
+static SPYValue *k_take(SPYContext *c, SPYValue *state, Continuation *k) {
+    size_t n = state->as.seq.len;
+    SPYValue *ctx = state->as.seq.items[n - 1] == c->unbound ? NULL : spy_retain(state->as.seq.items[n - 1]);
+    *k = (Continuation)(void (*)(void))state->as.seq.items[n - 2]->as.native.call;
+    spy_release(state);
+    return ctx;
+}
+static SPYValue *equal_returned(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The call of a Python __eq__, function, on left and right for equalk,
+ * then k with ctx, which it takes; reflected whether it is the
+ * reflected call. */
+static SPYValue *equal_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *left, SPYValue *right, int reflected,
+                             Continuation k, SPYValue *ctx) {
+    SPYValue *state = k_state(c, 3, (SPYValue *[]){spy_retain(left), spy_retain(right), spy_bool(c, reflected), NULL, NULL}, k, ctx);
+    if (!state) return NULL;
+    return callk(c, m, function, 2, (SPYValue *[]){spy_retain(left), spy_retain(right)}, equal_returned, state);
+}
+/* What equalk's __eq__ returned, result: NotImplemented from the first
+ * call leaves the reflected method (operator_declined), then the default;
+ * else its truth goes to the continuation. */
+static SPYValue *equal_returned(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *left = state->as.seq.items[0], *right = state->as.seq.items[1], *self = NULL, *function = NULL, *test = result;
+    if (result == c->not_implemented) {
+        spy_release(result);
+        if (state->as.seq.items[2] == c->booleans[1]) test = comparison_declined(c, T_EQ, left, right);
+        else function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test, NULL);
+    }
+    if (function) {
+        Continuation k;
+        spy_retain(left); spy_retain(self);
+        SPYValue *ctx = k_take(c, state, &k);
+        result = equal_callk(c, m, function, self, left, 1, k, ctx);
+        spy_release(left); spy_release(self);
+        return result;
+    }
+    int truth = test && truthy(test);
+    spy_release(test);
+    return k_resume(c, m, state, c->error_type[0] ? NULL : spy_bool(c, truth));
+}
+/* a == b as a bool for continuation k with ctx, which it takes, calling
+ * a Python __eq__ on m (callk): a's, or b's when b's class is a subclass
+ * of a's, or a has none; else in C. */
+static SPYValue *equalk(SPYContext *c, Machine *m, SPYValue *a, SPYValue *b, Continuation k, SPYValue *ctx) {
+    SPYValue *left = a, *function = a == b ? NULL : rich_function(c, a, b, R_EQ);
+    if (!function && a != b && (function = rich_function(c, b, a, R_EQ))) left = b;
+    if (function) return equal_callk(c, m, function, left, left == a ? b : a, 0, k, ctx);
+    int truth = a == b || equal(a, b);
+    return k(c, m, ctx, c->error_type[0] ? NULL : spy_bool(c, truth));
+}
+static SPYValue *map_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The search of map for key, of hash, from the entries cursor yields on,
+ * comparing a stored key by Python on m (equalk): the index of the entry
+ * found, or -1, as an int for continuation k with ctx, which it takes;
+ * NULL for an error. A comparison that changes map starts it again. */
+static SPYValue *map_findk(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor, Continuation k,
+                           SPYValue *ctx) {
+    SPYValue *storage = namespace_map(map);
+    for (ptrdiff_t i; (i = map_next(storage, hash, &cursor)) >= 0;) {
+        SPYValue *candidate = storage->as.map.items[i].key;
+        if (candidate == key) return k(c, m, ctx, int_value(c, i));
+        if (rich_function(c, candidate, key, R_EQ) || rich_function(c, key, candidate, R_EQ)) {
+            SPYValue *state = k_state(c, 7, (SPYValue *[]){spy_retain(map), spy_retain(key), int_value(c, hash),
+                int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed)), int_value(c, (int64_t)cursor.changes),
+                int_value(c, i), spy_retain(candidate), NULL, NULL}, k, ctx);
+            return state ? equalk(c, m, candidate, key, map_compared, state) : NULL;
+        }
+        spy_retain(candidate);
+        int matches = equal(candidate, key), unchanged = entry_unchanged(storage, i, candidate, cursor);
+        spy_release(candidate);
+        if (c->error_type[0]) return k(c, m, ctx, NULL);
+        if (!unchanged) cursor = map_cursor(storage, hash);
+        else if (matches) return k(c, m, ctx, int_value(c, i));
+    }
+    return k(c, m, ctx, int_value(c, -1));
+}
+/* map_findk's comparison of entry i's key returned result: the entry
+ * found if it still holds that key, else the search goes on. */
+static SPYValue *map_compared(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *map = spy_retain(items[0]), *key = spy_retain(items[1]), *storage = namespace_map(map);
+    int64_t hash = items[2]->as.integer_data.small, at = items[3]->as.integer_data.small;
+    ptrdiff_t i = (ptrdiff_t)items[5]->as.integer_data.small;
+    MapCursor cursor = {(size_t)at / 2, (size_t)items[4]->as.integer_data.small, (int)(at & 1)};
+    int unchanged = entry_unchanged(storage, i, items[6], cursor), matches = result == c->booleans[1];
+    spy_release(result);
+    Continuation k;
+    SPYValue *ctx = k_take(c, state, &k);
+    if (!result) result = k(c, m, ctx, NULL);
+    else if (unchanged && matches) result = k(c, m, ctx, int_value(c, i));
+    else result = map_findk(c, m, map, key, hash, unchanged ? cursor : map_cursor(storage, hash), k, ctx);
+    spy_release(map); spy_release(key);
+    return result;
 }
 /* An item's comparison for in, op, of step ins (contains_call) found it
  * equal, or not: the test's truth; or the next item's comparison, or the
@@ -42513,6 +42648,13 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         hidden_field(self, "message") && group_exceptions(self) && split_condition(c, argv[0]))
         /* A group's split() or subgroup() goes on on m (split_run), or gives its value. */
         return split_begin(c, m, self, argv[0], which == 3 ? SPLIT_REST : 0);
+    const char *entry;
+    SPYValue *map;
+    if (callee->as.native.call == iterator_state_call && !argc && !((intptr_t)callee->as.native.data >> 8) &&
+        self->type == SPY_ITERATOR && iterator_class_id(self) == ((intptr_t)callee->as.native.data & 0xff) &&
+        (entry = reduce_entry(iterator_class_id(self))) && (map = entry_compares(c, entry)))
+        /* An iterator's __reduce__ looks its builtins entry up on m (reduce_begin). */
+        return reduce_begin(c, m, self, map, entry);
     intptr_t reduce = callee->as.native.call == builtin ? (intptr_t)callee->as.native.data : -1;
     if (reduce == B_OBJECT_REDUCE || reduce == B_OBJECT_REDUCE_EX || reduce == B_OBJECT_GETSTATE) {
         /* So does object's reduction, its intrinsic's call or an error (object_reduce). */

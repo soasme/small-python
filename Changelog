@@ -479,6 +479,8 @@ Unreleased (0.10.0):
   or `print` calls, held as a descriptor or property, is read and called without nesting on the C stack
 - `complex()` reads a descriptor `__complex__`, `__float__` or `__index__` once
 - `super()` reads its object's Python `__class__` without nesting on the C stack
+- An iterator's `__reduce__` compares a builtins key by its Python `__eq__` without nesting on the C stack
+- A range iterator's `__reduce__` reads its range before it looks up `iter`
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

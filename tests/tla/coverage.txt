@@ -480,7 +480,7 @@ Contents | - navigation
 26 Mappings and Sets > 26.6 The %MappingProxyType% intrinsic | IntrinsicTypes, ClassObjects
 27 Control Abstraction Objects | = sections
 27 Control Abstraction Objects > 27.1 Iteration | = sections
-27 Control Abstraction Objects > 27.1 Iteration > 27.1.1 Iterators | Iterators, IntrinsicTypes
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.1 Iterators | Iterators, IntrinsicTypes, ReduceEntry
 27 Control Abstraction Objects > 27.1 Iteration > 27.1.2 Sequence iterators | Iterators
 27 Control Abstraction Objects > 27.1 Iteration > 27.1.3 Callable iterators | BuiltinsIter
 27 Control Abstraction Objects > 27.1 Iteration > 27.1.4 enumerate ( *iterable*, *start*=0 ) | BuiltinsIter
