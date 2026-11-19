@@ -35328,7 +35328,8 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         spy_release(items);
         return status;
     }
-    if (items->as.seq.len == 1 && ((item = items->as.seq.items[0])->type == SPY_INSTANCE || (item->type == SPY_TUPLE && item->listed && !item->as.seq.hashed && is_builtin(callee, B_HASH))) &&
+    if (items->as.seq.len == 1 && ((item = items->as.seq.items[0])->type == SPY_INSTANCE || metaclassed(item) ||
+                                   (item->type == SPY_TUPLE && item->listed && !item->as.seq.hashed && is_builtin(callee, B_HASH))) &&
         (status = item_convert(c, m, callee, item, fn, env))) {
         spy_release(items);
         return status;
