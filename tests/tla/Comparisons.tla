@@ -197,8 +197,9 @@ Case(c) ==
       [] c = "builtin_declines" -> <<"('a==NoneType', 'b>str', 'c==P', 'd==tuple')",
                                      <<"'a==NoneType'", "'b>str'", "'c==P'", "'d==tuple'">>>>
       \* so does a builtin's subclass instance by its builtin's method, or its
-      \* own declining one: the reflected method is called once
-      [] c = "builtin_sub_declines" -> <<"('v', 'TypeError', 'TypeError')", <<"'E>I'", "'E>I'", "'N<'", "'E>N'">>>>
+      \* own declining one, and a set: the reflected method is called once
+      [] c = "builtin_sub_declines" -> <<"('v', 'TypeError', 'TypeError', 'TypeError')",
+                                         <<"'E>I'", "'E>I'", "'N<'", "'E>N'", "'E>set'">>>>
       \* object's __ne__ inverts whatever __eq__ returns, also for a declining str
       \* or int; its NotImplemented goes on with the other operand's __ne__
       [] c = "ne_by_eq" -> <<"(True, False, False, False)", <<"'==str'", "'a==P'", "'b==int'", "'d==E'", "'c==E'">>>>

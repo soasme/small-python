@@ -30567,14 +30567,16 @@ static int rich_declines(SPYContext *c, SPYValue *x, int rich) {
     return (plain_instance(x) || metaclassed(x)) && class_lookup(value_class(c, x), rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
            (rich != R_NE || rich_declines(c, x, R_EQ));
 }
-/* Whether x, an instance of a builtin's subclass whose rich comparison
- * rich is the builtin's, declines y, an instance of no builtin's
- * subclass, as its builtin value would (rich_declines); a number's does. */
+/* Whether x, a set, or an instance of a builtin's subclass whose rich
+ * comparison rich is the builtin's, declines y, an instance of no
+ * builtin's subclass, as its builtin value would (rich_declines); a
+ * number's or a set's does. */
 static int based_declines(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
-    SPYValue *base = x->type == SPY_INSTANCE ? x->as.map.base : NULL;
+    SPYValue *base = x->type == SPY_INSTANCE ? x->as.map.base : x;
     if (!base || y->type != SPY_INSTANCE || y->as.map.base) return 0;
-    return class_lookup(x->as.map.parent, rich_names[rich]) == class_lookup(value_class(c, base), rich_names[rich]) &&
-           (base->type == SPY_INT || base->type == SPY_FLOAT || base->type == SPY_COMPLEX || rich_declines(c, base, rich));
+    if (base != x && class_lookup(x->as.map.parent, rich_names[rich]) != class_lookup(value_class(c, base), rich_names[rich])) return 0;
+    return base->type == SPY_SET || base->type == SPY_FROZENSET ||
+           (base != x && (base->type == SPY_INT || base->type == SPY_FLOAT || base->type == SPY_COMPLEX || rich_declines(c, base, rich)));
 }
 /* The Python special method that operator step ins calls first on x and
  * y, owned, with its env, to enter on m (CALL_OPERATOR), x, y and the

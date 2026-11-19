@@ -543,7 +543,7 @@ Unreleased (0.10.0):
 - An await of `anext()` of an async generator, with a default or not, resumes the generator, and a throw into the awaiting coroutine raises in it, without nesting on the C stack
 - `zip()` and `map()` given `strict=` call their iterables' Python `__iter__` without nesting on the C stack
 - A throw of a GeneratorExit class with a Python `__init__`, given a value or traceback, into a `yield from` makes the exception without nesting on the C stack
-- A builtin's subclass instance compared with another object calls that object's reflected Python method without nesting on the C stack
+- A set, or a builtin's subclass instance, compared with another object calls that object's reflected Python method without nesting on the C stack
 - A builtin's subclass instance whose comparison declines no longer calls the other object's reflected method a second time
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
