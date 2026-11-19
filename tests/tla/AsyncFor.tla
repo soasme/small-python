@@ -30,14 +30,18 @@
 (* turn, or a list over the class whose __anext__ returns 1 and 2, its     *)
 (* Python __aiter__ called as the comprehension is evaluated. A syntax     *)
 (* program compiles async for, async with, await, or an asynchronous       *)
-(* comprehension in a plain function. The outcome is the values passed     *)
-(* out, the items, and whether else ran, or the exception.                 *)
+(* comprehension in a plain function. A builtin program awaits             *)
+(* anext(aiter(SRC)) three times for a class SRC, with a default "end" or  *)
+(* none, which StopAsyncIteration ends; one __anext__ raises it itself.    *)
+(* The outcome is the values passed out, the items, and whether else ran,  *)
+(* or the exception.                                                       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [part : {"loop"}, source : {"agen", "relay", "class", "plain", "awaiting", "noaiter", "badanext", "noanext"}, body : {"normal", "break", "raise"}]
             \cup [part : {"comprehension"}, kind : {"list", "set", "dict", "class", "element"}]
             \cup [part : {"syntax"}, construct : {"for", "with", "await", "comprehension"}]
+            \cup [part : {"builtin"}, source : {"class", "plain", "awaiting", "noaiter", "badanext", "noanext"}, default : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -63,7 +67,15 @@ Comprehension(p) == CASE p.kind = "list" -> "['tick', 'tick'] [0, 1]"
                       [] p.kind = "class" -> "[] [1, 2]"
                       [] p.kind = "element" -> Ticks(4) \o " [0, 10]"
 
+\* aiter() and anext() reach the methods async for does.
+Builtin(p) ==
+    IF p.source \in {"noaiter", "badanext", "noanext"} THEN "[] TypeError"
+    ELSE Ticks(IF p.source = "awaiting" THEN 3 ELSE 0) \o
+         \* Plain's __anext__ raises itself, before any awaitable takes the default.
+         (IF p.default /\ p.source # "plain" THEN " [1, 2, 'end']" ELSE " StopAsyncIteration")
+
 Run(p) == CASE p.part = "loop" -> Loop(p)
+            [] p.part = "builtin" -> Builtin(p)
             [] p.part = "comprehension" -> Comprehension(p)
             [] p.part = "syntax" -> "SyntaxError"
 

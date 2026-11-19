@@ -13,7 +13,7 @@ def drive(coro):
             out.append(coro.send(None))
     except StopIteration as stop:
         result = repr(stop.value)
-    except (TypeError, KeyError) as error:
+    except (TypeError, KeyError, StopAsyncIteration) as error:
         result = type(error).__name__
     return "%r %s" % (out, result)
 
@@ -125,8 +125,19 @@ def comprehension(kind):
     return drive(main())
 
 
+def builtin(source, default):
+    async def main():
+        it = aiter(source())
+        items = [await anext(it), await anext(it)]
+        items.append(await (anext(it, "end") if default else anext(it)))
+        return items
+    return drive(main())
+
+
 def outcome(p):
     part = p["part"]
+    if part == "builtin":
+        return builtin(SOURCES[p["source"]], p["default"])
     if part == "loop":
         return loop(SOURCES[p["source"]], p["body"])
     if part == "comprehension":

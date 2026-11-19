@@ -496,6 +496,8 @@ Unreleased (0.10.0):
 - `intersection_update()` of several iterables changes the set only once all are intersected
 - `pow()` with a modulus and `divmod()` read an operand's method through a Python `__get__` without nesting on the C stack
 - `type.__instancecheck__()` and `type.__subclasscheck__()` read a Python `__class__` or `__bases__` without nesting on the C stack
+- `aiter()` and `anext()` call a Python `__aiter__` or `__anext__`, or a descriptor's `__get__` for one, without nesting on the C stack
+- `aiter()` and `async for` check the iterator's class has `__anext__` without reading it through a descriptor
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

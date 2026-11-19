@@ -24684,8 +24684,13 @@ static SPYValue *async_iterator(SPYContext *c, SPYValue *value, int statement) {
 /* What value's __aiter__ returned, which it takes, when it is an async
  * iterator; else NULL with the error. */
 static SPYValue *async_returned(SPYContext *c, SPYValue *value, SPYValue *iterator, int statement) {
-    SPYValue *next = special_method(c, iterator, "__anext__");
-    if (next) { spy_release(next); return iterator; }
+    /* An instance's class has __anext__, which is not read. */
+    if (iterator->type == SPY_INSTANCE || metaclassed(iterator)) {
+        if (class_lookup(value_class(c, iterator), "__anext__")) return iterator;
+    } else {
+        SPYValue *next = special_method(c, iterator, "__anext__");
+        if (next) { spy_release(next); return iterator; }
+    }
     if (!c->error_type[0]) {
         if (statement) errorf(c, "TypeError", "'async for' received an object from __aiter__ that does not implement __anext__: %s", type_name(iterator));
         else errorf(c, "TypeError", "%s.__aiter__() must return an async iterator, not %s", type_name(value), type_name(iterator));
@@ -27401,20 +27406,20 @@ static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
 /* Whether callee is exec(), eval(), divmod(), pow(), sum(), any(), all(),
- * isinstance(), issubclass() or open(), whose call may run on the machine
+ * isinstance(), issubclass(), aiter(), anext() or open(), whose call may run on the machine
  * (builtin_call). */
 static SPYValue *open_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *open_loaded(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *intrinsics_k(SPYContext *, Machine *, Continuation, SPYValue *);
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
     _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64 &&
-                   B_ISINSTANCE < 64 && B_ISSUBCLASS < 64, "builtin mask");
+                   B_ISINSTANCE < 64 && B_ISSUBCLASS < 64 && B_AITER < 64 && B_ANEXT < 64, "builtin mask");
     uintptr_t id = (uintptr_t)callee->as.native.data;
     return callee->type == SPY_NATIVE &&
            ((callee->as.native.call == builtin && id < 64 &&
              (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
                                    UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL |
-                                   UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS))) ||
+                                   UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS | UINT64_C(1) << B_AITER | UINT64_C(1) << B_ANEXT))) ||
             callee->as.native.kwcall == open_builtin);
 }
 static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
@@ -40985,6 +40990,28 @@ static SPYValue *attribute_builtin(SPYContext *c, intptr_t id, SPYValue *a, cons
  * special_k called, got result: NotImplemented from each goes on to the
  * built-in slots, pow()'s or divmod()'s error (power_slots,
  * divmod_declined). */
+/* What aiter() of value, which it takes, got from its __aiter__: result,
+ * when it is an async iterator (async_returned). */
+static SPYValue *aiter_made(SPYContext *c, Machine *m, SPYValue *value, SPYValue *result) {
+    (void)m;
+    if (result) result = async_returned(c, value, result, 0);
+    spy_release(value);
+    return result;
+}
+/* What anext() got from its __anext__, result, which it takes: itself,
+ * or with fallback, a 1-tuple of the default, which it takes, an
+ * awaitable of it giving the default at its end. */
+static SPYValue *anext_made(SPYContext *c, Machine *m, SPYValue *fallback, SPYValue *result) {
+    (void)m;
+    if (!fallback || !result) { spy_release(fallback); return result; }
+    SPYValue *wrapper = value_new(c, SPY_ANEXT_AWAITABLE);
+    if (wrapper) {
+        wrapper->as.iterator.source = result;
+        wrapper->as.iterator.counter = spy_retain(fallback->as.seq.items[0]);
+    } else spy_release(result);
+    spy_release(fallback);
+    return wrapper;
+}
 static SPYValue *operator_declined_k(SPYContext *c, Machine *m, SPYValue *args, SPYValue *result) {
     (void)m;
     SPYValue **v = args->as.seq.items;
@@ -41270,19 +41297,17 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (value || c->error_type[0]) return value;
         return argc == 2 ? spy_retain(argv[1]) : spy_error(c, "StopIteration", "");
     }
-    case B_AITER: {
-        if (argc != 1) goto arity;
-        return async_iterator(c, a, 0);
-    }
-    case B_ANEXT: {
-        if (argc < 1 || argc > 2) goto arity;
-        SPYValue *value = call_special(c, a, "__anext__", 0, NULL);
-        if (!value || argc == 1) return value;
-        SPYValue *wrapper = value_new(c, SPY_ANEXT_AWAITABLE);
-        if (!wrapper) { spy_release(value); return NULL; }
-        wrapper->as.iterator.source = value;
-        wrapper->as.iterator.counter = spy_retain(argv[1]);
-        return wrapper;
+    case B_AITER: case B_ANEXT: {
+        if (id == B_AITER ? argc != 1 : argc < 1 || argc > 2) goto arity;
+        /* On the machine of the call step, a Python __aiter__ or
+         * __anext__ is a call there (special_callk). */
+        Machine *m = step_machine(c);
+        SPYValue *function = m ? item_special(c, a, id == B_AITER ? "__aiter__" : "__anext__") : NULL;
+        SPYValue *fallback = id == B_AITER ? spy_retain(a) : argc == 2 ? tuple_of(c, 1, &argv[1]) : NULL;
+        if (argc == 2 && !fallback) return NULL;
+        if (function) return special_callk(c, m, function, a, 0, NULL, NULL, id == B_AITER ? aiter_made : anext_made, fallback);
+        if (id == B_AITER) { spy_release(fallback); return async_iterator(c, a, 0); }
+        return anext_made(c, NULL, fallback, call_special(c, a, "__anext__", 0, NULL));
     }
     case B_ZIP: case B_ENUMERATE: case B_REVERSED: case B_MAP: {
         if (id == B_ENUMERATE && !argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
