@@ -108,6 +108,10 @@ SOURCES = {
     "update_too_many": 'result = {}.update({}, {})',
     "or_non_dict": 'result = {} | [1]',
     "ior_iterable": "d = {}\nd |= [('a', 1)]\nresult = d",
+    "merge_dict_iter": "log = []\nclass D(dict):\n    def keys(s):\n        for _ in (): pass\n        log.append('keys')\n        return ['a']\n"
+                       "    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k)\n        return k * 2\n"
+                       "class Own(D):\n    def __iter__(s): return iter(['z'])\n"
+                       "u = {}\nu.update(Own(q=1))\nresult = ({**D(q=1)}, {**Own(q=1)}, u, log)",
     "ior_mapping": "class M:\n    def keys(s):\n        for _ in range(2): pass\n        log.append('keys')\n        return ['a', 'b']\n    def __getitem__(s, k):\n        for _ in range(2): pass\n        log.append(k)\n        return k * 2\nlog = []\nd = e = {'z': 0}\nd |= M()\nresult = (d, d is e, log)",
     "merge_equal_keys": "class E:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n    def __eq__(s, o):\n        for _ in range(2): pass\n        log.append(s.n + o.n)\n        return s.n[0] == o.n[0]\nlog = []\nd = {E('a1'): 1}\ndel log[:]\nd.update({E('a2'): 2, E('b1'): 3})\nd |= {E('b2'): 4}\nf = d | {E('c1'): 5}\ng = {**d, **{E('a3'): 6}}\nresult = ([(k.n, v) for k, v in d.items()], len(f), [(k.n, v) for k, v in g.items()], log)",
     "merge_mutated": "class E:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n    def __eq__(s, o):\n        src.clear() if o.n == 'b' else src.update(z=0)\n        return False\nsrc = {}\nout = []\nfor k in ('a', 'b'):\n    d = {E('x'): 0}\n    src.clear()\n    src[E(k)] = 1\n    try:\n        d.update(src)\n    except RuntimeError as e:\n        out.append((str(e), len(d)))\nresult = out",

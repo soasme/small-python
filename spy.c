@@ -25876,12 +25876,13 @@ static SPYValue *adapter_indexed(SPYContext *c, Machine *m, SPYValue *state, SPY
     if (status) { spy_release(state); return NULL; }
     return adapter_step(c, m, state);
 }
-/* The Python __getitem__ on the machine of plain instance v's class, or
- * a descriptor with a Python getter (special_env), borrowed; else NULL. */
+/* The Python __getitem__ on the machine of instance v's class, past a
+ * builtin base's, or a descriptor with a Python getter (special_env),
+ * borrowed; else NULL. */
 static SPYValue *getitem_function(SPYContext *c, SPYValue *v) {
     /* A class's is its metaclass's. */
     SPYValue *cls = metaclassed(v) ? value_class(c, v) :
-                    v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__getitem__", NULL) ? NULL : v->as.map.parent;
+                    v->type != SPY_INSTANCE || builtin_base(c, v, "__getitem__", NULL) ? NULL : v->as.map.parent;
     SPYValue *function = cls ? class_lookup(cls, "__getitem__") : NULL;
     return function && (machine_function(c, function) || descriptor_getter(c, function)) ? function : NULL;
 }
@@ -25914,6 +25915,14 @@ static SPYValue *asked_function(SPYContext *c, SPYValue *v, const char *name) {
  * instance v (KEY_KEYS): its class's (method_function), *bound then, or
  * a function v holds itself, called alone; else NULL. */
 static SPYValue *keys_function(SPYContext *c, SPYValue *v, int *bound) {
+    if (v->type == SPY_INSTANCE && v->as.map.base && is_dict(v->as.map.base) && !v->as.map.namespace) {
+        /* A dict subclass's merges by its keys() when it iterates its own way (extend_container). */
+        SPYValue *base = builtin_base(c, v, "__iter__", NULL), *hook = class_lookup(v->as.map.parent, "__getattribute__");
+        SPYValue *function = (base && is_dict(base)) || (hook && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) ? NULL :
+                             class_lookup(v->as.map.parent, "keys");
+        *bound = 1;
+        return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
+    }
     SPYValue *own = plain_instance(v) ? name_local(v, "keys") : NULL, *hook = own ? class_lookup(v->as.map.parent, "__getattribute__") : NULL;
     *bound = !own;
     if (!own) return method_function(c, v, "keys");
