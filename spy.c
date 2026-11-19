@@ -25844,13 +25844,29 @@ static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
     return function && (machine_function(c, function) || generator_function(c, function)) ? function : NULL;
 }
 static SPYValue *adapter_iterated(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The zip, map, enumerate or filter class that calling class cls makes:
+ * itself, or the one its subclass of type's metaclass derives from alone
+ * (its MRO's next to last), no class between defining __new__ or
+ * __init__, whose instance then carries the value it makes (native_new);
+ * else NULL. */
+static SPYValue *adapter_class(SPYContext *c, SPYValue *cls) {
+    if (cls->as.map.native) return cls;
+    SPYValue *mro = cls->as.map.mro;
+    if (!mro || mro->as.seq.len < 3 || metaclassed(cls)) return NULL;
+    SPYValue *owner = mro->as.seq.items[mro->as.seq.len - 2];
+    if (owner != c->iterator_types[IT_ZIP] && owner != c->iterator_types[IT_MAP] && owner != c->iterator_types[IT_ENUMERATE] &&
+        owner != c->iterator_types[IT_FILTER]) return NULL;
+    for (size_t i = 0; i < mro->as.seq.len - 2; i++)
+        if (name_local(mro->as.seq.items[i], "__new__") || name_local(mro->as.seq.items[i], "__init__")) return NULL;
+    return owner;
+}
 /* zip(), map(), enumerate() or filter() on machine m, whose iterables'
  * Python __iter__ methods are m's calls (callk), in order: state, which
  * it takes, lists the builtin, its arguments, an enumerate's count, then
  * map's or filter's function and the iterators so far. */
 static SPYValue *adapter_step(SPYContext *c, Machine *m, SPYValue *state) {
     SPYValue *callee = state->as.seq.items[0], *args = state->as.seq.items[1], *result;
-    int id = callee->as.map.native - 1;
+    int id = adapter_class(c, callee)->as.map.native - 1;
     size_t last = id == B_ENUMERATE ? 1 : id == B_FILTER ? 2 : args->as.seq.len;
     while (state->as.seq.len - 3 < last) {
         SPYValue *method = NULL, *iterator = iterator_of(c, args->as.seq.items[state->as.seq.len - 3], &method);
@@ -25870,11 +25886,16 @@ static SPYValue *adapter_step(SPYContext *c, Machine *m, SPYValue *state) {
     else if ((source = id == B_FILTER ? value_new(c, SPY_TUPLE) : spy_list(c)))
         for (size_t i = 3; i < state->as.seq.len; i++)
             if (sequence_append(c, source, state->as.seq.items[i])) { spy_release(source); source = NULL; break; }
+    /* A subclass's instance carries the adapter (native_new). */
+    SPYValue *instance = source && !callee->as.map.native ? new_instance(c, callee) : NULL;
     spy_release(state);
-    if (!source) { spy_release(counter); return NULL; }
+    if (!source || (!instance && !callee->as.map.native)) { spy_release(counter); spy_release(source); return NULL; }
     SPYValue *adapter = adapter_new(c, id, source, counter);
     if (adapter && strict) adapter->as.iterator.size = 1;
-    return adapter;
+    if (!instance) return adapter;
+    if (!adapter) { spy_release(instance); return NULL; }
+    instance->as.map.base = adapter;
+    return instance;
 }
 /* What an iterable's Python __iter__ returned for adapter_step (callk). */
 static SPYValue *adapter_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
@@ -25890,7 +25911,9 @@ static SPYValue *adapter_iterated(SPYContext *c, Machine *m, SPYValue *state, SP
  * the machine (iter_function). */
 static NO_INLINE int adapter_iterates(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     size_t i = 0, last = argc;
-    switch (callee->as.map.native - 1) {
+    SPYValue *owner = adapter_class(c, callee);
+    if (!owner) return 0;
+    switch (owner->as.map.native - 1) {
     case B_ZIP: break;
     case B_MAP: if (argc < 2) return 0; i = 1; break;
     case B_ENUMERATE: if (argc < 1 || argc > 2) return 0; last = 1; break;
@@ -25911,7 +25934,7 @@ static NO_INLINE SPYValue *adapter_call(SPYContext *c, Machine *m, SPYValue *cal
     return adapter_strict(c, m, callee, argc, argv, 0);
 }
 static NO_INLINE SPYValue *adapter_strict(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, int strict) {
-    int id = callee->as.map.native - 1;
+    int id = adapter_class(c, callee)->as.map.native - 1;
     SPYValue *args = tuple_of(c, argc, argv), *state = args ? spy_list(c) : NULL, *index;
     release_all(argc, argv);
     int status = !state || sequence_append(c, state, callee) || sequence_append(c, state, args);
@@ -28260,7 +28283,7 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
         return spy_retain(c->types[SPY_STRING]);
     }
     /* zip(), map(), enumerate() and filter() call a Python __iter__ (adapter_call). */
-    if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, argc, argv))
+    if (method < 0 && callee->type == SPY_CLASS && adapter_iterates(c, callee, argc, argv))
         return adapter_call(c, m, callee, argc, argv);
     /* A dict or set method hashing an instance or tuple key, or hash() of
      * a tuple, enters its first Python __hash__ (hash_call_step). */
@@ -28975,7 +28998,7 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
         return state ? special_callk(c, m, index_special(c, part), part, 0, NULL, NULL, index_argued, state) : NULL;
     }
-    if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, args->as.seq.len, args->as.seq.items)) {
+    if (method < 0 && callee->type == SPY_CLASS && adapter_iterates(c, callee, args->as.seq.len, args->as.seq.items)) {
         /* enumerate() goes on to its iterable's Python __iter__ (adapter_call). */
         for (size_t k = 0; k < args->as.seq.len; k++) spy_retain(args->as.seq.items[k]);
         return adapter_call(c, m, spy_retain(callee), args->as.seq.len, args->as.seq.items);
@@ -29743,7 +29766,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(source); spy_release(callee);
         return result;
     }
-    if (calls && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, argc, argv)) {
+    if (calls && callee->type == SPY_CLASS && adapter_iterates(c, callee, argc, argv)) {
         /* So do zip(), map(), enumerate() and filter(), the callee and arguments leaving the stack. */
         m->len -= argc + 1;
         return adapter_call(c, m, callee, argc, argv);

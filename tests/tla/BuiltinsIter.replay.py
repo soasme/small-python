@@ -110,6 +110,9 @@ SOURCES = {
     "map_strict": 'result = list(map(pow, [1, 2], [3], strict=True))',
     "map_shortest": 'result = list(map(pow, [2, 3, 4], [1, 2]))',
     "map_none": 'result = list(map(None, [1]))',
+    "adapter_subclass_iter": "log = []\nclass It:\n    def __init__(s, n): s.n = n\n    def __iter__(s):\n        for _ in (): pass\n        log.append(s.n); return iter(range(s.n))\n"
+                             "class E(enumerate): pass\nclass Z(zip): pass\ne = E(It(2), 1)\n"
+                             "result = (type(e).__name__, list(e), list(Z(It(1), It(1))), len(log))",
     "iterator_subclass": "def gen(*items):\n    for _ in (): pass\n    yield from items\n"
                          "class E(enumerate): pass\nclass Z(zip): pass\ne = E(gen(1))\n"
                          "result = (list(E(gen(1, 2))), tuple(Z(gen(1), 'ab')), next(e), next(e, 'end'))",
