@@ -25509,15 +25509,10 @@ static int made_natively(SPYValue *k) {
     SPYValue *init = class_lookup(k, "__init__"), *made = class_lookup(k, "__new__");
     return !k->as.map.meta && (!init || init->type == SPY_NATIVE) && (!made || made->type == SPY_NATIVE);
 }
-/* Whether a close, or a throw of k with argc arguments, into generator
+/* Whether a close, or a throw with argc arguments, into generator
  * machine m raises on the machine: a value at its innermost yield
- * (raises_at), a yield from of a generator passing it on as given. A
- * GeneratorExit class whose making runs Python (made_natively), given a
- * value, is made only after a yield from's delegates close, in C; with
- * none, on the machine (thrown_late). */
-static NO_INLINE int thrown_at(SPYContext *c, Machine *m, size_t argc, SPYValue *k) {
-    if (argc > 1 && k->type == SPY_CLASS && m->awaiting == AWAIT_DELEGATE && subclass(k, c->exceptions[X_GENERATOR_EXIT]) && !made_natively(k))
-        return 0;
+ * (raises_at), a yield from of a generator passing it on as given. */
+static NO_INLINE int thrown_at(Machine *m, size_t argc) {
     return argc < 2 || raises_at(innermost(m));
 }
 /* Whether a close of, or a throw of exception into, a generator or
@@ -26063,7 +26058,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
          * yield, or a yield from of a builtin iterator, too. */
         return (argc == (method == M_THROW) || (argc >= 2 && method == M_THROW && argv[0]->type == SPY_CLASS &&
                                                 (argc == 2 || argv[2]->type == SPY_NONE || argv[2]->type == SPY_TRACEBACK))) &&
-               throws_in(c, callee, argc ? argv[0] : NULL) && thrown_at(c, callee->as.generator.machine, argc, argc ? argv[0] : NULL) ?
+               throws_in(c, callee, argc ? argv[0] : NULL) && thrown_at(callee->as.generator.machine, argc) ?
                method == M_THROW ? B_THROW : B_CLOSE : -1;
     /* An iterator's __next__, bound or given it, of a Python function is next() of it. */
     if (method == M_NEXT && !argc && callee->type == SPY_ITERATOR) return next_calls(c, callee) ? B_NEXT : -1;
@@ -26307,7 +26302,7 @@ static NO_INLINE int thrown_raw(SPYContext *c, SPYValue *g, SPYValue *k) {
 }
 /* Whether class k thrown into generator g is a GeneratorExit made by
  * Python (made_natively) after g's yield from's delegates close, as
- * given until then (delegate_closed). */
+ * given until then, with its value and traceback (delegate_closed). */
 static NO_INLINE int thrown_late(SPYContext *c, SPYValue *g, SPYValue *k) {
     if (g->type == SPY_BOUND_METHOD) g = g->as.bound.self;
     if (g->type == SPY_COROUTINE_ITERATOR) g = g->as.iterator.source;
@@ -26362,7 +26357,10 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     }
     SPYValue *init = NULL, *made = NULL, *built = method < 0 ? built_type(c, callee) : NULL, *wrap = built ? spy_retain(callee) : NULL;
     if (built) callee = built;
-    int late = id == B_THROW && generator->type == SPY_CLASS && !start && thrown_late(c, callee, generator),
+    int late = id == B_THROW && generator->type == SPY_CLASS && thrown_late(c, callee, generator) &&
+               !(start && start->type == SPY_INSTANCE && subclass(start->as.map.parent, generator)) &&
+               !(start && start->type == SPY_TUPLE && start->as.seq.len > 8) &&
+               (!traceback || traceback->type == SPY_NONE || traceback->type == SPY_TRACEBACK),
         raw = late || (id == B_THROW && generator->type == SPY_CLASS && thrown_raw(c, callee, generator));
     if (id == B_THROW && generator->type == SPY_CLASS && !raw) {
         /* The value is the instance, the tuple of arguments, none, or the
@@ -26428,6 +26426,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     if (awaited && !awaited->as.async_operation.state && awaited->as.async_operation.method == M_ASEND && (!sent || sent->type == SPY_NONE)) {
         spy_release(sent); sent = spy_retain(awaited->as.async_operation.args->as.seq.items[0]);
     }
+    /* A late GeneratorExit given a value or traceback is made of them (exit_made). */
+    SPYValue *exit = late && (start || traceback) ? tuple_of(c, 3, (SPYValue *[]){generator, start ? start : c->none, traceback ? traceback : c->none}) : NULL;
     if (id == B_THROW) {
         sent = raw ? spy_retain(generator) : thrown_exception(c, traceback ? 3 : start ? 2 : 1, (SPYValue *[]){generator, start ? start : c->none, traceback});
         spy_release(generator); spy_release(start); start = NULL;
@@ -26459,7 +26459,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     if (given) { iterator_refused(c, id, collects, given); spy_release(given); }
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(consumer); release_all(10, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited, bound, sources}); return; }
+    if (!block) { mem_free(consumer); release_all(11, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited, bound, sources, exit}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
                            .searched = searched, .wrap = wrap, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
@@ -26485,11 +26485,16 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
          * new one raised at the innermost yield, and raises at the
          * outermost (delegate_closed). */
         int closing = id == B_CLOSE || late || subclass(sent->as.map.parent, c->exceptions[X_GENERATOR_EXIT]);
-        if (id == B_THROW && closing && g->awaiting == AWAIT_DELEGATE) { consumer->made = sent; consumer->sent = close_exception(c); }
+        if (id == B_THROW && closing && g->awaiting == AWAIT_DELEGATE) {
+            consumer->made = exit ? exit : sent; consumer->sent = close_exception(c);
+            if (exit) spy_release(sent);
+            exit = NULL;
+        }
         for (; g->awaiting == AWAIT_DELEGATE && g->delegate->type != SPY_INSTANCE && g->delegate->type != SPY_ITERATOR; g = g->delegate->as.generator.machine)
             g->throwing = closing ? CLOSING : THROWING;
         consumer->count = (size_t)g->drop + 1; g->drop = 0;
     }
+    spy_release(exit);
 }
 /* Whether the machine takes v's items, a source whose items call Python
  * (machine_source), but a map or filter of a native function. */
@@ -36547,11 +36552,13 @@ static SPYValue *generator_end(SPYContext *c, SPYValue *g, Result result) {
  * there, chained again to the exception m handles (13.16.3). */
 static void operation_closed(SPYContext *, Machine *, SPYValue *, Result);
 /* The GeneratorExit delegate_closed made, exit, raised at m's yield from,
- * chained as there to inheriting's exception (None for none). */
+ * chained as there to inheriting's first exception (None for none), with
+ * its second traceback if one was thrown. */
 static SPYValue *exit_made(SPYContext *c, Machine *m, SPYValue *inheriting, SPYValue *exit) {
     (void)m;
-    SPYValue *inherited = c->inherited_exception, *chained = inheriting->as.seq.items[0];
+    SPYValue *inherited = c->inherited_exception, *chained = inheriting->as.seq.items[0], *traceback = inheriting->as.seq.items[1];
     c->inherited_exception = chained == c->none ? NULL : chained;
+    if (exit && exit->type == SPY_INSTANCE && traceback->type == SPY_TRACEBACK) set_hidden_field(c, exit, "__traceback__", traceback);
     if (exit) raise_thrown(c, exit, c->handled);
     c->inherited_exception = inherited;
     spy_release(exit); spy_release(inheriting);
@@ -36580,11 +36587,17 @@ static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     if (ignored) {
         spy_error(c, "RuntimeError", d->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
         materialize_error(c);
-    } else if (thrown && thrown->type == SPY_CLASS && !c->error_type[0]) {
+    } else if (thrown && (thrown->type == SPY_CLASS || thrown->type == SPY_TUPLE) && !c->error_type[0]) {
         /* A GeneratorExit class made by Python (thrown_late) is m's call
-         * now (exit_made). */
-        SPYValue *inheriting = tuple_of(c, 1, (SPYValue *[]){c->inherited_exception ? c->inherited_exception : c->none});
-        if (inheriting) callk(c, m, thrown, 0, NULL, exit_made, inheriting);
+         * now, of its value's arguments as a throw's (exit_made). */
+        SPYValue *k = thrown, *value = c->none, *traceback = c->none;
+        if (thrown->type == SPY_TUPLE) { k = thrown->as.seq.items[0]; value = thrown->as.seq.items[1]; traceback = thrown->as.seq.items[2]; }
+        size_t argc = value->type == SPY_TUPLE ? value->as.seq.len : value != c->none;
+        SPYValue *args[8];
+        for (size_t i = 0; i < argc; i++) args[i] = spy_retain(value->type == SPY_TUPLE ? value->as.seq.items[i] : value);
+        SPYValue *inheriting = tuple_of(c, 2, (SPYValue *[]){c->inherited_exception ? c->inherited_exception : c->none, traceback});
+        if (inheriting) callk(c, m, k, argc, args, exit_made, inheriting);
+        else release_all(argc, args);
     } else if (thrown && !c->error_type[0]) raise_thrown(c, thrown, c->handled);
     else if (!c->error_type[0]) {
         SPYValue *exit = exception_create(c, c->exceptions[X_GENERATOR_EXIT], 0, NULL);
