@@ -486,6 +486,8 @@ Unreleased (0.10.0):
 - An `asend()` or `athrow()` awaitable's `send`, `throw`, `close` or `__next__` called through its type resumes the generator without nesting on the C stack
 - A `throw()` into, or `close()` of, a coroutine awaiting an async generator's `asend()` or `athrow()` reaches the generator without nesting on the C stack
 - `close()` and `throw()` of an `asend()`, `athrow()` or `aclose()` awaitable, and `send()` of one in progress, reach its generator without nesting on the C stack
+- A program's first `object.__reduce__()`, `__reduce_ex__()` or `__getstate__()` loads the engine's intrinsics without nesting on the C stack
+- `open()` with positional arguments runs its file-object code without nesting on the C stack
 - a `with` statement reads a descriptor `__enter__` or `__exit__`, and tests `__exit__`'s result with
   its Python `__bool__` or `__len__`, without nesting on the C stack
 - an error testing `__exit__`'s result has the exception it was to suppress as its `__context__`

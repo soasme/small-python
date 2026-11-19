@@ -510,6 +510,8 @@ struct SPYContext {
     size_t buffer_next;
     /* On a machine's stack, marks a special method's descriptor __get__ whose result an operator step calls (special_env). */
     SPYValue *descripting;
+    /* Whether k_fn is a unit whose module body k_enter enters (intrinsics_k). */
+    int k_unit;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -18060,8 +18062,8 @@ static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t
 /* The call callk left on m, its continuation's (CALL_K), or a repr job's
  * first left with none (CALL_CHECKED): the machine to run on. */
 static NO_INLINE Machine *k_enter(SPYContext *c, Machine *m) {
-    Call *call = call_enter(c, c->k_fn, c->k_env, m);
-    c->k_fn = c->k_env = NULL;
+    Call *call = c->k_unit ? unit_enter(c, c->k_fn, c->k_env, m) : call_enter(c, c->k_fn, c->k_env, m);
+    c->k_fn = c->k_env = NULL; c->k_unit = 0;
     int kind = c->k_kind;
     c->k_kind = 0;
     if (call) {
@@ -21990,6 +21992,47 @@ enter:
 /* object.__reduce__(), __reduce_ex__() or __getstate__() (id) of argc
  * arguments argv: the protocol itself is Python code in the intrinsics
  * module, on m when given (callk), the call then m's. */
+/* The intrinsics module's load that intrinsics_k began on m ended, its
+ * body returning result, or NULL when it raised: state's continuation
+ * goes on, given None, or NULL with the error (k_resume). */
+static SPYValue *intrinsics_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    c->fuel = (size_t)state->as.seq.items[1]->as.integer_data.small;
+    c->intrinsics_loading = 0;
+    if (result) c->intrinsics = spy_retain(state->as.seq.items[0]);
+    spy_release(result);
+    return k_resume(c, m, state, result ? spy_none(c) : NULL);
+}
+static int unit_call(SPYContext *, SPYValue *, SPYValue *);
+/* Continuation k with ctx, which it takes, once the intrinsics module is
+ * loaded: at once when it is, else after its body runs on m (k_enter of
+ * the unit, intrinsics_loaded), spending none of the program's fuel. */
+static SPYValue *intrinsics_k(SPYContext *c, Machine *m, Continuation k, SPYValue *ctx) {
+    if (c->intrinsics) return k(c, m, ctx, spy_none(c));
+    if (c->intrinsics_loading) { spy_release(ctx); return spy_error(c, "SystemError", "intrinsics used while loading intrinsics"); }
+    SPYValue *unit, *module = intrinsics_begin(c, &unit), *state = NULL;
+    if (module && !unit_call(c, unit, module))
+        state = k_state(c, 2, (SPYValue *[4]){spy_retain(module), int_value(c, (int64_t)c->fuel)}, k, ctx);
+    else spy_release(ctx);
+    if (!state) {
+        if (module) { spy_release(unit); spy_release(module); }
+        return NULL;
+    }
+    c->fuel = SIZE_MAX; c->intrinsics_loading = 1;
+    c->k_fn = unit; c->k_env = module; c->k = intrinsics_loaded; c->k_ctx = state; c->k_unit = 1;
+    return NULL;
+}
+static SPYValue *object_reduce(SPYContext *, Machine *, int, size_t, SPYValue *const *);
+/* The intrinsics an object reduction (ctx: its id and arguments) needs are
+ * loaded, given result, or NULL with an error: it goes on (object_reduce). */
+static SPYValue *reduce_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue *value = NULL;
+    if (result) {
+        spy_release(result);
+        value = object_reduce(c, m, (int)ctx->as.seq.items[0]->as.integer_data.small, ctx->as.seq.len - 1, ctx->as.seq.items + 1);
+    }
+    spy_release(ctx);
+    return value;
+}
 static SPYValue *object_reduce(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv) {
     size_t expected = id == B_OBJECT_REDUCE_EX ? 2 : 1;
     const char *method = id == B_OBJECT_REDUCE ? "__reduce__" : id == B_OBJECT_REDUCE_EX ? "__reduce_ex__" : "__getstate__";
@@ -22006,6 +22049,12 @@ static SPYValue *object_reduce(SPYContext *c, Machine *m, int id, size_t argc, S
     int64_t protocol;
     if (id == B_OBJECT_REDUCE_EX && !is_int(argv[1])) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(argv[1]));
     if (id == B_OBJECT_REDUCE_EX && spy_as_int(c, argv[1], &protocol)) return NULL;
+    if (m && !c->intrinsics) {
+        /* Its intrinsic's module loads on m first (intrinsics_k). */
+        SPYValue *which = int_value(c, id), *ctx = which ? tuple_of(c, argc + 1, (SPYValue *[3]){which, argv[0], argc > 1 ? argv[1] : NULL}) : NULL;
+        spy_release(which);
+        return ctx ? intrinsics_k(c, m, reduce_loaded, ctx) : NULL;
+    }
     SPYValue *function = intrinsic(c, id == B_OBJECT_REDUCE_EX ? "_object_reduce_ex" : id == B_OBJECT_REDUCE ? "_object_common_reduce" : "_object_getstate_default");
     SPYValue *second = id == B_OBJECT_REDUCE_EX ? spy_retain(argv[1]) : id == B_OBJECT_REDUCE ? spy_int(c, 0) : spy_retain(c->booleans[0]);
     if (!function || !second) { spy_release(second); return NULL; }
@@ -27209,16 +27258,21 @@ static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
 /* Whether callee is exec(), eval(), divmod(), pow(), sum(), any(), all(),
- * isinstance() or issubclass(), whose call may run on the machine
+ * isinstance(), issubclass() or open(), whose call may run on the machine
  * (builtin_call). */
+static SPYValue *open_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *open_loaded(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *intrinsics_k(SPYContext *, Machine *, Continuation, SPYValue *);
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
     _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64 &&
                    B_ISINSTANCE < 64 && B_ISSUBCLASS < 64, "builtin mask");
     uintptr_t id = (uintptr_t)callee->as.native.data;
-    return callee->type == SPY_NATIVE && callee->as.native.call == builtin && id < 64 &&
-           (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
-                                 UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL |
-                                 UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS));
+    return callee->type == SPY_NATIVE &&
+           ((callee->as.native.call == builtin && id < 64 &&
+             (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
+                                   UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL |
+                                   UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS))) ||
+            callee->as.native.kwcall == open_builtin);
 }
 static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
@@ -27834,6 +27888,17 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
                                         SPYValue **env) {
     int id = (int)(intptr_t)callee->as.native.data;
     SPYValue *result, *function = NULL;
+    if (callee->as.native.kwcall == open_builtin) {
+        /* open() calls its intrinsic on m, loading the intrinsics first (intrinsics_k). */
+        SPYValue *ctx = argc && argc <= 8 ? tuple_of(c, argc, argv) : NULL;
+        if (!ctx) {
+            result = c->error_type[0] ? NULL : call_plain(c, callee, -1, n, argc, argv);
+            release_all(argc, argv); spy_release(callee);
+            return result;
+        }
+        release_all(argc, argv); spy_release(callee);
+        return intrinsics_k(c, m, open_loaded, ctx);
+    }
     if (id == B_EXEC || id == B_EVAL) {
         result = source_call(c, callee, argc, argv, env);
         spy_release(callee);
@@ -33703,6 +33768,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         Continuation k = ((Call *)m)->k;
                         SPYValue *k_ctx = ((Call *)m)->k_ctx;
                         c->k_host = ((Call *)m)->host;
+                        m->owner = NULL;
                         m = call_leave(c, (Call *)m, result);
                         f = m->frame; code = m->code->items; pc = m->pc;
                         if ((result = k(c, m, k_ctx, result)) == c->stepped) {
@@ -42760,6 +42826,16 @@ static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYV
  * leaves its call on m (memory_released, object_reduce): NULL, c->k_fn
  * set. A group's split() or subgroup() leaves its call so, or gives the
  * call's value, *env unset (split_run). */
+/* The intrinsics open() needs are loaded, given result, or NULL with an
+ * error: its intrinsic is called on m with the arguments ctx holds. */
+static SPYValue *open_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue *fn = result ? intrinsic(c, "open") : NULL, *args[8];
+    size_t argc = ctx->as.seq.len;
+    spy_release(result);
+    for (size_t i = 0; fn && i < argc; i++) args[i] = spy_retain(ctx->as.seq.items[i]);
+    spy_release(ctx);
+    return fn ? callk(c, m, fn, argc, args, method_called, NULL) : NULL;
+}
 static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     SPYValue *self = NULL, *function;
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }

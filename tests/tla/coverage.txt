@@ -334,7 +334,7 @@ Contents | - navigation
 20 Fundamental Objects > 20.1 The `object` class | = sections
 20 Fundamental Objects > 20.1 The `object` class > 20.1.1 object ( ) | Callables
 20 Fundamental Objects > 20.1 The `object` class > 20.1.2 Instance namespace | Attributes, Slots
-20 Fundamental Objects > 20.1 The `object` class > 20.1.3 Methods of `object` | BasicCustomization, Objects
+20 Fundamental Objects > 20.1 The `object` class > 20.1.3 Methods of `object` | BasicCustomization, Objects, ReduceFirst
 20 Fundamental Objects > 20.1 The `object` class > 20.1.4 The reduction protocol | Reduction
 20 Fundamental Objects > 20.2 The `type` class | = sections
 20 Fundamental Objects > 20.2 The `type` class > 20.2.1 Type objects | ClassObjects
