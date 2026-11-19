@@ -9,7 +9,8 @@
 (* or __getattr__, refusing objects without a __dict__ and read-only       *)
 (* attributes, delattr() calling a Python __delattr__, property deleter or *)
 (* __delete__; vars(), dir() (sorted, or __dir__ listed, a generator or a  *)
-(* Python __iter__ too), callable(), id(), hash() (truncating big __hash__ *)
+(* Python __iter__ too), callable() (by a class's __call__, unread),      *)
+(* id(), hash() (truncating big __hash__                                   *)
 (* results, refusing non-int ones and classes that set __eq__ alone; a     *)
 (* tuple's of its items' in order, kept unless an item fails), object(),   *)
 (* and type() with one or three arguments.                                 *)
@@ -55,7 +56,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
 
 Cases == {"getattr_nonstr", "property_get_calls", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
-          "dir_hook_bad", "callable_forms", "id_identity", "hash_big", "hash_bad", "hash_eq_only", "hash_method_object",
+          "dir_hook_bad", "callable_forms", "callable_unread", "id_identity", "hash_big", "hash_bad", "hash_eq_only", "hash_method_object",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
           "type_bad_dict", "type_bad_name", "type_qualname_kw", "isinstance_hook", "isinstance_bad",
           "issubclass_bad_first", "issubclass_bad_second", "object_no_attrs", "object_args",
@@ -100,6 +101,8 @@ Case(c) ==
       [] c = "dir_hook_raises" -> "KeyError: 'e'"
       [] c = "dir_hook_bad" -> "TypeError: 'int' object is not iterable"
       [] c = "callable_forms" -> "(True, True, False, True, False)"
+      \* a class's __call__ makes its instances callable unread: a failing property, None
+      [] c = "callable_unread" -> "(True, True, False)"
       [] c = "id_identity" -> "(True, True, 'int')"
       [] c = "hash_big" -> "True"
       [] c = "hash_bad" -> "TypeError: __hash__ method should return an integer"

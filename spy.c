@@ -3404,11 +3404,11 @@ static SPYValue *name_searched(SPYContext *c, Machine *m, SPYValue *state, SPYVa
     spy_release(result); spy_release(env); spy_release(e); spy_release(key);
     return value;
 }
-/* The value continuation name_from gives. */
-static SPYValue *name_given(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) { (void)c; (void)m; (void)ctx; return result; }
+/* The continuation that gives the result as it is (name_from, a mappingproxy's call). */
+static SPYValue *unchanged(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) { (void)c; (void)m; (void)ctx; return result; }
 /* name_walk in C. */
 static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name name, int annotation) {
-    return name_walk(c, NULL, env, from, name, annotation, 0, NULL, name_given, NULL);
+    return name_walk(c, NULL, env, from, name, annotation, 0, NULL, unchanged, NULL);
 }
 static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) { return name_from(c, env, env, name, 1); }
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
@@ -22844,6 +22844,18 @@ static SPYValue *property_called(SPYContext *c, Machine *m, SPYValue *ctx, SPYVa
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *native_entered_rest(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 
+static SPYValue *special_callk_keywords(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, SPYValue *,
+                                        Continuation, SPYValue *);
+/* A call of instance v, of argc (at most 8) arguments argv and keywords,
+ * a dict or NULL, whose class's __call__ is a descriptor with a Python
+ * getter: its read on m, what it returns then called
+ * (special_callk_keywords); else NULL with no call. */
+static NO_INLINE SPYValue *call_described(SPYContext *c, Machine *m, SPYValue *v, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *function = class_lookup(v->as.map.parent, "__call__"), *args[8];
+    if (!function || argc > 8 || machine_function(c, function) || !descriptor_getter(c, function)) return NULL;
+    for (size_t i = 0; i < argc; i++) args[i] = spy_retain(argv[i]);
+    return special_callk_keywords(c, m, function, v, argc, args, keywords, NULL, unchanged, NULL);
+}
 /* native_entered_rest of a native callee or a method of one. */
 static ALWAYS_INLINE SPYValue *native_entered(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
     return callee->type == SPY_NATIVE || callee->type == SPY_METHOD ? native_entered_rest(c, m, callee, argc, argv, env) : NULL;
@@ -23171,12 +23183,11 @@ static NO_INLINE Result execute_with(SPYContext *c, Frame *f, Node *item, Node *
     spy_release(c->handled); c->handled = outer;
     c->depth--; return r;
 }
+/* Whether v is callable: its type defines __call__, whatever reading it
+ * would give, or v is a builtin callable. */
 static int callable_value(SPYContext *c, SPYValue *v) {
-    SPYValue *method = special_dispatch(v) ? special_method(c, v, "__call__") : NULL;
-    int result = method || v->type == SPY_CLASS || v->type == SPY_STATICMETHOD || v->type == SPY_FUNCTION ||
-        v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD || builtin_classmethod(v);
-    spy_release(method);
-    return result;
+    return (special_dispatch(v) && class_lookup(value_class(c, v), "__call__")) || v->type == SPY_CLASS || v->type == SPY_STATICMETHOD ||
+           v->type == SPY_FUNCTION || v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD || builtin_classmethod(v);
 }
 static SPYValue *group_class(SPYContext *c) { return c->exceptions[X_BASE_EXCEPTION_GROUP]; }
 static int is_group(SPYContext *c, SPYValue *v) { return v->type == SPY_INSTANCE && subclass(v->as.map.parent, group_class(c)); }
@@ -29517,7 +29528,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     SPYValue *generator = id >= 0 && argc ? spy_retain(argv[0]) : NULL;
     SPYValue *start = id >= 0 && argc > 3 ? set_rest(c, argc, argv) : id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     SPYValue *traceback = id >= 0 && argc > 3 ? c->unbound : id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
-    SPYValue *getter = id < 0 && calls ? native_entered(c, m, callee, argc, argv, env) : NULL;
+    SPYValue *getter = id < 0 && calls ? (callee->type == SPY_INSTANCE ? call_described(c, m, callee, argc, argv, NULL) : native_entered(c, m, callee, argc, argv, env)) : NULL;
     int plain = 0;
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
     result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, callee, argc, argv, NULL) :
@@ -29919,6 +29930,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     } else {
         SPYValue *keywords = entries_dict(c, kw, kwc);
         if (keywords) result = calls && class_maker(c, callee, positional, argv) ? class_make(c, callee, positional, argv, keywords) :
+                               calls && callee->type == SPY_INSTANCE && ((result = call_described(c, m, callee, positional, argv, keywords)) || c->k_fn) ? result :
                                step_keywords(c, m, callee, positional, argv, keywords);
         spy_release(keywords);
     }
@@ -32064,6 +32076,7 @@ static SPYValue *special_read(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     size_t n = state->as.seq.len, argc = args->as.seq.len;
     Continuation k = (Continuation)(void (*)(void))state->as.seq.items[n - 2]->as.native.call;
     SPYValue *ctx = state->as.seq.items[n - 1] == c->unbound ? NULL : spy_retain(state->as.seq.items[n - 1]);
+    SPYValue *keywords = n > 4 ? spy_retain(state->as.seq.items[2]) : NULL;
     for (size_t i = 0; i < argc; i++) argv[i] = spy_retain(args->as.seq.items[i]);
     if (!bound) {
         /* What an absent method gives (special_env). */
@@ -32074,36 +32087,43 @@ static SPYValue *special_read(SPYContext *c, Machine *m, SPYValue *state, SPYVal
             if (absent->type == SPY_TUPLE) absence_error(c, absent);
             else result = spy_retain(absent);
         }
-        spy_release(state);
+        spy_release(state); spy_release(keywords);
         return k(c, m, ctx, result);
     }
     spy_release(state);
-    SPYValue *result = callk(c, m, bound, argc, argv, k, ctx);
-    spy_release(bound);
+    SPYValue *result = callk_keywords(c, m, bound, argc, argv, keywords, k, ctx);
+    spy_release(bound); spy_release(keywords);
     return result;
 }
-/* callk of special method function, found on self's class, on self, then
- * the argc (at most 8) arguments argv, which it takes, then k with ctx:
- * function itself, or the descriptor's read (descriptor_getter) first,
- * on m too, what it returns then called (special_read), its errors the
- * call's but an AttributeError for an absent method's (special_env),
- * absent, which it takes, NULL for none. */
-static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, size_t argc, SPYValue **argv, SPYValue *absent,
-                               Continuation k, SPYValue *ctx) {
+/* callk_keywords of special method function, found on self's class, on
+ * self, then the argc (at most 8) arguments argv, which it takes, and
+ * keywords, a dict or NULL, borrowed, then k with ctx: function itself,
+ * or the descriptor's read (descriptor_getter) first, on m too, what it
+ * returns then called (special_read), its errors the call's but an
+ * AttributeError for an absent method's (special_env), absent, which it
+ * takes, NULL for none. */
+static SPYValue *special_callk_keywords(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, size_t argc, SPYValue **argv,
+                                        SPYValue *keywords, SPYValue *absent, Continuation k, SPYValue *ctx) {
     SPYValue *get = machine_function(c, function) ? NULL : descriptor_getter(c, function), *all[9];
     if (!get) {
         spy_release(absent);
         all[0] = spy_retain(self);
         if (argc) memcpy(all + 1, argv, argc * sizeof(*argv));
-        return callk(c, m, function, argc + 1, all, k, ctx);
+        return callk_keywords(c, m, function, argc + 1, all, keywords, k, ctx);
     }
     SPYValue *tuple = tuple_of(c, argc, argv);
     release_all(argc, argv);
-    SPYValue *state = tuple ? k_state(c, 2, (SPYValue *[]){tuple, absent ? absent : spy_none(c), NULL, NULL}, k, ctx) :
-                      (spy_release(ctx), spy_release(absent), NULL);
+    SPYValue *state = !tuple ? (spy_release(ctx), spy_release(absent), NULL) :
+                      keywords ? k_state(c, 3, (SPYValue *[]){tuple, absent ? absent : spy_none(c), spy_retain(keywords), NULL, NULL}, k, ctx) :
+                      k_state(c, 2, (SPYValue *[]){tuple, absent ? absent : spy_none(c), NULL, NULL}, k, ctx);
     if (!state) return NULL;
     if (function->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, special_read, state);
     return callk(c, m, get, 3, (SPYValue *[]){spy_retain(function), spy_retain(self), spy_retain(value_class(c, self))}, special_read, state);
+}
+/* special_callk_keywords of no keywords. */
+static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, size_t argc, SPYValue **argv, SPYValue *absent,
+                               Continuation k, SPYValue *ctx) {
+    return special_callk_keywords(c, m, function, self, argc, argv, NULL, absent, k, ctx);
 }
 /* Whether a builtin value of type and class cls declines operator o, in
  * place if inplace, with y: it has neither method, or y is a plain
@@ -33365,7 +33385,7 @@ static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, Node *
     SPYValue *value = leaf_operand(f, n);
     if (value) return spy_retain(value);
     if (!strcmp(n->text, "__debug__")) return spy_bool(c, 1);
-    return name_walk(c, m, f->env, f->env, node_name(n), 1, 0, NULL, name_given, NULL);
+    return name_walk(c, m, f->env, f->env, node_name(n), 1, 0, NULL, unchanged, NULL);
 }
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
@@ -38550,11 +38570,6 @@ static SPYValue *proxy_compared(SPYContext *c, SPYValue *proxy, SPYValue *other)
     }
     return proxy;
 }
-/* What a mappingproxy's mapping gave its call, result. */
-static SPYValue *proxied(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
-    (void)c; (void)m; (void)ctx;
-    return result;
-}
 static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
     const char *name = mappingproxy_methods[op];
@@ -38570,17 +38585,17 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
      * its method of a mapping's own, is a call there (callk). */
     Machine *m = mapping->type == SPY_INSTANCE ? step_machine(c) : NULL;
     SPYValue *function = m && op == MP_GETITEM ? item_special(c, mapping, "__getitem__") : NULL;
-    if (function) return special_callk(c, m, function, mapping, 1, (SPYValue *[]){spy_retain(args[0])}, NULL, proxied, NULL);
+    if (function) return special_callk(c, m, function, mapping, 1, (SPYValue *[]){spy_retain(args[0])}, NULL, unchanged, NULL);
     if (m && op >= MP_GET) {
         SPYValue *method = attribute(c, mapping, name), *result;
         if (!method) return NULL;
         size_t n = op == MP_GET ? 2 : 0;
-        result = callk(c, m, method, n, (SPYValue *[]){n ? spy_retain(args[0]) : NULL, n ? spy_retain(args[1] ? args[1] : c->none) : NULL}, proxied, NULL);
+        result = callk(c, m, method, n, (SPYValue *[]){n ? spy_retain(args[0]) : NULL, n ? spy_retain(args[1] ? args[1] : c->none) : NULL}, unchanged, NULL);
         spy_release(method); return result;
     }
     /* Its comparisons and in run on the machine (comparek). */
     Machine *step = op == MP_CONTAINS || op == MP_EQ || op == MP_NE ? step_machine(c) : NULL;
-    if (step && op == MP_CONTAINS) return comparek(c, step, spy_retain(args[0]), spy_retain(mapping), COMPARE_IN, proxied, NULL);
+    if (step && op == MP_CONTAINS) return comparek(c, step, spy_retain(args[0]), spy_retain(mapping), COMPARE_IN, unchanged, NULL);
     switch (op) {
     case MP_GETITEM: return get_index(c, mapping, args[0]);
     case MP_CONTAINS: return comparison(c, O_IN, args[0], mapping);
@@ -38590,7 +38605,7 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     case MP_HASH: return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
     case MP_EQ: case MP_NE: {
         SPYValue *compared = proxy_compared(c, spy_retain(proxy), args[0]);
-        if (compared && step) return comparek(c, step, compared, spy_retain(args[0]), op == MP_EQ ? R_EQ : R_NE, proxied, NULL);
+        if (compared && step) return comparek(c, step, compared, spy_retain(args[0]), op == MP_EQ ? R_EQ : R_NE, unchanged, NULL);
         SPYValue *result = compared ? comparison(c, op == MP_EQ ? T_EQ : T_NE, compared, args[0]) : NULL;
         spy_release(compared); return result;
     }
@@ -45237,7 +45252,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         /* A dict view compares with a set or view (dictview_richcompare),
          * by Python on the call step's machine (view_comparek). */
         if (type == SPY_DICT_KEYS || type == SPY_DICT_ITEMS)
-            return view_operands(value, argv[0]) ? view_comparek(c, step_machine(c), compare_tokens[op], value, argv[0], proxied, NULL) :
+            return view_operands(value, argv[0]) ? view_comparek(c, step_machine(c), compare_tokens[op], value, argv[0], unchanged, NULL) :
                    spy_retain(c->not_implemented);
         if (!slot_accepts(c, type, argv[0]) || (type != SPY_FLOAT && type != SPY_COMPLEX && type != SPY_INT &&
             builtin_type_id(c, value_class(c, other)) != type && type != SPY_SET && type != SPY_FROZENSET && type != SPY_BYTES && type != SPY_BYTEARRAY))
@@ -45280,7 +45295,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     }
     case SLOT_CONTAINS:
         /* A dict view's lookup calls Python on the call step's machine (view_containsk). */
-        if (set_view(value)) return view_containsk(c, step_machine(c), argv[0], value, proxied, NULL);
+        if (set_view(value)) return view_containsk(c, step_machine(c), argv[0], value, unchanged, NULL);
         if (value->type == SPY_DICT) return map_lookupk(c, step_machine(c), value, argv[0], lookup_contains, NULL);
         return comparison(c, O_IN, argv[0], value);
     case SLOT_GETITEM:

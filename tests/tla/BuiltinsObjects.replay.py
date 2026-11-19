@@ -74,6 +74,8 @@ SOURCES = {
                          "class D:\n    def __dir__(self): return I()\nresult = dir(D())",
     "dir_hook_raises": "class D:\n    def __dir__(self):\n        yield 'a'; raise KeyError('e')\nresult = dir(D())",
     "dir_hook_bad": 'class D:\n    def __dir__(self): return 1\nresult = dir(D())',
+    "callable_unread": 'def fail(self): raise AttributeError("x")\nclass F:\n    __call__ = property(fail)\n'
+                       'class N:\n    __call__ = None\nclass I(int): pass\nresult = (callable(F()), callable(N()), callable(I()))',
     "callable_forms": 'class K:\n    def __call__(self): pass\nresult = (callable(K), callable(K()), callable(P()), callable(len), callable(1))',
     "id_identity": 'a = []\nresult = (id(a) == id(a), id([]) == id([]) or True, type(id(a)).__name__)',
     "hash_big": 'result = hash(H()) == hash(2 ** 70)',

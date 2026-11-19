@@ -549,6 +549,8 @@ Unreleased (0.10.0):
 - Truth tests of such an object, `bool()` and `filter()` call its `__len__` without nesting on the C stack
 - `iter()` and `in` read a Python `__iter__` or `__contains__` descriptor, and take its fallback, without nesting on the C stack
 - An `in` inside a comparison chain searches by Python `__eq__`, `__iter__` or a generator without nesting on the C stack
+- `callable()` is true of an instance whose class defines `__call__` without reading it, as in CPython
+- Calling an instance whose class's `__call__` is a Python descriptor reads and calls it without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
 - a dict's keys and items views have the rich comparison and set operator methods, which take a set or view and any iterable, and an items view finds a tuple subclass's pair
