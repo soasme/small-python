@@ -128,6 +128,10 @@ SOURCES = {
                      "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"
                      "result = (({K('a'): 1},) == ({K('a'): 1},), [{K('b'): {K('c'): 2}}] != [{K('b'): {K('c'): 2}}],\n"
                      "          ({K('d'): 1},) in [({K('e'): 1},)])",
+    "seq_scalar_order": "class W(int):\n    def __lt__(s, o):\n        for _ in (): pass\n"
+                        "        t('%d<%d' % (s, o)); return int.__lt__(s, o)\n"
+                        "class L(list): pass\n"
+                        "result = ([W(1), W(5)] <= [W(1), W(3)], [3] > [W(2)], L([W(3)]) < L([W(4)]))",
     "view_calls": "class K:\n    def __init__(s, n): s.n = n\n"
                   "    def __hash__(s):\n        for _ in (): pass\n        t('h' + s.n); return 1\n"
                   "    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n + '=' + o.n); return s.n == o.n\n"

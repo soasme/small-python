@@ -29893,17 +29893,27 @@ static int pair_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t at) {
     int same = map_equal_from(a, b, SPY_DICT, at);
     return c->error_type[0] ? -1 : same;
 }
+static int python_eq(SPYValue *);
+/* Whether v's == calls no Python method and compares no items: a builtin
+ * scalar, or an instance whose class has no Python __eq__, plain or of a
+ * builtin scalar's subclass. */
+static int plain_equal(SPYValue *v) {
+    SPYValue *base = v->type == SPY_INSTANCE ? v->as.map.base : NULL;
+    return v->type <= SPY_STRING || (v->type == SPY_INSTANCE && !python_eq(v) && (!base || base->type <= SPY_STRING));
+}
 /* The first pair from at on of a and b (sequence_pair) whose comparison
  * calls a Python __eq__ (rich_function), itself or in a pair of its own,
- * the pairs before it identical, builtin scalars found equal, or such
- * pairs found equal so; else SIZE_MAX, for the native comparison to
- * decide from *end on, the pairs before it equal so, comparing only what
- * calls no Python again. */
+ * the pairs before it identical, builtin scalars or instances whose ==
+ * calls no Python (plain_equal) found equal, or such pairs found equal
+ * so; else SIZE_MAX, for the native comparison to decide from *end on,
+ * the pairs before it equal so, comparing only what calls no Python
+ * again: a plain_equal pair there is unequal. */
 static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at, size_t *end) {
     for (SPYValue *x, *y; pair_at(a, b, at, &x, &y); at++) {
         if (x == y) continue;
         if (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE) {
             if (rich_function(c, x, y, R_EQ) || rich_function(c, y, x, R_EQ)) return at;
+            if (plain_equal(x) && plain_equal(y) && equal(x, y)) continue;
             break;
         }
         if (sequence_pair(x, y)) {
@@ -29937,14 +29947,10 @@ static int python_eq(SPYValue *v) {
     SPYValue *eq = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__eq__") : NULL;
     return eq && eq->type == SPY_FUNCTION;
 }
-/* Whether instance v's == is identity: its class has no Python __eq__. */
-static int identity_equal(SPYValue *v) {
-    return v->type == SPY_INSTANCE && !v->as.map.base && !python_eq(v);
-}
 /* Whether ordering op of a and b, two lists or two tuples, calls a
  * Python method on the machine: an item's __eq__ (python_pair), or the
- * ordering method of the first pair of distinct instances whose == is
- * identity, the pairs before it found equal so. */
+ * ordering method of the first unequal pair, whose == calls no Python
+ * (plain_equal), the pairs before it found equal so. */
 static int order_python(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if ((a->type != SPY_LIST && a->type != SPY_TUPLE) || b->type != a->type || (op != '<' && op != T_LE && op != '>' && op != T_GE))
         return 0;
@@ -29953,7 +29959,7 @@ static int order_python(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (end >= a->as.seq.len || end >= b->as.seq.len) return 0;
     SPYValue *x = a->as.seq.items[end], *y = b->as.seq.items[end];
     int rich = op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : R_GE;
-    return identity_equal(x) && identity_equal(y) && (rich_function(c, x, y, rich) || rich_function(c, y, x, rich_reflected[rich]));
+    return plain_equal(x) && plain_equal(y) && (rich_function(c, x, y, rich) || rich_function(c, y, x, rich_reflected[rich]));
 }
 /* Whether a and b, lists or tuples, are equal from item at on, as
  * list_richcompare decides, an unequal pair left past an end comparing the
@@ -36698,6 +36704,12 @@ static int sort_step(struct Sorter *s) {
 /* Whether a and b are two tuples or two lists, whose comparison goes item
  * by item. */
 static int ordered_pair(SPYValue *a, SPYValue *b) { return (a->type == SPY_TUPLE || a->type == SPY_LIST) && b->type == a->type; }
+/* Whether comparing keys x and y, two tuples or two lists, a subclass's
+ * instance among them, compares items that may call Python (sort_reaches). */
+static int keys_items_reach(SPYValue *x, SPYValue *y) {
+    SPYValue *a = sequence_base(x), *b = sequence_base(y);
+    return ordered_pair(a, b) && (sort_reaches(a, 64) || sort_reaches(b, 64));
+}
 /* The Python rich comparison s's question s->x < s->y calls next, with
  * its pair in cx and cy, to enter on the machine; else NULL, s->less
  * answered natively. Two tuples compare as sequence_order does: each pair
@@ -36719,7 +36731,7 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
         if (x == y) continue;
         if ((function = rich_function(c, x, y, R_EQ))) { s->cx = x; s->cy = y; s->rich = R_EQ; return function; }
         /* Two nested tuples or lists compare on the machine (compare_enter, key_call). */
-        if (ordered_pair(x, y) && (sort_reaches(x, 64) || sort_reaches(y, 64))) { s->cx = x; s->cy = y; s->rich = R_EQ; return c->unbound; }
+        if (keys_items_reach(x, y)) { s->cx = x; s->cy = y; s->rich = R_EQ; return c->unbound; }
         spy_retain(x); spy_retain(y);
         int same = equal(x, y);
         spy_release(x); spy_release(y);
@@ -36730,7 +36742,7 @@ static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
     if (s->at_item >= a->as.seq.len || s->at_item >= b->as.seq.len) { s->less = a->as.seq.len < b->as.seq.len; return NULL; }
     SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
     if ((function = rich_function(c, x, y, R_LT))) { s->cx = x; s->cy = y; s->rich = R_LT; return function; }
-    if (ordered_pair(x, y) && (sort_reaches(x, 64) || sort_reaches(y, 64))) { s->cx = x; s->cy = y; s->rich = R_LT; return c->unbound; }
+    if (keys_items_reach(x, y)) { s->cx = x; s->cy = y; s->rich = R_LT; return c->unbound; }
     s->less = sort_less(c, x, y);
     return NULL;
 }
