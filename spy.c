@@ -18904,7 +18904,11 @@ static SPYValue *callk_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValu
 static SPYValue *class_described(SPYContext *, Machine *, SPYValue *, int, size_t, SPYValue *const *, SPYValue *, Continuation, SPYValue *);
 static int group_sequence(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static SPYValue *group_newk(SPYContext *, Machine *, SPYValue *, int);
+static SPYValue *class_converted(SPYContext *, Machine *, SPYValue *, int, size_t, SPYValue *const *, Continuation, SPYValue *);
 static SPYValue *class_callk(SPYContext *c, Machine *m, SPYValue *cls, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+    /* A builtin subclass's that may run Python code (subclass_new). */
+    SPYValue *converted = class_converted(c, m, cls, 0, argc, argv, k, ctx);
+    if (converted != c->unbound) { release_all(argc, argv); return converted; }
     int plain, kind = c->entering_kind;
     SPYValue *init = class_init(c, cls, &plain), *allocate = !init && !c->error_type[0] ? new_method(c, cls) : NULL, *args[10];
     c->entering_kind = kind;
@@ -18950,8 +18954,119 @@ static SPYValue *class_new_read(SPYContext *c, Machine *m, SPYValue *state, SPYV
  * first, then its instance initialized (callk_newed), then k with ctx,
  * which it takes. Else NULL, with no call or error, nothing taken. A
  * class whose __init__ class_init gives is not one. */
+static SPYValue *subclass_instance(SPYContext *, SPYValue *, int, SPYValue *);
+static SPYValue *comparek(SPYContext *, Machine *, SPYValue *, SPYValue *, int, Continuation, SPYValue *);
+static int builtin_layout(SPYContext *, SPYValue *);
+static int bytearray_exported(SPYContext *, SPYValue *);
+static int bytearray_resize(SPYContext *, SPYValue *, size_t);
+static SPYValue *type_new(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
+/* The builtin type T whose value an instance of class cls holds, when
+ * cls's nearest builtin base is T, whose __new__ (type_new) builds the
+ * value T() of its arguments would: int, float, complex, str, bytes,
+ * tuple or frozenset; or bytearray, whose __init__ (type_init) does;
+ * else 0. */
+/* Whether a subclass of builtin type is built by T() (built_base). */
+static int built_layout(int type) {
+    return !!(UINT64_C(1) << type & (UINT64_C(1) << SPY_INT | UINT64_C(1) << SPY_FLOAT | UINT64_C(1) << SPY_COMPLEX | UINT64_C(1) << SPY_STRING |
+                                     UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_FROZENSET | UINT64_C(1) << SPY_BYTEARRAY));
+}
+static int built_base(SPYContext *c, SPYValue *cls) {
+    SPYValue *mro = cls->as.map.mro, *base = NULL;
+    if (cls->as.map.native || !mro) return 0;
+    for (size_t i = 0; i < mro->as.seq.len && !base; i++)
+        if (builtin_class(c, mro->as.seq.items[i])) base = mro->as.seq.items[i];
+    int type = base ? builtin_layout(c, base) : -1;
+    return type >= 0 && base == c->types[type] && built_layout(type) ? type : 0;
+}
+/* Whether T() of argc arguments argv may run Python code. */
+static int built_calls(size_t argc, SPYValue *const *argv) {
+    size_t i = 0;
+    while (i < argc && UINT64_C(1) << argv[i]->type & (UINT64_C(1) << SPY_INT | UINT64_C(1) << SPY_FLOAT | UINT64_C(1) << SPY_STRING |
+                                                     UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BOOL | UINT64_C(1) << SPY_NONE)) i++;
+    return i < argc && argc <= COMPARE_ARGS;
+}
+/* built_base of class cls for a call of cls of argc arguments argv that
+ * may run Python code (built_calls), when the call is type.__call__, as
+ * called is, of T's own __new__, and of bytearray's own __init__ too;
+ * else 0. */
+static int built_call(SPYContext *c, SPYValue *cls, int called, size_t argc, SPYValue *const *argv) {
+    int type = built_calls(argc, argv) ? built_base(c, cls) : 0;
+    SPYValue *meta = cls->as.map.meta;
+    return type && (called || !meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) &&
+           class_lookup(cls, "__new__") == name_local(c->types[type], "__new__") &&
+           (type != SPY_BYTEARRAY || class_lookup(cls, "__init__") == name_local(c->types[type], "__init__")) ? type : 0;
+}
+/* What bytearray() of the arguments returned in result for
+ * bytearray.__init__ of state's first item (array_init): its contents,
+ * then state's second item for the continuation (k_resume). */
+static SPYValue *array_filled(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (result) swap_contents(builtin_value(c, state->as.seq.items[0], SPY_BYTEARRAY), result);
+    spy_release(result);
+    return k_resume(c, m, state, result ? spy_retain(state->as.seq.items[1]) : NULL);
+}
+/* bytearray.__init__ of self, a bytearray or its subclass's instance, and
+ * argc (at most COMPARE_ARGS) arguments argv, borrowed, as type_init:
+ * an exported array refused and the array emptied, then bytearray() of
+ * them, a call step on m (comparek), its contents taken (array_filled),
+ * then k with value, which it takes, and ctx, which it takes. */
+static SPYValue *array_init(SPYContext *c, Machine *m, SPYValue *self, size_t argc, SPYValue *const *argv, SPYValue *value,
+                            Continuation k, SPYValue *ctx) {
+    static const char *const names[] = {"source", "encoding", "errors"};
+    SPYValue *parsed[3], *array = builtin_value(c, self, SPY_BYTEARRAY), *args;
+    if (parse_arguments(c, "bytearray", argc, argv, NULL, names, 3, 0, 0, parsed) || bytearray_exported(c, array) ||
+        bytearray_resize(c, array, 0) || !(args = tuple_of(c, argc, argv))) {
+        spy_release(value); spy_release(ctx);
+        return NULL;
+    }
+    SPYValue *state = k_state(c, 2, (SPYValue *[]){spy_retain(self), value, NULL, NULL}, k, ctx);
+    if (!state) { spy_release(args); return NULL; }
+    return comparek(c, m, spy_retain(c->types[SPY_BYTEARRAY]), args, COMPARE_CALL + (int)argc, array_filled, state);
+}
+/* What T() of its arguments returned in result for a new instance of
+ * state's class (subclass_new): held by that instance, which __init__ then
+ * initializes (callk_newed, given state's last item), or, that state
+ * holding only its continuation, it resumes with. */
+static SPYValue *subclass_built(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *cls = state->as.seq.items[0], *newed = spy_retain(state->as.seq.items[1]);
+    SPYValue *instance = result ? subclass_instance(c, cls, built_base(c, cls), result) : NULL;
+    spy_release(state);
+    return newed->as.seq.len == 2 ? k_resume(c, m, newed, instance) : callk_newed(c, m, newed, instance);
+}
+/* T.__new__(cls, ...) of argc arguments argv, borrowed, T cls's
+ * built_base: T() of them, a call step on m whose machine paths it takes
+ * (comparek), held by a new instance of cls, which its __init__, given
+ * them, initializes when init (subclass_built), then k with ctx, which
+ * it takes. */
+static SPYValue *subclass_new(SPYContext *c, Machine *m, SPYValue *cls, size_t argc, SPYValue *const *argv, int init, Continuation k, SPYValue *ctx) {
+    SPYValue *args = tuple_of(c, argc, argv);
+    SPYValue *newed = !args ? (spy_release(ctx), NULL) : init ? k_state(c, 2, (SPYValue *[]){spy_retain(cls), spy_retain(args), NULL, NULL}, k, ctx) :
+                      k_state(c, 0, (SPYValue *[]){NULL, NULL}, k, ctx);
+    SPYValue *state = newed ? spy_tuple(c, 2, (SPYValue *[]){cls, newed}) : NULL;
+    spy_release(newed);
+    if (!state) { spy_release(args); return NULL; }
+    return comparek(c, m, spy_retain(c->types[built_base(c, cls)]), args, COMPARE_CALL + (int)argc, subclass_built, state);
+}
+/* subclass_new of a call of class cls, called whether as type.__call__,
+ * of argc arguments argv, borrowed, when it is one (built_call), or a bytearray subclass's new instance,
+ * filled by array_init; else c->unbound, nothing taken. */
+static SPYValue *class_converted(SPYContext *c, Machine *m, SPYValue *cls, int called, size_t argc, SPYValue *const *argv, Continuation k,
+                                 SPYValue *ctx) {
+    int type = built_call(c, cls, called, argc, argv);
+    if (!type) return c->unbound;
+    if (type != SPY_BYTEARRAY) return subclass_new(c, m, cls, argc, argv, 1, k, ctx);
+    /* A bytearray subclass's empty instance, which bytearray.__init__ fills (array_init). */
+    SPYValue *args[COMPARE_ARGS + 1], *self;
+    args[0] = cls;
+    memcpy(args + 1, argv, argc * sizeof(*argv));
+    if (!(self = type_new(c, argc + 1, args, NULL, (void *)(intptr_t)SPY_BYTEARRAY))) { spy_release(ctx); return NULL; }
+    return array_init(c, m, self, argc, argv, self, k, ctx);
+}
 static NO_INLINE SPYValue *class_described(SPYContext *c, Machine *m, SPYValue *cls, int called, size_t argc, SPYValue *const *argv,
                                            SPYValue *keywords, Continuation k, SPYValue *ctx) {
+    /* So is a builtin subclass's that may run Python code (subclass_new). */
+    SPYValue *converted = keywords ? c->unbound : class_converted(c, m, cls, called, argc, argv, k, ctx);
+    if (converted != c->unbound) return converted;
     SPYValue *allocator = argc > 8 ? NULL : described_new(c, cls, called), *get = allocator ? descriptor_getter(c, allocator) : NULL;
     /* So is an exception group's of a custom sequence (group_newk). */
     int group = !allocator && !keywords ? group_sequence(c, cls, called, argc, argv) : 0;
@@ -19308,19 +19423,20 @@ static SPYValue *new_called_rest(SPYContext *, SPYValue *, int);
 static ALWAYS_INLINE SPYValue *new_called(SPYContext *c, SPYValue *callee, int called) {
     return callee->as.map.flags == 2 || callee->as.map.native || !callee->as.map.mro ? NULL : new_called_rest(c, callee, called);
 }
-static int called_machine(SPYContext *, SPYValue *);
+static int called_machine(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 /* class_init of a call of type.__call__ on cls (type_called), uncached. */
 static SPYValue *called_init(SPYContext *c, SPYValue *cls, int *plain) {
     SPYValue *native = NULL, *init = cls->as.map.native || cls->as.map.flags == 2 ? NULL : plain_of(c, cls, 1, &native);
     *plain = init != NULL;
     return init ? init : native && machine_function(c, native) ? native : NULL;
 }
-/* Whether type.__call__ of cls runs a Python __init__ or __new__ on the
- * machine, as a class call does (called_init, new_called). */
-static int called_machine(SPYContext *c, SPYValue *cls) {
+/* Whether type.__call__ of cls and argc arguments argv runs a Python
+ * __init__ or __new__ on the machine, as a class call does (called_init,
+ * new_called), or a builtin base's call (built_call). */
+static int called_machine(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv) {
     int plain;
     SPYValue *init = called_init(c, cls, &plain);
-    return init ? machine_function(c, init) : new_called(c, cls, 1) != NULL;
+    return init ? machine_function(c, init) : new_called(c, cls, 1) != NULL || built_call(c, cls, 1, argc, argv);
 }
 static NO_INLINE SPYValue *class_init(SPYContext *c, SPYValue *cls, int *plain) {
     SPYValue *init = plain_init(c, cls);
@@ -28958,7 +29074,7 @@ static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
  * enters none. */
 static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
                                          SPYValue **argv, SPYValue **env) {
-    SPYValue *found[2], *convert = method < 0 && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0]) || metaclassed(argv[0])) ?
+    SPYValue *found[2], *convert = method < 0 && argc && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0]) || metaclassed(argv[0])) ?
                                    conversion_method(c, callee, argc, argv, found) : NULL;
     if (!convert && method < 0 && argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta)) && (convert = check_method(c, callee, argv, found))) {
         /* isinstance() or issubclass() enters its check (check_method)
@@ -29079,7 +29195,16 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     /* A view's release left its exporter's __release_buffer__ (native_entered). */
     if (c->error_type[0] || c->k_fn) { release_all(argc, argv); spy_release(callee); return NULL; }
-    if (method < 0 && argc && unbound_called(c, callee, argv[0]) && called_machine(c, argv[0])) {
+    if (method < 0 && (self = type_called(c, callee)) && built_call(c, self, 1, argc, argv)) {
+        /* A bound one calls its class of the arguments, too. */
+        if (grow_array(c, (void **)&m->stack, &m->cap, m->len + argc + 1, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
+        m->stack[m->len++] = spy_retain(self);
+        memcpy(&m->stack[m->len], argv, argc * sizeof(*argv));
+        m->len += argc;
+        spy_release(callee);
+        return class_stack_call(c, m, m->stack[m->len - argc - 1], argc, 1, env);
+    }
+    if (method < 0 && argc && unbound_called(c, callee, argv[0]) && called_machine(c, argv[0], argc - 1, argv + 1)) {
         /* An unbound type.__call__ calls the class first as a stack call does (class_stack_call). */
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + argc, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
         memcpy(&m->stack[m->len], argv, argc * sizeof(*argv));
@@ -29199,13 +29324,15 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     /* A set method walking another set (set_call). */
     if (method < 0 && argc && argc <= 9 && walk_operand(argv[argc - 1]) && (result = set_call(c, m, callee, argc, argv, env)) != c->unbound)
         return result;
-    if (argc && (argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
-                 metaclassed(argv[0]) ||
-                 (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
-                 (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed))) ||
-                 /* hash() of a view (memory_hasher) */
-                 (argc == 1 && argv[0]->type == SPY_MEMORYVIEW && memory_hasher(c, argv[0])) ||
-                 UNLIKELY(proxy_unwrapped(c, callee, method, argc, argv))) &&
+    if ((argc ? argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
+                metaclassed(argv[0]) ||
+                (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
+                (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed))) ||
+                /* hash() of a view (memory_hasher) */
+                (argc == 1 && argv[0]->type == SPY_MEMORYVIEW && memory_hasher(c, argv[0])) ||
+                UNLIKELY(proxy_unwrapped(c, callee, method, argc, argv))
+              /* a view's bound __hash__ (memory_hasher) */
+              : method < 0 && callee->type == SPY_METHOD && callee->as.method.self->type == SPY_MEMORYVIEW && memory_hasher(c, callee->as.method.self)) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     /* A set's method given its set first, as a method call's operands
      * give it, consumes its source as the bound method does. */
@@ -29686,6 +29813,7 @@ static int join_listable(SPYValue *v) {
            (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE);
 }
 static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
     if (method < 0 && function->type != SPY_NATIVE && (function->type != SPY_CLASS || !function->as.map.native)) return 0;
@@ -29724,6 +29852,7 @@ static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *c, SPYValue *callee, 
 static unsigned index_shifted(unsigned mask) { return (mask & 0xffu) << 1 | (mask & ~0xffu); }
 static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+
     unsigned buffers = buffer_arguments(c, callee, method, argc, argv);
     int indices = method == M_INDICES && callee->type == SPY_SLICE && argc == 1;
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
@@ -30440,6 +30569,13 @@ static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue 
  * when neither is Python. */
 static SPYValue *class_stack_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, int called, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc], *self;
+    /* A builtin subclass's that may run Python code, the call's value
+     * (subclass_new), its arguments and itself off m's stack. */
+    SPYValue *converted = class_converted(c, m, callee, called, argc, argv, unchanged, NULL);
+    if (converted != c->unbound) {
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return converted;
+    }
     int plain = 0;
     SPYValue *init = called ? called_init(c, callee, &plain) : class_init(c, callee, &plain);
     /* An exception group's of a custom sequence is class_described's. */
@@ -30472,9 +30608,9 @@ static SPYValue *round_enter(SPYContext *, Machine *, SPYValue *, SPYValue **);
 /* Whether callee calls type.__call__ of a class whose Python __init__ or
  * __new__ runs on the machine (class_stack_call); the class, owned, then
  * replaces *slot, which held callee. */
-static int called_class(SPYContext *c, SPYValue *callee, SPYValue **slot) {
+static int called_class(SPYContext *c, SPYValue *callee, SPYValue **slot, size_t argc, SPYValue *const *argv) {
     SPYValue *cls = type_called(c, callee);
-    if (!cls || !called_machine(c, cls)) return 0;
+    if (!cls || !called_machine(c, cls, argc, argv)) return 0;
     *slot = spy_retain(cls);
     spy_release(callee);
     return 1;
@@ -30499,9 +30635,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return NULL;
     }
     /* type.__call__ of a class calls the class, its metaclass's __call__ aside. */
-    if (calls && callee->type == SPY_METHOD && called_class(c, callee, &argv[-1]))
+    if (calls && callee->type == SPY_METHOD && called_class(c, callee, &argv[-1], argc, argv))
         return class_stack_call(c, m, argv[-1], argc, 1, env);
-    if (calls && argc && unbound_called(c, callee, argv[0]) && called_machine(c, argv[0])) {
+    if (calls && argc && unbound_called(c, callee, argv[0]) && called_machine(c, argv[0], argc - 1, argv + 1)) {
         /* So does an unbound one of the class first, in the callee's place. */
         memmove(argv - 1, argv, argc * sizeof(*argv));
         m->len--;
@@ -30541,7 +30677,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
-    if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->error_type[0])) return result;
+    if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->k_fn || c->error_type[0])) return result;
     if (calls && callee->type == SPY_CLASS && ((result = class_described(c, m, callee, 0, argc, argv, NULL, unchanged, NULL)) || c->k_fn || c->error_type[0])) {
         /* So does one whose __new__ is read first (class_described). */
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -30855,12 +30991,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         spy_release(callee); callee = function; skip = 0;
     }
     /* type.__call__ of a class calls the class in the object's place (class_stack_call). */
-    if (callee && method < 0 && calls && skip && callee->type == SPY_METHOD && called_class(c, callee, &argv[0])) {
+    if (callee && method < 0 && calls && skip && callee->type == SPY_METHOD && called_class(c, callee, &argv[0], argc, argv + 1)) {
         SPYValue *cls = argv[0];
         spy_release(object);
         return class_stack_call(c, m, cls, argc, 1, env);
     }
-    if (callee && method < 0 && calls && skip && argc && unbound_called(c, callee, argv[1]) && called_machine(c, argv[1])) {
+    if (callee && method < 0 && calls && skip && argc && unbound_called(c, callee, argv[1]) && called_machine(c, argv[1], argc - 1, argv + 2)) {
         /* So does type.__call__ of the class first, in the object's place. */
         spy_release(object); spy_release(callee);
         memmove(argv, argv + 1, argc * sizeof(*argv));
@@ -31244,12 +31380,12 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
     ptrdiff_t at;
     /* type.__call__ of a class whose __init__ or __new__ runs on the
      * machine calls the class, its metaclass's __call__ aside. */
-    if (direct && string_keys(c, keywords) && called_machine(c, direct)) {
+    if (direct && string_keys(c, keywords) && called_machine(c, direct, 0, NULL)) {
         spy_retain(direct); spy_release(callee);
         callee = direct; called = 1;
     }
     SPYValue *first = calls && !called && args->as.seq.len ? unbound_called(c, callee, args->as.seq.items[0]) : NULL;
-    if (first && string_keys(c, keywords) && called_machine(c, first)) {
+    if (first && string_keys(c, keywords) && called_machine(c, first, 0, NULL)) {
         /* So does an unbound one of the class first, of the other arguments. */
         SPYValue *rest = spy_tuple(c, args->as.seq.len - 1, args->as.seq.items + 1);
         spy_retain(first); spy_release(callee); spy_release(args);
@@ -36901,7 +37037,8 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         return status;
     }
     if (!c->error_type[0] && items->as.seq.len <= COMPARE_ARGS && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] &&
-        (map_steps(callee) || is_builtin(callee, B_NEXT) || (callee->type == SPY_CLASS && described_new(c, callee, 0)) ||
+        (map_steps(callee) || is_builtin(callee, B_NEXT) ||
+         (callee->type == SPY_CLASS && (described_new(c, callee, 0) || built_call(c, callee, 0, items->as.seq.len, items->as.seq.items))) ||
          index_arguments(c, callee, -1, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 2 && is_builtin(callee, B_ROUND) && is_number(items->as.seq.items[0]) && index_function(c, items->as.seq.items[1])) ||
          (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) ||
@@ -46889,6 +47026,18 @@ static SPYValue *native_new(SPYContext *c, size_t argc, SPYValue *const *argv, S
 static int mutable_layout(int type) { return type == SPY_LIST || type == SPY_DICT || type == SPY_SET || type == SPY_BYTEARRAY; }
 /* T.__new__(cls, ...): immutable values are built from the arguments; mutable
  * ones start empty and T.__init__ fills them. */
+/* A new instance of class cls, a subclass of builtin type, holding the
+ * value base of that type, which it takes. */
+static SPYValue *subclass_instance(SPYContext *c, SPYValue *cls, int type, SPYValue *base) {
+    if (base->type == SPY_INSTANCE) { /* a __bytes__ result of a bytes subclass */
+        SPYValue *value = spy_retain(builtin_value(c, base, type));
+        spy_release(base); base = value;
+    }
+    SPYValue *instance = new_instance(c, cls);
+    if (instance) instance->as.map.base = base;
+    else spy_release(base);
+    return instance;
+}
 static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     SPYValue *owner = c->types[type];
@@ -46915,15 +47064,7 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     SPYValue *base = type == SPY_BYTEARRAY ? bytearray_new(c, "", 0) : mutable_layout(type) ? value_new(c, type) :
         type == SPY_FROZENDICT ? frozendict_construct(c, argc - 1, argv + 1, keywords, 0) :
         builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
-    if (!base || cls == owner) return base;
-    if (base->type == SPY_INSTANCE) { /* a __bytes__ result of a bytes subclass */
-        SPYValue *value = spy_retain(builtin_value(c, base, type));
-        spy_release(base); base = value;
-    }
-    SPYValue *instance = new_instance(c, cls);
-    if (instance) instance->as.map.base = base;
-    else spy_release(base);
-    return instance;
+    return !base || cls == owner ? base : subclass_instance(c, cls, type, base);
 }
 /* T.__init__(self, ...) for mutable T: list, set, and bytearray are reset,
  * dict is updated. */
@@ -47043,6 +47184,19 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
     if (callee->type != SPY_NATIVE || (!self && !argc--)) return NULL;
     if (!self) self = *argv++;
+    /* T.__new__(T, ...) is T() of the arguments, a call step on m (comparek). */
+    int built = callee->as.native.kwcall == type_new ? (int)(intptr_t)callee->as.native.data : SPY_BYTEARRAY;
+    if (built != SPY_BYTEARRAY && built_layout(built) && self == c->types[built] && built_calls(argc, argv)) {
+        SPYValue *args = tuple_of(c, argc, argv);
+        return args ? comparek(c, m, spy_retain(self), args, COMPARE_CALL + (int)argc, unchanged, NULL) : NULL;
+    }
+    /* T.__new__(cls, ...) builds T() of the arguments on m, then runs no __init__ (subclass_new). */
+    if (built != SPY_BYTEARRAY && argc && argc <= COMPARE_ARGS && self->type == SPY_CLASS && built == built_base(c, self))
+        return subclass_new(c, m, self, argc, argv, 0, unchanged, NULL);
+    /* bytearray.__init__(self, ...) fills it on m (array_init). */
+    if (callee->as.native.kwcall == type_init && callee->as.native.data == (void *)(intptr_t)SPY_BYTEARRAY && built_calls(argc, argv) &&
+        builtin_value(c, self, SPY_BYTEARRAY))
+        return array_init(c, m, self, argc, argv, spy_none(c), unchanged, NULL);
     if (callee->as.native.kwcall == slot_call && argc == 1 && repeat_slot(c, callee, self) && (function = index_special(c, argv[0]))) {
         /* A sequence's repetition by a count with a Python __index__ converts it on m first (repeat_indexed). */
         SPYValue *state = spy_tuple(c, 3, (SPYValue *[]){callee, self, argv[0]});

@@ -1,6 +1,7 @@
 # spec: PLS-315 24.4.2
 # description: hash() of a read-only memoryview, its own __hash__ bound or
-# unbound, and a dict lookup of it, hash its exporter first, by the
+# unbound, called with unpacked arguments too, and a dict lookup of it,
+# hash its exporter first, by the
 # exporter's Python __hash__, then hash the view's bytes and keep that
 # hash, so a second hash calls no Python. An exporter's error or a
 # non-int hash propagates; the view stays exported while the exporter
@@ -45,3 +46,11 @@ view = memoryview(Releasing(b"r"))
 assert_eq(taken(lambda: hash(view) == hash(b"r")), (True, ["BufferError"]))
 view.release()
 assert_eq(hash(view), hash(b"r"))
+
+# The bound __hash__ called with unpacked arguments, or by another
+# function's call of it, hashes the same way.
+def call(f, *args, **kwargs): return f(*args, **kwargs)
+none, nothing = (), {}
+assert_eq(taken(lambda: memoryview(E(b"s")).__hash__(*none) == hash(b"s")), (True, ["hash"]))
+assert_eq(taken(lambda: memoryview(E(b"k")).__hash__(**nothing) == hash(b"k")), (True, ["hash"]))
+assert_eq(taken(lambda: call(memoryview(E(b"c")).__hash__) == hash(b"c")), (True, ["hash"]))

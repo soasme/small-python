@@ -156,7 +156,8 @@ def hashed(p, log):
             if p["exporter"] == "raise": raise KeyError
             return 7
     v = memoryview(X(b"ab"))
-    ways = {"hash": lambda: hash(v) == hash(b"ab"), "method": lambda: v.__hash__() == hash(b"ab"), "get": lambda: {}.get(v)}
+    ways = {"hash": lambda: hash(v) == hash(b"ab"), "method": lambda: v.__hash__() == hash(b"ab"),
+            "passed": lambda: (lambda f: f())(v.__hash__) == hash(b"ab"), "get": lambda: {}.get(v)}
     try:
         return " ".join(repr(ways[p["call"]]()) for _ in range(2))
     except KeyError:

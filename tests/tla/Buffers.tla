@@ -57,8 +57,9 @@
 (* raising, returning "x" or 98, its __buffer__ logging "get" and giving   *)
 (* b"bc" or raising KeyError, its __release_buffer__ logging "rel". A     *)
 (* hash program hashes v = memoryview(X(b"ab")) twice, by hash(v),         *)
-(* v.__hash__() or a dict's get, X a bytes subclass whose __hash__ logs    *)
-(* "hash" and returns 7 or raises KeyError.                                *)
+(* v.__hash__(), a function's call of v.__hash__ passed to it, or a dict's *)
+(* get, X a bytes subclass whose __hash__ logs "hash" and returns 7 or     *)
+(* raises KeyError.                                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -72,7 +73,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice", "from_bytes", "super"}]
             \cup [part : {"item"}, format : {"B", "d", "?"}, bad : BOOLEAN]
             \cup [part : {"needle"}, index : {"raise", "str", "byte"}, buffer : {"view", "raise"}, array : BOOLEAN]
-            \cup [part : {"hash"}, exporter : {"int", "raise"}, call : {"hash", "method", "get"}]
+            \cup [part : {"hash"}, exporter : {"int", "raise"}, call : {"hash", "method", "passed", "get"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
