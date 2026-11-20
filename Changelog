@@ -611,6 +611,7 @@ Unreleased (0.10.0):
 - `reversed()` of a mappingproxy calls its mapping's `__reversed__`, raising AttributeError without one
 - `send()`, `throw()`, `close()` and `next()` of an `anext()` awaitable's `__await__()` resume its async generator without nesting on the C stack
 - `sorted()` and `list.sort()` call a Python `__bool__` or `__len__` of `reverse` without nesting on the C stack
+- `zip()` and `map()`, strict or not, over instance iterators mixed with generators call their Python `__next__` without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

@@ -61,7 +61,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 Cases == {"iter_sequence_protocol", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
-          "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
+          "zip_strict_third", "zip_strict_mixed", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_generator", "map_repr", "map_metaclass", "callable_generator", "iterator_subclass", "iterator_subclass_next", "adapter_subclass_iter", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "map_index", "map_index_bad", "callable_bound", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next", "filter_adapted", "filter_next_truth",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
@@ -130,6 +130,9 @@ Case(c) ==
       [] c = "iter_two_args_kw" -> "TypeError: iter() takes no keyword arguments"
       [] c = "zip_strict_first_shorter" -> "ValueError: zip() argument 2 is longer than argument 1"
       [] c = "zip_strict_third" -> "ValueError: zip() argument 3 is shorter than arguments 1-2"
+      \* a strict zip of instances and generators takes each item in turn, then
+      \* asks each later one, an instance or a generator, for one more
+      [] c = "zip_strict_mixed" -> "([(5, 0, 0)], [('it', 1), ('gen', 5), ('it', 0), ('gen', 6), 'zip() argument 2 is longer than argument 1', ('gen', 5), ('it', 1), ('it', 1), ('it', 0), ('it', 0)])"
       [] c = "zip_shortest" -> "([('a', 0), ('b', 1)], [], [('a',)])"
       [] c = "zip_consumes" -> "[2, 3]"
       [] c = "zip_consumes_order" -> "[1, 2, 3]"

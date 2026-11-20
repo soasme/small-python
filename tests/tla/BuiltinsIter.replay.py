@@ -106,6 +106,12 @@ SOURCES = {
     "zip_strict_third": 'result = list(zip([1, 2], [1, 2], [1], strict=True))',
     "zip_shortest": "result = (list(zip('ab', range(5))), list(zip()), list(zip('a')))",
     "zip_consumes": 'it = iter([1, 2, 3])\nlist(zip(it, []))\nresult = list(it)',
+    "zip_strict_mixed": "log = []\nclass It:\n    def __init__(self, n): self.n = n\n    def __iter__(self): return self\n"
+                        "    def __next__(self):\n        for _ in (): pass\n        log.append(('it', self.n))\n"
+                        "        if not self.n: raise StopIteration\n        self.n -= 1; return self.n\n"
+                        "def gen(*items):\n    for item in items: log.append(('gen', item)); yield item\n"
+                        "try: list(zip(It(1), gen(5, 6), strict=True))\nexcept ValueError as e: log.append(str(e))\n"
+                        "result = (list(zip(gen(5), It(1), It(1), strict=True)), log)",
     "zip_consumes_order": 'it = iter([1, 2, 3])\nlist(zip([], it))\nresult = list(it)',
     "map_strict": 'result = list(map(pow, [1, 2], [3], strict=True))',
     "map_shortest": 'result = list(map(pow, [2, 3, 4], [1, 2]))',

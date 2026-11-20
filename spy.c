@@ -9063,11 +9063,22 @@ static NO_INLINE SPYValue *zip_pending(SPYValue *v) {
 /* The next items of zip or map iterator v's iterables, as a tuple, after
  * those pending in its counter (zip_fill); NULL at their end or on an
  * error. */
+/* Strict zip or map v's iterables from from on, its first ended, must
+ * end too; a longer one raises. */
+static void zip_rest(SPYContext *c, SPYValue *v, size_t from) {
+    SPYValue *source = v->as.iterator.source;
+    for (size_t j = from; j < source->as.seq.len && !c->error_type[0]; j++) {
+        SPYValue *extra = iterator_next(c, source->as.seq.items[j]);
+        if (extra) { spy_release(extra); zip_unequal(c, v, j, "longer"); }
+    }
+}
 static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
     SPYValue *source = v->as.iterator.source, *result = v->as.iterator.counter ? zip_pending(v) : NULL;
+    size_t first = v->as.iterator.kind == I_MAP, checking = v->as.iterator.size ? v->as.iterator.index : 0;
     v->as.iterator.index = 0;
+    /* A check under way on the machine goes on (zip_checked). */
+    if (checking) { spy_release(result); zip_rest(c, v, checking); return NULL; }
     if (!source->as.seq.len || (!result && !(result = value_new(c, SPY_TUPLE)))) return NULL;
-    size_t first = v->as.iterator.kind == I_MAP;
     for (size_t i = first + result->as.seq.len; i < source->as.seq.len; i++) {
         SPYValue *item = iterator_next(c, source->as.seq.items[i]);
         if (!item || sequence_append(c, result, item)) {
@@ -9077,10 +9088,7 @@ static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
              * first is exhausted. Arguments count from the first iterable. */
             if (!item && !c->error_type[0] && v->as.iterator.size) {
                 if (i > first) { zip_unequal(c, v, i, "shorter"); break; }
-                for (size_t j = first + 1; j < source->as.seq.len && !c->error_type[0]; j++) {
-                    SPYValue *extra = iterator_next(c, source->as.seq.items[j]);
-                    if (extra) { spy_release(extra); zip_unequal(c, v, j, "longer"); }
-                }
+                zip_rest(c, v, first + 1);
             }
             break;
         }
@@ -35910,6 +35918,8 @@ static NO_INLINE int zip_checked(SPYContext *c, SPYValue *v, SPYValue **g) {
     for (size_t i = v->as.iterator.index; i < source->as.seq.len; i++) {
         SPYValue *s = source->as.seq.items[i];
         if (resumable(s)) { v->as.iterator.index = i; *g = s; return 1; }
+        /* One whose next is a call checks on (adapted_call). */
+        if ((v->as.iterator.removed & 2) && adapted_source(c, s)) { v->as.iterator.index = i; return 0; }
         if (!iterator_fast(c, s, &item)) item = iterator_next(c, s);
         if (item) { spy_release(item); zip_unequal(c, v, i, "longer"); return -1; }
         if (c->error_type[0]) break;
@@ -36403,11 +36413,11 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
 }
 static int next_call_of(SPYContext *, Machine *, SPYValue *, SPYValue **, SPYValue **);
 /* Whether iterator v takes items from a map or an instance, whose next
- * item may be a call: an enumerate of one, or a zip or map, not strict,
- * with one among its iterables (its removed count's second bit). */
+ * item may be a call: an enumerate of one, or a zip or map with one among
+ * its iterables (its removed count's second bit). */
 static ALWAYS_INLINE int adapts(SPYValue *v) {
     int kind = v->as.iterator.kind;
-    return (kind == I_ZIP || kind == I_MAP || kind == I_ENUMERATE) && (v->as.iterator.removed & 2) && !v->as.iterator.size;
+    return (kind == I_ZIP || kind == I_MAP || (kind == I_ENUMERATE && !v->as.iterator.size)) && (v->as.iterator.removed & 2);
 }
 /* For iterator v that adapts a map's items (adapts): the call of that
  * map's next item (next_call_of), v and c->adapting pushed on m's stack
@@ -36420,22 +36430,30 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
     if (!adapts(v)) return 0;
     for (;;) {
         SPYValue *source = v->as.iterator.source, *inner = source, *item;
+        /* A strict one checking its others end goes on from its index (zip_checked). */
+        int strict = v->as.iterator.kind != I_ENUMERATE && v->as.iterator.size, checking = strict && v->as.iterator.index;
+        size_t i = 0;
         if (v->as.iterator.kind != I_ENUMERATE) {
             inner = NULL;
-            for (size_t i = (v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0); !inner && i < source->as.seq.len; i++) {
+            for (i = checking ? v->as.iterator.index : (v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0);
+                 i < source->as.seq.len; i++) {
                 SPYValue *s = source->as.seq.items[i];
-                if (adapted_source(c, s)) inner = s;
-                else if (resumable(s)) return 0;
+                if (checking) v->as.iterator.index = i;
+                if (adapted_source(c, s)) { inner = s; break; }
+                /* A generator the machine resumes for the item (zip_fill, zip_left). */
+                if (resumable(s)) { *fn = s; return 2; }
                 /* Another iterable's item is taken as zip_items takes it. */
-                else if (!iterator_fast(c, s, &item) && !(item = iterator_next(c, s))) break;
-                else if (!item) break;
-                else if (!adapted_item(c, v, item) && c->error_type[0]) break;
+                if (!iterator_fast(c, s, &item)) item = iterator_next(c, s);
+                if (!item && (c->error_type[0] || !checking)) break;
+                if (item && !adapted_item(c, v, item) && c->error_type[0]) break;
             }
             if (!inner) {
-                /* An iterable ended, or all are taken. */
-                if (!c->error_type[0] && v->as.iterator.counter &&
-                    v->as.iterator.counter->as.seq.len + (v->as.iterator.kind == I_MAP) == source->as.seq.len) return 0;
-                spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL;
+                /* All are taken; the strict check found all ended; or an
+                 * iterable ended, a strict one's check going on (zip_ended). */
+                if (!c->error_type[0] && checking) { v->as.iterator.index = 0; return -1; }
+                if (!c->error_type[0] && i == source->as.seq.len) return 0;
+                if (!c->error_type[0] && strict) { if (zip_ended(c, v, i)) return -1; continue; }
+                spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL; v->as.iterator.index = 0;
                 return -1;
             }
         }
@@ -36446,8 +36464,14 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         if (status == 2) return 0;
         /* A map of a host function, or an ended iterable, gives its item here. */
         if (status == 0 && !(item = iterator_next(c, inner))) status = -1;
+        if (status < 0 && strict && !c->error_type[0]) {
+            if (checking) v->as.iterator.index = i + 1;
+            else if (zip_ended(c, v, i)) return -1;
+            continue;
+        }
         if (status < 0) {
             spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL;
+            if (strict) v->as.iterator.index = 0;
             return -1;
         }
         if (status) item = *fn;
@@ -36463,16 +36487,30 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
  * with the sentinel's Python __eq__ in c->k_fn, v left on m's stack. */
 static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue *result, int *again, int tested, int kind) {
     SPYValue *v = m->stack[m->len - 2], *source = v->as.iterator.source, *inner = source;
-    /* The iterable called is a filter's, or the first a zip or map has no item of. */
+    /* The iterable called is a filter's, or the first a zip or map has no
+     * item of, or a strict one's that it checks ends. */
+    int strict = v->as.iterator.kind != I_ENUMERATE && v->as.iterator.kind != I_FILTER && v->as.iterator.size;
+    size_t at = strict && v->as.iterator.index ? v->as.iterator.index :
+                (v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0);
     if (v->as.iterator.kind == I_FILTER) inner = source->as.seq.items[1];
-    else if (v->as.iterator.kind != I_ENUMERATE)
-        inner = source->as.seq.items[(v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0)];
+    else if (v->as.iterator.kind != I_ENUMERATE) inner = source->as.seq.items[at];
     if (!tested && inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE &&
         !(result = sentinel_returned(c, m, inner, result, kind)) && c->k_fn) return NULL;
     /* A __getitem__'s IndexError ends its iterator, which then gives none (next_ended). */
     if (!result && inner->type == SPY_ITERATOR && (inner->as.iterator.kind == I_GETITEM || inner->as.iterator.kind == I_REVERSED))
         next_ended(c, inner);
     spy_release(machine_pop(m)); machine_pop(m);
+    if (!result && strict && (!c->error_type[0] || error_is(c, "StopIteration"))) {
+        /* A strict one's iterable that ended: it goes on (adapted_call),
+         * checking the others after the first, or a later one is shorter. */
+        spy_clear_error(c);
+        if (v->as.iterator.index) v->as.iterator.index++;
+        else if (zip_ended(c, v, at)) { spy_release(v); return NULL; }
+        *again = 1;
+        spy_release(v);
+        return NULL;
+    }
+    if (!result && strict) v->as.iterator.index = 0;
     if (v->as.iterator.kind == I_FILTER) {
         /* A filter's iterator's item waits to be tested (filter_next). */
         if (result) { v->as.iterator.counter = result; v->as.iterator.index = 1; *again = 1; }
