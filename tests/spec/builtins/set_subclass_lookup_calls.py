@@ -1,4 +1,4 @@
-# spec: PLS-315 26.3.2 26.3.3 7.5.7
+# spec: PLS-315 26.3.2, 26.3.3, 7.5.7
 # description: add, discard and remove of a set subclass's instance hash
 # their element by its Python __hash__, then look it up in the set's
 # entries as an exact set's do, calling an entry's Python __eq__ with the

@@ -1,4 +1,4 @@
-# spec: PLS-315 26.1.1 13.2.7 13.3.4
+# spec: PLS-315 26.1.1, 13.2.3, 13.3.4
 # description: A dict or frozendict subclass whose __iter__ is its own
 # merges into a dict display's **, a call's ** and dict.update() by its
 # Python keys(), whose result is listed first, and its Python

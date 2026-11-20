@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.6 27.2.2 27.3.2
+# spec: PLS-315 27.1.6, 27.2.2, 27.4.2
 # description: map() of a generator's or coroutine's own method, send,
 # throw or close taken from its type, resumes each generator with the
 # map's next items as that method called directly does: what it yields is

@@ -1,4 +1,4 @@
-# spec: PLS-315 7.4.3 13.16.1 27.2.1
+# spec: PLS-315 7.4.3, 13.16.1, 27.2.1
 # description: A call of a generator function, a coroutine function or an
 # asynchronous generator function binds a keyword whose name is an
 # instance of a str subclass as any function's call does: the first

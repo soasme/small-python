@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 7.3.2 6.11
+# spec: PLS-315 10.3, 7.3.2, 7.5.1
 # description: A class without __bool__ whose __len__ is a descriptor
 # takes its truth from the read's result called, checked as a length:
 # zero is false, a negative length raises ValueError and a non-integer

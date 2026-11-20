@@ -1,4 +1,4 @@
-# spec: PLS-315 25.5.2 7.5.4
+# spec: PLS-315 25.5.2, 7.5.4
 # description: A sequence's explicit __mul__, __rmul__ or __imul__ takes
 # its count by the count's Python __index__, called once, then repeats as
 # the operator does; an error of __index__ propagates, a result that is

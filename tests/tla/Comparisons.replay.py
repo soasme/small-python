@@ -179,6 +179,11 @@ SOURCES = {
     "dict_key_eq": "class E:\n    def __init__(s, n, v=''): s.n, s.v = n, v\n    def __hash__(s): return 1\n"
                    "    def __eq__(s, o): t(s.n + '==' + o.n); return s.v == o.v\n"
                    "result = ({E('a'): 1, E('b', 'x'): 2} == {E('c'): 1, E('d', 'x'): 2}, {E('e'): 1} != {E('f', 'y'): 1})",
+    "metaclass_eq_hash": "class M(type):\n    def __eq__(s, o):\n        for _ in (): pass\n"
+                         "        t(s.__name__ + '=' + o.__name__); return s.__name__ == o.__name__\n"
+                         "    def __hash__(s): t('h' + s.__name__); return 1\n"
+                         "A = M('A', (), {}); A2 = M('A', (), {}); B = M('B', (), {})\n"
+                         "result = (A2 in [B, A], [A] == [A2], A2 in {B, A}, {B: 1}.get(A2), (A, 1) in {(A2, 1): 0})",
 }
 
 

@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.6 19.3.1 7.5.6
+# spec: PLS-315 27.1.6, 19.3.1, 7.5.6
 # description: map() of dir, str, repr, len or hash over classes whose
 # metaclass defines the method in Python calls the metaclass's method
 # for each class, in order, as calling the builtin on each does: dir()

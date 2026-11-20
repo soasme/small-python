@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 3.3.1 18.1.4
+# spec: PLS-315 10.3, 7.3.2, 18.1.4
 # description: An instance whose class's __del__ is a descriptor is
 # finalized by reading it through its getter, then calling what the read
 # gave with no arguments, once, when its last reference goes or the

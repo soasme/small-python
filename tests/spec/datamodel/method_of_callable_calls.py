@@ -1,4 +1,4 @@
-# spec: PLS-315 28.4 7.4.1
+# spec: PLS-315 28.4, 7.4.1
 # description: Calling a method object whose function is itself a method
 # or an instance with a Python __call__ calls that function with the
 # method's self first: a method of a method gives the inner self, then

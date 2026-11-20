@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.4 24.2.3 24.4.2
+# spec: PLS-315 7.5.4, 24.2, 24.4.2
 # description: A slice store into, or deletion from, a bytearray, and a
 # slice store into a writable one-dimensional memoryview, converts the
 # slice's start, stop and step by their Python __index__, the step first,

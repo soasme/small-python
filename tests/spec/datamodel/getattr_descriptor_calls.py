@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 3.3.2 19.3.7
+# spec: PLS-315 10.3, 7.3.2, 7.3.4
 # description: A class whose __getattr__ is a descriptor answers a missing
 # attribute by reading it through its getter, after the lookup's
 # AttributeError, then calling what the read gave with the name alone.

@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.4 27.1.6 27.1.8 7.7.6
+# spec: PLS-315 27.1.4, 27.1.6, 27.1.8, 7.7.6
 # description: list(), tuple(), sum(), sorted(), dict() and next() of an
 # instance of an enumerate, zip, map or filter subclass that overrides
 # neither __iter__ nor __next__ take its items as its builtin iterator

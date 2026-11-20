@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.4 27.1.6 3.3.5
+# spec: PLS-315 27.1.4, 27.1.8, 19.3.27, 27.1.1
 # description: next() of an enumerate or zip subclass's instance, with or
 # without a default, a subclass's Python __next__ calling
 # super().__next__(), and the builtin's __next__ called on a plain

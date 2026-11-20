@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.8 27.1.4 7.7.4
+# spec: PLS-315 27.1.8, 27.1.4, 7.7.4
 # description: filter() takes each item of an iterator that gives it by a
 # call, a __getitem__ iterator, iter(f, sentinel), a map or an enumerate
 # of one, as that iterator gives it, then tests it by its function or its

@@ -1,4 +1,4 @@
-# spec: PLS-315 15.3.2 9.4.1
+# spec: PLS-315 15.3.2, 7.7.5
 # description: An async for whose __anext__ returns an instance awaits it
 # through its class's __await__: a plain method, a generator function or
 # one a descriptor gives, its iterator's values suspending the coroutine.

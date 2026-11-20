@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 6.10.2 19.3.11
+# spec: PLS-315 10.3, 7.3.2, 7.7.1, 13.10
 # description: iter() and in read a class's __iter__ or __contains__
 # descriptor, whose Python getter runs once and whose result is called.
 # A read raising AttributeError leaves the method absent: iter() falls

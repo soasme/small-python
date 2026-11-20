@@ -1,4 +1,4 @@
-# spec: PLS-315 19.3.4 27.5.1 13.4.1
+# spec: PLS-315 19.3.4, 27.5.1, 13.4
 # description: An await of anext() of an async generator, with a default
 # or not, resumes the generator: what its awaits pass out reaches the
 # coroutine's driver, a yield is the await's value, and its end gives the

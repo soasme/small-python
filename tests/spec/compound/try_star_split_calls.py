@@ -1,4 +1,4 @@
-# spec: PLS-315 15.4.3 21.4.3
+# spec: PLS-315 15.4.3, 21.4.3
 # description: except* of a group splits it by calling its split method
 # with the clause's types: a group's own split calls a subclass's Python
 # derive for each part it makes, a subclass's Python split, or one a

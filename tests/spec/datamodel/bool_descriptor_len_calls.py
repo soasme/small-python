@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 7.3.2 6.11
+# spec: PLS-315 10.3, 7.3.2, 7.5.1
 # description: A class defining __bool__ by a descriptor whose read raises
 # AttributeError has no __bool__ for truth: its truth is that of what its
 # __len__ returns, unchecked as a length, or true when the __len__ read

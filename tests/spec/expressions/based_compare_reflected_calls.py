@@ -1,4 +1,4 @@
-# spec: PLS-315 6.10.1 3.3.1
+# spec: PLS-315 7.2.4, 7.2.3
 # description: A set, a frozenset, or an instance of a builtin's
 # subclass that does not define a comparison, compares with an instance of an unrelated class by the
 # builtin's method, which declines it: the other's reflected Python

@@ -1,4 +1,4 @@
-# spec: PLS-315 19.3.20 27.1.6
+# spec: PLS-315 19.3.20, 27.1.6
 # description: iter(f, sentinel) of a generator's __next__ resumes the
 # generator for each item, as calling __next__ does, until it yields an
 # item equal to the sentinel, a Python __eq__ deciding, or ends; the

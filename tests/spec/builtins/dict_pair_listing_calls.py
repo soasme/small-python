@@ -1,4 +1,4 @@
-# spec: PLS-315 26.1.1 26.1.3 7.7.8
+# spec: PLS-315 26.1.1, 26.1.3, 7.7.8
 # description: dict() and dict.update() of an iterable of pairs take each
 # element that is no list or tuple by SequenceFast: its iterator, then a
 # list of what that iterator gives, which asks the iterator's own

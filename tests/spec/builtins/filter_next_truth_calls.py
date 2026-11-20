@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.8 27.1.4 6.11
+# spec: PLS-315 27.1.5, 19.3.27, 7.5.1
 # description: next() of a filter whose function is None, bool or another
 # builtin tests each item as the filter's iteration does, an instance's
 # Python __bool__, __len__ or conversion method called in order, until

@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 6.3.4 19.3.1
+# spec: PLS-315 10.3, 7.3.2, 13.3.4
 # description: Calling an instance whose class's __call__ is a
 # descriptor reads it through its getter, once per call, then calls what
 # the read returned with the call's arguments, keywords included; an

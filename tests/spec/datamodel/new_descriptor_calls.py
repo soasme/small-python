@@ -1,4 +1,4 @@
-# spec: PLS-315 10.2.1 7.5.6
+# spec: PLS-315 10.2.1, 7.5.6
 # description: Calling a class whose __new__ is a classmethod, a plain
 # function set on the class after it was made, or a descriptor with a
 # Python __get__ reads __new__ from the class as an attribute: the

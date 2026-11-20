@@ -566,6 +566,8 @@ static SPYValue *class_lookup(SPYValue *, const char *);
 static SPYValue *value_class(SPYContext *, SPYValue *);
 /* A class with a metaclass, whose special methods the metaclass supplies. */
 static ALWAYS_INLINE int metaclassed(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
+/* An instance, or a class with a metaclass, whose special methods its class's Python ones may be. */
+static ALWAYS_INLINE int instance_like(SPYValue *v) { return v->type == SPY_INSTANCE || metaclassed(v); }
 /* Whether stores to v's attributes may call a Python setter (setter_function):
  * an instance's class's, or a class's metaclass's. */
 static ALWAYS_INLINE int setter_object(SPYValue *v) { return v->type == SPY_INSTANCE || metaclassed(v); }
@@ -2878,7 +2880,7 @@ static NO_INLINE int pair_reaches(SPYValue *, int);
 /* Whether a lookup of key may compare it by a Python __eq__ on the machine
  * (lookup_call): an instance, or a tuple whose items may. */
 static ALWAYS_INLINE int lookup_key(SPYValue *key) {
-    return key->type == SPY_INSTANCE || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
+    return key->type == SPY_INSTANCE || metaclassed(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
 }
 /* A map's odd_keys: 1 once it gains a key not a str, 2 too once one that
  * is a lookup_key, which the lookup of any other key may compare by a
@@ -10725,7 +10727,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left
      * or a list or tuple with an item it compares by a Python __eq__
      * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
-        return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(b) || b->type == SPY_GENERATOR ||
+        return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || b->type == SPY_GENERATOR ||
                (b->type == SPY_ITERATOR && iterated_python(c, a, b)) || (b->type == SPY_DICT_VALUES && values_python(c, a, b)) ||
                (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) || (set_view(b) && view_python(c, a, b)) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
@@ -11040,7 +11042,7 @@ static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue 
     for (size_t i = 0; i < seq->as.seq.len; i++) {
         SPYValue *item = seq->as.seq.items[i];
         if (item == x) return 1;
-        if (pairs && (pair_python(c, x, item) || (item->type == SPY_INSTANCE && python_item(c, x, seq, i) == i))) return 2;
+        if (pairs && (pair_python(c, x, item) || (instance_like(item) && python_item(c, x, seq, i) == i))) return 2;
         if (scalars && item->type > SPY_STRING && !pure_operand(item)) {
             size_t first = python_item(c, x, seq, i);
             if (first < seq->as.seq.len && seq->as.seq.items[first] != x) return 2;
@@ -27098,12 +27100,13 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     }
     return !status;
 }
-/* The Python rich comparison rich of instance x's class that comparing
- * x with y calls first, borrowed: none when y's class is a subclass of x's,
- * whose reflected method comes first; else NULL. */
+/* The Python rich comparison rich of instance x's class, or of class x's
+ * metaclass, that comparing x with y calls first, borrowed: none when y's
+ * class is a subclass of x's, whose reflected method comes first; else
+ * NULL. */
 static SPYValue *rich_function(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
-    if (x->type != SPY_INSTANCE) return NULL;
-    SPYValue *cls = x->as.map.parent, *other = value_class(c, y);
+    if (!instance_like(x)) return NULL;
+    SPYValue *cls = value_class(c, x), *other = value_class(c, y);
     SPYValue *function = other != cls && subclass(other, cls) ? NULL : class_lookup(cls, rich_names[rich]);
     return function && machine_function(c, function) ? function : NULL;
 }
@@ -27574,7 +27577,7 @@ static void pairs_walk(SPYContext *c, Machine *m, SPYValue *lookup, SPYValue *x,
     SPYValue *a = x->as.seq.items[at], *b = y->as.seq.items[at], *function, *walk;
     size_t end;
     spy_retain(x); spy_retain(y);
-    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE) {
+    while (!instance_like(a) && !instance_like(b)) {
         walk = parts_tuple(c, 5, (SPYValue *[]){spy_retain(lookup), x, y, int_value(c, (int64_t)at + 1), outer});
         if (!walk) { spy_release(lookup); return; }
         outer = walk; x = spy_retain(a); y = spy_retain(b); at = python_pair(c, x, y, 0, &end);
@@ -28183,13 +28186,14 @@ static ALWAYS_INLINE int format_reached(SPYContext *c, SPYValue *callee, int met
 static int hashing_call(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, SPYValue **);
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv may be a hashing_call: a dict's get, setdefault or pop,
- * or a native function, an instance among its first two arguments. */
+ * or a native function, an instance or a class with a metaclass among its
+ * first two arguments. */
 static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) method = callee->as.bound.method;
     int native = method >= 0 ? method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP :
                  callee->type == SPY_NATIVE || (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE);
-    return native && argc && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_TUPLE ||
-                              (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_TUPLE)));
+    return native && argc && (instance_like(argv[0]) || argv[0]->type == SPY_TUPLE ||
+                              (argc == 2 && (instance_like(argv[1]) || argv[1]->type == SPY_TUPLE)));
 }
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *hashed_map(SPYValue *, int, size_t, SPYValue *const *, size_t *);
@@ -30527,7 +30531,7 @@ static int step_operation(Instruction *ins, int *op) {
 /* Whether item is x or its comparison with x calls a Python __eq__
  * (rich_function), or its pairs' (pair_python). */
 static int python_at(SPYContext *c, SPYValue *x, SPYValue *item) {
-    return item == x || ((x->type == SPY_INSTANCE || item->type == SPY_INSTANCE) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))) ||
+    return item == x || ((instance_like(x) || instance_like(item)) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))) ||
            pair_python(c, x, item);
 }
 /* The first item of seq, a list or tuple, from at on that is x or calls
@@ -30549,9 +30553,9 @@ static NO_INLINE SPYValue *search_call(SPYContext *c, Machine *m, int method, SP
                                        int64_t tally, SPYValue **env, SPYValue **value) {
     size_t found = SIZE_MAX;
     *value = NULL;
-    for (int instance = x->type == SPY_INSTANCE; at < seq->as.seq.len && (method != M_INDEX || at < (uint64_t)tally); at++) {
+    for (int instance = instance_like(x); at < seq->as.seq.len && (method != M_INDEX || at < (uint64_t)tally); at++) {
         SPYValue *item = seq->as.seq.items[at], *function;
-        if (item != x && (instance || item->type == SPY_INSTANCE) &&
+        if (item != x && (instance || instance_like(item)) &&
             ((function = rich_function(c, item, x, R_EQ)) || (function = rich_function(c, x, item, R_EQ)))) {
             SPYValue *left = rich_function(c, item, x, R_EQ) ? item : x, *right = left == x ? item : x;
             SPYValue *args[] = {spy_retain(left), spy_retain(right)};
@@ -30592,7 +30596,7 @@ static NO_INLINE SPYValue *fold_call(SPYContext *c, Machine *m, int op, SPYValue
     for (; at < seq->as.seq.len; at++) {
         SPYValue *item = seq->as.seq.items[at], *function = NULL;
         int called = op;
-        if (item->type == SPY_INSTANCE || best->type == SPY_INSTANCE) {
+        if (instance_like(item) || instance_like(best)) {
             function = rich_function(c, item, best, rich_kind(op));
             if (!function && (function = rich_function(c, best, item, rich_kind(other)))) called = other;
         }
@@ -30673,7 +30677,7 @@ static int pair_at(SPYValue *a, SPYValue *b, size_t at, SPYValue **x, SPYValue *
     }
     if (at >= a->as.map.len || ((at & 15) == 15 && spend(a->ctx, 1))) return 0;
     Entry *e = &map_items(a)[at];
-    ptrdiff_t j = e->key->type == SPY_INSTANCE || e->key->type == SPY_TUPLE ? -1 : map_find_hash(b, e->key, e->hash);
+    ptrdiff_t j = instance_like(e->key) || e->key->type == SPY_TUPLE ? -1 : map_find_hash(b, e->key, e->hash);
     if (j < 0) return 0;
     *x = e->value; *y = b->as.map.items[j].value;
     return 1;
@@ -30703,7 +30707,7 @@ static int plain_equal(SPYValue *v) {
 static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at, size_t *end) {
     for (SPYValue *x, *y; pair_at(a, b, at, &x, &y); at++) {
         if (x == y) continue;
-        if (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE) {
+        if (instance_like(x) || instance_like(y)) {
             if (rich_function(c, x, y, R_EQ) || rich_function(c, y, x, R_EQ)) return at;
             if (plain_equal(x) && plain_equal(y) && equal(x, y)) continue;
             break;
@@ -30730,15 +30734,9 @@ static int pair_python(SPYContext *c, SPYValue *a, SPYValue *b) {
     size_t end;
     return sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX;
 }
-/* Whether comparing a and b for == calls a Python __eq__ on the machine:
- * an instance, or a sequence_pair with a python_pair. */
-static int sequence_python(SPYContext *c, SPYValue *a, SPYValue *b) {
-    size_t end;
-    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
-}
-/* Whether v is an instance whose class has a Python __eq__. */
+/* Whether v is an instance, or a class, whose class has a Python __eq__. */
 static int python_eq(SPYValue *v) {
-    SPYValue *eq = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__eq__") : NULL;
+    SPYValue *eq = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__eq__") : metaclassed(v) ? class_lookup(v->as.map.meta, "__eq__") : NULL;
     return eq && eq->type == SPY_FUNCTION;
 }
 /* Whether ordering op of a and b, two lists or two tuples, calls a
@@ -30766,7 +30764,7 @@ static int sequence_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t a
         if (x == y) continue;
         if (scalars && (x->type > SPY_STRING || y->type > SPY_STRING)) {
             size_t end = at;
-            if ((x->type == SPY_INSTANCE || y->type == SPY_INSTANCE || sequence_pair(x, y) || set_pair(x, y)) && python_pair(c, a, b, at, &end) != SIZE_MAX)
+            if ((instance_like(x) || instance_like(y) || sequence_pair(x, y) || set_pair(x, y)) && python_pair(c, a, b, at, &end) != SIZE_MAX)
                 return 2;
             scalars = 0;
             /* The pairs it found equal. */
@@ -30794,7 +30792,7 @@ static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SP
     pair_at(x, y, at, &a, &b);
     /* A pair of sequences compares its own pairs, each sequence's x, y
      * and next pair's index under them with c->nesting. */
-    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE && !set_pair(a, b) && (a->type != SPY_DICT || !dict_walks(a, b, 0))) {
+    while (!instance_like(a) && !instance_like(b) && !set_pair(a, b) && (a->type != SPY_DICT || !dict_walks(a, b, 0))) {
         if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
             machine_push(c, m, spy_retain(c->nesting))) goto fail;
         x = a; y = b; at = python_pair(c, x, y, 0, &end);
@@ -30999,10 +30997,12 @@ static int based_declines(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
  * (contains_step); else NULL. */
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 /* The Python __hash__ of key, a machine function, also of a builtin's
- * subclass defining it before the builtin, or NULL. */
+ * subclass defining it before the builtin, or of a class's metaclass; or
+ * NULL. */
 static SPYValue *hash_function(SPYContext *c, SPYValue *key) {
-    SPYValue *function = key->type == SPY_INSTANCE && key != c->hashed && (!key->as.map.base || !builtin_base(c, key, "__hash__", NULL)) ?
-                         class_lookup(key->as.map.parent, "__hash__") : NULL;
+    SPYValue *function = key == c->hashed ? NULL :
+                         key->type == SPY_INSTANCE && (!key->as.map.base || !builtin_base(c, key, "__hash__", NULL)) ?
+                         class_lookup(key->as.map.parent, "__hash__") : metaclassed(key) ? class_lookup(key->as.map.meta, "__hash__") : NULL;
     /* A method object stays bound to its own self (hash_self). */
     if (function && function->type == SPY_METHOD) function = function->as.method.function;
     return function && machine_function(c, function) ? function : NULL;
@@ -31010,7 +31010,8 @@ static SPYValue *hash_function(SPYContext *c, SPYValue *key) {
 /* What key's Python __hash__ (hash_function) is called with: key, or the
  * self of the method object its class holds, borrowed. */
 static SPYValue *hash_self(SPYValue *key) {
-    SPYValue *held = key->type == SPY_INSTANCE ? class_lookup(key->as.map.parent, "__hash__") : NULL;
+    SPYValue *kind = key->type == SPY_INSTANCE ? key->as.map.parent : metaclassed(key) ? key->as.map.meta : NULL;
+    SPYValue *held = kind ? class_lookup(kind, "__hash__") : NULL;
     return held && held->type == SPY_METHOD ? held->as.method.self : key;
 }
 /* The Python __hash__, a machine function, that hashing key calls first
@@ -31020,7 +31021,7 @@ static SPYValue *hash_first(SPYContext *c, SPYValue *key, int depth) {
     if (key->type != SPY_TUPLE) return hash_function(c, key);
     for (size_t i = 0; key->listed && !key->as.seq.hashed && depth && i < key->as.seq.len; i++) {
         SPYValue *item = key->as.seq.items[i], *function;
-        if ((item->type == SPY_INSTANCE || item->type == SPY_TUPLE) && (function = hash_first(c, item, depth - 1))) return function;
+        if ((instance_like(item) || item->type == SPY_TUPLE) && (function = hash_first(c, item, depth - 1))) return function;
     }
     return NULL;
 }
@@ -31106,7 +31107,7 @@ static NO_INLINE int pair_reaches(SPYValue *key, int depth) {
     int instances = 0;
     for (size_t i = 0; i < key->as.seq.len; i++) {
         SPYValue *item = key->as.seq.items[i];
-        if (item->type == SPY_INSTANCE) {
+        if (instance_like(item)) {
             if (python_eq(item)) return 1;
             instances = 1;
         } else if (item->type == SPY_TUPLE && item->listed && !item->as.seq.plain) {
@@ -31128,7 +31129,7 @@ static NO_INLINE int items_reach(SPYContext *c, SPYValue *key, int pairs) {
  * kept apart from items_reach, which only such items reach. */
 static NO_INLINE int hash_reaches(SPYContext *c, SPYValue *key, int pairs) {
     for (size_t i = 0; !key->as.seq.hashed && i < key->as.seq.len; i++)
-        if (key->as.seq.items[i]->type == SPY_INSTANCE || key->as.seq.items[i]->type == SPY_TUPLE) return items_reach(c, key, pairs);
+        if (instance_like(key->as.seq.items[i]) || key->as.seq.items[i]->type == SPY_TUPLE) return items_reach(c, key, pairs);
     if (key->as.seq.hashed) return items_reach(c, key, pairs);
     key->as.seq.plain = 1;
     return 0;
@@ -32579,7 +32580,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     SPYValue *map = kind == OPERATE_INDEX || contains ? lookup_storage(c, contains ? y : x, contains) : NULL;
     if (contains ? hashes_key(map, 1) : kind == OPERATE_INDEX && hashes_first(c, x, "__getitem__")) {
         SPYValue *operands[] = {x, y};
-        if (((contains ? x : y)->type == SPY_INSTANCE || (contains ? x : y)->type == SPY_TUPLE) &&
+        if ((instance_like(contains ? x : y) || (contains ? x : y)->type == SPY_TUPLE) &&
             ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0])) return function;
         c->entering_kind = CALL_OPERATOR;
         /* A key hashed in C whose Python __eq__ the lookup may call; a
@@ -32684,7 +32685,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, x, y, env);
         if (kind == OPERATE_INDEX && x->type == SPY_CLASS) return class_item(c, m, x, y, env);
         /* A list's or tuple's items compared by a Python __eq__ (equal_call). */
-        if ((rich == R_EQ || rich == R_NE) && x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && sequence_python(c, x, y))
+        if ((rich == R_EQ || rich == R_NE) && pair_python(c, x, y))
             return equal_call(c, m, x, y, python_pair(c, x, y, 0, &(size_t){0}), env);
         /* Their ordering: by the items' __eq__, then the first unequal
          * pair's method (order_decide). */
@@ -36244,7 +36245,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg) seal_tuple(c, m->stack[m->len - 1]); /* The display's last item. */
             break;
         CASE(BC_MAP)
-            if (m->stack[m->len - 2]->type == SPY_INSTANCE || (m->stack[m->len - 2]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 2])) ||
+            if (instance_like(m->stack[m->len - 2]) || (m->stack[m->len - 2]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 2])) ||
                 UNLIKELY(eq_keyed(m->stack[m->len - 3]))) {
                 a = spy_retain(m->stack[m->len - 2]); goto display_hash;
             }

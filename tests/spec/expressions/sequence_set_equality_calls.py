@@ -1,4 +1,4 @@
-# spec: PLS-315 6.10.1 26.3.2 26.1.2
+# spec: PLS-315 25.5.3, 26.3.2, 26.1.2
 # description: == and != of two tuples, lists or dicts compare their
 # items in order; an item pair of two sets or frozensets compares as the
 # sets do, looking each element of one up in the other, an element's

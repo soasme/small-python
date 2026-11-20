@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 6.3.2 19.3.11
+# spec: PLS-315 10.3, 7.3.2, 7.7.1, 27.1.2
 # description: A class whose __getitem__ is a descriptor iterates by the
 # sequence protocol: each item reads it through its getter, then calls
 # what the read returned with the index, from 0 until IndexError, in a

@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.6 7.3.2 19.3.1
+# spec: PLS-315 7.5.6, 7.3.2, 19.3.1
 # description: any() and all() take each item's truth as a test does,
 # through descriptors too: a __bool__ read raising AttributeError is
 # absent, its __len__'s result's truth then taken unchecked, or true

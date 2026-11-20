@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.4 27.1.6 27.1.8 19.3.1
+# spec: PLS-315 27.1.4, 27.1.6, 27.1.8, 19.3.1
 # description: Calling a subclass of zip, map, enumerate or filter that
 # defines no __new__ or __init__ calls each iterable's Python __iter__ in
 # order, after an enumerate's start is converted, and returns an instance

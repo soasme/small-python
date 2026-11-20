@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.6 7.5.6 7.5.5
+# spec: PLS-315 27.1.6, 7.5.6, 7.5.5
 # description: map() of repr, str or ascii over containers holding
 # instances calls each instance's Python __repr__ once per item, in
 # order, for the container's repr; an error in one propagates out of the

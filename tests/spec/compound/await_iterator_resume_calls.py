@@ -1,4 +1,4 @@
-# spec: PLS-315 13.4.1 15.3.2 27.4.2
+# spec: PLS-315 13.4, 15.3.2, 27.4.2
 # description: A coroutine suspended in an await, or an async for's await,
 # of an iterator that is no generator, a builtin's or an instance's whose
 # __next__ is Python, resumes it on each send: the iterator's values are

@@ -1,4 +1,4 @@
-# spec: PLS-315 6.10 6.10.2
+# spec: PLS-315 13.10
 # description: An in or not in inside a comparison chain searches its
 # right operand as a lone one does, item by item through Python __eq__,
 # __iter__, __getitem__ or a generator, then goes on with that same

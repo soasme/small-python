@@ -42,7 +42,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
           "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_set_pair", "seq_scalar_order", "sort_reflected_items", "map_builtin_calls", "view_calls", "builtin_declines",
-          "ne_by_eq", "sub_object_reflected", "dict_key_eq", "builtin_sub_reflected",
+          "ne_by_eq", "sub_object_reflected", "dict_key_eq", "metaclass_eq_hash", "builtin_sub_reflected",
           "builtin_sub_unordered", "builtin_sub_declines", "in_chain_calls"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
@@ -215,6 +215,12 @@ Case(c) ==
       \* __eq__ of each entry of the same hash there, the entry's key first
       \* (building each dict compares its colliding keys first)
       [] c = "dict_key_eq" -> <<"(True, True)", <<"'a==b'", "'c==d'", "'c==a'", "'c==b'", "'d==b'", "'f==e'">>>>
+      \* classes compare and hash by their metaclass's __eq__ and __hash__ as
+      \* instances do by their class's: in sequences, displays, lookups and
+      \* methods, and as items of a tuple key
+      [] c = "metaclass_eq_hash" -> <<"(True, True, True, None, True)",
+                                      <<"'B=A'", "'A=A'", "'A=A'", "'hB'", "'hA'", "'B=A'", "'hA'", "'B=A'", "'A=A'",
+                                        "'hB'", "'hA'", "'B=A'", "'hA'", "'hA'", "'A=A'">>>>
       \* a builtin's value compared with an instance of its type's subclass:
       \* the subclass's reflected method first, its NotImplemented going on
       \* with the builtin's own comparison
