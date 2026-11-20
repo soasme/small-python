@@ -107,6 +107,9 @@ SOURCES = {
     "proxy_reflected": "class M(dict):\n    def __eq__(self, other):\n        for _ in range(2): pass\n        return ('eq', type(other).__name__)\n"
                        "p = types.MappingProxyType({'a': 1})\n"
                        "result = ({} == types.MappingProxyType(M()), {'a': 1} == p == {'a': 1}, [] == p, 1 != p)",
+    "proxy_contains_calls": "log = []\nclass M(dict):\n    def __contains__(s, k):\n        for _ in (): pass\n"
+                            "        log.append(k)\n        return k == 'k'\n"
+                            "v = type(type.__dict__)(M())\nresult = ('k' in v, 'z' in v, log)",
     "proxy_declined_calls": "log = []\nclass K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n"
                             "    def __eq__(s, o):\n        for _ in range(2): pass\n"
                             "        log.append(s.n + getattr(o, 'n', '?')); return s.n == getattr(o, 'n', None)\n"

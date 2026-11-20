@@ -10731,9 +10731,10 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left
     if (machine_exporter(c, a) || machine_exporter(c, b)) return NULL;
     /* An in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
-     * before any identical one. */
+     * before any identical one, or a mappingproxy's mapping (operator_call). */
     if (op == O_IN || op == O_NOTIN)
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || b->type == SPY_GENERATOR ||
+               b->type == SPY_MAPPINGPROXY ||
                (b->type == SPY_ITERATOR && iterated_python(c, a, b)) || (b->type == SPY_DICT_VALUES && values_python(c, a, b)) ||
                (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) || (set_view(b) && view_python(c, a, b)) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
@@ -32615,6 +32616,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         function = operator_call(c, m, ins, compared, x, env);
         spy_release(compared);
         return function;
+    }
+    /* x in mappingproxy y is x in its mapping (mappingproxy_contains), y
+     * kept for a chain. */
+    if (UNLIKELY(y && y->type == SPY_MAPPINGPROXY) && contains) {
+        operator_keep(c, m, ins, y);
+        return operator_call(c, m, ins, x, y->as.bound.self, env);
     }
     /* A set operation, augmented assignment or comparison, whose lookups
      * may call a Python __eq__. */
