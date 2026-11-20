@@ -14,7 +14,8 @@
 (* by DictSetItem, hashing its name once and comparing it with each       *)
 (* earlier name equal in hash; a subclass's construction, dict.update and *)
 (* a display merge without hashing. A function with a parameter z first   *)
-(* compares each name with z by its __eq__.                                *)
+(* compares each name with z by its __eq__; a generator function's call  *)
+(* binds as that function's does, before making its generator.          *)
 (*                                                                         *)
 (* A program is a target, a call of a function taking only **kw, or z=None *)
 (* and **kw, dict(), a dict subclass, dict.update, frozendict(), a         *)
@@ -26,7 +27,7 @@
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
-Targets == {"call", "parameter call", "dict", "dict subclass", "update", "frozendict", "frozendict subclass", "display"}
+Targets == {"call", "parameter call", "generator call", "dict", "dict subclass", "update", "frozendict", "frozendict subclass", "display"}
 Keys == UNION {[1..n -> {"a", "b", "A"}] : n \in 1..2}
 Programs == {p \in [target : Targets, explicit : {"none", "first", "last"}, keys : Keys, joined : BOOLEAN] :
                 p.joined => Len(p.keys) = 2 /\ p.keys[1] # p.keys[2]}
@@ -77,8 +78,8 @@ Run(p) ==
         merged == IF p.explicit = "last" /\ given[1] = "ok"
                   THEN <<"ok", [j \in DOMAIN given[2] |-> IF given[2][j][2] = Len(keys) THEN <<given[2][j][1], 0>> ELSE given[2][j]], given[3]>>
                   ELSE given
-    IN  IF merged[1] # "ok" \/ p.target \notin {"call", "parameter call", "dict", "frozendict"} THEN merged
-        ELSE <<"ok", merged[2], merged[3] \o Stores(merged[2], p.target = "parameter call", 1)>>
+    IN  IF merged[1] # "ok" \/ p.target \notin {"call", "parameter call", "generator call", "dict", "frozendict"} THEN merged
+        ELSE <<"ok", merged[2], merged[3] \o Stores(merged[2], p.target \in {"parameter call", "generator call"}, 1)>>
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -89,7 +90,7 @@ Done == outcome # Pending
 
 \* No name is hashed more than once, nor compared without one equal in hash.
 OnceEach == Done => Len(SelectSeq(outcome[3], LAMBDA e : e = "hash")) <= Len(program.keys)
-Duplicates == (Done /\ program.target \notin {"display", "parameter call"} /\ outcome[1] = "ok" /\ program.explicit # "last" /\
+Duplicates == (Done /\ program.target \notin {"display", "parameter call", "generator call"} /\ outcome[1] = "ok" /\ program.explicit # "last" /\
                \A j \in DOMAIN program.keys : program.keys[j] # "A") =>
               outcome[3] \in {<<>>, <<"hash">>, <<"hash", "hash">>}
 =============================================================================

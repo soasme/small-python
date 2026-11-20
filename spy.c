@@ -18487,6 +18487,12 @@ static int string_keys(SPYContext *c, SPYValue *keywords) {
         if (!builtin_value(c, map_items(keywords)[i].key, SPY_STRING)) return 0;
     return 1;
 }
+/* A function of this context whose call makes a generator, coroutine or
+ * asynchronous generator, running none of its body. */
+static int suspending_function(SPYContext *c, SPYValue *fn) {
+    Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
+    return def && (def->kind == N_DEF || def->kind == N_LAMBDA) && def->code && !def->flat;
+}
 /* A function of this context whose body is on the machine. */
 static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
     return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->flat;
@@ -29333,11 +29339,13 @@ static SPYValue *keyword_resume(SPYContext *c, Machine *m, SPYValue *state, size
     int status = c->error_type[0] ? -1 : bind_named(c, fn, env, (size_t)items[6]->as.integer_data.small, items[2], i, from, found);
     c->bind_machine = machine; c->bind_entries = entries;
     if (!status) status = bind_rest(c, fn, env, (size_t)items[6]->as.integer_data.small);
-    if (!status) { c->k_fn = spy_retain(fn); c->k_env = spy_retain(env); c->k = method_called; c->k_ctx = NULL; }
+    SPYValue *made = NULL;
+    if (!status && suspending_function(c, fn)) made = run_function(c, fn, spy_retain(env));
+    else if (!status) { c->k_fn = spy_retain(fn); c->k_env = spy_retain(env); c->k = method_called; c->k_ctx = NULL; }
     spy_release(state);
     if (status && status != 2) release_locals(env);
     else spy_release(env);
-    return NULL;
+    return made;
 }
 /* Keyword state's comparison with its parameter, found or not
  * (keyword_resume). */
@@ -30319,6 +30327,11 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         result = complex_keywords(c, m, args->as.seq.len, args->as.seq.items, keywords);
     else if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = step_env(c, m, callee, args->as.seq.len, args->as.seq.items, keywords)) ? spy_retain(callee) : NULL;
+    else if (calls && suspending_function(c, callee) && string_keys(c, keywords)) {
+        /* A generator function's call binds on m too, then makes its generator. */
+        SPYValue *bound = step_env(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
+        result = bound ? run_function(c, callee, bound) : NULL;
+    }
     else if (calls && !called && (function = bound_function(c, callee)) && string_keys(c, keywords))
         self = spy_retain(callee->type == SPY_METHOD ? callee->as.method.self : callee);
     else if (calls && callee->type == SPY_CLASS && (function = called ? called_init(c, callee, &plain) : class_init(c, callee, &plain)) &&

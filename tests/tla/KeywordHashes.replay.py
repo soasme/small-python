@@ -34,6 +34,10 @@ def g(z=None, **kw):
     return kw
 
 
+def h(z=None, **kw):
+    yield kw
+
+
 def outcome(p):
     first = {"a": 0} if p["explicit"] == "first" else {}
     if p["joined"]:
@@ -52,6 +56,8 @@ def outcome(p):
                 result.update(**first, **sources[0], **second, a=0)
             else:
                 result.update(**first, **sources[0], **second)
+        elif p["target"] == "generator call":
+            result = next(h(**first, **sources[0], **second, a=0) if last else h(**first, **sources[0], **second))
         else:
             callee = {"call": f, "parameter call": g, "dict": dict, "dict subclass": D, "frozendict": frozendict, "frozendict subclass": F}[p["target"]]
             result = callee(**first, **sources[0], **second, a=0) if last else callee(**first, **sources[0], **second)
