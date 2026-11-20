@@ -12,11 +12,14 @@
 (* or absent (None), and calls the method from the property, from the      *)
 (* property class with the property first, or bound and called later. The  *)
 (* outcome is what the call returns, or the exception, and the function's  *)
-(* calls.                                                                  *)
+(* calls. For op doc, the property is made of a getter whose __doc__ is a  *)
+(* Python property returning "documented", raising LookupError, or raising *)
+(* AttributeError (absent), read once: the property's __doc__ is that      *)
+(* docstring, the error, or None.                                          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [op : {"set", "delete"}, maker : {"property", "subclass"}, function : {"returns", "raises", "absent"},
+Programs == [op : {"set", "delete", "doc"}, maker : {"property", "subclass"}, function : {"returns", "raises", "absent"},
              how : {"method", "class", "bound"}]
 
 VARIABLES program, outcome
@@ -24,9 +27,12 @@ vars == <<program, outcome>>
 
 Pending == "pending"
 
-Call(p) == IF p.op = "set" THEN "set(c, 1)" ELSE "delete(c)"
+Call(p) == CASE p.op = "set" -> "set(c, 1)" [] p.op = "delete" -> "delete(c)" [] OTHER -> "doc"
 
-Run(p) == CASE p.function = "absent" -> IF p.op = "set" THEN "AttributeError setter" ELSE "AttributeError deleter"
+Run(p) == CASE p.op = "doc" -> (CASE p.function = "absent" -> "None doc"
+                                 [] p.function = "raises" -> "LookupError doc"
+                                 [] OTHER -> "'documented' doc")
+            [] p.function = "absent" -> IF p.op = "set" THEN "AttributeError setter" ELSE "AttributeError deleter"
             [] p.function = "raises" -> "LookupError " \o Call(p)
             [] OTHER -> "None " \o Call(p)
 
@@ -38,5 +44,5 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* The function's own result never comes back.
-ReturnsNone == Done /\ program.function = "returns" => outcome = "None " \o Call(program)
+ReturnsNone == Done /\ program.op # "doc" /\ program.function = "returns" => outcome = "None " \o Call(program)
 =============================================================================

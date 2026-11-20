@@ -11440,18 +11440,16 @@ static int property_set(SPYContext *c, SPYValue *p, SPYValue *object, SPYValue *
 /* property.__init__(fget, fset, fdel, doc). Without a doc, fget's __doc__ is
  * used. A subclass instance keeps the doc in its own __dict__, where the
  * subclass's __doc__ does not shadow it. */
-static int property_init(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *const args[4]) {
-    SPYValue **fields[] = {&p->as.property.get, &p->as.property.set, &p->as.property.del};
-    for (int i = 0; i < 3; i++) { spy_retain(args[i]); spy_release(*fields[i]); *fields[i] = args[i]; }
-    spy_release(p->as.property.doc); p->as.property.doc = spy_none(c);
-    spy_release(p->as.property.name); p->as.property.name = NULL;
-    p->as.property.getter_doc = 0;
-    SPYValue *doc = NULL;
-    if (args[3]->type != SPY_NONE) doc = spy_retain(args[3]);
-    else if (args[0]->type != SPY_NONE) {
-        doc = attribute(c, args[0], "__doc__");
+static SPYValue *attribute_step(SPYContext *, SPYValue *, const char *);
+static SPYValue *tuple_of(SPYContext *, size_t, SPYValue *const *);
+static SPYValue *attribute_callk(SPYContext *, Machine *, SPYValue *, const char *, SPYValue *, Continuation, SPYValue *);
+/* The end of property p's initialization (property_init) of self with
+ * doc, which it takes, its getter's doc when getter is set: 0, or -1 with
+ * an error. */
+static int property_documented(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *doc, int getter) {
+    if (getter) {
         if (!doc && error_is(c, "AttributeError")) spy_clear_error(c);
-        if (c->error_type[0]) return -1;
+        if (c->error_type[0]) { spy_release(doc); return -1; }
         if (doc && doc->type == SPY_NONE) { spy_release(doc); doc = NULL; }
         p->as.property.getter_doc = doc != NULL;
     }
@@ -11463,6 +11461,42 @@ static int property_init(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *c
     spy_release(doc);
     if (status && !p->as.property.getter_doc && error_is(c, "AttributeError")) { spy_clear_error(c); status = 0; }
     return status;
+}
+/* What the Python read of property state[1]'s getter's __doc__ gave, doc,
+ * for property() (property_init): the property, or NULL with an error. */
+static SPYValue *property_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *doc) {
+    (void)m;
+    SPYValue *p = spy_retain(state->as.seq.items[0]);
+    spy_release(state);
+    if (property_documented(c, p, p, doc, 1)) { spy_release(p); return NULL; }
+    return p;
+}
+/* Property p's initialization of self with args (getter, setter, deleter,
+ * doc): 0, or -1 with an error; property() of a getter whose __doc__ a
+ * Python read gives, on the step's machine (property_read), 1, the
+ * property its value. */
+static int property_init(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *const args[4]) {
+    SPYValue **fields[] = {&p->as.property.get, &p->as.property.set, &p->as.property.del};
+    for (int i = 0; i < 3; i++) { spy_retain(args[i]); spy_release(*fields[i]); *fields[i] = args[i]; }
+    spy_release(p->as.property.doc); p->as.property.doc = spy_none(c);
+    spy_release(p->as.property.name); p->as.property.name = NULL;
+    p->as.property.getter_doc = 0;
+    if (args[3]->type != SPY_NONE) return property_documented(c, self, p, spy_retain(args[3]), 0);
+    if (args[0]->type == SPY_NONE) return property_documented(c, self, p, NULL, 0);
+    SPYValue *doc = attribute_step(c, args[0], "__doc__");
+    Machine *m = !doc && !c->error_type[0] && c->fallback && self == p ? step_machine(c) : NULL;
+    if (m) {
+        SPYValue *function = c->fallback, *state = tuple_of(c, 1, &p);
+        c->fallback = NULL;
+        if (!state) { spy_release(function); return -1; }
+        attribute_callk(c, m, args[0], "__doc__", function, property_read, state);
+        return c->k_fn ? 1 : -1;
+    }
+    if (!doc && !c->error_type[0] && c->fallback) {
+        spy_release(c->fallback); c->fallback = NULL;
+        doc = attribute(c, args[0], "__doc__");
+    }
+    return property_documented(c, self, p, doc, 1);
 }
 enum { SUGGEST_MOVE = 2, SUGGEST_CASE = 1, SUGGEST_MAX_STRING = 40, SUGGEST_MAX_ITEMS = 750 };
 /* Python/suggestions.c: Levenshtein distance over UTF-8 bytes. */
@@ -28700,7 +28734,7 @@ static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
 /* Whether callee is exec(), eval(), divmod(), pow(), sum(), any(), all(),
- * isinstance(), issubclass(), aiter(), anext() or open(), whose call may run on the machine
+ * isinstance(), issubclass(), aiter(), anext(), repr(), dir(), property() or open(), whose call may run on the machine
  * (builtin_call). */
 static SPYValue *open_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *open_loaded(SPYContext *, Machine *, SPYValue *, SPYValue *);
@@ -28713,14 +28747,14 @@ static SPYValue *open_context(SPYContext *c, size_t argc, SPYValue *const *argv,
 }
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
     _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64 &&
-                   B_ISINSTANCE < 64 && B_ISSUBCLASS < 64 && B_AITER < 64 && B_ANEXT < 64 && B_REPR < 64, "builtin mask");
+                   B_ISINSTANCE < 64 && B_ISSUBCLASS < 64 && B_AITER < 64 && B_ANEXT < 64 && B_REPR < 64 && B_DIR < 64 && B_PROPERTY < 64, "builtin mask");
     uintptr_t id = (uintptr_t)callee->as.native.data;
     return callee->type == SPY_NATIVE &&
            ((callee->as.native.call == builtin && id < 64 &&
              (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
                                    UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL |
                                    UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS | UINT64_C(1) << B_AITER | UINT64_C(1) << B_ANEXT |
-                                   UINT64_C(1) << B_REPR))) ||
+                                   UINT64_C(1) << B_REPR | UINT64_C(1) << B_DIR | UINT64_C(1) << B_PROPERTY))) ||
             callee->as.native.kwcall == open_builtin);
 }
 /* Whether a map's builtin callee may go on on the machine, its call a call
@@ -29910,6 +29944,12 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->error_type[0])) return result;
     if (calls && callee->type == SPY_CLASS && ((result = class_described(c, m, callee, 0, argc, argv, NULL, unchanged, NULL)) || c->k_fn || c->error_type[0])) {
         /* So does one whose __new__ is read first (class_described). */
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return result;
+    }
+    if (calls && callee == c->types[SPY_PROPERTY]) {
+        /* property() reads its getter's __doc__ on m (property_init). */
+        result = step_native(c, m, callee, -1, NULL, argc, argv, NULL);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
@@ -38984,6 +39024,28 @@ static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv
     env->as.map.flags = 1; /* Definitions capture globals, not exec's separate locals. */
     return env;
 }
+static SPYValue *directory_of(SPYContext *, SPYValue *, int);
+/* dir()'s listing, sorted. */
+static SPYValue *directory_sorted(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *listing) {
+    (void)m; (void)ctx;
+    SPYValue *result = listing ? builtin(c, 1, &listing, (void *)(intptr_t)B_LIST) : NULL;
+    if (result && sort_list(c, result, NULL, 0, NULL)) { spy_release(result); result = NULL; }
+    spy_release(listing);
+    return result;
+}
+/* What a module subclass's instance's __dict__ gave, own, for dir() of it:
+ * its keys sorted, or what a __dir__ it holds returns, called on m when
+ * there is one (callk). */
+static SPYValue *directory_read(SPYContext *c, Machine *m, SPYValue *module, SPYValue *own) {
+    SPYValue *dict = own ? builtin_value(c, own, SPY_DICT) : NULL, *result = NULL, *hook = NULL;
+    if (!dict && !c->error_type[0]) spy_error(c, "TypeError", "<module>.__dict__ is not a dictionary");
+    for (size_t i = 0; dict && i < dict->as.map.len && !hook; i++)
+        if (map_items(dict)[i].key->type == SPY_STRING && !strcmp(map_items(dict)[i].key->as.string.data, "__dir__")) hook = map_items(dict)[i].value;
+    if (hook && m) result = callk(c, m, hook, 0, NULL, directory_sorted, NULL);
+    else if (dict) result = directory_sorted(c, m, NULL, hook ? call(c, hook, 0, NULL) : spy_retain(dict));
+    spy_release(own); spy_release(module);
+    return result;
+}
 /* dir(object); with plain set, the listing of object.__dir__ and type.__dir__. */
 static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
     SPYValue *result = spy_list(c), *names = value_new(c, SPY_DICT);
@@ -38991,15 +39053,13 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
     /* A module subclass's instance lists its module's namespace. */
     SPYValue *carried = !plain && object ? builtin_base(c, object, "__dir__", NULL) : NULL;
     if (carried && carried->type == SPY_MODULE && carried != object) {
-        /* module.__dir__ reads the instance's __dict__, which shall be a dict. */
-        SPYValue *own = attribute(c, object, "__dict__");
-        int dict = own && builtin_value(c, own, SPY_DICT);
-        spy_release(own);
-        if (!dict) {
-            if (!c->error_type[0]) spy_error(c, "TypeError", "<module>.__dict__ is not a dictionary");
-            spy_release(result); spy_release(names); return NULL;
-        }
-        object = carried;
+        /* module.__dir__ reads the instance's __dict__, which shall be a
+         * dict: a Python property's getter on the step's machine. */
+        SPYValue *d = object->type == SPY_INSTANCE ? class_lookup(object->as.map.parent, "__dict__") : NULL;
+        Machine *m = d && d->type == SPY_PROPERTY && descriptor_getter(c, d) ? step_machine(c) : NULL;
+        spy_release(result); spy_release(names);
+        if (m) return descriptor_readk(c, m, d, object, directory_read, spy_retain(carried));
+        return directory_read(c, step_machine(c), spy_retain(carried), attribute(c, object, "__dict__"));
     }
     SPYValue *method = !plain && object && object->type == SPY_INSTANCE ? special_method(c, object, "__dir__") : NULL;
     /* A module's own __dir__ function (PEP 562), and a metaclass's __dir__. */
@@ -44024,7 +44084,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (property_arguments(c, argc, argv, NULL, args)) return NULL;
         SPYValue *v = property_new(c, c->none, c->none, c->none, c->none);
         if (v && property_init(c, v, v, args)) { spy_release(v); return NULL; }
-        return v;
+        return v;  /* NULL, its __doc__ read queued (property_read), too */
     }
     case B_STATICMETHOD: case B_CLASSMETHOD: {
         if (argc != 1) return errorf(c, "TypeError", "%s expected 1 argument, got %zu", id == B_STATICMETHOD ? "staticmethod" : "classmethod", argc);

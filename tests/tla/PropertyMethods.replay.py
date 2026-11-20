@@ -9,7 +9,31 @@ class Sub(property):
     pass
 
 
+def documented(p):
+    calls = []
+
+    class Getter:
+        def __call__(self, obj): return 0
+
+        @property
+        def __doc__(self):
+            for _ in (): pass
+            calls.append("doc")
+            if p["function"] == "raises": raise LookupError
+            if p["function"] == "absent": raise AttributeError
+            return "documented"
+
+    maker = property if p["maker"] == "property" else Sub
+    try:
+        result = repr(maker(Getter()).__doc__)
+    except LookupError:
+        result = "LookupError"
+    return " ".join([result] + calls)
+
+
 def outcome(p):
+    if p["op"] == "doc":
+        return documented(p)
     calls = []
 
     def function(self, *value):

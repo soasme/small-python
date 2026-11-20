@@ -66,6 +66,9 @@ SOURCES = {
     "slots_vars": 'result = vars(P())',
     "vars_no_arg": 'def f():\n    a = 1\n    return vars()\nresult = f()',
     "vars_module": 'result = type(vars(type(P))).__name__',
+    "dir_module_property": "n = []\nclass M(type(__import__('builtins'))):\n"
+                           "    @property\n    def __dict__(self):\n        for _ in (): pass\n        n.append(1)\n"
+                           "        return {'b': 1, 'a': 2}\nresult = (dir(M('m')), len(n))",
     "dir_sorted": "class D:\n    b = 1\n    a = 2\nresult = [n for n in dir(D) if not n.startswith('_')]",
     "dir_hook_calls": "n = []\nclass D:\n    def __dir__(self):\n        for _ in (): pass\n        n.append(1)\n        return ('z', 'a', 'y')\nresult = (dir(D()), len(n))",
     "dir_hook": "class D:\n    def __dir__(self): return ['z', 'a']\nresult = dir(D())",
