@@ -56,7 +56,7 @@ Cases == {"round_half_even", "round_float_digits", "round_none", "round_keyword_
           "round_nan", "round_bad_ndigits", "abs_hook", "abs_bad", "divmod_float", "divmod_hook",
           "divmod_complex", "divmod_zero_float", "pow_float", "pow_mod_float", "pow_keywords",
           "pow_zero_zero", "sum_floats", "sum_compensated", "sum_stages", "sum_add", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
-          "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
+          "min_key_default", "minmax_python_iter", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
           "min_first_of_equal", "max_mixed", "minmax_sources", "bin_index", "index_calls", "int_index_calls", "round_index_calls", "round_index_bad", "bin_float", "hex_float_method", "complex_forms",
           "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "text_repr", "text_index", "int_forms",
           "int_bad_base", "int_base_first", "complex_fallbacks", "complex_parts", "complex_from_number", "int_from_bytes", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
@@ -114,6 +114,8 @@ Case(c) ==
       [] c = "sum_start_kw" -> "(13, [1, 2])"
       [] c = "sum_empty" -> "(0, 5, 'float')"
       [] c = "min_key_default" -> "(3, 'd', 'c', 3)"
+      \* A keyed min or max asks its source's Python __iter__ first, then each item and its key.
+      [] c = "minmax_python_iter" -> "(2, 7, ['iter', 0, 1, 2, 'iter'])"
       [] c = "min_empty" -> "ValueError: min() iterable argument is empty"
       [] c = "max_empty" -> "ValueError: max() iterable argument is empty"
       [] c = "min_default_with_many" -> "TypeError: Cannot specify a default for min() with multiple positional arguments"

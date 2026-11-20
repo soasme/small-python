@@ -83,6 +83,9 @@ SOURCES = {
     "sum_bytes": "result = sum([b'a'], b'')",
     "sum_start_kw": 'result = (sum([1, 2], start=10), sum([[1], [2]], []))',
     "sum_empty": 'result = (sum([]), sum((), 5), type(sum([], 0.0)).__name__)',
+    "minmax_python_iter": "log = []\nclass It:\n    def __init__(self, n): self.n = n\n    def __iter__(self):\n        for _ in (): pass\n        log.append('iter')\n        return iter(range(self.n))\n"
+                          "def key(v):\n    for _ in (): pass\n    log.append(v)\n    return -v\n"
+                          "result = (min(It(3), key=key), max(It(0), key=key, default=7), log)",
     "min_key_default": "result = (min([3, 1, 2], key=lambda x: -x), min([], default='d'), max('abc'), max(1, 2, 3, key=str))",
     "min_empty": 'result = min([])',
     "max_empty": 'result = max(())',

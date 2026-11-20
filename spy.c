@@ -28350,6 +28350,17 @@ static SPYValue *sorter_call(SPYContext *, struct Sorter *);
 static void sorter_end(SPYValue *, struct Sorter *, int);
 static int sort_keys(SPYContext *, SPYValue *, SPYValue *, int);
 static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
+/* What the Python __iter__ of min's or max's source it returned, again,
+ * which becomes the iterator of their consumer atop m (key_consumer). */
+static SPYValue *keyed_iterated(SPYContext *c, Machine *m, SPYValue *it, SPYValue *again) {
+    if (again) again = iterator_returned(c, it, again, "__iter__");
+    spy_release(it);
+    if (!again) return NULL;
+    Block *top = &m->blocks[m->block_len - 1];
+    spy_release(top->value);
+    top->value = again;
+    return NULL;
+}
 static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, size_t positional, SPYValue *const *argv,
                                   const Entry *kw, size_t kwc) {
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
@@ -28367,13 +28378,15 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
     }
     if (key && key->type == SPY_NONE) key = NULL;
     if (positional == 1 && machine_source(c, argv[0]) && keyed != KEY_SORT) {
-        /* min and max take each item on the machine, then its key (fed). */
-        SPYValue *items = get_iterator(c, argv[0]);
-        Consumer *consumer = items ? allocate(c, sizeof(*consumer)) : NULL;
+        /* min and max take each item on the machine, then its key (fed);
+         * a Python __iter__ is m's call first (callk, keyed_iterated). */
+        SPYValue *iter = NULL, *items = iterator_of(c, argv[0], &iter);
+        Consumer *consumer = items || iter ? allocate(c, sizeof(*consumer)) : NULL;
         Block *block = consumer ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-        if (!block) { mem_free(consumer); spy_release(items); return -1; }
+        if (!block) { mem_free(consumer); spy_release(items); spy_release(iter); return -1; }
         *consumer = (Consumer){.keyed = keyed, .fed = 1, .callee = key ? spy_retain(key) : NULL, .empty = empty ? spy_retain(empty) : NULL};
-        block->value = items; block->consumer = consumer;
+        block->value = items ? items : spy_retain(argv[0]); block->consumer = consumer;
+        if (iter) { callk(c, m, iter, 0, NULL, keyed_iterated, spy_retain(argv[0])); spy_release(iter); }
         return 1;
     }
     if (positional == 1 && machine_source(c, argv[0])) {
