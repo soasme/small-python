@@ -18,13 +18,18 @@
 (* module, or __import__ (used by an import statement run with exec()). An *)
 (* insert program runs exec() in an empty dictionary and checks that it    *)
 (* gained __builtins__ bound to the builtins module or its dictionary. The *)
-(* outcome is which object was found, or the exception.                    *)
+(* outcome is which object was found, or the exception. A builder program  *)
+(* runs class C(base()) with exec() under builtins whose Python            *)
+(* __missing__, which may loop, logs each name and gives base and          *)
+(* __build_class__, or lacks the latter: the outcome is the names looked   *)
+(* up, in order, and whether the statement raised NameError.               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [part : {"lookup"}, builtins : {"absent", "module", "custom", "empty", "missing"}, shadow : BOOLEAN,
              name : {"len", "added", "import"}]
             \cup [part : {"insert"}]
+            \cup [part : {"builder"}, lacking : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -40,7 +45,10 @@ Lookup(p) ==
           [] standard -> "builtin"
           [] OTHER -> "NameError"
 
-Run(p) == IF p.part = "lookup" THEN Lookup(p) ELSE "True"
+\* __build_class__ is looked up before the bases are evaluated (16.4.1).
+Built(p) == IF p.lacking THEN "__build_class__ NameError" ELSE "__build_class__ base"
+
+Run(p) == CASE p.part = "lookup" -> Lookup(p) [] p.part = "builder" -> Built(p) [] OTHER -> "True"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

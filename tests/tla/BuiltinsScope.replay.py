@@ -51,7 +51,31 @@ def lookup(p):
     return "builtin" if found in (len, "added") else "other"
 
 
+def built(p):
+    log = []
+
+    class Logging(dict):
+        def __missing__(self, key):
+            for _ in ():
+                pass
+            log.append(key)
+            if key == "base":
+                return lambda: object
+            if key == "__build_class__" and not p["lacking"]:
+                return builtins.__build_class__
+            raise KeyError(key)
+
+    try:
+        exec("class C(base()): pass", {"__builtins__": Logging(), "__name__": "replay"})
+        ended = []
+    except NameError:
+        ended = ["NameError"]
+    return " ".join(log + ended)
+
+
 def outcome(p):
+    if p["part"] == "builder":
+        return built(p)
     if p["part"] == "insert":
         namespace = {}
         exec("pass", namespace)

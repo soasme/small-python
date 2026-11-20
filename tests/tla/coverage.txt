@@ -250,7 +250,7 @@ Contents | - navigation
 16 Functions and Classes > 16.2 Function objects > 16.2.3 Method binding | Methods
 16 Functions and Classes > 16.3 Qualified names | FunctionObjects, ClassObjects
 16 Functions and Classes > 16.4 Class definitions | = sections
-16 Functions and Classes > 16.4 Class definitions > 16.4.1 Runtime Semantics: Evaluation | ClassCreation
+16 Functions and Classes > 16.4 Class definitions > 16.4.1 Runtime Semantics: Evaluation | ClassCreation, BuiltinsScope
 16 Functions and Classes > 16.4 Class definitions > 16.4.2 BuildClass ( *body*, *name*, *bases*, *kwds* ) | ClassCreation, Metaclasses
 16 Functions and Classes > 16.4 Class definitions > 16.4.3 `type.__new__` ( *meta*, *name*, *bases*, *ns*, **kwds* ) | ClassCreation, Metaclasses, MRO
 16 Functions and Classes > 16.5 Decorators | FunctionDefs, ClassCreation

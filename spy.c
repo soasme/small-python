@@ -16158,13 +16158,14 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     /* The alias (alias_step), stored as a name. */
     case N_TYPEALIAS: emit(c, p, BC_CLASS, n, 11); emit(c, p, BC_STORE, n->a, 1); break;
     default: { /* N_CLASS, the last statement that can contain a yield */
-        /* Decorators, then the bases and keywords as __build_class__'s
-         * arguments; a generic class's bases cannot suspend. */
+        /* Decorators, __build_class__ (BC_BUILDER), then the bases and
+         * keywords as its arguments; a generic class's bases cannot suspend. */
         int stacked = 0;
         for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
         for (Node *a = n->args; a && !n->params; a = a->next) stacked |= expands(a, p->calls);
+        emit(c, p, BC_BUILDER, n, 0);
         if (stacked) {
-            emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
+            emit(c, p, BC_ARGS, n, 0);
             compile_arguments(c, p, n->args);
         }
         if (n->params || (n->args && c->pausing) || list_expands(n->b, CALLS) || loops(n->b)) {
@@ -21807,18 +21808,35 @@ static SPYValue *builder_arguments(SPYContext *c, Frame *f, Node *n, SPYValue *n
     spy_release(body);
     return args;
 }
-/* The class statement calls __build_class__ from the built-in namespace
- * (19.3.38); the builtin one runs the body directly, any other gets the body
- * as a function. */
-static SPYValue *class_statement(SPYContext *c, Frame *f, Node *n, SPYValue *name, SPYValue *bases,
-                                 SPYValue *arguments, SPYValue *type_params, Machine *m) {
-    SPYValue *builtins = module_env(c, f->env)->as.map.parent;
-    SPYValue *builder = builtins ? name_lookup(c, builtins, name_of("__build_class__")) : NULL;
-    if (!builder) return c->error_type[0] ? NULL : spy_error(c, "NameError", "__build_class__ not found");
-    if (builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin) {
-        spy_release(builder);
-        return make_class(c, f, n, NULL, name, bases, arguments, type_params, m);
+/* What a class statement's lookup of __build_class__ in its builtins'
+ * Python __getitem__ or __missing__ returned (builder_step): a KeyError
+ * makes it absent. */
+static SPYValue *builder_found(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m; (void)ctx;
+    if (!result && !c->stopped && error_is(c, "KeyError")) { spy_clear_error(c); spy_error(c, "NameError", "__build_class__ not found"); }
+    return result;
+}
+/* The __build_class__ a class statement in frame f calls, looked up in its
+ * builtins before its arguments are evaluated (16.4.1), owned; a Python
+ * __getitem__ or __missing__ of theirs is m's call when m is given
+ * (callk, builder_found). */
+static NO_INLINE SPYValue *builder_step(SPYContext *c, Machine *m, Frame *f) {
+    SPYValue *builtins = module_env(c, f->env)->as.map.parent, *function;
+    Name name = name_of("__build_class__");
+    if (builtins && ((function = name_getitem(c, builtins)) || (function = name_missing(c, builtins, name)))) {
+        SPYValue *key = spy_string(c, name.text, name.len);
+        return key ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(builtins->as.map.namespace), key}, builder_found, NULL) : NULL;
     }
+    SPYValue *builder = builtins ? name_lookup(c, builtins, name) : NULL;
+    return builder || c->error_type[0] ? builder : spy_error(c, "NameError", "__build_class__ not found");
+}
+/* The class statement calls builder, the __build_class__ of its builtins
+ * (builder_step); the builtin one (19.3.38) runs the body directly, any
+ * other gets the body as a function. */
+static SPYValue *class_statement(SPYContext *c, Frame *f, Node *n, SPYValue *name, SPYValue *bases,
+                                 SPYValue *arguments, SPYValue *type_params, Machine *m, SPYValue *builder) {
+    if (builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin)
+        return make_class(c, f, n, NULL, name, bases, arguments, type_params, m);
     SPYValue *args = builder_arguments(c, f, n, name, bases, type_params), *cls = NULL;
     if (args && m && args->as.seq.len <= 64) {
         /* On m (class_step's arg 0), its call, the class the step's value
@@ -21829,20 +21847,19 @@ static SPYValue *class_statement(SPYContext *c, Frame *f, Node *n, SPYValue *nam
             cls = callk_keywords(c, m, builder, args->as.seq.len, argv, arguments->as.map.len ? arguments : NULL, unchanged, NULL);
         }
     } else if (args) cls = call_keywords(c, builder, args->as.seq.len, args->as.seq.items, arguments);
-    spy_release(args); spy_release(builder);
+    spy_release(args);
     return cls;
 }
-static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic_base, SPYValue *type_params, Machine *m) {
-    SPYValue *bases = spy_list(c), *arguments = value_new(c, SPY_DICT), *name = NULL, *cls = NULL;
-    if (!bases || !arguments) goto done;
-    SPYValue *builder = spy_string(c, "__build_class__", 15);
-    int argument_error = builder ? eval_arguments(c, f, n->args, builder, bases, arguments) : -1;
-    spy_release(builder);
-    if (argument_error || (generic_base && sequence_append(c, bases, generic_base))) goto done;
+/* Class statement n of no type parameters, its arguments evaluated in C,
+ * calling builder, borrowed, or the one builder_step finds first. */
+static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *builder, Machine *m) {
+    SPYValue *found = builder ? NULL : builder_step(c, NULL, f), *bases = NULL, *arguments = NULL, *name = NULL, *cls = NULL;
+    if (!builder && !(builder = found)) return NULL;
+    if (!(bases = spy_list(c)) || !(arguments = value_new(c, SPY_DICT)) || eval_arguments(c, f, n->args, builder, bases, arguments)) goto done;
     name = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
-    if (name) cls = class_statement(c, f, n, name, bases, arguments, type_params, m);
+    if (name) cls = class_statement(c, f, n, name, bases, arguments, NULL, m, builder);
 done:
-    spy_release(name); spy_release(bases); spy_release(arguments);
+    spy_release(name); spy_release(bases); spy_release(arguments); spy_release(found);
     return cls;
 }
 /* builtins.__build_class__(func, name, /, *bases, metaclass=..., **kwds). */
@@ -22058,7 +22075,7 @@ static SPYValue *alias_params(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue
 static NO_INLINE void execute_class(SPYContext *c, Frame *f, Node *n) {
     SPYValue *decorators = eval_decorators(c, f, n);
     if (!decorators) return;
-    SPYValue *cls = apply_decorators(c, decorators, build_class(c, f, n, NULL, NULL, NULL));
+    SPYValue *cls = apply_decorators(c, decorators, build_class(c, f, n, NULL, NULL));
     if (cls) name_set(c, f->env, n->a->text, cls);
     spy_release(cls); spy_release(decorators);
 }
@@ -34906,10 +34923,12 @@ static SPYValue *class_built(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue 
     spy_release(cls);
     return alone && !machine_push(c, m, alone) ? spy_retain(c->types[SPY_TUPLE]) : NULL;
 }
-/* BC_CLASS but arg 2 (class_part, build_class). Arg 0 and 5 leave the
- * class statement's state and __class__ cell, or two Nones, under the class
- * for arg 7, which checks the cell (class_made); a metaclass call they defer
- * is entered first (class_new_call). */
+/* BC_CLASS but arg 2 (class_part, build_class), the statement's
+ * __build_class__ under its type parameters' tuple (BC_BUILDER). Arg 0
+ * and 5 leave the class statement's state and __class__ cell, or two
+ * Nones, under the class for arg 7, which checks the cell (class_made)
+ * and pops the builder; a metaclass call they defer is entered first
+ * (class_new_call). */
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     if (ins->arg == 10) return name_load(c, m, f, ins->node);
     if (ins->arg == 11) return alias_step(c, m, f, ins->node);
@@ -34920,6 +34939,7 @@ static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instr
         if (list && ((cls = class_callback(c, m->stack[m->len - 1], state, env)) || c->error_type[0])) return cls;
         cls = machine_pop(m); classcell = machine_pop(m); state = machine_pop(m);
         if (ins->node->params) spy_release(machine_pop(m));
+        spy_release(machine_pop(m));
         if (state != c->none)
             class_made(c, cls, state->as.seq.items[list ? 0 : 6], state->as.seq.items[list ? 1 : 3], classcell == c->none ? NULL : classcell);
         spy_release(classcell); spy_release(state);
@@ -34928,7 +34948,7 @@ static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instr
     }
     /* Arg 0 leaves two items, as arg 5 keeps them, when it defers. */
     size_t deferred = m->len + (ins->arg ? 0 : 2);
-    SPYValue *cls = ins->arg ? class_part(c, m, f, ins, env) : build_class(c, f, ins->node, NULL, NULL, m);
+    SPYValue *cls = ins->arg ? class_part(c, m, f, ins, env) : build_class(c, f, ins->node, m->stack[m->len - 1], m);
     if (*env) return cls;
     if (cls == c->unbound) { spy_release(cls); return class_new_call(c, m, env); }
     if (cls && (ins->arg == 0 || ins->arg == 5) && m->len != deferred && (machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_none(c)))) { spy_release(cls); return NULL; }
@@ -35080,26 +35100,23 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     if (m->len && m->stack[m->len - 1] == c->unbound) {
         spy_release(machine_pop(m)); arguments = machine_pop(m); bases = machine_pop(m); progress = machine_pop(m);
     } else if (ins->arg == 3) {
-        arguments = machine_pop(m); bases = machine_pop(m); spy_release(machine_pop(m));
+        arguments = machine_pop(m); bases = machine_pop(m);
     }
+    SPYValue *builder = m->stack[m->len - 1 - (n->params != NULL)];
     /* A generic class's header runs in its type parameters' env. */
     Frame g = generic_frame(m, n, f);
     f = &g;
     if (!progress && ins->arg == 4) {
-        SPYValue *builder = spy_string(c, "__build_class__", 15);
         bases = spy_list(c); arguments = value_new(c, SPY_DICT);
-        if (!builder || !bases || !arguments || eval_arguments(c, f, n->args, builder, bases, arguments) ||
+        if (!bases || !arguments || eval_arguments(c, f, n->args, builder, bases, arguments) ||
             (n->params && sequence_append(c, bases, m->stack[m->len - 1]->as.seq.items[2]))) {
-            spy_release(builder); spy_release(bases); spy_release(arguments);
+            spy_release(bases); spy_release(arguments);
             return NULL;
         }
-        spy_release(builder);
     }
     if (!(name = spy_string(c, source_name(n->a), strlen(source_name(n->a))))) goto done;
-    SPYValue *builtins = module_env(c, f->env)->as.map.parent;
-    SPYValue *builder = builtins && !progress ? name_lookup(c, builtins, name_of("__build_class__")) : NULL;
-    int builtin = progress || (builder && builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin);
-    if (!builtin && builder) {
+    int builtin = progress || (builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin);
+    if (!builtin) {
         /* Another __build_class__ is m's call, which pushes the class
          * alone for the call tuple() after it (class_built). */
         SPYValue *args = builder_arguments(c, f, n, name, bases, n->params ? m->stack[m->len - 1]->as.seq.items[1] : NULL);
@@ -35109,16 +35126,15 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
             if (argc <= 64) {
                 for (size_t i = 0; i < argc; i++) argv[i] = spy_retain(items[i]);
                 body = callk_keywords(c, m, builder, argc, argv, arguments->as.map.len ? arguments : NULL, class_built, NULL);
-                spy_release(args); spy_release(builder);
+                spy_release(args);
                 goto done;
             }
             spy_release(args);
         }
     }
-    spy_release(builder);
     if (!builtin || !n->flat) {
         SPYValue *params = n->params ? m->stack[m->len - 1]->as.seq.items[1] : NULL;
-        SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, params, NULL);
+        SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, params, NULL, builder);
         SPYValue *alone = cls ? tuple_of(c, 1, &cls) : NULL;
         spy_release(cls);
         if (alone && !machine_push(c, m, alone)) body = spy_retain(c->types[SPY_TUPLE]);
@@ -37276,13 +37292,17 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->op == BC_STAR_DONE) pc = ins->target;
             break;
         }
-        CASE(BC_BUILDER) machine_push(c, m, spy_string(c, "__build_class__", 15)); break;
+        CASE(BC_BUILDER)
+            /* The class statement's __build_class__, before its arguments (builder_step). */
+            if (!(value = builder_step(c, m, &f)) && c->k_fn) goto enter_k;
+            machine_push(c, m, value); break;
         CASE(BC_CLASS)
             if (ins->arg == 2) {
-                b = machine_pop(m); a = machine_pop(m); spy_release(machine_pop(m));
+                b = machine_pop(m); a = machine_pop(m);
+                SPYValue *builder = machine_pop(m);
                 value = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
-                machine_push(c, m, value ? class_statement(c, &f, n, value, a, b, NULL, NULL) : NULL);
-                spy_release(value);
+                machine_push(c, m, value ? class_statement(c, &f, n, value, a, b, NULL, NULL, builder) : NULL);
+                spy_release(value); spy_release(builder);
             } else {
                 /* A generic class's type parameters and a type alias call intrinsics. */
                 if (UNLIKELY(!c->intrinsics) && (ins->arg == 1 || ins->arg == 11)) goto load_intrinsics;
