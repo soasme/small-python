@@ -614,6 +614,8 @@ static int property_enters(SPYContext *, SPYValue *);
 static int tuple_push(SPYContext *, Machine *, SPYValue *, size_t, uint64_t);
 static SPYValue *tuple_next(SPYContext *, Machine *, SPYValue **, int64_t *);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *release_function(SPYContext *, SPYValue *);
+static int memory_released(SPYContext *, Machine *, SPYValue *, SPYValue *, Continuation, SPYValue **);
 static int abstract_reaches(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *abstract_from(SPYContext *, Machine *, int, SPYValue *, SPYValue *, SPYValue *, size_t);
 static SPYValue *object_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -19673,6 +19675,17 @@ static SPYValue *collect_called(SPYContext *c, Machine *m, SPYValue *held, SPYVa
     return collect_go(c, m, state);
 }
 static SPYValue *collect_go(SPYContext *, Machine *, SPYValue *);
+static SPYValue *buffer_released(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* A collection's release of a dead view ended (collect_go), what
+ * buffer_released gives the state and the number of entries waiting. */
+static SPYValue *collect_released(SPYContext *c, Machine *m, SPYValue *pair, SPYValue *result) {
+    SPYValue *held = buffer_released(c, m, pair, result), *state = spy_retain(held->as.seq.items[0]);
+    c->finalizing = 0;
+    finalize_ahead(c, (size_t)held->as.seq.items[1]->as.integer_data.small);
+    spy_release(held);
+    attend(c);
+    return collect_go(c, m, state);
+}
 /* A collection's close of a dead generator ended (finalize_closed). */
 static SPYValue *collect_closed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     spy_release(result);
@@ -19697,6 +19710,16 @@ static SPYValue *collect_go(SPYContext *c, Machine *m, SPYValue *state) {
             spy_release(items[0]); items[0] = count;
             items[1] = spy_retain(kept ? c->booleans[0] : c->none); spy_release(c->booleans[1]);
             continue;
+        }
+        if (!weak && self->type == SPY_MEMORYVIEW && finalizer(c)) {
+            /* A dead view's exporter's Python __release_buffer__ (collect_released). */
+            finalize_pop(c);
+            SPYValue *released = NULL;
+            held = parts_tuple(c, 2, (SPYValue *[]){state, int_value(c, (int64_t)c->finalize_calls_len)});
+            c->finalizing = c->calls_len + 1;
+            if (held) memory_released(c, m, self, held, collect_released, &released);
+            spy_release(self);
+            return released;
         }
         if (!weak && self->type != SPY_INSTANCE && finalizer(c)) {
             /* A dead generator closes at its yield on m (k_enter), the
@@ -26131,6 +26154,8 @@ static void finalize_close(SPYContext *, Machine *);
 static NO_INLINE void finalized(SPYContext *, Machine *, SPYValue *);
 static SPYValue *deleted(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *deleter_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, Continuation, SPYValue *);
+static SPYValue *view_finalized(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *buffer_released(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
     if (weak_next(c)) {
         /* A dead target's weak reference, its Python callback cleared,
@@ -26147,6 +26172,15 @@ static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **
         return NULL;
     }
     SPYValue *self = c->finalize_first, *method = finalizer(c);
+    if (self->type == SPY_MEMORYVIEW) {
+        /* Its exporter's __release_buffer__, a call with no step (view_finalized). */
+        finalize_pop(c);
+        SPYValue *waiting = int_value(c, (int64_t)c->finalize_calls_len), *released = NULL;
+        c->finalizing = c->calls_len + 1;
+        if (waiting) memory_released(c, m, self, waiting, view_finalized, &released);
+        spy_release(self);
+        return NULL;
+    }
     if (self->type != SPY_INSTANCE) {
         finalize_close(c, m);
         return c->error_type[0] ? NULL : c->unbound;
@@ -26176,6 +26210,11 @@ static SPYValue *deleted(SPYContext *c, Machine *m, SPYValue *waiting, SPYValue 
     spy_release(waiting);
     attend(c);
     return c->stepped;
+}
+/* A dead view's exporter's __release_buffer__ returned result (finalizer_call),
+ * pair buffer_released's, its value the number of entries waiting after it. */
+static SPYValue *view_finalized(SPYContext *c, Machine *m, SPYValue *pair, SPYValue *result) {
+    return deleted(c, m, buffer_released(c, m, pair, result), NULL);
 }
 /* The finalizer finalizer_call entered returned result, or NULL with its
  * exception, which is unraisable. */
@@ -27432,7 +27471,8 @@ static SPYValue *key_best(SPYContext *c, Consumer *s) {
            errorf(c, "ValueError", "%s() iterable argument is empty", s->keyed == KEY_MAX ? "max" : "min");
 }
 /* What finalizes the value first in line for finalization on the machine,
- * borrowed: an instance's Python __del__, or a dead generator suspended
+ * borrowed: an instance's Python __del__, a dead view itself, its
+ * exporter's __release_buffer__ Python (release_function), or a dead generator suspended
  * at a yield inside a try or with, which closes there (finalize_close);
  * else NULL, finalizing in C (weak_callbacks), as also inside it, past the
  * recursion limit or under a trace function, whose errors are unraisable
@@ -27450,6 +27490,7 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
     if (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.origin)
         return suspended(self) && self->as.generator.started && innermost(self->as.generator.machine)->awaiting == AWAIT_YIELD &&
                !close_quietly(c, self) ? self : NULL;
+    if (self->type == SPY_MEMORYVIEW) return release_function(c, self) ? self : NULL;
     SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
     return method && (machine_function(c, method) || descriptor_getter(c, method)) ? method : NULL;
 }
@@ -42511,8 +42552,8 @@ static SPYValue *buffer_released(SPYContext *c, Machine *machine, SPYValue *pair
 }
 /* The release of view m on machine, its exporter's __release_buffer__
  * Python: m released, the method then machine's call (callk), its view
- * released when it returns (buffer_released), value, which it takes, the
- * call's; 1 with *result what callk returned, or 0 to release m as
+ * released when it returns (buffer_released), then k given what that
+ * returns: value, which it takes, for buffer_released; 1 with *result what callk returned, or 0 to release m as
  * memory_release does. */
 /* The Python __release_buffer__, a machine function, that releasing view
  * m calls, borrowed; else NULL. */
@@ -42520,7 +42561,7 @@ static SPYValue *release_function(SPYContext *c, SPYValue *m) {
     SPYValue *function = own_release(m->as.memory.obj);
     return m->as.memory.released || m->as.memory.exports || !m->as.memory.view || !function || !machine_function(c, function) ? NULL : function;
 }
-static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m, SPYValue *value, SPYValue **result) {
+static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m, SPYValue *value, Continuation k, SPYValue **result) {
     SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function = release_function(c, m), *pair;
     if (!function) return 0;
     memory_unexport(m);
@@ -42528,7 +42569,7 @@ static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *
     spy_release(value);
     *result = NULL;
     if (!pair) { memory_unexport(view); return 1; }
-    *result = callk(c, machine, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view)}, buffer_released, pair);
+    *result = callk(c, machine, function, 2, (SPYValue *[]){spy_retain(obj), spy_retain(view)}, k, pair);
     return 1;
 }
 static int memory_check(SPYContext *c, SPYValue *m) {
@@ -46762,7 +46803,6 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     return c->error_type[0] ? NULL : spy_none(c);
 }
 static int native_absent(SPYContext *, SPYValue *, SPYValue *);
-static int memory_released(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* object.__getattribute__ of instance v, or type.__getattribute__ of
  * class v (type), and name, whose default lookup calls a Python getter
@@ -46850,7 +46890,7 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     if (callee->as.native.kwcall == memory_method) {
         intptr_t op = (intptr_t)callee->as.native.data;
         SPYValue *released = NULL;
-        if (self->type == SPY_MEMORYVIEW && (op == MV_EXIT || (op == MV_RELEASE && !argc))) memory_released(c, m, self, spy_none(c), &released);
+        if (self->type == SPY_MEMORYVIEW && (op == MV_EXIT || (op == MV_RELEASE && !argc))) memory_released(c, m, self, spy_none(c), buffer_released, &released);
         spy_release(released);
         return NULL;
     }

@@ -22,7 +22,8 @@
 (* then takes bytes(B()), bytes(bytearray(B())), map(bytes, [B()])'s     *)
 (* item or b"%b" % (B(),), or makes m =                                    *)
 (* memoryview(B()) and reads bytes(m) inside `with m:`, before m.release() *)
-(* or memoryview.release(m), or before del m. A resize program appends to  *)
+(* or memoryview.release(m), or before del m, or before m, held in a      *)
+(* cycle, is collected. A resize program appends to                        *)
 (* a bytearray with a view that is unreleased or released; a plain program *)
 (* takes memoryview(object()). A reenter program releases a view of a      *)
 (* bytearray, and empties the bytearray, from the __index__ of the key of  *)
@@ -61,7 +62,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"none", "logs", "fails"}, how : {"bytes", "bytearray", "map", "percent", "with", "release", "unbound", "del"}]
+Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"none", "logs", "fails"}, how : {"bytes", "bytearray", "map", "percent", "with", "release", "unbound", "del", "collect"}]
             \cup [part : {"resize"}, released : BOOLEAN]
             \cup [part : {"plain"}]
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]

@@ -623,6 +623,7 @@ Unreleased (0.10.0):
 - `int.from_bytes()` calls a Python `__buffer__` and `__release_buffer__` without nesting on the C stack
 - the error for a property's missing setter or deleter reads its getter's Python `__name__` and the name's `__repr__` without nesting on the C stack
 - an instance's `__name__` read through its class's property or descriptor no longer nests on the C stack
+- a view that dies or is collected unreleased calls its exporter's Python `__release_buffer__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
 - a view a bytearray subclass's own `__buffer__` returns is released without bytearray's `__release_buffer__`, which reported an error
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack

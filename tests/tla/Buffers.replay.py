@@ -1,6 +1,7 @@
 # Replays Buffers.tla: each case exports a buffer from the spec's class B
 # and compares the log of __buffer__ and __release_buffer__ calls and the
 # result with the model's.
+from harness import host
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -38,6 +39,12 @@ def export(p, log):
     elif how == "unbound":
         data = bytes(m)
         memoryview.release(m)
+    elif how == "collect":
+        data = bytes(m)
+        ring = [m, B]
+        ring.append(ring)
+        del m, ring
+        host.collect()
     else:
         data = bytes(m)
         del m
