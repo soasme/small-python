@@ -82,7 +82,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "sequence_stop_iteration", "sequence_lookup_error", "callable_not_callable",
           "callable_sentinel_equality", "iter_of_iterator_is_self", "for_calls_iter_once",
           "list_iterator_mutation", "dict_changed_size", "set_changed_size", "dict_keys_replaced_ok",
-          "iterator_type_names", "length_hint", "hint_sized", "hint_reversed_spent", "next_dunder_direct", "zip_strict", "map_multi",
+          "iterator_type_names", "length_hint", "hint_sized", "hint_reversed_spent", "hint_len_read", "hint_hint_read", "next_dunder_direct", "zip_strict", "map_multi",
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
@@ -132,6 +132,10 @@ Case(c) ==
       \* a reversed one with no items left asks none.
       [] c = "hint_sized" -> "(2, 1, ['len', 'len', 'len'])"
       [] c = "hint_reversed_spent" -> "(0, 0, [])"
+      \* A TypeError reading __len__ (its descriptor's __get__) gives way to
+      \* __length_hint__ as its call's does; reading __length_hint__ raises.
+      [] c = "hint_len_read" -> "([1, 2], ['get __len__', 'get __length_hint__'])"
+      [] c = "hint_hint_read" -> "'TypeError'"
       [] c = "next_dunder_direct" -> "('a', 'b')"
       [] c = "zip_strict" -> "ValueError: zip() argument 2 is shorter than argument 1"
       [] c = "map_multi" -> "[8, 9]"

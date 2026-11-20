@@ -8929,6 +8929,7 @@ static SPYValue *iterated(SPYContext *c, Machine *m, SPYValue *source, SPYValue 
 static SPYValue *special_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, Continuation, SPYValue *);
 static int machine_function(SPYContext *, SPYValue *);
 static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
+static SPYValue *descriptor_readk(SPYContext *, Machine *, SPYValue *, SPYValue *, Continuation, SPYValue *);
 /* iter() of source on machine m, whose Python __iter__, or a descriptor
  * __iter__'s Python read (special_callk), is m's call (callk). */
 static SPYValue *iter_builtin(SPYContext *c, Machine *m, SPYValue *source) {
@@ -9350,7 +9351,24 @@ static SPYValue *length_hinted(SPYContext *c, Machine *m, SPYValue *o, SPYValue 
     return NULL;
 }
 /* o's __length_hint__ called, for its LengthHint (7.7.7). */
+/* An instance's special method name, as its class has it, a machine
+ * function or a descriptor with a Python __get__ (descriptor_readk), or NULL. */
+static SPYValue *instance_special(SPYContext *c, SPYValue *o, const char *name) {
+    SPYValue *function = o->type == SPY_INSTANCE ? class_lookup(o->as.map.parent, name) : NULL;
+    return function && (machine_function(c, function) || descriptor_getter(c, function)) ? function : NULL;
+}
+/* What the read of o's __length_hint__ gave, method: its call, whose
+ * TypeError alone gives way (length_hinted); the read's errors propagate. */
+static SPYValue *length_hint_read(SPYContext *c, Machine *m, SPYValue *o, SPYValue *method) {
+    if (!method) { spy_release(o); return NULL; }
+    SPYValue *result = callk(c, m, method, 0, NULL, length_hinted, o);
+    spy_release(method);
+    return result;
+}
 static SPYValue *length_hint_method(SPYContext *c, Machine *m, SPYValue *o) {
+    SPYValue *function = instance_special(c, o, "__length_hint__");
+    if (function && !machine_function(c, function)) return descriptor_readk(c, m, function, o, length_hint_read, o);
+    if (function) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(o)}, length_hinted, o);
     SPYValue *method = special_method(c, o, "__length_hint__");
     if (!method) { spy_release(o); return NULL; }
     SPYValue *result = callk(c, m, method, 0, NULL, length_hinted, o);
@@ -9380,6 +9398,9 @@ static SPYValue *sequence_measured(SPYContext *c, Machine *m, SPYValue *o, SPYVa
     return length_hinted(c, m, o, NULL);
 }
 static SPYValue *length_hint(SPYContext *c, Machine *m, SPYValue *o) {
+    SPYValue *function = instance_special(c, sequence_iterator(o) ? o->as.iterator.source : o, "__len__");
+    if (function) return special_callk(c, m, function, sequence_iterator(o) ? o->as.iterator.source : o, 0, NULL, NULL,
+                                       sequence_iterator(o) ? sequence_measured : length_measured, o);
     if (sequence_iterator(o)) {
         SPYValue *method = special_method(c, o->as.iterator.source, "__len__");
         if (!method) return length_hinted(c, m, o, NULL);
@@ -18564,6 +18585,7 @@ static SPYValue *callk_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     return k_resume(c, m, state, self);
 }
 static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
+static SPYValue *descriptor_readk(SPYContext *, Machine *, SPYValue *, SPYValue *, Continuation, SPYValue *);
 static SPYValue *item_special(SPYContext *, SPYValue *, const char *);
 static SPYValue *rich_special(SPYContext *, SPYValue *, int, int *);
 static SPYValue *index_special(SPYContext *, SPYValue *);
@@ -19388,10 +19410,8 @@ static SPYValue *deleter_read(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 /* callk of self's __del__ descriptor function, read, then what it gave
  * called, then k with ctx, given None. */
 static SPYValue *deleter_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, Continuation k, SPYValue *ctx) {
-    SPYValue *state = k_state(c, 0, (SPYValue *[]){NULL, NULL}, k, ctx), *get = descriptor_getter(c, function);
-    if (!state) return NULL;
-    if (function->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, deleter_read, state);
-    return callk(c, m, get, 3, (SPYValue *[]){spy_retain(function), spy_retain(self), spy_retain(value_class(c, self))}, deleter_read, state);
+    SPYValue *state = k_state(c, 0, (SPYValue *[]){NULL, NULL}, k, ctx);
+    return state ? descriptor_readk(c, m, function, self, deleter_read, state) : NULL;
 }
 static SPYValue *collect_called(SPYContext *c, Machine *m, SPYValue *held, SPYValue *result) {
     SPYValue **items = held->as.seq.items, *state = spy_retain(items[0]);
@@ -30602,10 +30622,9 @@ static SPYValue *with_read(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *with_next(SPYContext *c, Machine *m, SPYValue *state) {
     SPYValue *manager = state->as.seq.items[0];
     const char *name = state->as.seq.len == 1 ? "__exit__" : "__enter__";
-    SPYValue *descriptor = class_lookup(value_class(c, manager), name), *get = descriptor ? descriptor_getter(c, descriptor) : NULL;
-    if (!get) return with_read(c, m, state, special_method(c, manager, name));
-    if (descriptor->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(manager)}, with_read, state);
-    return callk(c, m, get, 3, (SPYValue *[]){spy_retain(descriptor), spy_retain(manager), spy_retain(value_class(c, manager))}, with_read, state);
+    SPYValue *descriptor = class_lookup(value_class(c, manager), name);
+    if (!descriptor || !descriptor_getter(c, descriptor)) return with_read(c, m, state, special_method(c, manager, name));
+    return descriptor_readk(c, m, descriptor, manager, with_read, state);
 }
 /* What with_next's read returned in value, kept in state after the
  * manager, then the call of the __enter__ read, on m too (callk), whose
@@ -32436,11 +32455,54 @@ static SPYValue *class_item_function(SPYContext *c, SPYValue *x, int *generic) {
     }
     return function;
 }
-static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+/* What x[y]'s __class_getitem__ returned, result, state its step's
+ * index, x, y and whether class_item still waits: the step ends
+ * (operator_finish), or class_item has the result. */
+static SPYValue *class_item_called(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **s = state->as.seq.items;
+    if (s[3] == c->booleans[1]) { spy_release(state); return result; }
+    m->pc = operator_finish(c, m, &m->code->items[s[0]->as.integer_data.small], s[2], result, m->pc);
+    spy_release(state);
+    return c->stepped;
+}
+/* What the read of x's __class_getitem__ gave, method, for x[y] (state):
+ * its call with y on m (class_item_called); none, or None, makes x not
+ * subscriptable. */
+static SPYValue *class_item_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *method) {
+    SPYValue *x = state->as.seq.items[1];
+    if (!method && error_is(c, "AttributeError")) spy_clear_error(c);
+    if (!method || method->type == SPY_NONE) {
+        if (!c->error_type[0]) errorf(c, "TypeError", "type '%s' is not subscriptable", class_tname(x));
+        spy_release(method);
+        return class_item_called(c, m, state, NULL);
+    }
+    SPYValue *result = callk(c, m, method, 1, (SPYValue *[]){spy_retain(state->as.seq.items[2])}, class_item_called, state);
+    spy_release(method);
+    return result;
+}
+static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int generic;
     SPYValue *function = class_item_function(c, x, &generic);
     if (generic) function = intrinsic(c, "_class_getitem");
-    return function && machine_function(c, function) ? last_call(c, m, function, x, y, x, y, env) : NULL;
+    if (function && machine_function(c, function)) return last_call(c, m, function, x, y, x, y, env);
+    if (generic || function || x == c->types[SPY_CLASS] || (x->as.map.meta && class_lookup(x->as.map.meta, "__getitem__"))) return NULL;
+    /* Else x's __class_getitem__, read by attribute_step or a Python
+     * lookup (attribute_callk), is called on m (class_item_read). */
+    SPYValue *index = int_value(c, (int64_t)(ins - m->code->items)), *method;
+    SPYValue *state = index ? spy_tuple(c, 4, (SPYValue *[]){index, x, y, c->booleans[1]}) : NULL;
+    spy_release(index);
+    if (!state) return NULL;
+    spy_retain(state);
+    if (!(method = attribute_step(c, x, "__class_getitem__")) && !c->error_type[0] && c->fallback) {
+        function = c->fallback;
+        c->fallback = NULL;
+        method = attribute_callk(c, m, x, "__class_getitem__", function, class_item_read, state);
+    } else method = class_item_read(c, m, state, method);
+    /* Queued, the continuation ends the step; else its error does here. */
+    spy_release(state->as.seq.items[3]);
+    state->as.seq.items[3] = spy_retain(c->booleans[0]);
+    spy_release(state);
+    return c->k_fn ? c->unbound : method;
 }
 /* Whether operator step ins of x and y calls an intrinsic (class_item,
  * union_call). */
@@ -32697,9 +32759,7 @@ static SPYValue *special_callk_keywords(SPYContext *c, Machine *m, SPYValue *fun
     SPYValue *state = !tuple ? (spy_release(ctx), spy_release(absent), NULL) :
                       keywords ? k_state(c, 3, (SPYValue *[]){tuple, absent ? absent : spy_none(c), spy_retain(keywords), NULL, NULL}, k, ctx) :
                       k_state(c, 2, (SPYValue *[]){tuple, absent ? absent : spy_none(c), NULL, NULL}, k, ctx);
-    if (!state) return NULL;
-    if (function->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, special_read, state);
-    return callk(c, m, get, 3, (SPYValue *[]){spy_retain(function), spy_retain(self), spy_retain(value_class(c, self))}, special_read, state);
+    return state ? descriptor_readk(c, m, function, self, special_read, state) : NULL;
 }
 /* special_callk_keywords of no keywords. */
 static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SPYValue *self, size_t argc, SPYValue **argv, SPYValue *absent,
@@ -32879,7 +32939,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         self = y; other = x; phase = OPERATOR_LAST;
     } else {
         if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, x, y, env);
-        if (kind == OPERATE_INDEX && x->type == SPY_CLASS) return class_item(c, m, x, y, env);
+        if (kind == OPERATE_INDEX && x->type == SPY_CLASS) return class_item(c, m, ins, x, y, env);
         /* A list's or tuple's items compared by a Python __eq__ (equal_call). */
         if ((rich == R_EQ || rich == R_NE) && pair_python(c, x, y))
             return equal_call(c, m, x, y, python_pair(c, x, y, 0, &(size_t){0}), env);
@@ -33853,6 +33913,13 @@ static SPYValue *descriptor_getter(SPYContext *c, SPYValue *d) {
     SPYValue *get = !d ? NULL : d->type == SPY_PROPERTY ? d->as.property.get :
                     d->type == SPY_INSTANCE ? class_lookup(d->as.map.parent, "__get__") : NULL;
     return get && machine_function(c, get) ? get : NULL;
+}
+/* The read of descriptor d, which descriptor_getter reads, on self, as m's
+ * call (callk), then k with ctx and what it gave. */
+static SPYValue *descriptor_readk(SPYContext *c, Machine *m, SPYValue *d, SPYValue *self, Continuation k, SPYValue *ctx) {
+    SPYValue *get = descriptor_getter(c, d);
+    if (d->type == SPY_PROPERTY) return callk(c, m, get, 1, (SPYValue *[]){spy_retain(self)}, k, ctx);
+    return callk(c, m, get, 3, (SPYValue *[]){spy_retain(d), spy_retain(self), spy_retain(value_class(c, self))}, k, ctx);
 }
 /* item_function, or a descriptor whose Python __get__ an operator step
  * calls first (special_env). */

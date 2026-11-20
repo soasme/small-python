@@ -130,6 +130,20 @@ SOURCES = {
     "hint_sized": "log = []\nclass S:\n    def __len__(s):\n        for _ in (): pass\n        log.append('len')\n        return 3\n"
                   "    def __getitem__(s, i): return i\nit = iter(S())\nnext(it)\nr = reversed(S())\nnext(r)\nnext(r)\n"
                   "result = (it.__length_hint__(), r.__length_hint__(), log)",
+    "hint_len_read": "log = []\nclass D:\n    def __init__(s, f, bad): s.f = f; s.bad = bad\n"
+                     "    def __get__(s, obj, owner):\n        log.append('get ' + s.f.__name__)\n"
+                     "        if s.bad: raise TypeError('read')\n        return s.f.__get__(obj, owner)\n"
+                     "def __len__(self): return 2\ndef __length_hint__(self): return 5\n"
+                     "def __iter__(self): return iter((1, 2))\n"
+                     "X = type('X', (), {'__len__': D(__len__, True), '__length_hint__': D(__length_hint__, False), '__iter__': __iter__})\n"
+                     "result = (list(X()), log)",
+    "hint_hint_read": "log = []\nclass D:\n    def __init__(s, f, bad): s.f = f; s.bad = bad\n"
+                     "    def __get__(s, obj, owner):\n        log.append('get ' + s.f.__name__)\n"
+                     "        if s.bad: raise TypeError('read')\n        return s.f.__get__(obj, owner)\n"
+                     "def __len__(self): return 2\ndef __length_hint__(self): return 5\n"
+                     "def __iter__(self): return iter((1, 2))\n"
+                      "X = type('X', (), {'__len__': D(__len__, True), '__length_hint__': D(__length_hint__, True), '__iter__': __iter__})\n"
+                      "try:\n    list(X())\nexcept TypeError as e:\n    result = type(e).__name__",
     "hint_reversed_spent": "log = []\nclass S:\n    def __len__(s):\n        log.append('len')\n        return len(log) - 1\n"
                            "    def __getitem__(s, i): return i\nr = reversed(S())\ns = S()\nq = reversed(s)\nnext(q)\nlog.clear()\n"
                            "result = (r.__length_hint__(), q.__length_hint__(), log)",

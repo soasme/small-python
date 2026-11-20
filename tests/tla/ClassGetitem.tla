@@ -15,12 +15,20 @@
 (* A builtin program takes repr(list[int]), repr(dict[str, int]),          *)
 (* repr(tuple[int, ...]), or repr(type[int]). The outcome is the result    *)
 (* or the exception.                                                       *)
+(*                                                                         *)
+(* A read program has C's __class_getitem__ read as any attribute is: a   *)
+(* metaclass __getattribute__ or __getattr__ giving a function of the key, *)
+(* a metaclass attribute that is a classmethod, a plain function or a      *)
+(* staticmethod stored on C after creation (called with the key alone), a *)
+(* __getattribute__ raising AttributeError (C not subscriptable) or        *)
+(* KeyError, which propagates.                                             *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [part : {"user"}, cg : {"none", "plain", "classmethod"}, item : BOOLEAN, meta : BOOLEAN,
              subject : {"class", "instance"}]
             \cup [part : {"builtin"}, name : {"list", "dict", "tuple", "type"}]
+            \cup [part : {"read"}, read : {"getattribute", "getattr", "meta_attribute", "stored", "static", "missing", "raising"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -39,7 +47,12 @@ Builtin(p) == CASE p.name = "list" -> "list[int]"
                 [] p.name = "tuple" -> "tuple[int, ...]"
                 [] p.name = "type" -> "type[int]"
 
-Run(p) == IF p.part = "user" THEN User(p) ELSE Builtin(p)
+Read(p) == CASE p.read = "missing" -> "TypeError"
+             [] p.read = "raising" -> "KeyError"
+             [] p.read = "meta_attribute" -> "cg Meta int"   \* bound to the metaclass
+             [] OTHER -> "key int"
+
+Run(p) == CASE p.part = "user" -> User(p) [] p.part = "read" -> Read(p) [] OTHER -> Builtin(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

@@ -17,13 +17,35 @@ def user(p):
     return C[int] if p["subject"] == "class" else C()[int]
 
 
+def read(p):
+    def key(k):
+        for _ in (): pass
+        return "key %s" % k.__name__
+    def getattribute(cls, name):
+        if name != "__class_getitem__": return type.__getattribute__(cls, name)
+        if p["read"] == "missing": raise AttributeError(name)
+        if p["read"] == "raising": raise KeyError(name)
+        return key
+    body = {}
+    if p["read"] in ("getattribute", "missing", "raising"): body["__getattribute__"] = getattribute
+    if p["read"] == "getattr": body["__getattr__"] = lambda cls, name: key
+    if p["read"] == "meta_attribute":
+        body["__class_getitem__"] = classmethod(lambda cls, k: "cg %s %s" % (cls.__name__, k.__name__))
+    C = type("Meta", (type,), body)("C", (), {})
+    if p["read"] == "stored": C.__class_getitem__ = key
+    if p["read"] == "static": C.__class_getitem__ = staticmethod(key)
+    return C[int]
+
+
 def outcome(p):
     try:
         if p["part"] == "user":
             return user(p)
+        if p["part"] == "read":
+            return read(p)
         return repr({"list": lambda: list[int], "dict": lambda: dict[str, int], "tuple": lambda: tuple[int, ...],
                      "type": lambda: type[int]}[p["name"]]())
-    except TypeError as error:
+    except (TypeError, KeyError) as error:
         return type(error).__name__
 
 
