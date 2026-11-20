@@ -27,7 +27,46 @@ def value(v, name, log):
     return None if v == 99 else "x" if v == 98 else Indexed(name, log) if v == 97 else Sub(3) if v == 96 else v
 
 
+class Part:
+    def __init__(self, value, log):
+        self.value, self.log = value, log
+
+    def __eq__(self, other):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        self.log.append("eq")
+        if self.value == "raise":
+            raise KeyError(self.value)
+        return self.value == other.value
+
+    def __lt__(self, other):
+        for _ in ():
+            pass
+        self.log.append("lt")
+        return self.value < other.value
+
+    __hash__ = None
+
+
+def compared(p):
+    log = []
+
+    def made(value):
+        parts = [None, None, None]
+        parts[p["part"] - 1] = Part(value, log)
+        return slice(*parts)
+
+    left, right = ("raise", 1) if p["other"] == "raise" else (1, 1 if p["other"] == "one" else 2)
+    try:
+        result = repr(made(left) == made(right) if p["rel"] == "eq" else made(left) < made(right))
+    except KeyError:
+        result = "KeyError"
+    return " ".join([result] + log)
+
+
 def outcome(p):
+    if p["op"] == "compare":
+        return compared(p)
     if p["op"] == "generic":
         return repr(slice[float])
     log = []

@@ -18,7 +18,11 @@
 (* which runs first, or takes list(range(L))[s], or reads the              *)
 (* attributes, assigns s.start, or compares and hashes s with a copy;      *)
 (* or evaluates slice[float]. The outcome is the repr of the result or     *)
-(* the exception, followed by the bounds whose __index__ ran.              *)
+(* the exception, followed by the bounds whose __index__ ran. A compare    *)
+(* program puts at one part of two slices, None elsewhere, objects whose   *)
+(* Python __eq__ and __lt__ loop and log, worth 1 and 1, 2, or a raising   *)
+(* one on the left, and compares them by == or <, as tuples of the parts:  *)
+(* the outcome is the result or exception, then the methods called.        *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, TLC
 
@@ -31,6 +35,7 @@ Steps == {None, -2, -1, 1, 2, 0}
 Programs == [start : Bounds, stop : Bounds, step : Steps, length : {0, 4}, op : {"indices", "subscript", "lengthed"}]
             \cup [start : Bounds, stop : Bounds, step : Steps, length : {0}, op : {"attrs", "set", "eqhash"}]
             \cup [op : {"generic"}]
+            \cup [op : {"compare"}, part : {1, 2, 3}, rel : {"eq", "lt"}, other : {"one", "two", "raise"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -78,7 +83,14 @@ Result(p) ==
       [] p.op \in {"indices", "lengthed"} -> LET i == Indices(p) IN "(" \o Join(i) \o ")"
       [] p.op = "subscript" -> LET i == Indices(p) IN "[" \o Join(Items(i[1], i[2], i[3])) \o "]"
 
-Run(p) == IF p.op = "generic" THEN Result(p) ELSE Result(p) \o Called(p)
+\* The parts' pair is compared by __eq__; an unequal one orders by __lt__,
+\* an equal one leaves the Nones after it, whose tuples are then equal.
+Compared(p) == CASE p.other = "raise" -> "KeyError eq"
+                 [] p.rel = "eq" -> IF p.other = "one" THEN "True eq" ELSE "False eq"
+                 [] p.other = "one" -> "False eq"
+                 [] OTHER -> "True eq lt"
+
+Run(p) == CASE p.op = "compare" -> Compared(p) [] p.op = "generic" -> Result(p) [] OTHER -> Result(p) \o Called(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

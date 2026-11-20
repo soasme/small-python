@@ -14,6 +14,15 @@ def global_len(value):
     return 7
 
 
+class Missing(dict):
+    def __missing__(self, key):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        if key in ("len", "added_name"):
+            return custom_len
+        raise KeyError(key)
+
+
 def lookup(p):
     namespace = {}
     if p["builtins"] == "module":
@@ -22,6 +31,8 @@ def lookup(p):
         namespace["__builtins__"] = {"len": custom_len}
     elif p["builtins"] == "empty":
         namespace["__builtins__"] = {}
+    elif p["builtins"] == "missing":
+        namespace["__builtins__"] = Missing()
     if p["shadow"]:
         namespace["len"] = global_len
     name = p["name"]

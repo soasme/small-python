@@ -3285,6 +3285,15 @@ static SPYValue *name_getitem(SPYContext *c, SPYValue *e) {
     SPYValue *classdict = e->type == V_ENV && e->as.map.flags == 1 && e->as.map.base ? cell_contents(e->as.map.base) : NULL;
     return (!classdict || classdict == namespace) && namespace && namespace->type != SPY_DICT ? store_function(c, namespace, "__getitem__") : NULL;
 }
+/* The Python __missing__ of env e's namespace, a dict subclass's
+ * instance without name, that a lookup of it there calls (dict's
+ * __getitem__), borrowed; else NULL. */
+static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
+static SPYValue *dictionary_value(SPYContext *, SPYValue *);
+static NO_INLINE SPYValue *name_missing(SPYContext *c, SPYValue *e, Name name) {
+    SPYValue *namespace = e->as.map.namespace, *dict = namespace && namespace->type == SPY_INSTANCE ? dictionary_value(c, namespace) : NULL;
+    return dict && !dict_name(c, dict, name) && !c->error_type[0] ? item_function(c, namespace, "__missing__") : NULL;
+}
 /* Value v, owned, of name text found in env e of a lookup from env: an
  * unbound local's error, a lazy import reified in a global or class
  * namespace, else v. */
@@ -3345,7 +3354,7 @@ static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e
             e = binding_env(c, e, name);
             int storage = locals && at != env && e == at && e->type == V_ENV && e->as.map.flags == 3 &&
                           (namespace = e->as.map.namespace) && namespace->type != SPY_DICT;
-            if (!storage && (function = name_getitem(c, e))) {
+            if (!storage && ((function = name_getitem(c, e)) || (function = name_missing(c, e, name)))) {
                 SPYValue *key = spy_string(c, name.text, name.len), *state = NULL;
                 if (key) state = k_state(c, 4, (SPYValue *[6]){spy_retain(env), spy_retain(e), spy_retain(key), int_value(c, annotation)}, k, ctx);
                 else spy_release(ctx);
@@ -10679,6 +10688,21 @@ static int proxy_reflects(SPYValue *x) {
  * for the machine to dispatch, or with an error. A mappingproxy's == and
  * != compare its mapping instead, which replaces *left (proxy_compared). */
 static NO_INLINE SPYValue *binary_operand(SPYContext *, int, SPYValue **, SPYValue *);
+static SPYValue *tuple_of(SPYContext *, size_t, SPYValue *const *);
+/* The tuple of slice s's start, stop and step, which its comparisons compare. */
+static SPYValue *slice_parts(SPYContext *c, SPYValue *s) {
+    return tuple_of(c, 3, (SPYValue *[]){s->as.slice.start, s->as.slice.stop, s->as.slice.step});
+}
+static int pair_python(SPYContext *, SPYValue *, SPYValue *);
+static int order_python(SPYContext *, int, SPYValue *, SPYValue *);
+/* Whether comparison op of slices a and b compares their parts by a
+ * Python method (pair_python, order_python). */
+static NO_INLINE int slice_python(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    SPYValue *x = slice_parts(c, a), *y = x ? slice_parts(c, b) : NULL;
+    int python = y && (op == T_EQ || op == T_NE ? pair_python(c, x, y) : order_python(c, op, x, y));
+    spy_release(x); spy_release(y);
+    return python;
+}
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **left, SPYValue *b) {
     if (UNLIKELY((*left)->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && !(*left = proxy_compared(c, *left, b))) return NULL;
     SPYValue *a = *left;
@@ -10689,6 +10713,9 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **lef
      * machine's (view_step). */
     if (op == O_IN || op == O_NOTIN) return binary_operand(c, op, left, b);
     if (view_operands(a, b)) return NULL;
+    /* Two slices whose parts' comparison calls Python compare their parts
+     * on the machine (operator_call). */
+    if (UNLIKELY(a->type == SPY_SLICE) && b->type == SPY_SLICE && a != b && slice_python(c, op, a, b)) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
         if (op != T_EQ && op != T_NE) {
             if (order_python(c, op, a, b)) return NULL;
@@ -32927,6 +32954,17 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         operator_keep(c, m, ins, y);
         function = operator_call(c, m, ins, compared, x, env);
         spy_release(compared);
+        return function;
+    }
+    /* A comparison of two slices is that of their parts (slice_parts), y
+     * kept for a chain; of a slice with itself, the native one's. */
+    if (UNLIKELY(y && x->type == SPY_SLICE && y->type == SPY_SLICE) && rich >= 0 && x != y) {
+        SPYValue *a = slice_parts(c, x), *b = a ? slice_parts(c, y) : NULL;
+        if (b) {
+            operator_keep(c, m, ins, y);
+            function = operator_call(c, m, ins, a, b, env);
+        }
+        spy_release(a); spy_release(b);
         return function;
     }
     /* x in mappingproxy y is x in its mapping (mappingproxy_contains), y

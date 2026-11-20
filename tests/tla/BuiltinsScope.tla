@@ -11,16 +11,18 @@
 (*                                                                         *)
 (* A lookup program evaluates NAME with eval() in globals whose            *)
 (* __builtins__ is absent, the builtins module, a dictionary mapping len   *)
-(* to a custom function, or an empty dictionary, with or without a global  *)
-(* len; NAME is len, a name the program first adds to the builtins module, *)
-(* or __import__ (used by an import statement run with exec()). An insert  *)
-(* program runs exec() in an empty dictionary and checks that it gained    *)
-(* __builtins__ bound to the builtins module or its dictionary. The        *)
+(* to a custom function, an empty dictionary, or an empty dict subclass    *)
+(* whose Python __missing__, which may loop, gives that function for len   *)
+(* and the added name and raises KeyError for others, with or without a    *)
+(* global len; NAME is len, a name the program first adds to the builtins  *)
+(* module, or __import__ (used by an import statement run with exec()). An *)
+(* insert program runs exec() in an empty dictionary and checks that it    *)
+(* gained __builtins__ bound to the builtins module or its dictionary. The *)
 (* outcome is which object was found, or the exception.                    *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"lookup"}, builtins : {"absent", "module", "custom", "empty"}, shadow : BOOLEAN,
+Programs == [part : {"lookup"}, builtins : {"absent", "module", "custom", "empty", "missing"}, shadow : BOOLEAN,
              name : {"len", "added", "import"}]
             \cup [part : {"insert"}]
 
@@ -33,6 +35,7 @@ Lookup(p) ==
     LET standard == p.builtins \in {"absent", "module"}
     IN  CASE p.name = "len" /\ p.shadow -> "global"
           [] p.name = "len" /\ p.builtins = "custom" -> "custom"
+          [] p.name \in {"len", "added"} /\ p.builtins = "missing" -> "custom"
           [] p.name = "import" /\ ~standard -> "ImportError"   \* __import__ not found
           [] standard -> "builtin"
           [] OTHER -> "NameError"
