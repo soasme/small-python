@@ -16364,6 +16364,25 @@ static int keyword_taken(SPYContext *c, SPYValue *result, SPYValue *key, SPYValu
     return keyword_found(c, map_find(result, key), key, callable);
 }
 static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether v is a mappingproxy of an instance, whose methods may be Python. */
+static ALWAYS_INLINE int proxies_instance(SPYValue *v) {
+    return v->type == SPY_MAPPINGPROXY && v->as.bound.self->type == SPY_INSTANCE;
+}
+/* Whether len() of a mappingproxy of an instance, in argv, is that of
+ * its mapping (mappingproxy_len), put in its place. */
+static int is_builtin(SPYValue *, int);
+static NO_INLINE int proxy_unwrapped(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue **argv) {
+    (void)c;
+    if (argc != 1 || method >= 0 || !proxies_instance(argv[0]) || !is_builtin(callee, B_LEN)) return 0;
+    SPYValue *mapping = spy_retain(argv[0]->as.bound.self);
+    spy_release(argv[0]); argv[0] = mapping;
+    return 1;
+}
+/* *v, owned, but for a mappingproxy of an instance its mapping, which it
+ * iterates and measures (mappingproxy_getiter, mappingproxy_len). */
+static void proxy_mapping(SPYValue **v) {
+    if (UNLIKELY(proxies_instance(*v))) { SPYValue *mapping = spy_retain((*v)->as.bound.self); spy_release(*v); *v = mapping; }
+}
 /* Whether function_str names fn without calling Python. */
 static int named_plainly(SPYContext *c, SPYValue *fn) {
     if (fn->type == SPY_METHOD) fn = fn->as.method.function;
@@ -26555,7 +26574,8 @@ static SPYValue *iterator_base(SPYContext *c, SPYValue *v) {
 static int machine_source(SPYContext *c, SPYValue *v) {
     SPYValue *base;
     return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(v) || iter_function(c, v) || getitem_iterated(c, v) ||
-           iterator_subclass(c, v) || ((base = iterator_base(c, v)) && machine_source(c, base));
+           iterator_subclass(c, v) || ((base = iterator_base(c, v)) && machine_source(c, base)) ||
+           (proxies_instance(v) && machine_source(c, v->as.bound.self));
 }
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -26819,7 +26839,7 @@ static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
-                     metaclassed(argv[0]) || (argv[0]->type == SPY_FUNCTION && argv[0]->as.function.attributes) ||
+                     metaclassed(argv[0]) || (argv[0]->type == SPY_FUNCTION && argv[0]->as.function.attributes) || proxies_instance(argv[0]) ||
                      argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
@@ -26836,6 +26856,7 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
  * or tuple (hashed_items), and a builtin iterator's subclass its
  * iterator (iterator_base). The consumer's keyed. */
 static int consumer_source(SPYContext *c, SPYValue **v) {
+    proxy_mapping(v);
     if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && (*v)->type != SPY_DICT_VALUES && !is_dict(*v) &&
         !metaclassed(*v)) return 0;
     SPYValue *iter = iterator_base(c, *v);
@@ -27116,6 +27137,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && keyed_mapping(c, generator);
     /* bytes() and bytearray.extend(), not bytearray(), ask the length hint too (7.7.7). */
     int hints = id == B_LIST || id == B_SORTED || id == B_BYTES || (id == B_EXTEND && callee->type == SPY_LIST) || (id == B_BYTEARRAY && collects);
+    if (generator) proxy_mapping(&generator);
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
     SPYValue *given = id == B_JOIN || id == B_BYTES || id == B_BYTEARRAY ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
@@ -27199,6 +27221,7 @@ static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, S
         return 0;
     }
     Consumer *s = allocate(c, sizeof(*s));
+    proxy_mapping(&a);
     SPYValue *source = s && hints && !merging && (a->type == SPY_INSTANCE || sequence_iterator(a)) ? spy_retain(a) : NULL;
     int keyed = merging ? KEY_KEYS : s ? consumer_source(c, &a) : 0;
     Block *block = s && a ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
@@ -28885,7 +28908,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     if (argc && (argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
                  metaclassed(argv[0]) ||
                  (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
-                 (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed)))) &&
+                 (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed))) ||
+                 UNLIKELY(proxy_unwrapped(c, callee, method, argc, argv))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     /* A set's method given its set first, as a method call's operands
      * give it, consumes its source as the bound method does. */
@@ -29699,11 +29723,12 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                   argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW)) ||
         /* type.__call__ of a class (unbound_called) */
         (callee->type == SPY_NATIVE && ((argc && argv[0]->type == SPY_CLASS && (argv[0]->as.map.meta || callee->as.native.kwcall == type_method)) ||
-                                        (argc == 1 && (argv[0]->type == SPY_INSTANCE ||
+                                        /* memoryview.release() of a view (native_entered), len() of
+                                         * a mappingproxy (proxy_unwrapped) */
+                                        (argc == 1 && ((UINT64_C(1) << argv[0]->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_MEMORYVIEW |
+                                                                                        UINT64_C(1) << SPY_MAPPINGPROXY)) ||
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
-                                                       (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)) ||
-                                                       /* memoryview.release() of a view (native_entered) */
-                                                       argv[0]->type == SPY_MEMORYVIEW)) ||
+                                                       (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
                                                        /* round() with ndigits (conversion_method) */
                                                        ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
@@ -30174,7 +30199,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return result;
     }
-    SPYValue *found[2], *convert = argc && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0]) || metaclassed(argv[0])) ?
+    SPYValue *found[2], *convert = argc && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0]) || metaclassed(argv[0]) ||
+                                            UNLIKELY(proxy_unwrapped(c, callee, -1, argc, argv))) ?
                                    conversion_method(c, callee, argc, argv, found) : NULL;
     if (!convert && calls && print_instances(c, callee, argc, argv, NULL)) {
         /* print writes its arguments, an instance's Python __str__ a call
@@ -33077,11 +33103,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         return function;
     }
     /* x in mappingproxy y is x in its mapping (mappingproxy_contains), y
-     * kept for a chain. */
+     * kept for a chain; mappingproxy x[y] its mapping's (mappingproxy_getitem). */
     if (UNLIKELY(y && y->type == SPY_MAPPINGPROXY) && contains) {
         operator_keep(c, m, ins, y);
         return operator_call(c, m, ins, x, y->as.bound.self, env);
     }
+    if (UNLIKELY(proxies_instance(x)) && ins->op == BC_INDEX) return operator_call(c, m, ins, x->as.bound.self, y, env);
     /* A set operation, augmented assignment or comparison, whose lookups
      * may call a Python __eq__. */
     if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) &&
@@ -36889,7 +36916,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE ||
                 ((a->type == SPY_DICT || a->type == SPY_FROZENDICT) && UNLIKELY(eq_keyed(a))) ||
                 (b->type == SPY_TUPLE && (key_reaches(c, b) || a->type == SPY_MEMORYVIEW)) ||
-                (b->type == SPY_SLICE && index_special(c, slice_part(c, b)))) { x = a; y = b; goto operator_step; }
+                (b->type == SPY_SLICE && index_special(c, slice_part(c, b))) || UNLIKELY(proxies_instance(a))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
@@ -37084,6 +37111,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_DEFAULT)
             a = machine_pop(m); function_default(c, m->stack[m->len - 1], n, a); break;
         CASE(BC_COMPREHENSION)
+            /* A mappingproxy iterates its mapping (mappingproxy_getiter). */
+            if (UNLIKELY(proxies_instance(m->stack[m->len - 1])) && !n->a->op) proxy_mapping(&m->stack[m->len - 1]);
             /* An instance's Python __iter__ or __aiter__ is a call (iter_call). */
             if (m->stack[m->len - 1]->type == SPY_INSTANCE) {
                 callee_env = NULL;
@@ -37224,6 +37253,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             flow = (Result){ins->arg, ins->arg == FLOW_RETURN ? machine_pop(m) : NULL}; break;
         CASE(BC_LOOP) {
+            /* A mappingproxy iterates its mapping (mappingproxy_getiter). */
+            if (ins->arg == 1) proxy_mapping(&m->stack[m->len - 1]);
             if ((ins->arg == 1 || ins->arg == 2) && m->stack[m->len - 1]->type == SPY_INSTANCE) {
                 callee_env = NULL;
                 if ((value = iter_call(c, m, ins, ins->arg == 2 ? "__aiter__" : "__iter__", &callee_env))) {
@@ -39779,7 +39810,11 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     case MP_CONTAINS: return comparison(c, O_IN, args[0], mapping);
     case MP_ITER: return get_iterator(c, mapping);
     case MP_LEN: return builtin(c, 1, &mapping, (void *)(intptr_t)B_LEN);
-    case MP_REVERSED: return builtin(c, 1, &mapping, (void *)(intptr_t)B_REVERSED);
+    case MP_REVERSED: {
+        /* The mapping's own __reversed__ (mappingproxy_reversed). */
+        SPYValue *method = attribute(c, mapping, "__reversed__"), *result = method ? call(c, method, 0, NULL) : NULL;
+        spy_release(method); return result;
+    }
     case MP_HASH: return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
     case MP_EQ: case MP_NE: {
         SPYValue *compared = proxy_compared(c, spy_retain(proxy), args[0]);

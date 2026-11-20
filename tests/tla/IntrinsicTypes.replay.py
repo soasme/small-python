@@ -98,6 +98,13 @@ SOURCES = {
     "proxy_bad": 'types.MappingProxyType([1])',
     "proxy_or": "result = types.MappingProxyType({'a': 1}) | {'b': 2}",
     "proxy_copy": "c = types.MappingProxyType({'a': 1}).copy()\nresult = (type(c).__name__, c)",
+    "proxy_machine_calls": "log = []\nclass M:\n    def __getitem__(self, k):\n        for _ in (): pass\n        log.append('get'); return k * 2\n"
+                           "    def __iter__(self):\n        for _ in (): pass\n        log.append('iter'); return iter('ab')\n"
+                           "    def __len__(self):\n        for _ in (): pass\n        log.append('len'); return 2\n"
+                           "class R(M):\n    def __reversed__(self):\n        for _ in (): pass\n        log.append('rev'); return iter('z')\n"
+                           "p = types.MappingProxyType(R())\n"
+                           "try: reversed(types.MappingProxyType(M()))\nexcept AttributeError as e: missing = type(e).__name__\n"
+                           "result = (p['k'], tuple(p), [x for x in p], len(p), list(reversed(p)), missing, log)",
     "proxy_forward": "class M:\n    def __getitem__(self, k):\n        for _ in range(2): pass\n        return {'k': 1}[k]\n"
                      "    def get(self, k, d=None):\n        for _ in range(2): pass\n        return d\n"
                      "    def keys(self): return ['k']\n    def values(self): return [1]\n    def items(self): return [('k', 1)]\n"
