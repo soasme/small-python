@@ -26706,7 +26706,7 @@ static NO_INLINE int delegating(Machine *m) {
         if ((d->type != SPY_GENERATOR && d->type != SPY_COROUTINE && !m->operation) || d->as.generator.running || d->as.generator.done ||
             !d->as.generator.machine)
             return d->type == SPY_INSTANCE ? next_method(m->generator->ctx, d) :
-                   (d->type == SPY_ITERATOR || delegate_ended(m)) && m->generator->type != SPY_ASYNC_GENERATOR;
+                   delegate_ended(m) || (d->type == SPY_ITERATOR && m->generator->type != SPY_ASYNC_GENERATOR);
         if ((m = d->as.generator.machine)->awaiting < AWAIT_DELEGATE) return 1;
     }
     return 0;
@@ -27895,11 +27895,11 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
         return NULL;
     /* A generator or coroutine closes where a close raises on the machine
      * (throws_in), an async generator without a finalizer hook at its
-     * yield, or its delegate's. */
+     * yield, its delegate's, or an await of a generator that ended. */
     if (self->type == SPY_GENERATOR || self->type == SPY_COROUTINE)
         return self->as.generator.started && throws_in(c, self, NULL) && !close_quietly(c, self) ? self : NULL;
     if (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.origin)
-        return suspended(self) && self->as.generator.started && innermost(self->as.generator.machine)->awaiting == AWAIT_YIELD &&
+        return suspended(self) && self->as.generator.started && raises_at(innermost(self->as.generator.machine)) &&
                !close_quietly(c, self) ? self : NULL;
     if (self->type == SPY_MEMORYVIEW) return release_function(c, self) ? self : NULL;
     SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
