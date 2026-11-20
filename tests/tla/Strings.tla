@@ -131,7 +131,7 @@ Padded(p) ==
           [] OTHER -> "'" \o Fill("0", pad) \o Cat(s) \o "'"
 
 
-Cases == {"capitalize", "index_arguments", "index_keywords", "casefold", "lower_upper", "final_sigma", "swapcase", "title", "istitle", "isupper_islower",
+Cases == {"capitalize", "index_arguments", "index_keywords", "index_keyword_pairs", "casefold", "lower_upper", "final_sigma", "swapcase", "title", "istitle", "isupper_islower",
           "isalpha_isalnum", "isascii", "digit_classes", "isidentifier", "isprintable", "isspace",
           "expandtabs", "splitlines", "splitlines_boundaries", "split_vs_splitlines", "split_maxsplit",
           "rsplit_maxsplit", "split_bad_sep", "join", "join_nonstr", "join_bytes", "maketrans_dict",
@@ -170,6 +170,8 @@ Case(c) ==
       [] c = "index_arguments" -> "('ab***', '   ab', 'a   b', ['a', 'b c'], 'TypeError', [5, 5, 4, 1, 3])"
       \* So does a maxsplit, tabsize or int() base given by keyword.
       [] c = "index_keywords" -> "(['a', 'b c'], ['a b', 'c'], 'a  b', 3, [1, 1, 3, 2])"
+      \* sep with maxsplit or bytes_per_sep by keyword, in either order, as by position.
+      [] c = "index_keyword_pairs" -> "(['a', 'b c'], ['a b', 'c'], '61:62', [1, 1, 1])"
       [] c = "casefold" -> "('strasse', '\\u03c3\\u03b1\\u03c3', 'fi')"
       [] c = "lower_upper" -> "('\\xe0b\\xe7', 'STRASSE', 'FI', 'i\\u0307', 2)"
       [] c = "final_sigma" -> "('\\u03c3\\u03b1\\u03c2', '\\u03b1\\u03c2 \\u03c3', '\\u03c3')"

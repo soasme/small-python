@@ -30574,6 +30574,25 @@ static ptrdiff_t keyword_index(SPYContext *c, SPYValue *callee, size_t argc, con
     return argc + bound == 1 && ((call == text_expandtabs && !strcmp(name, "tabsize")) || (call == int_to_bytes && !strcmp(name, "length"))) ?
            (ptrdiff_t)argc : -1;
 }
+/* Whether the two keyword entries kw of a call of callee after argc
+ * arguments, none but a bound method's object, are split's or rsplit's
+ * sep and maxsplit or hex's sep and bytes_per_sep, the second an
+ * instance (keyword_index): values set to theirs in parameter order. */
+static int keyword_pair(SPYValue *callee, size_t argc, const Entry *kw, SPYValue **values) {
+    size_t bound = callee->type == SPY_METHOD;
+    SPYValue *fn = bound ? callee->as.method.function : callee;
+    if (argc + bound != 1 || fn->type != SPY_NATIVE) return 0;
+    SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = fn->as.native.kwcall;
+    const char *second = call == text_split || call == bytearray_split ? "maxsplit" :
+                         call == bytes_hex || call == bytearray_hex || hex_viewing(fn) ? "bytes_per_sep" : NULL;
+    values[0] = values[1] = NULL;
+    for (int i = 0; second && i < 2; i++) {
+        if (kw[i].key->type != SPY_STRING) return 0;
+        const char *name = kw[i].key->as.string.data;
+        values[strcmp(name, "sep") != 0] = !strcmp(name, "sep") || !strcmp(name, second) ? kw[i].value : NULL;
+    }
+    return values[0] && values[1] && values[1]->type == SPY_INSTANCE;
+}
 static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
 /* The call of callee with argc arguments argv and keyword entry kw passed
  * by position at instead (keyword_index), after None defaults: on m, as
@@ -30585,6 +30604,14 @@ static SPYValue *keyword_indexed(SPYContext *c, Machine *m, SPYValue *callee, si
     while (count < (size_t)at) args[count++] = spy_none(c);
     args[count++] = spy_retain(kw->value);
     return indexed_call(c, m, callee, -1, NULL, count, args);
+}
+/* The call of callee with argc arguments argv and the two keyword values
+ * of keyword_pair passed by position: on m, as indexed_call's. */
+static SPYValue *keyword_pair_indexed(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue *const *values) {
+    SPYValue *args[INDEX_MOST];
+    for (size_t i = 0; i < argc; i++) args[i] = spy_retain(argv[i]);
+    args[argc] = spy_retain(values[0]); args[argc + 1] = spy_retain(values[1]);
+    return indexed_call(c, m, callee, -1, NULL, argc + 2, args);
 }
 /* The call (index_arguments) of callee, method number method of it, named
  * name, or -1 and NULL, or of a bound method's, with argc arguments argv,
@@ -31908,6 +31935,14 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         return adapter_call(c, m, callee, 1 + !!named[1], named);
     }
     ptrdiff_t at;
+    SPYValue *pair[2];
+    if (calls && kwc == 2 && keyword_pair(callee, positional, kw, pair)) {
+        spy_retain(callee);
+        result = keyword_pair_indexed(c, m, callee, positional, argv, pair);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        spy_release(callee);
+        return result;
+    }
     if (calls && kwc == 1 && (at = keyword_index(c, callee, positional, kw)) >= 0) {
         spy_retain(callee);
         result = keyword_indexed(c, m, callee, positional, argv, kw, at);
@@ -31964,6 +31999,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
     SPYValue *allocate = NULL, *direct = calls ? type_called(c, callee) : NULL, *seq;
     int plain = 0, init = 0, id, called = 0;
     ptrdiff_t at;
+    SPYValue *pair[2];
     /* type.__call__ of a class whose __init__ or __new__ runs on the
      * machine calls the class, its metaclass's __call__ aside. */
     if (direct && string_keys(c, keywords) && called_machine(c, direct, 0, NULL)) {
@@ -32034,7 +32070,10 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = indexed_call(c, m, callee, -1, NULL, args->as.seq.len, argv);
     } else if (calls && keywords->as.map.len == 1 && (at = keyword_index(c, callee, args->as.seq.len, map_items(keywords))) >= 0)
-        result = keyword_indexed(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), at); else if (calls && keywords->as.map.len && args->as.seq.len == 1 && (callee->type == SPY_CLASS || callee->type == SPY_BOUND_METHOD) &&
+        result = keyword_indexed(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), at);
+    else if (calls && keywords->as.map.len == 2 && keyword_pair(callee, args->as.seq.len, map_items(keywords), pair))
+        result = keyword_pair_indexed(c, m, callee, args->as.seq.len, args->as.seq.items, pair);
+    else if (calls && keywords->as.map.len && args->as.seq.len == 1 && (callee->type == SPY_CLASS || callee->type == SPY_BOUND_METHOD) &&
                string_keys(c, keywords) && consumer_of(c, callee, -1, 1, args->as.seq.items) >= 0 &&
                dict_consumer(c, m, callee, args->as.seq.items[0], spy_retain(keywords))) ;
     else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
