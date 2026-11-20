@@ -27343,7 +27343,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates != -1 || init == SPY_SET;
     /* As do dict() and dict.update() of pairs. */
     int pairs = dicts || (method == M_UPDATE && callee->type == SPY_DICT);
-    if (!argc || (argc > 1 && updates != -1 ? 0 : mapping ? !keys_function(c, argv[0], &(int){0}) :
+    if (!argc || (argc > 1 && updates != -1 ? 0 : mapping ? !keys_function(c, argv[0], &(int){0}) && !asked_function(c, argv[0], "keys") :
                   !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) &&
                   !(updates != -1 && compared_items(c, set_storage(callee->as.method.self), argv[0], (int)((intptr_t)function->as.native.data & 255))) && !(updates == B_SET_DISJOINT && set_storage(argv[0]) != argv[0]) &&
                   !(pairs && hashed_pairs(c, argv[0])) && !((sets || pairs) && zip_hashed(c, argv[0])))) return -1;
@@ -27757,6 +27757,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
                            .phase = id == B_SET_TOGGLE, .awaited = awaited, .closes = closes, .sources = sources,
                            .defaulted = defaulted};
     if (!keyed) min_max_fed(consumer);
+    /* A mapping's keys a Python __getattr__ gives is asked first (keys_asked). */
+    if (merging && !keys_function(c, generator, &(int){0}) && asked_function(c, generator, "keys")) consumer->phase = 1;
     spy_release(bound);
     block->value = generator; block->consumer = consumer;
     /* The operation runs its generator until the send ends (pop_block). */
@@ -28469,6 +28471,19 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         hash_failed(c, s->result, s->item);
         return NULL;
     }
+    if (s->keyed == KEY_KEYS && s->phase) {
+        /* Its __getattr__ asked for keys, twice (keys_asked), then what
+         * it gave called. */
+        if (s->phase == 3) {
+            SPYValue *keys = s->item;
+            if (machine_function(c, keys)) return (*env = function_env(c, keys, 0, NULL, NULL, 1)) ? spy_retain(keys) : NULL;
+            if ((result = call(c, keys, 0, NULL))) key_took(c, m, result);
+            return NULL;
+        }
+        SPYValue *function = asked_function(c, items, "keys"), *args[] = {spy_retain(items), spy_string(c, "keys", 4)};
+        if (!args[1]) { spy_release(args[0]); return NULL; }
+        return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
+    }
     if (s->keyed == KEY_ITER || s->keyed == KEY_KEYS) {
         int bound = 1;
         SPYValue *function = s->keyed == KEY_ITER ? iter_function(c, items) : keys_function(c, items, &bound);
@@ -28579,6 +28594,26 @@ static int keys_merge(SPYContext *c, Block *top, SPYValue *keys) {
     spy_release(keys);
     s->keyed = KEY_ITEMS; s->fed = 1;
     return top->value ? 0 : -1;
+}
+static NO_INLINE int keys_listing(SPYContext *, Block *, SPYValue *);
+/* What block top's mapping's Python __getattr__ gave asked for keys,
+ * result, which it takes, or its error: in phase 1 dict()'s or update()'s
+ * check, whose AttributeError merges the mapping's pairs instead
+ * (consumer_source); in phase 2 keys() looked up again, then called;
+ * in phase 3 what that returned, listed (keys_listing). */
+static NO_INLINE int keys_asked(SPYContext *c, Block *top, SPYValue *result) {
+    Consumer *s = top->consumer;
+    if (s->phase == 1 && !result && !c->stopped && error_is(c, "AttributeError")) {
+        spy_clear_error(c);
+        s->phase = 0;
+        s->keyed = consumer_source(c, &top->value);
+        return c->error_type[0] ? -1 : 0;
+    }
+    if (!result) return -1;
+    if (s->phase == 1) { spy_release(result); s->phase = 2; return 0; }
+    if (s->phase == 2) { s->item = result; s->phase = 3; return 0; }
+    spy_release(s->item); s->item = NULL; s->phase = 0;
+    return keys_listing(c, top, result);
 }
 /* What block top's mapping's keys() returned, keys, which it takes, is
  * listed before the first key is looked up: a list as it is, a generator
@@ -28791,6 +28826,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         spy_release(item);
         return failed ? -1 : 0;
     }
+    if (s->keyed == KEY_KEYS && s->phase) return keys_asked(c, top, key);
     if (!key) return -1;
     if (s->keyed == KEY_EQ) {
         /* What the __eq__ returned, a NotImplemented leaving the other's

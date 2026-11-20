@@ -644,6 +644,7 @@ Unreleased (0.10.0):
 - A dead async generator awaiting a generator that was closed first closes without nesting on the C stack
 - `send()`, `__next__()`, `next()`, `throw()` and `close()` of an `anext()` awaitable over a coroutine run without nesting on the C stack
 - `list += y`, `list *= y` and `bytearray *= y` whose reflected method declines take y's Python `__iter__` or `__index__` without nesting on the C stack
+- `dict()`, `dict.update()` and `frozendict()` of an object whose `keys` comes from a Python `__getattr__` merge it without nesting on the C stack
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
