@@ -52,6 +52,10 @@ SOURCES = {
     "dict_tuple_key": "d = {(1, 2): 'x'}\nresult = d[1, 2]",
     "dict_unhashable": "{}[[1]]",
     "dict_missing_hook": "class D(dict):\n    def __missing__(s, k): return ('missing', k)\nresult = D()['k']",
+    "meta_setitem": "log = []\nclass Meta(type):\n    def __setitem__(cls, k, v):\n        for _ in (): pass\n"
+                    "        log.append('set %s %s %s' % (cls.__name__, k, v))\n"
+                    "    def __delitem__(cls, k):\n        for _ in (): pass\n        log.append('del %s %s' % (cls.__name__, k))\n"
+                    "class K(metaclass=Meta): pass\nclass S(K): pass\nK['k'] = 1\nS['s'] = 2\ndel S['k']",
     "dict_missing_described": "log = []\nclass G:\n    def __init__(s, f): s.f = f\n    def __get__(s, obj, owner):\n        for _ in (): pass\n"
                                "        log.append('get')\n        if s.f is None: raise ValueError('unread')\n        return s.f.__get__(obj, owner)\n"
                                "def missing(s, k): return ('missing', k, log)\nclass D(dict):\n    __missing__ = G(missing)\nresult = D()['k']",

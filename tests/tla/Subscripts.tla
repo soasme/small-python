@@ -29,7 +29,7 @@ Forms == {"one", "pair", "trailing", "empty", "star", "mixed_star", "star_empty"
 Cases == {"aug_order", "not_subscriptable", "not_subscriptable_none", "no_setitem", "no_delitem", "no_delitem_key",
           "tuple_assign", "str_del", "int_del", "type_del", "type_getitem", "type_not_subscriptable", "list_neg",
           "list_out", "list_neg_out", "list_str_index", "list_float_index", "list_index_dunder", "list_big_index",
-          "tuple_out", "str_out", "dict_missing", "dict_tuple_key", "dict_unhashable", "dict_missing_hook", "dict_missing_described", "dict_missing_unreadable",
+          "tuple_out", "str_out", "dict_missing", "dict_tuple_key", "dict_unhashable", "dict_missing_hook", "dict_missing_described", "dict_missing_unreadable", "meta_setitem",
           "range_index", "range_out", "bytes_index", "getitem_none", "list_set_out", "list_del_out",
           "seq_getitem_iter", "generator_subscript", "star_in_slice", "star_bare_index", "nested_star",
           "slot_index", "slot_big_index", "range_slot_index", "range_big_index"}
@@ -92,6 +92,8 @@ Case(c) ==
       \* A __missing__ that a descriptor's Python __get__ reads, or fails to.
       [] c = "dict_missing_described" -> <<"('missing', 'k', ['get'])", <<"get">>>>
       [] c = "dict_missing_unreadable" -> <<"ValueError: unread", <<"get">>>>
+      \* A class's metaclass's Python __setitem__ and __delitem__, inherited by a subclass.
+      [] c = "meta_setitem" -> <<"None", <<"set K k 1", "set S s 2", "del S k">>>>
       [] c = "range_index" -> <<"(9, 6, range(2, 5))", <<>>>>
       [] c = "range_out" -> <<"IndexError: range object index out of range", <<>>>>
       [] c = "bytes_index" -> <<"(97, 98)", <<>>>>

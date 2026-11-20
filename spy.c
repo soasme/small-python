@@ -21684,6 +21684,34 @@ done:
 }
 static NO_INLINE SPYValue *new_method(SPYContext *, SPYValue *);
 static SPYValue *tuple_of(SPYContext *, size_t, SPYValue *const *);
+/* What a class statement's metaclass call (class_metacall) returned, cls,
+ * held its name, body env and __class__ cell or None: the class, made
+ * (class_made). */
+static SPYValue *class_metacalled(SPYContext *c, Machine *m, SPYValue *held, SPYValue *cls) {
+    (void)m;
+    SPYValue **items = held->as.seq.items;
+    if (cls) class_made(c, cls, items[0], items[1], items[2] == c->none ? NULL : items[2]);
+    spy_release(held);
+    if (c->error_type[0]) { spy_release(cls); return NULL; }
+    return cls;
+}
+static NO_INLINE SPYValue *callk_keywords(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue *, Continuation, SPYValue *);
+/* A class statement's call of a metaclass s holds, freed, that makes no
+ * class as type's does, on m (callk), with name, bases and namespace, the
+ * two Nones class_step's arg 7 takes pushed first; NULL, c->k_fn set. */
+static SPYValue *class_metacall(SPYContext *c, Machine *m, SPYValue *name, ClassState *s, SPYValue *classcell) {
+    SPYValue *held = NULL, *result = NULL;
+    if ((!s->original || !name_set(c, s->env, "__orig_bases__", s->original)) &&
+        (held = tuple_of(c, 3, (SPYValue *[]){name, s->env, classcell ? classcell : c->none})) &&
+        !machine_push(c, m, spy_none(c)) && !machine_push(c, m, spy_none(c))) {
+        SPYValue *args[] = {spy_retain(name), spy_retain(s->tuple), spy_retain(s->namespace)};
+        result = callk_keywords(c, m, s->meta, 3, args, s->keywords && s->keywords->as.map.len ? s->keywords : NULL, class_metacalled, held);
+        held = NULL;
+    }
+    spy_release(held);
+    class_state_free(s);
+    return result;
+}
 /* Whether a class statement's metaclass call enters the metaclass's Python
  * __new__, or the Python __init__ after its builtin __new__, on the machine
  * (class_new_call). */
@@ -34033,9 +34061,11 @@ static SPYValue *slice_part(SPYContext *c, SPYValue *s) {
     return NULL;
 }
 /* The Python __setitem__ or __delitem__, as name, of instance object's
- * class, also of a builtin's subclass overriding it, borrowed, or NULL. */
+ * class, also of a builtin's subclass overriding it, or of a class's
+ * metaclass, borrowed, or NULL. */
 static SPYValue *store_function(SPYContext *c, SPYValue *object, const char *name) {
-    SPYValue *function = object->type != SPY_INSTANCE || builtin_base(c, object, name, NULL) ? NULL : class_lookup(object->as.map.parent, name);
+    SPYValue *owner = object->type == SPY_INSTANCE ? object->as.map.parent : metaclassed(object) ? object->as.map.meta : NULL;
+    SPYValue *function = !owner || builtin_base(c, object, name, NULL) ? NULL : class_lookup(owner, name);
     return function && machine_function(c, function) ? function : NULL;
 }
 static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return store_function(c, object, "__setitem__"); }
@@ -34087,7 +34117,7 @@ static void memory_store_call(SPYContext *, Machine *, SPYValue *, const char *,
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
     SPYValue *map;
     const char *kind;
-    return (object->type == SPY_INSTANCE && setitem_function(c, object)) ||
+    return setitem_function(c, object) ||
            (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(map = store_storage(c, object, "__setitem__"), key, 0) &&
                                                                         store_collides(c, map, key)))) ||
            list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1) || memory_converter(c, object, key, value, &kind);
@@ -34962,7 +34992,9 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
             if (class_deferred(c, &state)) { class_state_free(&state); return spy_retain(c->unbound); }
         }
         m->len -= 2;
-        if (!body) body = class_create(c, items[6], &state, classcell == c->none ? NULL : classcell, m);
+        if (!body && state.meta != c->types[SPY_CLASS] && !type_made(c, state.meta))
+            body = class_metacall(c, m, items[6], &state, classcell == c->none ? NULL : classcell);
+        else if (!body) body = class_create(c, items[6], &state, classcell == c->none ? NULL : classcell, m);
         spy_release(classcell); spy_release(v);
         return body;
     }

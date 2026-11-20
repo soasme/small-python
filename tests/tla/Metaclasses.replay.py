@@ -74,10 +74,28 @@ def cell(p):
     return X().get().__name__
 
 
+def called(p):
+    log = []
+
+    def made(name, bases, namespace, **kw):
+        for _ in (): pass
+        log.append("%s flag %s" % (name, kw["flag"]))
+        if p["made"] == "raises":
+            raise KeyError(name)
+        return "f" if p["made"] == "marker" else type(name, bases, namespace)
+
+    class X(metaclass=made, flag=1):
+        def get(self):
+            return __class__
+    return " ".join([X if X == "f" else X().get().__name__] + log)
+
+
 def outcome(p):
     try:
+        if p["part"] == "call":
+            return called(p)
         return derive(p) if p["part"] == "derive" else cell(p)
-    except (TypeError, RuntimeError) as error:
+    except (TypeError, RuntimeError, KeyError) as error:
         return type(error).__name__
 
 

@@ -20,6 +20,10 @@
 (* program gives X a method returning __class__, under a metaclass whose   *)
 (* __new__ passes the namespace on, removes __classcell__, or creates no   *)
 (* cell because no method needs one; the outcome is the method's result.   *)
+(* A call program's metaclass is a function, which may loop, called once   *)
+(* with the name, bases, namespace and keyword flag=1: it returns "f",     *)
+(* raises KeyError, or returns type(name, bases, namespace), whose method *)
+(* returning __class__ gives that class.                                   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -27,6 +31,7 @@ BaseSets == {"none", "A", "B", "C", "AB", "AC", "E", "EA"}
 Metas == {"none", "type", "MA", "MB", "MC", "func"}
 Programs == [part : {"derive"}, bases : BaseSets, meta : Metas]
             \cup [part : {"cell"}, cell : {"kept", "dropped", "unused"}]
+            \cup [part : {"call"}, made : {"marker", "raises", "real"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -54,7 +59,11 @@ Derive(p) ==
 
 Cell(p) == IF p.cell = "dropped" THEN "RuntimeError" ELSE "X"
 
-Run(p) == IF p.part = "derive" THEN Derive(p) ELSE Cell(p)
+Called(p) == CASE p.made = "marker" -> "f X flag 1"
+                [] p.made = "raises" -> "KeyError"
+                [] OTHER -> "X X flag 1"
+
+Run(p) == CASE p.part = "derive" -> Derive(p) [] p.part = "cell" -> Cell(p) [] OTHER -> Called(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
