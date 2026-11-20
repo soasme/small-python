@@ -18961,16 +18961,16 @@ static int bytearray_exported(SPYContext *, SPYValue *);
 static int bytearray_resize(SPYContext *, SPYValue *, size_t);
 static SPYValue *type_new(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
-/* The builtin type T whose value an instance of class cls holds, when
- * cls's nearest builtin base is T, whose __new__ (type_new) builds the
- * value T() of its arguments would: int, float, complex, str, bytes,
- * tuple or frozenset; or bytearray, whose __init__ (type_init) does;
- * else 0. */
 /* Whether a subclass of builtin type is built by T() (built_base). */
 static int built_layout(int type) {
     return !!(UINT64_C(1) << type & (UINT64_C(1) << SPY_INT | UINT64_C(1) << SPY_FLOAT | UINT64_C(1) << SPY_COMPLEX | UINT64_C(1) << SPY_STRING |
                                      UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_FROZENSET | UINT64_C(1) << SPY_BYTEARRAY));
 }
+/* The builtin type T whose value an instance of class cls holds, when
+ * cls's nearest builtin base is T, whose __new__ (type_new) builds the
+ * value T() of its arguments would: int, float, complex, str, bytes,
+ * tuple or frozenset; or bytearray, whose __init__ (type_init) does;
+ * else 0. */
 static int built_base(SPYContext *c, SPYValue *cls) {
     SPYValue *mro = cls->as.map.mro, *base = NULL;
     if (cls->as.map.native || !mro) return 0;
@@ -18991,10 +18991,10 @@ static int built_calls(size_t argc, SPYValue *const *argv) {
  * called is, of T's own __new__, and of bytearray's own __init__ too;
  * else 0. */
 static int built_call(SPYContext *c, SPYValue *cls, int called, size_t argc, SPYValue *const *argv) {
-    int type = built_calls(argc, argv) ? built_base(c, cls) : 0;
-    SPYValue *meta = cls->as.map.meta;
-    return type && (called || !meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) &&
-           class_lookup(cls, "__new__") == name_local(c->types[type], "__new__") &&
+    SPYValue *new = built_calls(argc, argv) ? class_lookup(cls, "__new__") : NULL, *meta = cls->as.map.meta;
+    int type = new && new->type == SPY_NATIVE && new->as.native.kwcall == type_new ? (int)(intptr_t)new->as.native.data : 0;
+    return type && built_layout(type) && built_base(c, cls) == type &&
+           (called || !meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) &&
            (type != SPY_BYTEARRAY || class_lookup(cls, "__init__") == name_local(c->types[type], "__init__")) ? type : 0;
 }
 /* What bytearray() of the arguments returned in result for
@@ -19048,8 +19048,9 @@ static SPYValue *subclass_new(SPYContext *c, Machine *m, SPYValue *cls, size_t a
     return comparek(c, m, spy_retain(c->types[built_base(c, cls)]), args, COMPARE_CALL + (int)argc, subclass_built, state);
 }
 /* subclass_new of a call of class cls, called whether as type.__call__,
- * of argc arguments argv, borrowed, when it is one (built_call), or a bytearray subclass's new instance,
- * filled by array_init; else c->unbound, nothing taken. */
+ * of argc arguments argv, borrowed, when it is one (built_call), or a
+ * bytearray subclass's new instance, filled by array_init; else
+ * c->unbound, nothing taken. */
 static SPYValue *class_converted(SPYContext *c, Machine *m, SPYValue *cls, int called, size_t argc, SPYValue *const *argv, Continuation k,
                                  SPYValue *ctx) {
     int type = built_call(c, cls, called, argc, argv);
@@ -29972,16 +29973,39 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
     return method >= 0 ? call_native_method(c, callee, method, name, args->as.seq.len, args->as.seq.items) :
            call(c, callee, args->as.seq.len, args->as.seq.items);
 }
+/* What the Python __buffer__ of bytes() or bytearray()'s source, ctx's
+ * first item, returned in result, its __index__ having raised TypeError
+ * (index_argued): a copy of the view's bytes, a bytearray when ctx's
+ * second item is true (buffer_copied). */
+static SPYValue *buffer_copied(SPYContext *, Machine *, SPYValue *, int, SPYValue *);
+static SPYValue *size_exported(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue *value = result ? buffer_copied(c, m, ctx->as.seq.items[0], ctx->as.seq.items[1] == c->booleans[1], result) : NULL;
+    spy_release(result); spy_release(ctx);
+    return value;
+}
 /* An argument's __index__ that index_from called returned result. */
 static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **parts = state->as.seq.items, *args = parts[3], *items[8], *value = NULL;
     size_t i = (size_t)parts[4]->as.integer_data.small, n = args->as.seq.len;
     memcpy(items, args->as.seq.items, n * sizeof(*items));
     if (parts[0] == c->types[SPY_BYTES] || parts[0] == c->types[SPY_BYTEARRAY]) {
-        /* A size's TypeError leaves the iterable form. */
+        /* A size's TypeError leaves the buffer and iterable forms, a
+         * Python __buffer__ m's call (size_exported), a Python __iter__
+         * its consumer's, which then makes the step's value. */
         int array = parts[0] == c->types[SPY_BYTEARRAY];
-        SPYValue *bytes = index_bytes(c, items[0], index_result(c, items[0], result), array ? "bytearray" : "bytes");
-        value = bytes && array ? builtin(c, 1, &bytes, (void *)(intptr_t)B_BYTEARRAY) : spy_retain(bytes);
+        SPYValue *index = index_result(c, items[0], result), *bytes = NULL, *function, *ctx;
+        if (!index && error_is(c, "TypeError") && (function = machine_exporter(c, items[0]))) {
+            spy_clear_error(c);
+            if ((ctx = spy_tuple(c, 2, (SPYValue *[]){items[0], c->booleans[array]})))
+                value = callk(c, m, function, 2, (SPYValue *[]){spy_retain(items[0]), spy_int(c, BUFFER_FLAGS)}, size_exported, ctx);
+        } else if (!index && error_is(c, "TypeError") && !buffer_exporter(items[0]) && (function = iter_function(c, items[0])) &&
+                   function->type == SPY_FUNCTION) {
+            spy_clear_error(c);
+            consume_traced(c, m, array ? B_BYTEARRAY : B_BYTES, parts[0], -1, NULL, spy_retain(items[0]), NULL, NULL);
+        } else {
+            bytes = index_bytes(c, items[0], index, array ? "bytearray" : "bytes");
+            value = bytes && array ? builtin(c, 1, &bytes, (void *)(intptr_t)B_BYTEARRAY) : spy_retain(bytes);
+        }
         spy_release(bytes);
     } else if (i == n) {
         /* A slice's part: the call goes on with a slice of its int. */

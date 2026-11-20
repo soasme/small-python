@@ -629,6 +629,7 @@ Unreleased (0.10.0):
 - a bytes or bytearray search with instance bounds converts its int needle's Python `__index__` after them without nesting on the C stack
 - a memoryview's bound `__hash__` called through another function hashes its exporter's Python `__hash__` without nesting on the C stack
 - calling a subclass of `int`, `float`, `complex`, `str`, `bytes`, `tuple`, `frozenset` or `bytearray`, its base's `__new__` and `bytearray.__init__` run the arguments' Python conversions without nesting on the C stack
+- `bytes()` and `bytearray()` of a source whose `__index__` raises `TypeError` call its Python `__buffer__` or `__iter__` without nesting on the C stack
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
 - a view a bytearray subclass's own `__buffer__` returns is released without bytearray's `__release_buffer__`, which reported an error

@@ -65,6 +65,11 @@ SOURCES = {
                            "class L(list):\n    def __index__(self):\n        for _ in (): pass\n        log.append(2)\n        return 2\n"
                            "class N(int):\n    def __index__(self): return 4\n"
                            "result = (bytearray(C(b'abcd')), bytes(L([9])), bytearray(N(1)), log)",
+    "ctor_size_fallback": "log = []\nclass U:\n    def __index__(self):\n        for _ in (): pass\n        log.append('index')\n        raise TypeError\n"
+                          "    def __buffer__(self, flags): log.append('buffer'); return memoryview(b'xy')\n"
+                          "class N:\n    def __index__(self): log.append('index'); raise TypeError\n"
+                          "    def __iter__(self):\n        log.append('iter')\n        yield 7\n"
+                          "result = (bytes(U()), bytearray(U()), bytes(N()), bytearray(N()), log)",
     "ctor_iter_calls": "class It:\n    def __init__(s, items, log): s.items, s.log = items, log\n"
                        "    def __iter__(s):\n        for _ in (): pass\n        s.log.append('iter')\n        return iter(s.items)\n"
                        "    def __len__(s): s.log.append('len'); return 2\n"

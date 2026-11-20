@@ -4,9 +4,10 @@
 (* them (library/stdtypes.html#bytes-objects, #bytearray-objects, and      *)
 (* #bytes-and-bytearray-operations): immutable bytes and mutable bytearray *)
 (* sequences of integers in range(256), written as ASCII literals with     *)
-(* escapes; constructed from a length (an __index__ called once), an       *)
-(* iterable of ints, a buffer, __bytes__, or a str with an encoding; with  *)
-(* fromhex and hex; indexing yields ints and slicing the same type;        *)
+(* escapes; constructed from a length (an __index__ called once, its       *)
+(* TypeError leaving the other forms), an iterable of ints, a buffer,      *)
+(* __bytes__, or a str with an encoding; with fromhex and hex; indexing    *)
+(* yields ints and slicing the same type;                                  *)
 (* bytearray adds item and slice assignment and the mutating list methods, *)
 (* refusing to resize while exported; and both offer the str methods over  *)
 (* ASCII bytes, accepting any bytes-like argument (and an int for searches *)
@@ -131,7 +132,7 @@ Padded(p) ==
           [] OTHER -> Wrap(Fill("0", pad) \o Cat(s))
 
 
-Cases == {"literal_forms", "hex_group_first", "hex_sep_length", "search_needle_last", "bytearray_index_calls", "bytearray_arity", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_subclass_index", "ctor_iter_calls", "extend_iter_calls", "join_iter_calls", "ctor_index_big",
+Cases == {"literal_forms", "hex_group_first", "hex_sep_length", "search_needle_last", "bytearray_index_calls", "bytearray_arity", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_subclass_index", "ctor_iter_calls", "ctor_size_fallback", "extend_iter_calls", "join_iter_calls", "ctor_index_big",
           "ctor_negative", "ctor_range_error", "ctor_float", "bytearray_ctor", "fromhex", "fromhex_bad",
           "fromhex_space_middle", "fromhex_non_hex", "hex", "hex_bad_sep", "index_is_int", "iterate_ints",
           "repr_escapes", "immutable", "concat_repeat", "concat_str", "contains", "contains_str", "compare",
@@ -178,6 +179,8 @@ Case(c) ==
       [] c = "hex_sep_length" -> "('6162:6364', '61.62', 'ValueError', ['index', 'len', 'len', 'len'])"
       [] c = "ctor_subclass_index" -> "(bytearray(b'\\x00\\x00\\x00'), b'\\x00\\x00', bytearray(b'\\x00'), [3, 2])"
       [] c = "ctor_iter_calls" -> "(b'ab', bytearray(b'\\x01'), ['iter', 'len', 'iter'], \"TypeError: cannot convert 'N' object to bytes\")"
+      \* A size's TypeError leaves the buffer and iterable forms, __index__ called once.
+      [] c = "ctor_size_fallback" -> "(b'xy', bytearray(b'xy'), b'\\x07', bytearray(b'\\x07'), ['index', 'buffer', 'index', 'buffer', 'index', 'iter', 'index', 'iter'])"
       [] c = "extend_iter_calls" -> "(None, bytearray(b'xab'), ['iter', 'len'], \"TypeError: can't extend bytearray with N\", bytearray(b'xab'))"
       [] c = "join_iter_calls" -> "(b'a-b', bytearray(b'a+b'), b'a-b', ['iter', 'iter'], 'can only join an iterable')"
       [] c = "ctor_index_big" -> "OverflowError: cannot fit 'J' into an index-sized integer"
