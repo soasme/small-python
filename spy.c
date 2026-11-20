@@ -32877,6 +32877,39 @@ static NO_INLINE int truth_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue
     c->k_fn = entered; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
     return 1;
 }
+static void short_or_false(Machine *, Instruction *, int, size_t *, int *);
+/* What the Python __index__ of a test's __len__ result (truth_index)
+ * returned in result: m's step, the instruction before its pc, goes on
+ * with the length's truth, from state, the tested value, a chained
+ * comparison's right operand or unbound, and the __len__ result. */
+static SPYValue *truth_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *y = items[1] == c->unbound ? NULL : items[1], *index = result ? index_result(c, items[2], result) : NULL;
+    Instruction *ins = &m->code->items[m->pc - 1];
+    int64_t length = 0;
+    int status = index ? length_result(c, index, &length) : -1;
+    spy_release(index);
+    if (status) ;
+    else if (ins->op == BC_UNARY) machine_push(c, m, spy_bool(c, !length));
+    else if (ins->op == BC_FALSE || ins->op == BC_SHORT) short_or_false(m, ins, length != 0, &m->pc, &c->short_truth);
+    else if (length && y) machine_push(c, m, spy_retain(y));
+    else if (!length) {
+        m->pc = ins->target;
+        if (y) machine_push(c, m, spy_retain(items[0]));
+    }
+    spy_release(state);
+    return status ? NULL : c->stepped;
+}
+/* Whether the Python __index__ of result, which it takes, what v's
+ * __len__ returned for a test's truth, y its chained comparison's right
+ * operand or NULL, is m's call (truth_indexed). */
+static int truth_index(SPYContext *c, Machine *m, SPYValue *v, SPYValue *y, SPYValue *result) {
+    SPYValue *index = index_function(c, result);
+    if (!index) return 0;
+    SPYValue *state = spy_tuple(c, 3, (SPYValue *[]){v, y ? y : c->unbound, result});
+    if (!state) spy_release(result);
+    else if (!callk(c, m, index, 1, (SPYValue *[]){result}, truth_indexed, state) && c->k_fn) c->consuming = 1;
+    return 1;
+}
 /* The truth a test's or a chained comparison's call (truth_call) returned
  * in result, which it takes, into step ins: the test jumps when false;
  * the chain goes on with its right operand when true, else jumps out with
@@ -32890,6 +32923,7 @@ static NO_INLINE Machine *truth_returned(SPYContext *c, Machine *m, Instruction 
         if (!(result = truth_length(c, m, v))) return m;
         marker = machine_pop(m); v = machine_pop(m); y = y ? machine_pop(m) : NULL;
     }
+    if (result && marker == c->booleans[0] && truth_index(c, m, v, y, result)) { release_all(3, (SPYValue *[]){marker, v, y}); return m; }
     int truth = !result ? 0 : marker == c->missing ? truth_of(result) : truth_result(c, v, marker == c->booleans[1], result);
     spy_release(marker);
     if (c->error_type[0]) { spy_release(v); spy_release(y); return m; }
@@ -35049,6 +35083,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         spy_release(machine_pop(m)); v = machine_pop(m);
         returned = 1;
     }
+    if (!boolean && !returned && result && truth_index(c, m, v, NULL, result)) { spy_release(v); return m; }
     int truth = returned ? truth_of(result) : truth_result(c, v, boolean, result);
     if (ins->op == BC_UNARY) { if (!c->error_type[0]) machine_push(c, m, spy_bool(c, !truth)); }
     else if (!c->error_type[0]) short_or_false(m, ins, truth, &m->pc, &c->short_truth);
@@ -36045,8 +36080,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         m = compare_leave(c, (Call *)m, result);
                         f = m->frame; code = m->code->items; pc = m->pc;
                         if ((result = k(c, m, k_ctx, result)) == c->stepped) {
-                            /* It ended its operator step (buffered_end). */
-                            pc = m->pc;
+                            /* It ended its operator step (buffered_end), a
+                             * short circuit maybe knowing its truth (truth_indexed). */
+                            pc = m->pc; known = c->short_truth; c->short_truth = 0;
                             if (c->k_fn) goto enter_k;
                         } else if (result) machine_push(c, m, result);
                         /* consume_generator enters a further callk first. */

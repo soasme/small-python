@@ -4,7 +4,8 @@
 # loop, after __len__, and take its int as the length: a negative one
 # raises ValueError, one past a Py_ssize_t OverflowError, an __index__
 # returning no int TypeError, and its exception propagates; bool() is the
-# length's truth, as are not, and and if. Inside functions as at module
+# length's truth, as are not, and, or and if, a short circuit's landing
+# test taking the truth it found. Inside functions as at module
 # level.
 from harness import *
 
@@ -40,7 +41,8 @@ def results():
     return [t(lambda: len(L(3))), t(lambda: bool(L(0))), t(lambda: bool(L(2))), t(lambda: len(L(-1))),
             t(lambda: len(L("s"))), t(lambda: len(L("raise"))), t(lambda: [x for x in reversed(R(3))]),
             t(lambda: len(L(2 ** 70))), t(lambda: bool(L(-1))), t(lambda: not L(0)), t(lambda: L(1) and 5),
-            t(lambda: "yes" if L(0) else "no")]
+            t(lambda: "yes" if L(0) else "no"), t(lambda: "yes" if L(2) or L(0) else "no"),
+            t(lambda: (L(0) or 7, type(L(3) or 7).__name__)), t(lambda: not L(2 ** 70))]
 
 expected = [(3, ['len', ('index', 3)]), (False, ['len', ('index', 0)]), (True, ['len', ('index', 2)]),
             ('ValueError: __len__() should return >= 0', ['len', ('index', -1)]),
@@ -48,7 +50,9 @@ expected = [(3, ['len', ('index', 3)]), (False, ['len', ('index', 0)]), (True, [
             ('LookupError: i', ['len', ('index', 'raise')]), ([20, 10, 0], ['len', ('index', 3)]),
             ("OverflowError: cannot fit 'int' into an index-sized integer", ['len', ('index', 1180591620717411303424)]),
             ('ValueError: __len__() should return >= 0', ['len', ('index', -1)]), (True, ['len', ('index', 0)]),
-            (5, ['len', ('index', 1)]), ('no', ['len', ('index', 0)])]
+            (5, ['len', ('index', 1)]), ('no', ['len', ('index', 0)]), ('yes', ['len', ('index', 2)]),
+            ((7, 'L'), ['len', ('index', 0), 'len', ('index', 3)]),
+            ("OverflowError: cannot fit 'int' into an index-sized integer", ['len', ('index', 1180591620717411303424)])]
 
 def main():
     return results()
