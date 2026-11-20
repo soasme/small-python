@@ -587,6 +587,7 @@ Unreleased (0.10.0):
 - `in` a mappingproxy calls its mapping's Python `__contains__` without nesting on the C stack
 - a set method called unbound, `set()` and `frozenset()` of a dict, and `issubset` or `symmetric_difference` of one, compare elements by their Python `__eq__` without nesting on the C stack
 - an exception group of a custom sequence calls its Python `__repr__` and `__getitem__` without nesting on the C stack
+- `repr()` of a staticmethod or classmethod calls its object's Python `__repr__` without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

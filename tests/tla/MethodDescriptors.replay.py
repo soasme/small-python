@@ -8,6 +8,13 @@ def f(*a):
     return a
 
 
+class R:
+    def __init__(self, text): self.text = text
+    def __repr__(self):
+        for _ in (): pass  # a loop: __repr__ runs on the machine
+        return self.text
+
+
 def name(v):
     if type(v) is type:
         return v.__name__
@@ -17,7 +24,7 @@ def name(v):
 
 
 def outcome(p):
-    target = {"f": f, "abs": abs, "5": 5}[p["target"]]
+    target = {"f": f, "abs": abs, "5": 5, "R": R("r"), "N": R(1)}[p["target"]]
     wrap = staticmethod if p["wrap"] == "static" else classmethod
 
     class C:
@@ -31,6 +38,8 @@ def outcome(p):
            "raw": lambda: C.__dict__["x"]}[access]()
     op = p["op"]
     try:
+        if op == "repr":
+            return repr(got)
         if op == "type":
             return type(got).__name__
         if op == "call":

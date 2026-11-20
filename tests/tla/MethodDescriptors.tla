@@ -16,8 +16,10 @@
 (* with WRAP staticmethod or classmethod and TARGET f, abs, or 5, and      *)
 (* takes C.x, C().x, D.x, D().x, or the wrapper itself (C.__dict__["x"]);  *)
 (* it gives the type of what it took or calls it with -1, or (for the      *)
-(* wrapper) reads __func__, __wrapped__, or __name__. The outcome is the   *)
-(* result (classes by name) or the exception.                              *)
+(* wrapper) reads __func__, __wrapped__, or __name__, or takes the        *)
+(* wrapper's repr of 5 or of an object R whose Python __repr__ gives 'r'   *)
+(* or N whose gives an int. The outcome is the result (classes by name)    *)
+(* or the exception.                                                       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -26,6 +28,7 @@ Targets == {"f", "abs", "5"}
 Accesses == {"C", "C()", "D", "D()", "raw"}
 Programs == [wrap : Wraps, target : Targets, access : Accesses, op : {"type", "call"}]
             \cup [wrap : Wraps, target : Targets, access : {"raw"}, op : {"func", "wrapped", "name"}]
+            \cup [wrap : Wraps, target : {"5", "R", "N"}, access : {"raw"}, op : {"repr"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -42,7 +45,9 @@ Call(t, args) == CASE t = "f" -> "(" \o args \o (IF args = "-1" THEN ",)" ELSE "
 
 Run(p) ==
     LET t == p.target IN
-    CASE p.op = "func" \/ p.op = "wrapped" -> "the target"
+    CASE p.op = "repr" -> IF t = "N" THEN "TypeError"
+                          ELSE "<" \o p.wrap \o "method(" \o (IF t = "R" THEN "r" ELSE t) \o ")>"
+      [] p.op = "func" \/ p.op = "wrapped" -> "the target"
       [] p.op = "name" -> IF t = "5" THEN "AttributeError" ELSE "'" \o t \o "'"
       [] p.access = "raw" -> IF p.op = "type" THEN (IF p.wrap = "static" THEN "staticmethod" ELSE "classmethod")
                              ELSE IF p.wrap = "static" THEN Call(t, "-1") ELSE "TypeError"     \* not callable

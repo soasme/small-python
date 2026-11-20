@@ -28675,13 +28675,14 @@ static SPYValue *open_context(SPYContext *c, size_t argc, SPYValue *const *argv,
 }
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
     _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64 &&
-                   B_ISINSTANCE < 64 && B_ISSUBCLASS < 64 && B_AITER < 64 && B_ANEXT < 64, "builtin mask");
+                   B_ISINSTANCE < 64 && B_ISSUBCLASS < 64 && B_AITER < 64 && B_ANEXT < 64 && B_REPR < 64, "builtin mask");
     uintptr_t id = (uintptr_t)callee->as.native.data;
     return callee->type == SPY_NATIVE &&
            ((callee->as.native.call == builtin && id < 64 &&
              (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
                                    UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL |
-                                   UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS | UINT64_C(1) << B_AITER | UINT64_C(1) << B_ANEXT))) ||
+                                   UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS | UINT64_C(1) << B_AITER | UINT64_C(1) << B_ANEXT |
+                                   UINT64_C(1) << B_REPR))) ||
             callee->as.native.kwcall == open_builtin);
 }
 /* Whether a map's builtin callee may go on on the machine, its call a call
@@ -29326,7 +29327,8 @@ static SPYValue *pow_call(SPYContext *c, Machine *m, SPYValue *function, SPYValu
  * c->entering_init the method, CALL_OPERATOR, its operator pushed with the
  * phase, str's class then; sum(), any() and all() go on on m (consume,
  * reduce_call), NULL with no error, when the total or an item is an
- * instance; else
+ * instance; repr() of a staticmethod or classmethod may call its object's
+ * Python __repr__ there (wrapper_repred); else
  * the call's value. */
 static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, size_t argc, SPYValue **argv,
                                         SPYValue **env) {
@@ -43504,6 +43506,16 @@ static SPYValue *operator_declined_k(SPYContext *c, Machine *m, SPYValue *args, 
     spy_release(args);
     return result;
 }
+/* The repr of staticmethod or classmethod wrapper, whose object's Python
+ * __repr__ returned text, as format_object shows it. */
+static SPYValue *wrapper_repred(SPYContext *c, Machine *m, SPYValue *wrapper, SPYValue *text) {
+    (void)m;
+    Buffer b = {.ctx = c};
+    int status = puts_buffer(&b, wrapper->type == SPY_STATICMETHOD ? "<staticmethod(" : "<classmethod(") ||
+                 append_conversion(&b, wrapper->as.wrapper.function, text, "__repr__") || puts_buffer(&b, ")>");
+    spy_release(text); spy_release(wrapper);
+    return buffer_text(&b, SPY_STRING, status);
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -44040,6 +44052,13 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     default: break;
     }
     if (argc != 1) goto arity;
+    if (id == B_REPR && UNLIKELY(a->type == SPY_STATICMETHOD || a->type == SPY_CLASSMETHOD)) {
+        /* A wrapper's object's Python __repr__ goes on on the step's machine (wrapper_repred). */
+        SPYValue *object = a->as.wrapper.function, *function;
+        Machine *m = !builtin_classmethod(a) && object->type == SPY_INSTANCE && !builtin_base(c, object, "__repr__", NULL) &&
+                     (function = class_lookup(object->as.map.parent, "__repr__")) && machine_function(c, function) ? step_machine(c) : NULL;
+        if (m) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(object)}, wrapper_repred, spy_retain(a));
+    }
     if (id == B_REPR) return conversion(c, a, 1);
     if (id == B_ABS && argc == 1 && (a->type == SPY_INSTANCE || metaclassed(a))) {
         SPYValue *base = builtin_base(c, a, "__abs__", NULL);
