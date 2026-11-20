@@ -4,7 +4,8 @@
 (* __anext__ is a coroutine with the body below, or a generator with       *)
 (* CO_ITERABLE_COROUTINE awaiting by yield from, or it is an async         *)
 (* generator with that body, whose return "caught" is a yield of it and    *)
-(* whose raise StopAsyncIteration is a return, yielding got at its end:    *)
+(* whose raise StopAsyncIteration is a return, yielding got at its end,   *)
+(* or an instance whose Python __await__ gives that body's generator:     *)
 (*                                                                         *)
 (*     try: got = await Pause()                                            *)
 (*     except KeyError: after: return "caught" | raise StopAsyncIteration  *)
@@ -23,7 +24,7 @@
 (***************************************************************************)
 EXTENDS Naturals
 
-Programs == [source : {"coroutine", "generator", "agen"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"},
+Programs == [source : {"coroutine", "generator", "agen", "instance"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"},
              via : {"await", "direct", "next"}]
 
 VARIABLES program, outcome

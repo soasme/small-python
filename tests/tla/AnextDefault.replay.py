@@ -1,5 +1,6 @@
 # Replays AnextDefault.tla: each case suspends a coroutine in an await of
-# anext(it, "d"), it's __anext__ coroutine, or it an async generator,
+# anext(it, "d"), it's __anext__ coroutine or an instance with a Python
+# __await__, or it an async generator,
 # suspended in an await of its own, resumes the coroutine as the program
 # says, and writes what that did; or the case drives the awaitable's
 # __await__() itself.
@@ -44,6 +45,7 @@ def outcome(p):
             raise ValueError
         return got
 
+    plain = type(generator)(generator.__code__, globals(), None, None, generator.__closure__)
     generator.__code__ = generator.__code__.replace(co_flags=generator.__code__.co_flags | 0x100)
 
     class Based(It):
@@ -62,10 +64,22 @@ def outcome(p):
             raise ValueError
         yield got
 
+    class Awaiting:
+        # Its __await__, called at each step, gives one generator.
+        def __init__(self):
+            self.iterator = plain(None)
+
+        def __await__(self):
+            return self.iterator
+
+    class Instance(It):
+        def __anext__(self):
+            return Awaiting()
+
     async def driver(source):
         return await anext(source, "d")
 
-    source = {"coroutine": It, "generator": Based, "agen": agen}[p["source"]]()
+    source = {"coroutine": It, "generator": Based, "agen": agen, "instance": Instance}[p["source"]]()
     if p["via"] == "await":
         co = driver(source)
     else:

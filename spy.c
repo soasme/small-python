@@ -8854,6 +8854,9 @@ static SPYValue *generator_method(SPYContext *, SPYValue *, int, size_t, SPYValu
 static SPYValue *async_iterator(SPYContext *, SPYValue *, int);
 static SPYValue *stop_value(SPYContext *);
 static SPYValue *awaitable_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+static SPYValue *anext_awaiter(SPYValue *);
+static void anext_stopped(SPYContext *, SPYValue *);
+static SPYValue *anext_relay_k(SPYContext *, Machine *, SPYValue *, SPYValue *, int, size_t, SPYValue *const *, int);
 static int awaitable_iterator(SPYValue *v) {
     return v->type == SPY_ASYNC_GENERATOR_ASEND || v->type == SPY_ASYNC_GENERATOR_ATHROW || v->type == SPY_ANEXT_AWAITABLE;
 }
@@ -26164,6 +26167,14 @@ static SPYValue *generator_throw(SPYContext *c, SPYValue *g, size_t argc, SPYVal
  * delegating generator does not resume (13.16.3). */
 static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent, SPYValue *thrown,
                                size_t argc, SPYValue *const *argv, int *halt) {
+    if (iterator->type == SPY_ANEXT_AWAITABLE && !thrown && (!sent || sent->type == SPY_NONE))
+        return awaitable_method(c, iterator, M_NEXT, 0, NULL);
+    if (iterator->type == SPY_ANEXT_AWAITABLE && thrown && exits(c, thrown == c->unbound ? argv[0] : thrown)) {
+        /* An anext() awaitable's close is its own (19.3.4). */
+        SPYValue *value = awaitable_method(c, iterator, M_CLOSE, 0, NULL);
+        spy_release(value);
+        return c->error_type[0] ? NULL : raise_given(c, thrown, argc, argv, halt);
+    }
     if (awaitable_iterator(iterator))
         return awaitable_method(c, iterator, thrown ? M_THROW : M_SEND, thrown ? argc : 1,
                                       thrown ? argv : (SPYValue *[]){sent ? sent : c->none});
@@ -29563,6 +29574,13 @@ static SPYValue *exception_texter(SPYContext *c, SPYValue *callee, SPYValue *v) 
     if (repr) exception_shown(v, fn->as.native.owner, field, &python);
     return python || (!repr && (exception_str_target(c, v, fn->as.native.owner, &converter) || unicode_error_python(c, v, fn->as.native.owner) >= 0)) ? fn : NULL;
 }
+/* Whether callee, of method number method or a method of it bound, is an
+ * anext() awaitable's send, __next__, throw or close, which may call its
+ * source's Python __await__ as the step (awaitable_method). */
+static int anext_steps(SPYValue *callee, int method) {
+    SPYValue *self = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module ? callee->as.bound.self : method >= 0 ? callee : NULL;
+    return self && self->type == SPY_ANEXT_AWAITABLE && self->as.iterator.source->type == SPY_INSTANCE;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -29758,8 +29776,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     /* A builtin function runs as the step (step_native). */
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : c->error_type[0] ? NULL :
-             method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin ? step_native(c, m, callee, method, n, argc, argv, NULL) :
-             step_call(c, m, callee, method, n, argc, argv);
+             (method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin) || UNLIKELY(anext_steps(callee, method)) ?
+             step_native(c, m, callee, method, n, argc, argv, NULL) : step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
     return result;
@@ -31070,6 +31088,7 @@ static NO_INLINE SPYValue *target_copies(SPYContext *c, Machine *m, Node *n) {
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
+static int anext_steps(SPYValue *, int);
 static SPYValue *fold_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue **);
 /* min() or max() of argc arguments on m's stack after it (fold_call): the
  * value, or a class with the comparison to enter in c->entering_init. */
@@ -31405,7 +31424,10 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (callee->type == SPY_CLASS && calls && id < 0 && !getter && !init && !c->error_type[0])
         getter = class_described(c, m, callee, 0, argc, argv, NULL, unchanged, NULL);
     result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, callee, argc, argv, NULL) :
-             init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
+             init ? plain_construct(c, callee, init, argc, argv, NULL) :
+             /* next() of an anext() awaitable runs as the step (anext_steps). */
+             calls && argc == 1 && UNLIKELY(anext_steps(argv[0], M_NEXT)) && is_builtin(callee, B_NEXT) ?
+             step_native(c, m, callee, -1, n, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) { consume_traced(c, m, id, consumer, -1, NULL, generator, start, traceback); spy_release(consumer); if (traceback != c->unbound) spy_release(traceback); }
     return result;
@@ -31661,6 +31683,8 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     if (callee && id < 0 && !(result = calls && method < 0 ? native_entered(c, m, callee, argc + !skip, argv + skip, env) : NULL) &&
         !c->error_type[0] && !c->k_fn)
         result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, callee, argc + !skip, argv + skip, NULL) :
+                 /* An anext() awaitable's methods run as the step (anext_steps). */
+                 calls && UNLIKELY(anext_steps(callee, method)) ? step_native(c, m, callee, method, n, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start, traceback);
@@ -38075,6 +38099,15 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
         if (status != 1) call = NULL;
         if (status == 0 && !c->error_type[0]) *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
         else if (status < 0 && !c->error_type[0]) spy_error(c, "StopIteration", "");
+    } else if (!c->error_type[0] && d->type == SPY_ANEXT_AWAITABLE && (own = anext_awaiter(d)) &&
+               !(closing && machine_push(c, m, spy_retain(thrown)))) {
+        /* An anext() awaitable relays to its source's Python __await__'s
+         * iterator on m, returning into m as *kind (anext_relay_k). */
+        int method = closing ? M_CLOSE : thrown ? M_THROW : next ? M_NEXT : M_SEND;
+        SPYValue *arg = thrown ? thrown : sent;
+        anext_relay_k(c, m, d, own, method, method == M_THROW || method == M_SEND, &arg, *kind);
+        if (c->k_fn) call = spy_retain(c->unbound);
+        else if (closing) spy_release(machine_pop(m));
     } else if (!c->error_type[0])
         *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
     spy_release(sent); spy_release(thrown);
@@ -38133,6 +38166,8 @@ static NO_INLINE SPYValue *delegate_returned(SPYContext *c, Machine *m, int kind
         if ((result = delegate_asked(c, m, result, &kind)) == c->unbound || c->k_fn) return result;
         if (kind == CALL_CLOSED) kind = CALL_THROWN;
     }
+    /* One an anext() awaitable relayed (anext_iterated). */
+    if (!result && m->delegate && m->delegate->type == SPY_ANEXT_AWAITABLE) anext_stopped(c, m->delegate);
     if (kind == CALL_CLOSED) {
         SPYValue *thrown = machine_pop(m);
         spy_release(result); result = NULL;
@@ -38202,6 +38237,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         m->owner = NULL;
                         m = compare_leave(c, (Call *)m, result);
                         f = m->frame; code = m->code->items; pc = m->pc;
+                        /* What it raises next is at the step's line. */
+                        if (result) c->line = *c->frame_line;
                         if ((result = k(c, m, k_ctx, result)) == c->stepped) {
                             /* It ended its operator step (buffered_end), a
                              * short circuit maybe knowing its truth (truth_indexed). */
@@ -39757,26 +39794,97 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
     return generator_throw(c, g, argc, argv);
 }
 
+static Machine *step_machine(SPYContext *);
+static SPYValue *iterator_returned(SPYContext *, SPYValue *, SPYValue *, const char *);
+/* An async iterator's end, StopAsyncIteration, raised by the iterator
+ * anext() awaitable op relays to is StopIteration of op's default. */
+static void anext_stopped(SPYContext *c, SPYValue *op) {
+    if (!error_is(c, "StopAsyncIteration")) return;
+    spy_clear_error(c);
+    SPYValue *exception = exception_create(c, c->exceptions[X_STOP_ITERATION], 1, &op->as.iterator.counter);
+    if (exception) { raise_value(c, exception); spy_release(exception); }
+}
+/* What an anext() awaitable's relay (anext_iterated) gave, result. */
+static SPYValue *anext_sent(SPYContext *c, Machine *m, SPYValue *op, SPYValue *result) {
+    (void)m;
+    if (!result) anext_stopped(c, op);
+    spy_release(op);
+    return result;
+}
+/* What the Python __await__ of anext() awaitable state[0]'s source
+ * returned in result (awaitable_method): its method number state[1] with
+ * the arguments of state[2] relayed to that iterator's send, throw or
+ * close, __next__ to a generator's send of None or another's __next__,
+ * as a call step on m (comparek, anext_sent); for a yield from of it
+ * (anext_delegate), one returning into m as call kind state[3]
+ * (delegate_returned), c->stepped. */
+static SPYValue *anext_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *op = state->as.seq.items[0], *args = state->as.seq.items[2], *fn = NULL, *iterator;
+    int method = (int)state->as.seq.items[1]->as.integer_data.small;
+    iterator = result ? iterator_returned(c, op->as.iterator.source, result, "__await__") : NULL;
+    if (iterator && iterator->type == SPY_COROUTINE_ITERATOR) {
+        SPYValue *source = spy_retain(iterator->as.iterator.source);
+        spy_release(iterator); iterator = source;
+    }
+    SPYValue *sent = method == M_SEND ? args->as.seq.items[0] : c->none, *call = NULL;
+    int generator = iterator && (iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE);
+    if (iterator && method != M_NEXT) fn = attribute(c, iterator, method == M_THROW ? "throw" : method == M_SEND ? "send" : "close");
+    else if (generator) fn = attribute(c, iterator, "send");
+    else if (iterator) fn = iterator->type == SPY_INSTANCE ? special_method(c, iterator, "__next__") : attribute(c, iterator, "__next__");
+    if (fn && !c->error_type[0]) {
+        int given = method == M_THROW || method == M_CLOSE ? method == M_THROW : generator || method == M_SEND;
+        call = given && method != M_THROW ? tuple_of(c, 1, &sent) : given ? spy_retain(args) : value_new(c, SPY_TUPLE);
+    } else if (!fn && iterator && !c->error_type[0]) errorf(c, "TypeError", "'%s' object is not an iterator", type_name(iterator));
+    spy_release(iterator);
+    SPYValue *value = NULL;
+    if (call && state->as.seq.len == 4) {
+        c->k_fn = fn; c->k_env = call; c->k_unit = 2 + COMPARE_CALL + (int)call->as.seq.len; c->k = NULL; c->k_ctx = NULL;
+        c->k_kind = (int)state->as.seq.items[3]->as.integer_data.small;
+        value = c->stepped;
+    } else if (call) value = comparek(c, m, fn, call, COMPARE_CALL + (int)call->as.seq.len, anext_sent, spy_retain(op));
+    else spy_release(fn);
+    spy_release(state);
+    return value;
+}
+/* The Python __await__ of anext() awaitable op's source instance, or NULL. */
+static SPYValue *anext_awaiter(SPYValue *op) {
+    SPYValue *source = op->as.iterator.source, *awaiter;
+    return source->type == SPY_INSTANCE && (awaiter = class_lookup(source->as.map.parent, "__await__")) && awaiter->type == SPY_FUNCTION ? awaiter : NULL;
+}
+/* Relay anext() awaitable op's method number method of the argc
+ * arguments argv to its source's Python __await__'s iterator: awaiter
+ * called on m (callk), then that iterator's method (anext_iterated),
+ * returning into m as kind, or the step's result for -1. */
+static SPYValue *anext_relay_k(SPYContext *c, Machine *m, SPYValue *op, SPYValue *awaiter, int method, size_t argc, SPYValue *const *argv, int kind) {
+    SPYValue *number = spy_int(c, method), *args = number ? tuple_of(c, argc, argv) : NULL, *called = args ? spy_int(c, kind) : NULL;
+    SPYValue *state = called ? spy_tuple(c, 3 + (kind >= 0), (SPYValue *[]){op, number, args, called}) : NULL;
+    release_all(3, (SPYValue *[]){number, args, called});
+    return state ? callk(c, m, awaiter, 1, (SPYValue *[]){spy_retain(op->as.iterator.source)}, anext_iterated, state) : NULL;
+}
 static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_t argc, SPYValue *const *argv) {
     if (method == M_ITER) return spy_retain(op);
     if (op->type == SPY_ANEXT_AWAITABLE) {
-        SPYValue *source = op->as.iterator.source;
+        SPYValue *source = op->as.iterator.source, *awaiter;
+        Machine *m;
+        /* A Python __await__ of an instance is the step's machine's call
+         * (callk), a generator function's called here, its iterator
+         * relayed to there (anext_iterated). */
+        if (argc <= 3 && (awaiter = anext_awaiter(op)) && (m = step_machine(c))) return anext_relay_k(c, m, op, awaiter, method, argc, argv, -1);
+        /* Or its iterator's method is called here. */
         SPYValue *iterator = source->type == SPY_COROUTINE ? spy_retain(source) : await_iterator(c, source, NULL);
         if (!iterator) return NULL;
         SPYValue *value;
-        if (method == M_NEXT || method == M_SEND)
+        /* A send to an iterator no generator is its send method's. */
+        int generator = iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE || iterator->type == SPY_COROUTINE_ITERATOR;
+        if (method == M_NEXT || (method == M_SEND && generator))
             value = iterator_send(c, iterator, method == M_SEND ? argv[0] : c->none, NULL, 0, NULL, NULL);
         else {
-            SPYValue *fn = attribute(c, iterator, method == M_THROW ? "throw" : "close");
+            SPYValue *fn = attribute(c, iterator, method == M_THROW ? "throw" : method == M_SEND ? "send" : "close");
             value = fn ? call(c, fn, argc, argv) : NULL;
             spy_release(fn);
         }
         spy_release(iterator);
-        if (!value && error_is(c, "StopAsyncIteration")) {
-            spy_clear_error(c);
-            SPYValue *exception = exception_create(c, c->exceptions[X_STOP_ITERATION], 1, &op->as.iterator.counter);
-            if (exception) { raise_value(c, exception); spy_release(exception); }
-        }
+        if (!value) anext_stopped(c, op);
         return value;
     }
     if (method == M_CLOSE) {
@@ -46262,7 +46370,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *carried = a->type == SPY_INSTANCE ? builtin_base(c, a, "__next__", NULL) : NULL;
         if (carried && carried->type == SPY_ITERATOR) a = carried;
         if (a->type == SPY_INSTANCE || metaclassed(a) || a->type == SPY_GENERATOR || a->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(a)) {
-            SPYValue *value = a->type == SPY_INSTANCE || metaclassed(a) || awaitable_iterator(a) ? call_special(c, a, "__next__", 0, NULL) :
+            /* An anext() awaitable's may relay on the step's machine (awaitable_method). */
+            SPYValue *value = a->type == SPY_ANEXT_AWAITABLE && argc == 1 ? awaitable_method(c, a, M_NEXT, 0, NULL) :
+                a->type == SPY_INSTANCE || metaclassed(a) || awaitable_iterator(a) ? call_special(c, a, "__next__", 0, NULL) :
                 generator_send(c, a->type == SPY_COROUTINE_ITERATOR ? a->as.iterator.source : a, NULL, NULL);
             if (!value && argc == 2 && error_is(c, "StopIteration")) { spy_clear_error(c); return spy_retain(argv[1]); }
             return value;
