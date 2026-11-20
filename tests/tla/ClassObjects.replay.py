@@ -52,6 +52,12 @@ def outcome(p):
             return "written"
         if op == "subdoc":
             return repr(type("D", (C,), {}).__doc__)
+        if op == "docget":
+            class Doc:
+                def __get__(self, o, t):
+                    for _ in (): pass
+                    return (o, t.__name__)
+            return repr(type("D", (C,), {"__doc__": Doc()}).__doc__)
         if op == "subclasses":
             return name(A.__subclasses__())
         if op == "classset":

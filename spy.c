@@ -12978,6 +12978,12 @@ static int class_hooked(SPYValue *v) {
     SPYValue *meta = v->as.map.meta, *hook = meta ? class_lookup(meta, "__getattribute__") : NULL;
     return meta && (class_lookup(meta, "__getattr__") || (hook && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)));
 }
+/* Whether value is the own __doc__ of class v, not a builtin one, which
+ * type's __doc__, or the class's lookup past a metaclass's non-data one,
+ * reads through its __get__. */
+static int own_doc(const char *name, SPYValue *v, SPYValue *value) {
+    return !strcmp(name, "__doc__") && !v->as.map.native && name_local(v, "__doc__") == value;
+}
 /* The descriptor whose Python getter a read of class v's attribute name
  * calls (attribute_value) after any metaclass hook: a property
  * or data descriptor of its metaclass, else a class attribute's __get__,
@@ -12990,7 +12996,7 @@ static SPYValue *class_getter(SPYContext *c, SPYValue *v, const char *name) {
     /* Special names have their own answers, and a builtin base's
      * attribute comes before the class's, or the metaclass's non-data,
      * descriptor (attribute_value). */
-    if ((!strncmp(name, "__", 2) && !(value == found && data_descriptor_get(found) && !type_answers(c, v, name))) ||
+    if ((!strncmp(name, "__", 2) && !(value == found && data_descriptor_get(found) && !type_answers(c, v, name)) && !own_doc(name, v, value)) ||
         (value != found ? builtin_slot_before(c, v, name) != NULL :
                                     !data_descriptor_get(found) && builtin_descriptor_lookup(c, v, name))) return NULL;
     return python_getter(c, value) ? value : NULL;

@@ -17,7 +17,9 @@
 (*                                                                         *)
 (* optionally a docstring, an annotation x: int, and a type parameter T;   *)
 (* its method m assigns self.b and self.a. It reads one attribute of C, or *)
-(* does one of: C.__dict__["x"] = 1; D(C).__doc__; A.__subclasses__();    *)
+(* does one of: C.__dict__["x"] = 1; D(C).__doc__; the __doc__ of D(C)   *)
+(* whose own __doc__ is a descriptor with a Python __get__;               *)
+(* A.__subclasses__();                                                     *)
 (* C.w = 1 then A.w; c.w = 5 then C.w; c.z = 1 then c.__dict__;            *)
 (* c.__class__. A read may give C a metaclass whose property of that name *)
 (* answers first (TypeGetAttr), "P"; a __qualname__ one, or a __dict__   *)
@@ -30,7 +32,7 @@ EXTENDS Naturals, Sequences
 Bases == {<<>>, <<"A">>, <<"A", "B">>, <<"A", "int">>, <<"int">>}
 Reads == {"__name__", "__qualname__", "__module__", "__dict__", "__bases__", "__base__", "__doc__", "__annotations__",
           "__annotate__", "__type_params__", "__static_attributes__", "__firstlineno__", "__mro__"}
-Ops == {"dictwrite", "subdoc", "subclasses", "classset", "instanceset", "instancedict", "class"}
+Ops == {"dictwrite", "subdoc", "docget", "subclasses", "classset", "instanceset", "instancedict", "class"}
 Programs == [bases : Bases, doc : BOOLEAN, ann : BOOLEAN, generic : BOOLEAN, nested : BOOLEAN, op : {"read"}, attr : Reads, meta : BOOLEAN]
             \cup [bases : Bases, doc : BOOLEAN, ann : BOOLEAN, generic : BOOLEAN, nested : BOOLEAN, op : Ops]
 
@@ -71,6 +73,8 @@ Run(p) ==
                           ELSE IF p.attr = "__qualname__" \/ (p.attr = "__dict__" /\ p.generic) THEN "TypeError" ELSE "'P'"
     ELSE CASE p.op = "dictwrite" -> "TypeError"                   \* a read-only view
            [] p.op = "subdoc" -> "None"                            \* not inherited
+           \* A subclass D's own __doc__, a descriptor, read through its __get__.
+           [] p.op = "docget" -> "(None, 'D')"
            [] p.op = "subclasses" -> IF HasA(p) THEN "[C]" ELSE "[]"
            [] p.op = "classset" -> "0"                          \* A.w is untouched
            [] p.op = "instanceset" -> IF HasA(p) THEN "0" ELSE "AttributeError"
