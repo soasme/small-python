@@ -169,6 +169,22 @@ def subclass(p, log):
     return repr(b"-".join([x, x]))
 
 
+def item(p, log):
+    methods = {"B": "__index__", "d": "__float__", "?": "__bool__"}
+    good = {"B": 7, "d": 2.5, "?": True}
+    bad = {"B": 256, "d": "x", "?": 1}
+    name = methods[p["format"]]
+
+    def convert(self):
+        for _ in (): pass
+        log.append(name[2:-2])
+        return (bad if p["bad"] else good)[p["format"]]
+    V = type("V", (), {name: convert})
+    m = memoryview(bytearray(8)).cast(p["format"])
+    m[0] = V()
+    return repr(m[0])
+
+
 def outcome(p):
     log = []
     try:
@@ -186,6 +202,8 @@ def outcome(p):
             result = several(p, log)
         elif p["part"] == "subclass":
             result = subclass(p, log)
+        elif p["part"] == "item":
+            result = item(p, log)
         else:
             result = repr(memoryview(object()))
     except (TypeError, BufferError, ValueError, NotImplementedError, IndexError, KeyError) as error:

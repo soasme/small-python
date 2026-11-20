@@ -44,7 +44,10 @@
 (* returns memoryview(b"BUF") and whose __release_buffer__ logs "rel", and *)
 (* x = X(b"own"): it reads memoryview(x) inside `with`, b"a" + x,         *)
 (* b"own" == x, x.decode(), or b"-".join([x, x]). The outcome is the log   *)
-(* and the result or the exception.                                        *)
+(* and the result or the exception. An item program stores into item 0 of *)
+(* a view of format B, d or ? an instance whose Python __index__,          *)
+(* __float__ or __bool__ logs its name and returns 7, 2.5 or True, or a    *)
+(* bad 256, "x" or 1, and reads the item back.                             *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -56,6 +59,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"grid"}, first : {"in", "out"}, store : BOOLEAN]
             \cup [part : {"several"}, op : {"replace", "join", "starred", "first", "second", "compare"}]
             \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice"}]
+            \cup [part : {"item"}, format : {"B", "d", "?"}, bad : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -107,6 +111,10 @@ Run(p) == CASE p.part = "export" -> Export(p)
             [] p.part = "resize" -> IF p.released THEN "3" ELSE "BufferError"
             [] p.part = "plain" -> "TypeError"
             [] p.part = "reenter" -> IF p.during \in {"index", "store"} THEN "ValueError" ELSE "BufferError"
+            \* The value converts once for the format; a bad number is invalid.
+            [] p.part = "item" -> CASE p.format = "B" -> IF p.bad THEN "index ValueError" ELSE "index 7"
+                                   [] p.format = "d" -> IF p.bad THEN "float TypeError" ELSE "float 2.5"
+                                   [] OTHER -> IF p.bad THEN "bool TypeError" ELSE "bool True"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

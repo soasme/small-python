@@ -581,6 +581,7 @@ Unreleased (0.10.0):
 - `range.__getitem__` calls an index's `__index__` once, and an index beyond the index size raises "range object index out of range"
 - `not`, `and`, `or`, `if` and `while` take the length of a Python `__len__` returning an object with a Python `__index__` without nesting on the C stack
 - `map()` of a builtin, builtin type or builtin method converts its arguments' Python `__index__` without nesting on the C stack
+- storing into a `memoryview` item converts the value's Python `__index__`, `__float__` or `__bool__` without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

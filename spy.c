@@ -20295,7 +20295,7 @@ static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, SPYValue *
 }
 static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, value, 0); }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
-static int store_hooked(SPYContext *, SPYValue *, SPYValue *);
+static int store_hooked(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 /* The Python function a store to, or with deleting a deletion of,
  * attribute name of object, an instance or a class with a metaclass,
  * calls (SetAttr): its class's or metaclass's __setattr__ or __delattr__, a property's setter or deleter, or a data
@@ -20341,7 +20341,8 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
         SPYValue *object = leaf_operand(f, n->a), *key = object && n->kind == N_INDEX ? leaf_operand(f, n->b) : NULL;
         if (calls && key && (object->type == SPY_INSTANCE || key->type == SPY_INSTANCE || key->type == SPY_TUPLE ||
-                             (object->type == SPY_DICT && eq_keyed(object))) && store_hooked(c, object, key)) return 1;
+                             (object->type == SPY_DICT && eq_keyed(object)) || (object->type == SPY_MEMORYVIEW && value->type == SPY_INSTANCE)) &&
+            store_hooked(c, object, key, value)) return 1;
         if (object && (key || n->kind == N_ATTR)) {
             spy_retain(object); spy_retain(key);
             int status = key ? set_index(c, object, key, value) : node_set_attribute(c, object, n, value);
@@ -33792,16 +33793,20 @@ static int store_collides(SPYContext *c, SPYValue *map, SPYValue *key) {
     hash_kept(c, spy_retain(key), 1, hash);
     return map_collides(map, key, hash);
 }
-/* Whether a store of key into object is a call (store_call): a Python
- * __setitem__, or the key's Python __hash__ for a dict, or a comparison
- * of the key for an exact one (native_store), or its Python __index__ for
- * a list, or an item's of a view's tuple key (index_call). */
-static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key) {
+static SPYValue *memory_converter(SPYContext *, SPYValue *, SPYValue *, SPYValue *, const char **);
+static void memory_store_call(SPYContext *, Machine *, SPYValue *, const char *, SPYValue *, SPYValue *, SPYValue *);
+/* Whether a store of value at key into object is a call (store_call): a
+ * Python __setitem__, or the key's Python __hash__ for a dict, or a
+ * comparison of the key for an exact one (native_store), or its Python
+ * __index__ for a list, or an item's of a view's tuple key (index_call),
+ * or the value's conversion for a view's item (memory_store_call). */
+static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
     SPYValue *map;
+    const char *kind;
     return (object->type == SPY_INSTANCE && setitem_function(c, object)) ||
            (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(map = store_storage(c, object, "__setitem__"), key, 0) &&
                                                                         store_collides(c, map, key)))) ||
-           list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1);
+           list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1) || memory_converter(c, object, key, value, &kind);
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
@@ -33966,6 +33971,17 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     else {
         args[0] = spy_retain(leaf_operand(f, n->a)); args[1] = spy_retain(leaf_operand(f, n->b));
         args[2] = spy_retain(m->stack[m->len - 1]);
+    }
+    if (args[0]->type == SPY_MEMORYVIEW) {
+        /* A view's item converted on m (memory_store_call). */
+        const char *kind;
+        SPYValue *function = memory_converter(c, args[0], args[1], args[2], &kind);
+        if (function) {
+            relocate(c, n);
+            memory_store_call(c, m, function, kind, args[0], args[1], args[2]);
+            release_all(3, args);
+            return NULL;
+        }
     }
     SPYValue *map, *function = setitem_function(c, args[0]);
     if (!function) {
@@ -36484,7 +36500,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(a); spy_release(b); a = b = NULL;
             goto enter_k;
         CASE(BC_SET_TARGET)
-            if (ins->arg || (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 2], m->stack[m->len - 1]))) goto store_step;
+            if (ins->arg || (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) goto store_step;
             if (n->kind == N_INDEX && UNLIKELY(slice_source(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) {
                 if (slice_listing(c, m)) goto consume_generator;
                 break;
@@ -36504,7 +36520,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 node_attribute(c, m->stack[m->len - 1], n, 0);
             machine_push(c, m, value); break;
         CASE(BC_SAVE_TARGET)
-            if (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 3], m->stack[m->len - 2])) goto store_step;
+            if (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 3], m->stack[m->len - 2], m->stack[m->len - 1])) goto store_step;
             value = machine_pop(m);
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
@@ -42141,6 +42157,54 @@ static SPYValue *memory_subscript(SPYContext *c, SPYValue *m, SPYValue *key) {
     }
     if (memory_multi_key(key, 1)) return spy_error(c, "NotImplementedError", "multi-dimensional slicing is not implemented");
     return spy_error(c, "TypeError", "memoryview: invalid slice key");
+}
+/* The Python method that converts value, an instance, for a store at
+ * key into view m's item, by an int key into one dimension or by ... or
+ * () into none, a function on the machine: __index__ for an integer format, __bool__ for '?', and
+ * __float__, or __index__ without one, for a real one; *kind its name.
+ * Else NULL. */
+static SPYValue *memory_converter(SPYContext *c, SPYValue *m, SPYValue *key, SPYValue *value, const char **kind) {
+    if (m->type != SPY_MEMORYVIEW || value->type != SPY_INSTANCE ||
+        !(m->as.memory.ndim == 1 ? is_int(key) : !m->as.memory.ndim && (key->type == SPY_ELLIPSIS || (key->type == SPY_TUPLE && !key->as.seq.len))))
+        return NULL;
+    char code = memory_code(m)[0];
+    if (code == 'c' || code == 'Z') return NULL;
+    if (code == '?') return item_function(c, value, *kind = "__bool__");
+    if ((code == 'f' || code == 'd' || code == 'e') && class_lookup(value->as.map.parent, "__float__")) return item_function(c, value, *kind = "__float__");
+    *kind = "__index__";
+    return index_function(c, value);
+}
+static SPYValue *memory_stored(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The store of value at key into view m, its conversion function, of
+ * kind, m's call (callk, memory_stored) once the view is checked and the
+ * key indexed, as memory_assign does; the store step ends there
+ * (store_ended). */
+static void memory_store_call(SPYContext *c, Machine *m, SPYValue *function, const char *kind, SPYValue *view, SPYValue *key, SPYValue *value) {
+    ptrdiff_t at = view->as.memory.offset;
+    if (memory_check(c, view)) return;
+    if (view->as.memory.readonly) { spy_error(c, "TypeError", "cannot modify read-only memory"); return; }
+    if (view->as.memory.ndim && memory_full_index(c, view, key, &at)) return;
+    SPYValue *parts[] = {view, int_value(c, (int64_t)at), value, spy_string(c, kind, strlen(kind))};
+    SPYValue *state = parts[1] && parts[3] ? spy_tuple(c, 4, parts) : NULL;
+    spy_release(parts[1]); spy_release(parts[3]);
+    if (state) callk(c, m, function, 1, (SPYValue *[]){spy_retain(value)}, memory_stored, state);
+}
+/* What a view item's conversion (memory_store_call) returned in result:
+ * the item written from it as item_pack and memory_pack do, the store
+ * step ended. */
+static SPYValue *memory_stored(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *view = items[0], *value = items[2], *packed = NULL;
+    const char *code = memory_code(view);
+    int real = *code == 'f' || *code == 'd' || *code == 'e';
+    if (result && *code == '?') {
+        int truth = truth_result(c, value, 1, result);
+        if (!c->error_type[0]) packed = spy_bool(c, truth);
+    } else if (result) packed = real ? complex_result(c, value, items[3]->as.string.data, result) : index_result(c, value, result);
+    if (!packed && *code != '?' && error_is(c, "TypeError")) memory_value_error(c, code, 1);
+    else if (!packed && real && error_is(c, "OverflowError")) memory_value_error(c, code, 0);
+    int status = packed ? memory_pack(c, view, (ptrdiff_t)items[1]->as.integer_data.small, packed) : -1;
+    spy_release(packed); spy_release(state);
+    return status ? NULL : store_ended(c, m, NULL);
 }
 static int memory_assign(SPYContext *c, SPYValue *m, SPYValue *key, SPYValue *value) {
     if (memory_check(c, m)) return -1;
