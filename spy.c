@@ -15413,6 +15413,7 @@ typedef struct {
     SPYValue *keywords; /* dict()'s or dict.update()'s, merged after the source's items, set again when rehash (keywords_set). */
     SPYValue *call; /* A call's ** merge: the callee a duplicate keyword's error names (merge_keyword). */
     SPYValue *awaited; /* An asend or __anext__ awaitable's send or __next__ (asend_resumes): the operation. */
+    SPYValue *defaulted; /* An anext() awaitable's send, throw or close relayed to its asend (anext_relayed): its default. */
     SPYValue *instance; /* A class call's instance whose list's or set's __init__ extends it (constructed): the value. */
     SPYValue *pair; /* A sort's comparison of two lists' items, which its call may remove (sorter_call): the two. */
     SPYValue *sources, *updated; /* A set method's sources after its first, the next at source (set_source); intersection_update's set. */
@@ -15514,6 +15515,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->wrap) visit(b->consumer->wrap, data);
         if (b->consumer && b->consumer->call) visit(b->consumer->call, data);
         if (b->consumer && b->consumer->awaited) visit(b->consumer->awaited, data);
+        if (b->consumer && b->consumer->defaulted) visit(b->consumer->defaulted, data);
         if (b->consumer && b->consumer->instance) visit(b->consumer->instance, data);
         if (b->consumer && b->consumer->pair) visit(b->consumer->pair, data);
         if (b->consumer && b->consumer->closed_ctx) visit(b->consumer->closed_ctx, data);
@@ -25658,6 +25660,12 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         sort_restore(c, b.consumer->target, b.value);
         spy_release(b.consumer->target); b.value = NULL;
     }
+    if (b.consumer && b.consumer->defaulted && error_is(c, "StopAsyncIteration")) {
+        /* An anext() awaitable's StopAsyncIteration is a StopIteration of its default (awaitable_method). */
+        spy_clear_error(c);
+        SPYValue *exception = exception_create(c, c->exceptions[X_STOP_ITERATION], 1, &b.consumer->defaulted);
+        if (exception) { raise_value(c, exception); spy_release(exception); }
+    }
     if (b.consumer && b.consumer->awaited && c->error_type[0]) {
         /* An operation's send that raised, a StopIteration for its yield included, ends it (awaitable_method). */
         b.consumer->awaited->as.async_operation.state = 2;
@@ -25675,7 +25683,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee); spy_release(b.consumer->wrap);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty); spy_release(b.consumer->keywords); spy_release(b.consumer->call);
-        spy_release(b.consumer->awaited); spy_release(b.consumer->instance); spy_release(b.consumer->pair);
+        spy_release(b.consumer->awaited); spy_release(b.consumer->defaulted); spy_release(b.consumer->instance); spy_release(b.consumer->pair);
         spy_release(b.consumer->sources); spy_release(b.consumer->updated);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         spy_release(b.consumer->closed_ctx);
@@ -25914,6 +25922,19 @@ static SPYValue *async_returned(SPYContext *c, SPYValue *value, SPYValue *iterat
 static SPYValue *anext_asend(SPYValue *op) {
     SPYValue *source = op->as.iterator.source;
     return source->type == SPY_ASYNC_GENERATOR_ASEND ? source : NULL;
+}
+/* What an anext() awaitable of an asend relays its send, throw or close
+ * to (awaitable_method): for callee, the awaitable of method number
+ * *method or a method of it bound, that asend, *method then its number
+ * and *defaulted, given, its default; else callee. */
+static SPYValue *anext_relayed(SPYValue *callee, int *method, SPYValue **defaulted) {
+    SPYValue *self = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module ? callee->as.bound.self : *method >= 0 ? callee : NULL;
+    int number = self != callee && self ? callee->as.bound.method : *method;
+    if (!self || self->type != SPY_ANEXT_AWAITABLE || !anext_asend(self) ||
+        (number != M_NEXT && number != M_SEND && number != M_THROW && number != M_CLOSE)) return callee;
+    *method = number;
+    if (defaulted) *defaulted = self->as.iterator.counter;
+    return anext_asend(self);
 }
 static void finish_delegate(SPYContext *c, Machine *m) {
     /* An awaited comprehension's StopIteration is its value only when it
@@ -26696,6 +26717,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
     if (built) callee = built;
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    callee = anext_relayed(callee, &method, NULL);
     /* A coroutine wrapper's methods are its coroutine's, its __next__ and
      * next() of it the coroutine's send(None). */
     int wrapped = callee->type == SPY_COROUTINE_ITERATOR && method >= 0;
@@ -26716,6 +26738,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (method < 0 && argc == 2 && self_consumer(c, callee, argv[0])) { argc--; argv++; }
     if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ASEND && is_builtin(callee, B_NEXT))
         return asend_resumes(argv[0], M_NEXT, 0, NULL) ? B_NEXT : -1;
+    if (method < 0 && argc == 1 && argv[0]->type == SPY_ANEXT_AWAITABLE && anext_asend(argv[0]) && is_builtin(callee, B_NEXT))
+        return asend_resumes(anext_asend(argv[0]), M_NEXT, 0, NULL) ? B_NEXT : -1;
     /* An athrow's or aclose's first send, or next() of it, throws its
      * exception into its async generator (athrow_args). */
     if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW && is_builtin(callee, B_NEXT)) {
@@ -26840,7 +26864,7 @@ static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
                      metaclassed(argv[0]) || (argv[0]->type == SPY_FUNCTION && argv[0]->as.function.attributes) || proxies_instance(argv[0]) ||
-                     argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW ||
+                     argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW || argv[0]->type == SPY_ANEXT_AWAITABLE ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
                        callee->type == SPY_METHOD || callee->type == SPY_CLASS || (callee->type == SPY_NATIVE && argc == 2))) ||
@@ -27007,12 +27031,24 @@ static void min_max_fed(Consumer *s) {
  * throw's traceback, borrowed, becomes its exception's (thrown_exception). */
 static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start,
                            SPYValue *traceback) {
+    /* An anext() awaitable's methods are its asend's, its default kept;
+     * a throw that first calls its class gives the awaitable again. */
+    SPYValue *defaulted = NULL, *relaying = callee;
+    int relayed = method;
+    callee = anext_relayed(callee, &method, &defaulted);
+    if (callee == relaying) relaying = NULL;
+    if (id == B_NEXT && method < 0 && generator && generator->type == SPY_ANEXT_AWAITABLE && anext_asend(generator)) {
+        SPYValue *asend = spy_retain(anext_asend(generator));
+        defaulted = generator->as.iterator.counter;
+        spy_release(generator); generator = asend;
+    }
+    spy_retain(defaulted);
     /* A native method given its object first is bound to it (self_consumer). */
     SPYValue *bound = NULL;
     if (callee->type == SPY_NATIVE && (init_extends(callee) || bytes_joining(callee) || bytes_extend(callee))) {
         bound = bind_method(c, generator, callee);
         spy_release(generator);
-        if (!bound) { spy_release(start); return; }
+        if (!bound) { spy_release(start); spy_release(defaulted); return; }
         generator = start; start = NULL; callee = bound;
     }
     /* A set method's further sources follow its first (set_source). */
@@ -27021,7 +27057,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     else if (start && callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE && callee->as.method.function->as.native.kwcall == set_method) {
         sources = tuple_of(c, traceback ? 2 : 1, (SPYValue *[]){start, traceback});
         spy_release(start); start = traceback = NULL;
-        if (!sources) { spy_release(generator); return; }
+        if (!sources) { spy_release(generator); spy_release(defaulted); return; }
     }
     /* A method-wrapper's or super()'s __next__ is next() of its iterator (slotted_next). */
     if (id == B_NEXT && callee->type == SPY_METHOD && !generator) generator = spy_retain(slotted_next(c, callee, 0, NULL));
@@ -27054,14 +27090,14 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         int given = start && start->type == SPY_INSTANCE && subclass(start->as.map.parent, generator);
         SPYValue *allocator = given || argc > 6 || !subclass(generator, c->exceptions[X_BASE_EXCEPTION]) ? NULL : new_method(c, generator);
         if (allocator) {
-            SPYValue *consumer[] = {callee, int_value(c, method), name ? name : c->none, traceback ? traceback : c->none};
+            SPYValue *consumer[] = {relaying ? relaying : callee, int_value(c, relaying ? relayed : method), name ? name : c->none, traceback ? traceback : c->none};
             if (consumer[1]) throw_new(c, m, consumer, generator, generator, allocator, argc, argv);
-            spy_release(consumer[1]); spy_release(generator); spy_release(start); spy_release(awaited);
+            spy_release(consumer[1]); spy_release(generator); spy_release(start); spy_release(awaited); spy_release(defaulted);
             return;
         }
         made = given || argc > 6 ? NULL : raised_instance(c, generator, argc, argv, &init);
         if (made) {
-            SPYValue *parts[] = {spy_retain(callee), int_value(c, method), spy_retain(name ? name : c->none),
+            SPYValue *parts[] = {spy_retain(relaying ? relaying : callee), int_value(c, relaying ? relayed : method), spy_retain(name ? name : c->none),
                                  spy_retain(traceback ? traceback : c->none), made}, *args[8];
             args[0] = spy_retain(made);
             for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(argv[i]);
@@ -27069,7 +27105,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
             release_all(5, parts);
             if (state) callk(c, m, init, argc + 1, args, throw_inited, state);
             else release_all(argc + 1, args);
-            spy_release(generator); spy_release(start); spy_release(awaited);
+            spy_release(generator); spy_release(start); spy_release(awaited); spy_release(defaulted);
             return;
         }
     }
@@ -27143,11 +27179,12 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     if (given) { iterator_refused(c, id, collects, given); spy_release(given); }
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(consumer); release_all(11, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited, bound, sources, exit}); return; }
+    if (!block) { mem_free(consumer); release_all(12, (SPYValue *[]){result, generator, sent, source, value, searched, wrap, awaited, bound, sources, exit, defaulted}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
                            .searched = searched, .wrap = wrap, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
-                           .phase = id == B_SET_TOGGLE, .awaited = awaited, .closes = closes, .sources = sources};
+                           .phase = id == B_SET_TOGGLE, .awaited = awaited, .closes = closes, .sources = sources,
+                           .defaulted = defaulted};
     if (!keyed) min_max_fed(consumer);
     spy_release(bound);
     block->value = generator; block->consumer = consumer;
@@ -27652,6 +27689,8 @@ static struct Sorter *sorter_begin(SPYContext *, SPYValue *, SPYValue *, int);
 static int sort_step(struct Sorter *);
 static SPYValue *sorter_call(SPYContext *, struct Sorter *);
 static void sorter_end(SPYValue *, struct Sorter *, int);
+static int sort_keys(SPYContext *, SPYValue *, SPYValue *, int);
+static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
 static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, size_t positional, SPYValue *const *argv,
                                   const Entry *kw, size_t kwc) {
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
@@ -27694,36 +27733,65 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
         return 1;
     }
     /* With no key, a sort of instances (instance_sort) takes the items as
-     * its keys. */
-    if (key ? !key_function(c, key) && !key_converts(c, key, method ? 1 : positional, method ? &callee : argv) :
-              keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0])) return 0;
+     * its keys; any sort whose reverse has a Python truth calls it. */
+    int length = 0, truth = keyed == KEY_SORT && reverse && (reverse->type == SPY_INSTANCE || metaclassed(reverse)) &&
+                            truth_function(c, reverse, &length);
+    if (!truth && (key ? !key_function(c, key) && !key_converts(c, key, method ? 1 : positional, method ? &callee : argv) :
+                         keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0]))) return 0;
     /* sorted() takes its items before list.sort reads reverse, which reads
      * it before it empties the list. */
     SPYValue *items = NULL, *keys = NULL;
     Consumer *consumer = allocate(c, sizeof(*consumer));
-    int ready = 0, descending = 0;
+    int ready = 0, descending = 0, reversing = 0;
     if (!consumer) ;
     else if (keyed != KEY_SORT) {
         SPYValue *all = positional == 1 ? spy_retain(argv[0]) : spy_tuple(c, positional, argv);
         ready = all && (items = get_iterator(c, all));
         spy_release(all);
     } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !list_extend(c, items, argv[0])))) {
-        descending = reverse ? truthy(reverse) : 0;
-        ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee, &items)) &&
-                !sequence_reserve(c, keys, items->as.seq.len);
-        for (size_t i = 0; ready && !key && i < items->as.seq.len; i++) keys->as.seq.items[keys->as.seq.len++] = spy_retain(items->as.seq.items[i]);
+        /* A Python __bool__ or __len__ of reverse is the sort's first call
+         * (key_call), before list.sort empties its list (sort_reversed). */
+        if (truth) {
+            reversing = (1 + length) | method << 2;
+            if (method) items = spy_retain(callee);
+        } else descending = reverse ? truthy(reverse) : 0;
+        ready = !c->error_type[0] && (reversing || ((!method || !sort_detach_into(c, callee, &items)) && !sort_keys(c, keys, items, !key)));
     }
     Block *block = ready ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (block) {
         *consumer = (Consumer){.keyed = keyed, .descending = descending, .result = keys, .callee = key ? spy_retain(key) : NULL,
-                               .target = method ? spy_retain(callee) : NULL, .empty = empty ? spy_retain(empty) : NULL};
+                               .target = method && !reversing ? spy_retain(callee) : NULL, .empty = empty ? spy_retain(empty) : NULL,
+                               .item = reversing ? spy_retain(reverse) : NULL, .phase = reversing};
         block->value = items; block->consumer = consumer;
         return 1;
     }
-    if (ready && method) sort_restore(c, callee, items);
+    if (ready && method && !reversing) sort_restore(c, callee, items);
     else spy_release(items);
     mem_free(consumer); spy_release(keys);
     return -1;
+}
+/* The keys of a sort of items: room for each, or with no key function
+ * (keyless) the items themselves. */
+static int sort_keys(SPYContext *c, SPYValue *keys, SPYValue *items, int keyless) {
+    if (sequence_reserve(c, keys, items->as.seq.len)) return -1;
+    for (size_t i = 0; keyless && i < items->as.seq.len; i++) keys->as.seq.items[keys->as.seq.len++] = spy_retain(items->as.seq.items[i]);
+    return 0;
+}
+/* The sort atop m takes reverse's truth that its __bool__ or __len__
+ * returned in result (key_consumer); a list.sort then empties its list,
+ * the block's value, into the working list. */
+static int sort_reversed(SPYContext *c, Machine *m, Consumer *s, SPYValue *result) {
+    Block *top = &m->blocks[m->block_len - 1];
+    int listed = s->phase >> 2;
+    s->descending = truth_result(c, s->item, (s->phase & 3) == 1, result);
+    spy_release(s->item); s->item = NULL; s->phase = 0;
+    if (c->error_type[0]) return -1;
+    if (listed) {
+        SPYValue *list = top->value;
+        if (sort_detach_into(c, list, &top->value)) { top->value = list; return -1; }
+        s->target = list;
+    }
+    return sort_keys(c, s->result, top->value, !s->callee);
 }
 /* Which of an operator's special method calls one is: x's own first, y's
  * reflected one first, or the last. */
@@ -27819,6 +27887,12 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         SPYValue *value = get_index(c, s->mapping, s->item);
         if (value) key_took(c, m, value);
         return NULL;
+    }
+    if (s->keyed == KEY_SORT && s->phase) {
+        /* reverse's truth first (sort_reversed). */
+        int length = 0;
+        SPYValue *function = truth_function(c, s->item, &length), *self = spy_retain(s->item);
+        return (*env = function_env(c, function, 1, &self, NULL, 1)) ? spy_retain(function) : NULL;
     }
     if (s->keyed == KEY_SORT) {
         SPYValue *function;
@@ -28217,6 +28291,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         spy_release(fed); spy_release(key);
         return failed ? -1 : 0;
     }
+    if (s->keyed == KEY_SORT && s->phase) return sort_reversed(c, m, s, key);
     if (s->keyed == KEY_SORT && s->sorter) {
         /* The result of the sort's comparison under way: of two items of
          * tuple keys by __eq__, which goes on to the next item or decides
@@ -29711,7 +29786,7 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
     if ((method < 0 ? UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_METHOD | UINT64_C(1) << SPY_CLASS |
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD | UINT64_C(1) << SPY_STATICMETHOD) :
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
-                      callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ||
+                      callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW || callee->type == SPY_ANEXT_AWAITABLE ||
                       (argc && (argv[0]->type == SPY_INSTANCE ||
                                 /* bytes choices (buffered_choice), a dict's tuple key (hashing_call) */
                                 (argv[0]->type == SPY_TUPLE && (((method == M_STARTSWITH || method == M_ENDSWITH) && callee->type != SPY_STRING) ||
@@ -29720,7 +29795,7 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                       /* a slice's parts (slice_part) */
                       method == M_INDICES) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR ||
-                  argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW)) ||
+                  argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW || argv[0]->type == SPY_ANEXT_AWAITABLE)) ||
         /* type.__call__ of a class (unbound_called) */
         (callee->type == SPY_NATIVE && ((argc && argv[0]->type == SPY_CLASS && (argv[0]->as.map.meta || callee->as.native.kwcall == type_method)) ||
                                         /* memoryview.release() of a view (native_entered), len() of

@@ -66,7 +66,7 @@ Cases == {"iter_sequence_protocol", "enumerate_start_first", "reversed_hook", "r
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
-          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_list_ties", "sort_tuple_lt_only", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "sort_truth", "max_key_truth", "len_negative", "len_big",
+          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_list_ties", "sort_tuple_lt_only", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "sort_truth", "sort_reverse_truth", "max_key_truth", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
           "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
 Programs == [op : Ops, l : Lists]
@@ -228,6 +228,9 @@ Case(c) ==
       [] c = "min_reflected_truth" -> "(1, 3, ['lt', 'gt', 'bool', 'gt', 'bool'])"
       \* a sort orders a pair by the truth of its __lt__ or __eq__ result
       [] c = "sort_truth" -> "([1, 2], [(1, 1), (1, 2)], ['lt', 'bool', 'eq', 'bool'])"
+      \* a sort takes reverse's truth, by its __bool__ or __len__, before its
+      \* key calls, while list.sort's list still holds its items
+      [] c = "sort_reverse_truth" -> "([3, 1], [1, 3], [('bool', 2), ('key', 1), ('key', 3), 'len'])"
       \* max() by a key calls the best key's reflected method first when the key
       \* has only object's, then the result's __bool__
       [] c = "max_key_truth" -> "(3, ['lt', 'bool', 'lt', 'bool'])"

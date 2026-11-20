@@ -16,11 +16,14 @@
 (* KeyError("k"), of the class KeyError, of IndexError, or a close. The    *)
 (* outcome is what that did: the await's value (StopIteration), a          *)
 (* suspension, the exception, or a close's None; then whether cr_await is  *)
-(* None after it.                                                          *)
+(* None after it. Or the program resumes the awaitable itself, by its     *)
+(* __await__()'s send, throw or close, which acts as through the await,   *)
+(* awaiting then whether it is suspended.                                 *)
 (***************************************************************************)
 EXTENDS Naturals
 
-Programs == [source : {"coroutine", "generator", "agen"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"}]
+Programs == [source : {"coroutine", "generator", "agen"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"},
+             via : {"await", "direct"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -47,6 +50,9 @@ Done == outcome # Pending
 
 \* A class thrown acts as its instance.
 ClassAsInstance == Done /\ program.resume = "class" => outcome = Run([program EXCEPT !.resume = "instance"])
+
+\* The awaitable's own methods act as an await of it does.
+DirectAsAwait == Done /\ program.via = "direct" => outcome = Run([program EXCEPT !.via = "await"])
 
 \* StopAsyncIteration ending the coroutine is the default, never raised.
 Default == Done /\ program.after = "stop" /\ program.resume \in {"instance", "class"} => outcome = "value d awaiting=False"

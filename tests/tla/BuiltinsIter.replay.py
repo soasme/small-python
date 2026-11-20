@@ -262,6 +262,11 @@ SOURCES = {
                   "    def __lt__(self, o): log.append('lt'); return T(self.v < o.v)\n"
                   "    def __eq__(self, o): log.append('eq'); return T(self.v == o.v)\n"
                   "result = ([o.v for o in sorted([O(2), O(1)])], [(a.v, b) for a, b in sorted([(O(1), 2), (O(1), 1)])], log)",
+    "sort_reverse_truth": "log = []\nl = [1, 3]\nclass R:\n"
+                          "    def __bool__(self):\n        for _ in (): pass\n        log.append(('bool', len(l))); return True\n"
+                          "class L:\n    def __len__(self): log.append('len'); return 0\n"
+                          "def key(x): log.append(('key', x)); return x\n"
+                          "l.sort(key=key, reverse=R())\nresult = (l, sorted([3, 1], reverse=L()), log)",
     "max_key_truth": "log = []\nclass T:\n    def __init__(self, v): self.v = v\n"
                      "    def __bool__(self):\n        for _ in (): pass\n        log.append('bool'); return self.v\n"
                      "class L:\n    def __init__(self, n): self.n = n\n"

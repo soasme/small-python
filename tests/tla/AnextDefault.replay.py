@@ -1,7 +1,8 @@
 # Replays AnextDefault.tla: each case suspends a coroutine in an await of
 # anext(it, "d"), it's __anext__ coroutine, or it an async generator,
 # suspended in an await of its own, resumes the coroutine as the program
-# says, and writes what that did.
+# says, and writes what that did; or the case drives the awaitable's
+# __await__() itself.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -61,13 +62,17 @@ def outcome(p):
             raise ValueError
         yield got
 
-    async def driver():
-        source = {"coroutine": It, "generator": Based, "agen": agen}[p["source"]]()
+    async def driver(source):
         return await anext(source, "d")
 
-    co = driver()
+    source = {"coroutine": It, "generator": Based, "agen": agen}[p["source"]]()
+    if p["via"] == "direct":
+        co = anext(source, "d").__await__()
+    else:
+        co = driver(source)
     co.send(None)
-    assert type(co.cr_await).__name__ == "anext_awaitable"
+    if p["via"] == "await":
+        assert type(co.cr_await).__name__ == "anext_awaitable"
     resume = p["resume"]
     try:
         if resume == "close":
@@ -83,6 +88,7 @@ def outcome(p):
         result = "value " + e.value
     except (ValueError, IndexError) as e:
         result = "raised " + type(e).__name__
-    return "%s awaiting=%s" % (result, co.cr_await is not None)
+    awaiting = co.cr_await is not None if p["via"] == "await" else result == "suspended"
+    return "%s awaiting=%s" % (result, awaiting)
 
 check_programs(outcome)
