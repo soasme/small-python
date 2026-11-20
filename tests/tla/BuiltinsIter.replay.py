@@ -134,6 +134,10 @@ SOURCES = {
     "map_strict": 'result = list(map(pow, [1, 2], [3], strict=True))',
     "map_shortest": 'result = list(map(pow, [2, 3, 4], [1, 2]))',
     "map_none": 'result = list(map(None, [1]))',
+    "adapter_subclass_init": "log = []\nclass It:\n    def __init__(s, n): s.n = n\n    def __iter__(s):\n        for _ in (): pass\n        log.append(s.n); return iter(range(s.n))\n"
+                             "class E(enumerate):\n    def __init__(s, *a, **k):\n        for _ in (): pass\n        log.append('init')\n"
+                             "class Z(zip):\n    def __init__(s, *a, **k): log.append('init')\n"
+                             "e = E(It(2), start=2)\nz = Z(It(1), It(2), strict='')\nresult = (list(e), list(z), log)",
     "adapter_subclass_iter": "log = []\nclass It:\n    def __init__(s, n): s.n = n\n    def __iter__(s):\n        for _ in (): pass\n        log.append(s.n); return iter(range(s.n))\n"
                              "class E(enumerate): pass\nclass Z(zip): pass\ne = E(It(2), 1)\n"
                              "result = (type(e).__name__, list(e), list(Z(It(1), It(1))), len(log))",

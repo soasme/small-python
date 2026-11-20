@@ -656,6 +656,7 @@ Unreleased (0.10.0):
 - A memoryview slice's store of a value that is no buffer raises its TypeError without `memoryview:` before it
 - A list's slice assignment of a generator with a zero step raises ValueError before running the generator
 - A bytearray's slice assignment of a value with a Python `__iter__` or a generator runs it without nesting on the C stack
+- Calling a zip, map, enumerate or filter subclass that defines `__init__`, or naming enumerate's or zip's arguments, calls the iterables' Python `__iter__` without nesting on the C stack; zip's and map's `strict` takes any value's truth on the machine
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
