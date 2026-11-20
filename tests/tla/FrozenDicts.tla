@@ -19,7 +19,9 @@
 (*     and one of  x | y, x == y, x |= y (with x aliased as z), hash(x),   *)
 (*     hash of x with a list value, x[k] = 1, del x[k], x.pop(k),          *)
 (*     x.update(), x.setdefault(k), x.clear(), x.popitem(), x.copy() is x, *)
-(*     isinstance(x, dict).                                                *)
+(*     isinstance(x, dict), two hashes of x whose values have a Python    *)
+(*     __hash__ (which runs once a value), or x == y by the values' Python *)
+(*     __eq__.                                                             *)
 (*                                                                         *)
 (* The outcome is the result's type and items in order, or the exception.  *)
 (***************************************************************************)
@@ -30,7 +32,7 @@ Distinct(s) == \A i, j \in DOMAIN s : i # j => s[i][1] # s[j][1]
 Mappings == {s \in Pairs({"a", "b"}, {1, 2}) : Distinct(s)}
 Kinds == {"dict", "frozendict"}
 Ops == {"|", "==", "|=", "hash", "hash list", "setitem", "delitem", "pop", "update", "setdefault", "clear",
-        "popitem", "copy", "isdict"}
+        "popitem", "copy", "isdict", "hash once", "== python"}
 Programs == [op : {"build"}, positional : {<<"none", <<>>>>} \cup
                                          {<<kind, s>> : kind \in {"pairs", "mapping", "generator"}, s \in Pairs({"a", "b"}, {1, 2})},
              keywords : {s \in Pairs({"a", "c"}, {3, 4}) : Distinct(s)}]
@@ -56,12 +58,14 @@ Run(p) ==
     IF p.op = "build" THEN <<"frozendict", "", Update(Update(<<>>, p.positional[2]), p.keywords)>>
     ELSE LET x == p.x  y == p.y  frozen == p.kx = "frozendict"
          IN  CASE p.op = "|" -> <<p.kx, "", Update(x, y)>>
-               [] p.op = "==" -> Bool(Items(x) = Items(y))
+               [] p.op \in {"==", "== python"} -> Bool(Items(x) = Items(y))
                \* x |= y: a dict changes in place (z, an alias, sees it); a
                \* frozendict is replaced (z keeps its items).
                [] p.op = "|=" -> <<p.kx, IF frozen THEN "kept" ELSE "same", Update(x, y)>>
                [] p.op = "hash" -> IF frozen THEN <<"hashable", "", <<>>>> ELSE Error("TypeError")
                [] p.op = "hash list" -> Error("TypeError")
+               \* The first complete hash is kept: each value hashes once.
+               [] p.op = "hash once" -> IF frozen THEN <<"hashable", "once", <<>>>> ELSE Error("TypeError")
                [] ~frozen /\ p.op \in {"setitem", "delitem", "pop", "update", "setdefault", "clear", "popitem"} -> <<"mutable", "", <<>>>>
                [] p.op \in {"setitem", "delitem"} -> Error("TypeError")
                [] p.op \in {"pop", "update", "setdefault", "clear", "popitem"} -> Error("AttributeError")

@@ -9,6 +9,18 @@ SOURCES = {"hash": "hash(x)", "hash list": "hash(kind_x(a=[]))", "setitem": "x['
            "popitem": "x.popitem"}
 
 
+class Value:
+    """A value whose __hash__ and __eq__ are Python, counting calls."""
+    calls = []
+    def __init__(self, v): self.v = v
+    def __hash__(self):
+        Value.calls.append("hash")
+        return hash(self.v)
+    def __eq__(self, other):
+        Value.calls.append("eq")
+        return isinstance(other, Value) and other.v == self.v
+
+
 class Mapping:
     def __init__(self, pairs): self.pairs = pairs
     def keys(self): return [k for k, _ in self.pairs]
@@ -30,6 +42,17 @@ def outcome(p):
         return (type(r).__name__, "", tuple(r.items()))
     if op == "==":
         return ("bool", repr(x == y), ())
+    if op == "== python":
+        wrap = lambda m: kinds[type(m).__name__]({k: Value(v) for k, v in m.items()})
+        return ("bool", repr(wrap(x) == wrap(y)), ())
+    if op == "hash once":
+        w = kinds[p["kx"]]({k: Value(v) for k, v in x.items()})
+        del Value.calls[:]
+        try:
+            hash(w), hash(w)
+        except TypeError as error:
+            return (type(error).__name__, "", ())
+        return ("hashable", "once" if Value.calls == ["hash"] * len(w) else repr(Value.calls), ())
     if op == "|=":
         z = x
         before = tuple(z.items())

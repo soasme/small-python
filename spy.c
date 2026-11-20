@@ -612,6 +612,8 @@ static SPYValue *hash_entered(SPYContext *, SPYValue *);
 static int hash_calls(SPYContext *, SPYValue *);
 static int property_enters(SPYContext *, SPYValue *);
 static int tuple_push(SPYContext *, Machine *, SPYValue *, size_t, uint64_t);
+static int walk_push(SPYContext *, Machine *, SPYValue *);
+static int walk_reaches(SPYContext *, SPYValue *);
 static SPYValue *tuple_next(SPYContext *, Machine *, SPYValue **, int64_t *);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
 static SPYValue *release_function(SPYContext *, SPYValue *);
@@ -2583,12 +2585,32 @@ static uint64_t hash_lane(uint64_t hash, int64_t part) {
     hash = (hash << 31) | (hash >> 33);
     return hash * UINT64_C(11400714785074694791);
 }
+/* Whether hashing v walks its items (tuple_next): a tuple, or a frozen
+ * mapping, whose values it hashes, that keeps no hash yet. */
+static ALWAYS_INLINE int hash_walked(SPYValue *v) {
+    return v->type == SPY_TUPLE || (v->type == SPY_FROZENDICT && !v->as.map.flags);
+}
 /* The lanes items' hashes start from (hash_lane). */
 #define HASH_SEED UINT64_C(2870177450012600261)
 /* The hash of len items, of a tuple or not, whose hashes made lanes (hash_lane). */
 static int64_t hash_end(uint64_t lanes, size_t len, int tuple) {
     if (tuple) lanes += len ^ (HASH_SEED ^ 3527539);
     return lanes == UINT64_MAX ? 1546275796 : hash_signed(lanes);
+}
+/* A frozen mapping's or set's lanes, mixed with an item's hash h (CPython's
+ * frozenset mixing); a mapping's item hashes its pair, key hash and value
+ * hash part. */
+static uint64_t frozen_mix(uint64_t lanes, uint64_t h) { return lanes ^ ((h ^ UINT64_C(89869747)) ^ (h << 16)) * UINT64_C(3644798167); }
+static uint64_t frozen_pair(int64_t key, int64_t part) {
+    uint64_t h = hash_lane(hash_lane(HASH_SEED, key), part) + (2 ^ (HASH_SEED ^ 3527539));
+    return h == UINT64_MAX ? 1546275796 : h;
+}
+/* The hash of a frozen container of len items from its lanes. */
+static int64_t frozen_end(uint64_t hash, size_t len) {
+    hash ^= ((uint64_t)len + 1) * UINT64_C(1927868237);
+    hash ^= (hash >> 11) ^ (hash >> 25);
+    hash = hash * UINT64_C(69069) + UINT64_C(907133923);
+    return hash == UINT64_MAX ? 590923713 : hash_signed(hash);
 }
 static int hash_items(SPYContext *c, size_t len, SPYValue *const *items, int tuple, int64_t *result) {
     uint64_t hash = HASH_SEED;
@@ -2667,20 +2689,11 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         if (spend(c, value->as.map.len / 64)) return -1;
         uint64_t hash = 0;
         for (size_t i = 0; i < value->as.map.len; i++) {
-            uint64_t h = (uint64_t)map_items(value)[i].hash;
-            if (value->type == SPY_FROZENDICT) {
-                int64_t part;
-                if (hash_value(c, map_items(value)[i].value, &part)) return -1;
-                h = hash_lane(hash_lane(HASH_SEED, map_items(value)[i].hash), part);
-                h += 2 ^ (HASH_SEED ^ 3527539);
-                if (h == UINT64_MAX) h = 1546275796;
-            }
-            hash ^= ((h ^ UINT64_C(89869747)) ^ (h << 16)) * UINT64_C(3644798167);
+            int64_t part = 0;
+            if (value->type == SPY_FROZENDICT && hash_value(c, map_items(value)[i].value, &part)) return -1;
+            hash = frozen_mix(hash, value->type == SPY_FROZENDICT ? frozen_pair(map_items(value)[i].hash, part) : (uint64_t)map_items(value)[i].hash);
         }
-        hash ^= ((uint64_t)value->as.map.len + 1) * UINT64_C(1927868237);
-        hash ^= (hash >> 11) ^ (hash >> 25);
-        hash = hash * UINT64_C(69069) + UINT64_C(907133923);
-        *result = hash == UINT64_MAX ? 590923713 : hash_signed(hash);
+        *result = frozen_end(hash, value->as.map.len);
         if (value->type == SPY_FROZENDICT) { value->as.map.hash = *result; value->as.map.flags = 1; }
         return 0;
     }
@@ -2890,10 +2903,12 @@ static ptrdiff_t map_find(SPYValue *map, SPYValue *key) {
     return map_hash(map->ctx, map, key, &hash) ? -1 : map_find_hash(map, key, hash);
 }
 static NO_INLINE int pair_reaches(SPYValue *, int);
+static NO_INLINE int frozen_reaches(SPYValue *, int);
 /* Whether a lookup of key may compare it by a Python __eq__ on the machine
- * (lookup_call): an instance, or a tuple whose items may. */
+ * (lookup_call): an instance, or a tuple or frozen mapping whose items may. */
 static ALWAYS_INLINE int lookup_key(SPYValue *key) {
-    return key->type == SPY_INSTANCE || metaclassed(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
+    return key->type == SPY_INSTANCE || metaclassed(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0)) ||
+           (UNLIKELY(key->type == SPY_FROZENDICT) && frozen_reaches(key, 0));
 }
 /* A map's odd_keys: 1 once it gains a key not a str, 2 too once one that
  * is a lookup_key, which the lookup of any other key may compare by a
@@ -10662,6 +10677,8 @@ static int pair_equal_from(SPYContext *, SPYValue *, SPYValue *, size_t);
  * == calls an item's Python __eq__ (python_pair) or whose ordering calls
  * a Python method (order_python), gives NULL without an error. */
 static int order_python(SPYContext *, int, SPYValue *, SPYValue *);
+static int sequence_pair(SPYValue *, SPYValue *);
+static int pair_mapping(SPYValue *);
 static int set_walks(int, SPYValue *, SPYValue *);
 static int dict_walks(SPYValue *, SPYValue *, size_t);
 /* Comparison op of a, a set, and b: NULL without an error when it walks
@@ -10749,10 +10766,10 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **lef
             return equal < 0 || equal == 2 ? NULL : spy_bool(c, equal == (op == T_EQ));
         }
     }
-    /* Two dicts of one length compare their values, on the machine from
-     * a pair whose comparison calls Python (python_pair), or looking their
-     * keys up there too (dict_walks). */
-    if (a->type == SPY_DICT && b->type == SPY_DICT && (op == T_EQ || op == T_NE) && a->as.map.len == b->as.map.len) {
+    /* Two dicts or frozen mappings of one length compare their values, on
+     * the machine from a pair whose comparison calls Python (python_pair),
+     * or looking their keys up there too (dict_walks). */
+    if ((op == T_EQ || op == T_NE) && sequence_pair(a, b) && pair_mapping(a)) {
         size_t end;
         if (python_pair(c, a, b, 0, &end) != SIZE_MAX || (end < a->as.map.len && dict_walks(a, b, end))) return NULL;
         int equal = pair_equal_from(c, a, b, end);
@@ -10827,7 +10844,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue **left
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || b->type == SPY_GENERATOR ||
                b->type == SPY_MAPPINGPROXY ||
                (b->type == SPY_ITERATOR && iterated_python(c, a, b)) || (b->type == SPY_DICT_VALUES && values_python(c, a, b)) ||
-               (hashes_key(b, 1) && ((a->type == SPY_TUPLE && key_reaches(c, a)) || eq_keyed(b))) || (set_view(b) && view_python(c, a, b)) ? NULL :
+               (hashes_key(b, 1) && (walk_reaches(c, a) || eq_keyed(b))) || (set_view(b) && view_python(c, a, b)) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     /* A lone == or != while pausing, or a comparison's (compare_enter). */
     if (rich_kind(op) >= 0) return compare_operand(c, op, left, b);
@@ -11132,11 +11149,11 @@ static int pure_operand(SPYValue *v) {
  * an error. For the machine, 2 instead at the first item that is not pure
  * when a later one's comparison with x, neither an instance nor a class
  * with a metaclass, calls a Python __eq__ before any item identical to x
- * (python_item), or with x, a list, tuple or
- * dict, one of their items' or an instance item's (pair_python); the
+ * (python_item), or with x, a list, tuple, dict or
+ * frozen mapping, one of their items' or an instance item's (pair_python); the
  * machine compares those before it again (contains_call). */
 static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue *seq, int machine) {
-    int scalars = machine && x->type != SPY_INSTANCE && !metaclassed(x), pairs = machine && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_DICT);
+    int scalars = machine && x->type != SPY_INSTANCE && !metaclassed(x), pairs = machine && (x->type == SPY_LIST || x->type == SPY_TUPLE || pair_mapping(x));
     for (size_t i = 0; i < seq->as.seq.len; i++) {
         SPYValue *item = seq->as.seq.items[i];
         if (item == x) return 1;
@@ -26831,14 +26848,14 @@ static int next_calls(SPYContext *c, SPYValue *v) {
  * Python, or it is a tuple whose items' __hash__ or __eq__ may be
  * (key_reaches). */
 static ALWAYS_INLINE int hashed_item(SPYContext *c, SPYValue *item) {
-    return item->type == SPY_TUPLE ? key_reaches(c, item) : hash_function(c, item) != NULL;
+    return item->type == SPY_TUPLE ? key_reaches(c, item) : item->type == SPY_FROZENDICT ? hash_calls(c, item) : hash_function(c, item) != NULL;
 }
 /* Whether a dict takes pair on the machine: a list or tuple of a
  * hashed_item key and a value. */
 static ALWAYS_INLINE int hashed_pair(SPYContext *c, SPYValue *pair) {
     SPYValue *key;
     return (pair->type == SPY_LIST || pair->type == SPY_TUPLE) && pair->as.seq.len == 2 &&
-           ((key = pair->as.seq.items[0])->type == SPY_INSTANCE || key->type == SPY_TUPLE) && hashed_item(c, key);
+           ((key = pair->as.seq.items[0])->type == SPY_INSTANCE || hash_walked(key)) && hashed_item(c, key);
 }
 /* Whether a set takes v's items on the machine, a list or tuple, or a
  * forward iterator's next items of one, holding a hashed_item. */
@@ -28195,7 +28212,7 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
     }
     /* A set method's decided consumer ends (set_items). */
     if (s->keyed == KEY_DONE) { s->keyed = 0; consumer_took(c, m, f, NULL); return NULL; }
-    if (s->keyed == KEY_HASH && (s->item->type == SPY_TUPLE ? !hash_calls(c, s->item) : !hash_function(c, s->item))) {
+    if (s->keyed == KEY_HASH && (hash_walked(s->item) ? !hash_calls(c, s->item) : !hash_function(c, s->item))) {
         /* A tuple, or a set method's item, hashed in C is looked up on the
          * machine (consumer_lookup). */
         int64_t hash;
@@ -28207,10 +28224,11 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         spy_release(item);
         return NULL;
     }
-    if (s->keyed == KEY_HASH && s->item->type == SPY_TUPLE) {
-        /* A tuple's walk enters its first Python __hash__ (tuple_next). */
+    if (s->keyed == KEY_HASH && hash_walked(s->item)) {
+        /* A tuple's or frozen mapping's walk enters its first Python
+         * __hash__ (tuple_next). */
         int64_t hash;
-        SPYValue *function = tuple_push(c, m, s->item, 0, HASH_SEED) ? NULL : tuple_next(c, m, env, &hash);
+        SPYValue *function = walk_push(c, m, s->item) ? NULL : tuple_next(c, m, env, &hash);
         if (!function) hash_failed(c, s->result, s->item);
         return function;
     }
@@ -28640,7 +28658,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         /* The mapping's value of the key it was fed is merged, the key's
          * Python __hash__ waiting for its call (KEY_HASH), the value in
          * best. */
-        if ((s->item->type == SPY_INSTANCE || s->item->type == SPY_TUPLE) && hashed_item(c, s->item)) { s->best = key; s->keyed = KEY_HASH; return 0; }
+        if ((s->item->type == SPY_INSTANCE || hash_walked(s->item)) && hashed_item(c, s->item)) { s->best = key; s->keyed = KEY_HASH; return 0; }
         SPYValue *fed = s->item;
         s->item = NULL;
         int failed = map_set(c, s->result, fed, key);
@@ -29042,14 +29060,14 @@ static ALWAYS_INLINE int format_reached(SPYContext *c, SPYValue *callee, int met
 static int hashing_call(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, SPYValue **);
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv may be a hashing_call: a dict's get, setdefault or pop,
- * or a native function, an instance, a class with a metaclass, a tuple or
- * a view among its first two arguments. */
+ * or a native function, an instance, a class with a metaclass, a tuple, a
+ * frozen mapping or a view among its first two arguments. */
 static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) method = callee->as.bound.method;
     int native = method >= 0 ? method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP :
                  callee->type == SPY_NATIVE || (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE);
     /* A view hashes its exporter (memory_hasher). */
-    uint64_t hashing = UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_MEMORYVIEW;
+    uint64_t hashing = UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_MEMORYVIEW;
     if (!argc) return callee->type == SPY_METHOD && callee->as.method.self->type == SPY_MEMORYVIEW;
     return native && (instance_like(argv[0]) || (UINT64_C(1) << argv[0]->type & hashing) ||
                       (argc == 2 && (instance_like(argv[1]) || (UINT64_C(1) << argv[1]->type & hashing))));
@@ -29391,8 +29409,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     if ((argc ? argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
                 metaclassed(argv[0]) ||
-                (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
-                (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed))) ||
+                (argc <= 2 && ((argv[0]->type == SPY_TUPLE && argv[0]->listed) || argv[0]->type == SPY_FROZENDICT)) ||
+                (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed) ||
+                               argv[1]->type == SPY_FROZENDICT)) ||
                 /* hash() of a view (memory_hasher) */
                 (argc == 1 && argv[0]->type == SPY_MEMORYVIEW && memory_hasher(c, argv[0])) ||
                 UNLIKELY(proxy_unwrapped(c, callee, method, argc, argv))
@@ -30325,14 +30344,14 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                          * a mappingproxy (proxy_unwrapped) */
                                         (argc == 1 && ((UINT64_C(1) << argv[0]->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_MEMORYVIEW |
                                                                                         UINT64_C(1) << SPY_MAPPINGPROXY)) ||
-                                                       /* hash() of a tuple that may hold an instance (hashing_call) */
-                                                       (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
+                                                       /* hash() of a tuple or frozen mapping that may hold an instance (hashing_call) */
+                                                       (((argv[0]->type == SPY_TUPLE && argv[0]->listed) || argv[0]->type == SPY_FROZENDICT) && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
                                                        /* round() with ndigits (conversion_method) */
                                                        ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
                                                        /* a set method given its set (set_call, consumer_of), or its tuple key (hashing_call) */
                                                        callee->as.native.kwcall == set_method ||
-                                                       (argv[1]->type == SPY_TUPLE && argv[1]->listed && callee->as.native.kwcall == set_item_method) ||
+                                                       (((argv[1]->type == SPY_TUPLE && argv[1]->listed) || argv[1]->type == SPY_FROZENDICT) && callee->as.native.kwcall == set_item_method) ||
                                                        /* dict.__getitem__ of a subclass's instance (native_entered) */
                                                        ((walk_operand(argv[1]) || argv[0]->type == SPY_INSTANCE) && callee->as.native.kwcall == slot_call) ||
                                                        /* a bytes join of exporters (buffer_argument), or choices (buffered_choice) */
@@ -31822,11 +31841,14 @@ static NO_INLINE Machine *fold_returned(SPYContext *c, Machine *m, SPYValue *res
     machine_push(c, m, value);
     return m;
 }
-/* Whether a and b are two lists or two dicts of one length or two
- * tuples, whose == compares their items, a dict's the values of each key. */
-static size_t pair_length(SPYValue *v) { return v->type == SPY_DICT ? v->as.map.len : v->as.seq.len; }
+/* Whether a and b are two lists, or two dicts or frozen mappings, of one
+ * length, or two tuples, whose == compares their items, a mapping's the
+ * values of each key. */
+static int pair_mapping(SPYValue *v) { return v->type == SPY_DICT || v->type == SPY_FROZENDICT; }
+static size_t pair_length(SPYValue *v) { return pair_mapping(v) ? v->as.map.len : v->as.seq.len; }
 static int sequence_pair(SPYValue *a, SPYValue *b) {
-    return a->type == b->type && (a->type == SPY_TUPLE || ((a->type == SPY_LIST || a->type == SPY_DICT) && pair_length(a) == pair_length(b)));
+    return pair_mapping(a) ? pair_mapping(b) && pair_length(a) == pair_length(b) :
+           a->type == b->type && (a->type == SPY_TUPLE || (a->type == SPY_LIST && pair_length(a) == pair_length(b)));
 }
 /* Whether a and b are two sets or frozensets, compared whole (equal_call). */
 static int set_pair(SPYValue *a, SPYValue *b) { return is_set(a) && is_set(b); }
@@ -31836,7 +31858,7 @@ static int set_walks(int, SPYValue *, SPYValue *);
  * of its key in b; 0 past an end, at a key whose lookup may call Python
  * or that b lacks, or on an error. A dict walk spends a step per 16. */
 static int pair_at(SPYValue *a, SPYValue *b, size_t at, SPYValue **x, SPYValue **y) {
-    if (a->type != SPY_DICT) {
+    if (!pair_mapping(a)) {
         if (at >= a->as.seq.len || at >= b->as.seq.len) return 0;
         *x = a->as.seq.items[at]; *y = b->as.seq.items[at];
         return 1;
@@ -31851,7 +31873,7 @@ static int pair_at(SPYValue *a, SPYValue *b, size_t at, SPYValue **x, SPYValue *
 /* Whether a and b (sequence_pair) are equal from pair at on, natively;
  * -1 on an error. */
 static int pair_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t at) {
-    if (a->type != SPY_DICT) return sequence_equal_from(c, a, b, at, 0);
+    if (!pair_mapping(a)) return sequence_equal_from(c, a, b, at, 0);
     int same = map_equal_from(a, b, SPY_DICT, at);
     return c->error_type[0] ? -1 : same;
 }
@@ -32184,27 +32206,32 @@ static SPYValue *hash_self(SPYValue *key) {
     SPYValue *held = kind ? class_lookup(kind, "__hash__") : NULL;
     return held && held->type == SPY_METHOD ? held->as.method.self : key;
 }
+/* The count of walked v's items, and its item i: a mapping's value. */
+static size_t walk_len(SPYValue *v) { return v->type == SPY_TUPLE ? v->as.seq.len : v->as.map.len; }
+static SPYValue *walk_item(SPYValue *v, size_t i) { return v->type == SPY_TUPLE ? v->as.seq.items[i] : map_items(v)[i].value; }
 /* The Python __hash__, a machine function, that hashing key calls first
- * (hash_entered) within depth nested tuples; a sealed tuple holds no
+ * (hash_entered) within depth nested walks; a sealed tuple holds no
  * instance (seal_tuple). */
 static SPYValue *hash_first(SPYContext *c, SPYValue *key, int depth) {
-    if (key->type != SPY_TUPLE) return hash_function(c, key);
-    for (size_t i = 0; key->listed && !key->as.seq.hashed && depth && i < key->as.seq.len; i++) {
-        SPYValue *item = key->as.seq.items[i], *function;
-        if ((instance_like(item) || item->type == SPY_TUPLE) && (function = hash_first(c, item, depth - 1))) return function;
+    if (!hash_walked(key)) return hash_function(c, key);
+    int walks = key->type == SPY_TUPLE ? key->listed && !key->as.seq.hashed : 1;
+    for (size_t i = 0; walks && depth && i < walk_len(key); i++) {
+        SPYValue *item = walk_item(key, i), *function;
+        if ((instance_like(item) || hash_walked(item)) && (function = hash_first(c, item, depth - 1))) return function;
     }
     return NULL;
 }
 /* The Python __hash__, a machine function, that hashing key calls first:
- * an instance key's (hash_function), or, for a tuple whose hash it does
- * not keep yet, its first item's, depth first; deeper than 64 tuples, an
- * item hashes in C. Else NULL. */
+ * an instance key's (hash_function), or, for a tuple or frozen mapping
+ * whose hash it does not keep yet, its first item's, depth first; deeper
+ * than 64 walks, an item hashes in C. Else NULL. */
 static SPYValue *hash_entered(SPYContext *c, SPYValue *key) {
     return hash_first(c, key, 64);
 }
-/* A level of a tuple's hash walk, pushed on m's stack: the tuple, the
- * index of its next item, the lanes of the items before (hash_lane) and
- * c->tupling; -1, the stack as it was, on an error. */
+/* A level of a hash walk, pushed on m's stack: the tuple or frozen
+ * mapping, the index of its next item, the lanes of the items before
+ * (hash_lane, frozen_mix) and c->tupling; -1, the stack as it was, on an
+ * error. */
 static int tuple_push(SPYContext *c, Machine *m, SPYValue *tuple, size_t i, uint64_t lanes) {
     size_t len = m->len;
     if (machine_push(c, m, spy_retain(tuple)) || machine_push(c, m, int_value(c, (int64_t)i)) ||
@@ -32214,38 +32241,49 @@ static int tuple_push(SPYContext *c, Machine *m, SPYValue *tuple, size_t i, uint
     }
     return 0;
 }
+/* The walk of hash_walked v from its first item, pushed on m (tuple_push). */
+static int walk_push(SPYContext *c, Machine *m, SPYValue *v) {
+    if (v->type == SPY_FROZENDICT && spend(c, v->as.map.len / 64)) return -1;
+    return tuple_push(c, m, v, 0, v->type == SPY_TUPLE ? HASH_SEED : 0);
+}
 /* The walk atop m takes its next item's hash, part. */
 static int tuple_fold(SPYContext *c, Machine *m, int64_t part) {
     SPYValue **level = &m->stack[m->len - 4], *tuple = spy_retain(level[0]);
     size_t i = (size_t)level[1]->as.integer_data.small;
-    uint64_t lanes = hash_lane((uint64_t)level[2]->as.integer_data.small, part);
+    uint64_t lanes = (uint64_t)level[2]->as.integer_data.small;
+    lanes = tuple->type == SPY_TUPLE ? hash_lane(lanes, part) : frozen_mix(lanes, frozen_pair(map_items(tuple)[i].hash, part));
     for (int j = 0; j < 4; j++) spy_release(machine_pop(m));
     int status = tuple_push(c, m, tuple, i + 1, lanes);
     spy_release(tuple);
     return status;
 }
-/* A tuple's hash walk, its levels atop m, a nested tuple's above its own
+/* A hash walk, its levels atop m, a nested walk's above its own
  * (tuple_push), from the next item on: the items hashed in C, each tuple
- * done keeping its hash, until one has a Python __hash__, then owned,
- * with *env for the item, to enter (CALL_HASH); else NULL, the walk
- * popped, with the outermost tuple's hash in *hash, or an error. */
+ * or frozen mapping done keeping its hash, until one has a Python
+ * __hash__, then owned, with *env for the item, to enter (CALL_HASH);
+ * else NULL, the walk popped, with the outermost one's hash in *hash, or
+ * an error. A mapping, built privately, keeps its values while walked. */
 static SPYValue *tuple_next(SPYContext *c, Machine *m, SPYValue **env, int64_t *hash) {
     for (;;) {
         SPYValue **level = &m->stack[m->len - 4], *tuple = level[0], *item, *function;
         size_t i = (size_t)level[1]->as.integer_data.small;
         int64_t part;
-        if (i == tuple->as.seq.len) {
-            tuple->as.seq.hash = hash_end((uint64_t)level[2]->as.integer_data.small, i, 1);
-            tuple->as.seq.hashed = 1;
-            *hash = tuple->as.seq.hash;
+        if (i == walk_len(tuple)) {
+            if (tuple->type == SPY_TUPLE) {
+                tuple->as.seq.hash = *hash = hash_end((uint64_t)level[2]->as.integer_data.small, i, 1);
+                tuple->as.seq.hashed = 1;
+            } else {
+                tuple->as.map.hash = *hash = frozen_end((uint64_t)level[2]->as.integer_data.small, i);
+                tuple->as.map.flags = 1;
+            }
             for (int j = 0; j < 4; j++) spy_release(machine_pop(m));
             if (!m->len || m->stack[m->len - 1] != c->tupling) return NULL;
             if (tuple_fold(c, m, *hash)) break;
             continue;
         }
-        item = tuple->as.seq.items[i];
-        if (item->type == SPY_TUPLE && hash_entered(c, item)) {
-            if (tuple_push(c, m, item, 0, HASH_SEED)) break;
+        item = walk_item(tuple, i);
+        if (hash_walked(item) && hash_entered(c, item)) {
+            if (walk_push(c, m, item)) break;
         } else if ((function = hash_function(c, item))) {
             if ((*env = function_env(c, function, 1, (SPYValue *[]){hash_self(item)}, NULL, 0))) return spy_retain(function);
             break;
@@ -32271,8 +32309,9 @@ static NO_INLINE Machine *tuple_returned(SPYContext *c, Machine *m, int kind, SP
     return m;
 }
 /* Whether tuple key, not plain, holds a plain instance with a Python
- * __eq__ (python_eq), itself or in a tuple it holds; past depth, whether
- * it may. One that holds no instance is marked plain. */
+ * __eq__ (python_eq), itself or in a tuple or frozen mapping it holds;
+ * past depth, whether it may. One that holds no instance, nor a mapping
+ * that may, is marked plain. */
 static NO_INLINE int pair_reaches(SPYValue *key, int depth) {
     int instances = 0;
     for (size_t i = 0; i < key->as.seq.len; i++) {
@@ -32283,9 +32322,23 @@ static NO_INLINE int pair_reaches(SPYValue *key, int depth) {
         } else if (item->type == SPY_TUPLE && item->listed && !item->as.seq.plain) {
             if (depth == 64 || pair_reaches(item, depth + 1)) return 1;
             instances |= !item->as.seq.plain;
+        } else if (item->type == SPY_FROZENDICT && item->as.map.len) {
+            if (depth == 64 || frozen_reaches(item, depth + 1)) return 1;
+            instances = 1;
         }
     }
     key->as.seq.plain = !instances;
+    return 0;
+}
+/* Whether frozen mapping key holds a value with a Python __eq__, itself or
+ * in a tuple or frozen mapping (pair_reaches); past depth, whether it may. */
+static NO_INLINE int frozen_reaches(SPYValue *key, int depth) {
+    for (size_t i = 0; i < key->as.map.len; i++) {
+        SPYValue *item = map_items(key)[i].value;
+        if (python_eq(item) || ((item->type == SPY_TUPLE ? item->listed && !item->as.seq.plain : item->type == SPY_FROZENDICT) &&
+                                (depth == 64 || (item->type == SPY_TUPLE ? pair_reaches : frozen_reaches)(item, depth + 1))))
+            return 1;
+    }
     return 0;
 }
 /* Whether hashing tuple key, unless it is hashed, calls a Python __hash__
@@ -32309,9 +32362,15 @@ static NO_INLINE int hash_reaches(SPYContext *c, SPYValue *key, int pairs) {
 static ALWAYS_INLINE int key_reaches(SPYContext *c, SPYValue *key) {
     return key->listed && !key->as.seq.plain && hash_reaches(c, key, 1);
 }
+/* Whether a tuple key's lookup may call Python on the machine (key_reaches),
+ * or a frozen mapping key's hash, kept by none, does (hash_entered). */
+static int walk_reaches(SPYContext *c, SPYValue *key) {
+    return key->type == SPY_TUPLE ? key_reaches(c, key) : UNLIKELY(key->type == SPY_FROZENDICT) && !key->as.map.flags && hash_entered(c, key);
+}
 /* Whether hashing key enters a Python __hash__ (hash_entered). */
 static ALWAYS_INLINE int hash_calls(SPYContext *c, SPYValue *key) {
     return key->type == SPY_TUPLE ? key->listed && !key->as.seq.plain && hash_reaches(c, key, 0) :
+           UNLIKELY(key->type == SPY_FROZENDICT) ? !key->as.map.flags && hash_entered(c, key) :
            UNLIKELY(key->type == SPY_MEMORYVIEW) ? memory_hasher(c, key) != NULL : hash_function(c, key) != NULL;
 }
 /* The Python __hash__ that hashing key enters first (hash_entered),
@@ -32327,7 +32386,7 @@ static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, s
     for (size_t i = 0; i < count; i++) if (machine_push(c, m, spy_retain(operands[i]))) return NULL;
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_HASH;
-    if (key->type == SPY_TUPLE ? !tuple_push(c, m, key, 0, HASH_SEED) && (function = tuple_next(c, m, env, &hash))
+    if (hash_walked(key) ? !walk_push(c, m, key) && (function = tuple_next(c, m, env, &hash))
                                : !!(*env = function_env(c, function, 1, (SPYValue *[]){hash_self(key)}, NULL, 0))) {
         /* A view stays exported while its exporter hashes (memory_hash). */
         if (key->type == SPY_MEMORYVIEW) key->as.memory.exports++;
@@ -32347,8 +32406,8 @@ static NO_INLINE SPYValue *machine_operand(SPYContext *, Machine *, Instruction 
  * whether it was hashed. */
 static int hash_kept(SPYContext *c, SPYValue *key, int hashed, int64_t hash) {
     spy_release(c->hashed);
-    /* A tuple keeps its own hash. */
-    c->hashed = hashed && key->type != SPY_TUPLE ? key : NULL; c->hashed_value = hash;
+    /* A tuple or frozen mapping keeps its own hash. */
+    c->hashed = hashed && key->type != SPY_TUPLE && key->type != SPY_FROZENDICT ? key : NULL; c->hashed_value = hash;
     if (!c->hashed) spy_release(key);
     return hashed;
 }
@@ -32365,9 +32424,11 @@ static int hashes_first(SPYContext *c, SPYValue *object, const char *name) {
     return hashes_key(object, 0) || (object->type == SPY_INSTANCE && (base = builtin_base(c, object, name, NULL)) && is_dict(base));
 }
 /* Whether comparing key calls a Python __eq__: it is an instance with one
- * (python_eq), or a tuple holding one (pair_reaches). */
+ * (python_eq), or a tuple (pair_reaches) or frozen mapping (frozen_reaches)
+ * holding one. */
 static int eq_reaches(SPYValue *key) {
-    return python_eq(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
+    return python_eq(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0)) ||
+           (key->type == SPY_FROZENDICT && frozen_reaches(key, 0));
 }
 /* Whether a subscript or in of key in map, by operator step ins, looks
  * it up on the machine (lookup_call): an exact dict's or frozendict's
@@ -33886,7 +33947,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     SPYValue *map = kind == OPERATE_INDEX || contains ? lookup_storage(c, contains ? y : x, contains) : NULL;
     if (contains ? hashes_key(map, 1) : kind == OPERATE_INDEX && hashes_first(c, x, "__getitem__")) {
         SPYValue *operands[] = {x, y};
-        if ((instance_like(contains ? x : y) || (contains ? x : y)->type == SPY_TUPLE) &&
+        if ((instance_like(contains ? x : y) || hash_walked(contains ? x : y)) &&
             ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0])) return function;
         c->entering_kind = CALL_OPERATOR;
         /* A key hashed in C whose Python __eq__ the lookup may call; a
@@ -34677,7 +34738,7 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
             ordered = !nested && !probing && !walking && !searching && op != T_EQ && op != T_NE;
         /* An unequal pair the comparison left past an end compares the lengths. */
         int same = c->error_type[0] ? -1 : ordered ? 0 : found ? pair_equal_from(c, x, y, end) :
-                   x->type != SPY_DICT && (at > x->as.seq.len || at > y->as.seq.len) ? x->as.seq.len == y->as.seq.len : 0;
+                   !pair_mapping(x) && (at > x->as.seq.len || at > y->as.seq.len) ? x->as.seq.len == y->as.seq.len : 0;
         /* An enclosing sequence's pair is equal when these are. */
         if (nested) {
             spy_release(machine_pop(m)); spy_release(x); spy_release(y);
@@ -37113,7 +37174,7 @@ static int hash_convert(SPYContext *c, Machine *m, SPYValue *t, SPYValue **fn, S
     int64_t hash;
     SPYValue *name = spy_string(c, "__hash__", 8);
     if (!name || machine_push_all(c, m, 3, (SPYValue *[]){spy_retain(t), name, spy_retain(c->converting)})) return -1;
-    if (!tuple_push(c, m, t, 0, HASH_SEED) && (*fn = tuple_next(c, m, env, &hash))) return 1;
+    if (!walk_push(c, m, t) && (*fn = tuple_next(c, m, env, &hash))) return 1;
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     /* A walk that called no Python gives the hash at once. */
     return c->error_type[0] || !(*fn = int_value(c, hash)) ? -1 : 3;
@@ -37123,7 +37184,7 @@ static int hash_convert(SPYContext *c, Machine *m, SPYValue *t, SPYValue **fn, S
  * hash by its items' Python __hash__ (hash_convert); else 0. */
 static NO_INLINE int item_convert(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *item, SPYValue **fn, SPYValue **env) {
     SPYValue *found[2], *function;
-    if (item->type == SPY_TUPLE) return hash_calls(c, item) ? hash_convert(c, m, item, fn, env) : 0;
+    if (hash_walked(item)) return hash_calls(c, item) ? hash_convert(c, m, item, fn, env) : 0;
     return (function = conversion_method(c, callee, 1, &item, found)) ? convert_call(c, m, function, item, found[0], found[1], fn, env) : 0;
 }
 /* For map v of a builtin function or a class: its next item, the call of
@@ -37175,7 +37236,7 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         return status;
     }
     if (items->as.seq.len == 1 && ((item = items->as.seq.items[0])->type == SPY_INSTANCE || metaclassed(item) ||
-                                   (item->type == SPY_TUPLE && item->listed && !item->as.seq.hashed && is_builtin(callee, B_HASH))) &&
+                                   (((item->type == SPY_TUPLE && item->listed && !item->as.seq.hashed) || walk_reaches(c, item)) && is_builtin(callee, B_HASH))) &&
         (status = item_convert(c, m, callee, item, fn, env))) {
         spy_release(items);
         return status;
@@ -37824,7 +37885,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             b = machine_pop(m); a = machine_pop(m);
             if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE ||
                 ((a->type == SPY_DICT || a->type == SPY_FROZENDICT) && UNLIKELY(eq_keyed(a))) ||
-                (b->type == SPY_TUPLE && (key_reaches(c, b) || a->type == SPY_MEMORYVIEW)) ||
+                (b->type == SPY_TUPLE ? key_reaches(c, b) || a->type == SPY_MEMORYVIEW : walk_reaches(c, b)) ||
                 (b->type == SPY_SLICE && index_special(c, slice_part(c, b))) || UNLIKELY(proxies_instance(a))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
@@ -37865,7 +37926,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg) seal_tuple(c, m->stack[m->len - 1]); /* The display's last item. */
             break;
         CASE(BC_MAP)
-            if (instance_like(m->stack[m->len - 2]) || (m->stack[m->len - 2]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 2])) ||
+            if (instance_like(m->stack[m->len - 2]) || walk_reaches(c, m->stack[m->len - 2]) ||
                 UNLIKELY(eq_keyed(m->stack[m->len - 3]))) {
                 a = spy_retain(m->stack[m->len - 2]); goto display_hash;
             }
@@ -37970,7 +38031,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             break;
         CASE(BC_LOAD_TARGET)
             if (n->kind == N_INDEX && !ins->arg && (m->stack[m->len - 1]->type == SPY_INSTANCE ||
-                                                     (m->stack[m->len - 1]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 1])))) {
+                                                     walk_reaches(c, m->stack[m->len - 1]))) {
                 a = spy_retain(m->stack[m->len - 1]); goto display_hash;
             }
             value = ins->arg ? target_copies(c, m, n) : n->kind == N_INDEX ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
@@ -43130,14 +43191,14 @@ static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue 
  * arguments argv hashes a key that enters a Python __hash__ (hash_calls)
  * first, or compares it by a Python __eq__ (eq_reaches), *key then: in its
  * dict or set (hashed_map), though pop of an empty dict hashes none, or a
- * tuple or view hash() takes, or a view's own __hash__. */
+ * tuple, frozen mapping or view hash() takes, or a view's own __hash__. */
 static NO_INLINE int hashing_call(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **key) {
     size_t at = 0;
     SPYValue *map = hashed_map(callee, method, argc, argv, &at);
     /* A view's bound __hash__ hashes its view. */
     SPYValue *view = !argc && callee->type == SPY_METHOD && memory_hash_method(callee->as.method.function) ? callee->as.method.self : NULL;
     if (view) return hash_calls(c, *key = view);
-    if ((!map && (method >= 0 || argc != 1 || (argv[0]->type != SPY_TUPLE && argv[0]->type != SPY_MEMORYVIEW) ||
+    if ((!map && (method >= 0 || argc != 1 || (argv[0]->type != SPY_TUPLE && argv[0]->type != SPY_FROZENDICT && argv[0]->type != SPY_MEMORYVIEW) ||
                   !(is_builtin(callee, B_HASH) || (argv[0]->type == SPY_MEMORYVIEW && memory_hash_method(callee))))) ||
         !(hash_calls(c, argv[at]) || (map && eq_reaches(argv[at])))) return 0;
     *key = argv[at];
