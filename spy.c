@@ -25838,8 +25838,16 @@ static ALWAYS_INLINE int adapts(SPYValue *);
 static int next_resumes(SPYValue *f) {
     return f->type == SPY_BOUND_METHOD && !f->as.bound.module && f->as.bound.method == M_NEXT && resumable(f->as.bound.self);
 }
+static SPYValue *bound_function(SPYContext *, SPYValue *);
+/* Whether callable iterator v, not ended, calls a Python function, bound
+ * method or callable instance, or resumes a generator, on the machine
+ * (sentinel_call). */
+static int sentinel_calls(SPYContext *c, SPYValue *v) {
+    SPYValue *f = v->as.iterator.source;
+    return !v->as.iterator.done && (machine_function(c, f) || next_resumes(f) || bound_function(c, f));
+}
 /* Whether an adapter's iterable s may give its next item by a call
- * (adapts): a map, a zip or enumerate that adapts, a callable iterator of a Python function, a
+ * (adapts): a map, a zip or enumerate that adapts, a callable iterator of a Python function (sentinel_calls), a
  * __getitem__ or reversed iterator over a Python __getitem__
  * (getitem_call), or an instance whose __next__ is on the machine now. */
 static int adapted_source(SPYContext *c, SPYValue *s) {
@@ -25847,7 +25855,7 @@ static int adapted_source(SPYContext *c, SPYValue *s) {
     switch (s->as.iterator.kind) {
     case I_MAP: return 1;
     case I_ZIP: case I_ENUMERATE: return adapts(s);
-    case I_CALLABLE: return !s->as.iterator.done && (machine_function(c, s->as.iterator.source) || next_resumes(s->as.iterator.source));
+    case I_CALLABLE: return sentinel_calls(c, s);
     case I_GETITEM: case I_REVERSED: return getitem_function(c, s->as.iterator.source) != NULL;
     default: return 0;
     }
@@ -26106,7 +26114,8 @@ static int called_iterator(SPYValue *v) {
     int kind = v->as.iterator.kind;
     return kind == I_MAP || kind == I_FILTER ||
            ((kind == I_GETITEM || kind == I_REVERSED) && (v->as.iterator.source->type == SPY_INSTANCE || metaclassed(v->as.iterator.source))) ||
-           (kind == I_CALLABLE && (v->as.iterator.source->type == SPY_FUNCTION || next_resumes(v->as.iterator.source))) || adapts(v);
+           (kind == I_CALLABLE && (v->as.iterator.source->type == SPY_FUNCTION || v->as.iterator.source->type == SPY_METHOD ||
+                                   v->as.iterator.source->type == SPY_INSTANCE || next_resumes(v->as.iterator.source))) || adapts(v);
 }
 /* Whether next() of v takes its item on the machine (consume): one that
  * adapts a map's, or a map or filter whose function is Python. */
@@ -26117,7 +26126,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
     if (adapts(v)) return 1;
-    if (kind == I_CALLABLE) return !v->as.iterator.done && (machine_function(c, v->as.iterator.source) || next_resumes(v->as.iterator.source));
+    if (kind == I_CALLABLE) return sentinel_calls(c, v);
     if (kind == I_FILTER && !v->as.iterator.done && filter_fetches(c, v)) return 1;
     SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
     /* A filter testing by truth or a builtin may call an item's Python
@@ -35568,7 +35577,7 @@ static ALWAYS_INLINE int filtering(SPYValue *v) {
                                        (v->as.iterator.kind == I_CALLABLE && v->as.iterator.index));
 }
 /* next_call_of for a callable iterator v, iter(f, sentinel), of a Python
- * f: its call, v's index counting those pending for filter_returned,
+ * f, bound method or callable instance: its call, v's index counting those pending for filter_returned,
  * which a call of f may itself make; 1, or
  * 0 for iterator_next when v ended or f is no Python function. */
 static NO_INLINE int sentinel_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
@@ -35581,9 +35590,14 @@ static NO_INLINE int sentinel_call(SPYContext *c, SPYValue *v, SPYValue **fn, SP
         if (!none) return -1;
         c->k_fn = spy_retain(function); c->k_env = none; c->k = NULL; c->k_ctx = NULL; c->k_unit = 2 + COMPARE_CALL;
         *fn = spy_retain(c->unbound);
-    } else if (!machine_function(c, function)) return 0;
-    else if (!(*env = function_env(c, function, 0, NULL, NULL, 0))) return -1;
-    else *fn = spy_retain(function);
+    } else {
+        /* A bound method's or callable instance's self goes first (bound_function). */
+        SPYValue *called = machine_function(c, function) ? function : bound_function(c, function);
+        SPYValue *self = called == function ? NULL : function->type == SPY_METHOD ? function->as.method.self : function;
+        if (!called) return 0;
+        if (!(*env = function_env(c, called, self != NULL, &self, NULL, 0))) return -1;
+        *fn = spy_retain(called);
+    }
     v->as.iterator.index++;
     return 1;
 }

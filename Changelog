@@ -583,6 +583,7 @@ Unreleased (0.10.0):
 - `map()` of a builtin, builtin type or builtin method converts its arguments' Python `__index__` without nesting on the C stack
 - storing into a `memoryview` item converts the value's Python `__index__`, `__float__` or `__bool__` without nesting on the C stack
 - a class's `__doc__` read through its descriptor's Python `__get__` runs without nesting on the C stack
+- `iter(f, sentinel)` of a bound method or callable instance calls its Python method without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
