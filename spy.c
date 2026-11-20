@@ -34187,6 +34187,11 @@ static SPYValue *frame_item_done(SPYContext *c, Machine *m, SPYValue *state, SPY
     }
     return item_called(c, m, state, result);
 }
+/* Whether v, a dict or frozendict subclass's instance, does not iterate
+ * as its builtin, so that merging it calls its keys(). */
+static int keyed_dict(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_INSTANCE && v->as.map.base && is_dict(v->as.map.base) && !builtin_base(c, v, "__iter__", NULL);
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -34244,13 +34249,28 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             return set_walk(c, m, token, swapped ? y : x, swapped ? x : y, kind == OPERATE_INPLACE, env);
         }
     }
-    /* A dict's |= of a plain instance merges it as dict.update() does, on
-     * m (consume), the dict its result. */
-    if (kind == OPERATE_INPLACE && op == T_OREQ && x->type == SPY_DICT && plain_instance(y)) {
+    /* A dict's |= of a plain instance, or of a keyed_dict, merges it as
+     * dict.update() does, on m (consume), the dict its result; so does a
+     * dict subclass's whose __ior__ is dict's, into its dict. */
+    int ior = kind == OPERATE_INPLACE && op == T_OREQ;
+    SPYValue *own = !ior ? NULL : x->type == SPY_DICT ? x : builtin_base(c, x, "__ior__", NULL);
+    if (own && own->type == SPY_DICT && (plain_instance(y) || keyed_dict(c, y))) {
         size_t blocks = m->block_len;
-        consume(c, m, B_EXTEND, x, -1, NULL, spy_retain(y), NULL);
+        consume(c, m, B_EXTEND, own, -1, NULL, spy_retain(y), NULL);
         if (m->block_len == blocks) return NULL;
         m->blocks[m->block_len - 1].consumer->instance = spy_retain(x);
+        return c->unbound;
+    }
+    /* A dict's or frozendict's | of a keyed_dict whose __ror__ is the
+     * builtin's, or a frozendict's |= of one, merges it into a new one of
+     * x's items as dict() or frozendict() of it does, on m
+     * (dict_consumer), the new one its result; so does a subclass's whose
+     * __or__ is its builtin's. */
+    own = kind == OPERATE_BINARY && op == '|' ? is_dict(x) ? x : builtin_base(c, x, "__or__", NULL) :
+          ior && !(own && own->type == SPY_DICT) ? x->type == SPY_FROZENDICT ? x : builtin_base(c, x, "__or__", "__ior__") : NULL;
+    if (own && is_dict(own) && keyed_dict(c, y) && builtin_base(c, y, "__ror__", NULL)) {
+        int pushed = dict_consumer(c, m, c->types[own->type], y, NULL);
+        if (pushed <= 0 || extend_display(c, m->blocks[m->block_len - 1].consumer->result, own)) return NULL;
         return c->unbound;
     }
     /* A dict's | or |= of a dict whose keys may call a Python __eq__ (merge_walk). */

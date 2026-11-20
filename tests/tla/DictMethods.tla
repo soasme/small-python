@@ -77,7 +77,7 @@ SortedItems(S) == LET s == SelectSeq(AllItems, LAMBDA e : e \in S) IN List([i \i
 Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
-Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_function_keys", "ctor_own_keys_calls", "ctor_asked_keys", "ior_keyed_mapping", "keys_not_iterable", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_listed_pairs", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
+Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_function_keys", "ctor_own_keys_calls", "ctor_asked_keys", "ior_keyed_mapping", "keys_not_iterable", "union_keyed", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_listed_pairs", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_slot", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "subclass_equal_key_methods", "subclass_missing_equal_keys", "getitem_key_calls", "subclass_hashed", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "ior_mapping", "merge_dict_iter", "copy_shallow", "merge_empty", "merge_equal_keys", "merge_mutated", "clear",
@@ -166,6 +166,9 @@ Case(c) ==
       \* iterating as a dict merged by its keys(), into a subclass too.
       \* A keys() returning no iterable is named by its class's qualified
       \* name, after a module other than builtins or __main__.
+      \* | of a dict subclass not iterating as a dict merges a copy of the
+      \* left operand's items with it by keys(), the left's builtin type.
+      [] c = "union_keyed" -> "({'a': 'aa', 'q': 0, 'b': 'bb'}, frozendict({'a': 'aa', 'b': 'bb'}), 'dict', ['keys', 'b', 'a', 'keys', 'b', 'a', 'keys', 'b', 'a'])"
       [] c = "keys_not_iterable" -> "['make.<locals>.Local.keys() must return an iterable, not int', 'pkg.M.keys() must return an iterable, not int']"
       [] c = "ior_keyed_mapping" -> "({'a': 1, 'b': 2}, True, {'a': 1, 'b': 2}, ['keys', 'b', 'keys', 'b'])"
       [] c = "ctor_asked_keys" -> "({'a': 'aa'}, {'x': 1}, {'a': 'aa'}, ['keys', 'keys', 'a', 'keys', 'keys', 'a', 'keys'])"
