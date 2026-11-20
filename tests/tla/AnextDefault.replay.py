@@ -29,6 +29,25 @@ def outcome(p):
                 raise ValueError
             return got
 
+    def generator(self):
+        # A generator-based coroutine, as types.coroutine makes one.
+        try:
+            got = yield from Pause().__await__()
+        except KeyError:
+            if p["after"] == "return":
+                return "caught"
+            if p["after"] == "stop":
+                raise StopAsyncIteration
+            if p["after"] == "await":
+                yield from Pause().__await__()
+            raise ValueError
+        return got
+
+    generator.__code__ = generator.__code__.replace(co_flags=generator.__code__.co_flags | 0x100)
+
+    class Based(It):
+        __anext__ = generator
+
     async def agen():
         try:
             got = await Pause()
@@ -43,7 +62,8 @@ def outcome(p):
         yield got
 
     async def driver():
-        return await anext(It() if p["source"] == "coroutine" else agen(), "d")
+        source = {"coroutine": It, "generator": Based, "agen": agen}[p["source"]]()
+        return await anext(source, "d")
 
     co = driver()
     co.send(None)

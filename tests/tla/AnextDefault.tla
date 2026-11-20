@@ -1,7 +1,8 @@
 ----------------------------- MODULE AnextDefault -----------------------------
 (***************************************************************************)
 (* An await of anext(it, "d"), as PLS-315 19.3.4 specifies it, where it's  *)
-(* __anext__ is a coroutine with the body below, or it is an async         *)
+(* __anext__ is a coroutine with the body below, or a generator with       *)
+(* CO_ITERABLE_COROUTINE awaiting by yield from, or it is an async         *)
 (* generator with that body, whose return "caught" is a yield of it and    *)
 (* whose raise StopAsyncIteration is a return, yielding got at its end:    *)
 (*                                                                         *)
@@ -19,7 +20,7 @@
 (***************************************************************************)
 EXTENDS Naturals
 
-Programs == [source : {"coroutine", "agen"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"}]
+Programs == [source : {"coroutine", "generator", "agen"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

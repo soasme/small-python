@@ -25828,7 +25828,8 @@ static NO_INLINE int operation_entered(SPYContext *c, Machine *m) {
     return 1;
 }
 /* Whether the await of anext() awaitable op, m's delegate, resumes the
- * coroutine its __anext__ returned there (delegable): the coroutine
+ * coroutine, or generator with CO_ITERABLE_COROUTINE, its __anext__
+ * returned there (delegable): the coroutine
  * becomes m's delegate, op its operation, which delegate_left ends at its
  * end, its StopAsyncIteration giving the default. */
 static int delegable(SPYValue *);
@@ -25843,7 +25844,7 @@ static NO_INLINE int anext_entered(Machine *m) {
         m->operation = op; m->delegate = spy_retain(g); m->await_target = 0;
         return 1;
     }
-    if (source->type != SPY_COROUTINE || !delegable(source)) return 0;
+    if ((source->type != SPY_COROUTINE && !iterable_coroutine(source)) || !delegable(source)) return 0;
     m->operation = op; m->delegate = spy_retain(source); m->await_target = 0;
     return 1;
 }
@@ -37834,10 +37835,12 @@ static NO_INLINE Machine *delegate_left(SPYContext *c, Machine *m, SPYValue **g,
             m->throwing = 0;
             if (throwing == CLOSING) { delegate_closed(c, m, *flow); *flow = (Result){FLOW_NORMAL, NULL}; return m; }
         }
-        /* An operation's generator yields the await's value, or ends it
-         * raising StopAsyncIteration, which ends an async for; an anext()
-         * coroutine's (a coroutine never yields itself) gives the default. */
-        if (UNLIKELY(m->operation) && (flow->flow != FLOW_YIELD || m->delegate->as.generator.machine->awaiting == AWAIT_YIELD)) {
+        /* An operation's async generator yields the await's value, or ends
+         * it raising StopAsyncIteration, which ends an async for; an
+         * anext() coroutine's, whose yields suspend the await, gives the
+         * default. */
+        if (UNLIKELY(m->operation) && (flow->flow != FLOW_YIELD ||
+                                       (m->delegate->type == SPY_ASYNC_GENERATOR && m->delegate->as.generator.machine->awaiting == AWAIT_YIELD))) {
             /* An aclose's generator must not yield, and its end gives None. */
             int anext = m->operation->type == SPY_ANEXT_AWAITABLE, closing = !anext && m->operation->as.async_operation.method == M_ACLOSE;
             if (flow->flow == FLOW_YIELD && closing) { spy_release(flow->value); spy_error(c, "RuntimeError", "async generator ignored GeneratorExit"); }

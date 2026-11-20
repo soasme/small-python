@@ -601,6 +601,7 @@ Unreleased (0.10.0):
 - `complex.from_number` calls a Python `__complex__`, `__float__` or `__index__`, and a subclass, without nesting on the C stack
 - assigning or deleting a property subclass's attribute calls its Python setter or deleter without nesting on the C stack
 - `int.from_bytes` calls a Python `__bytes__`, and a subclass, without nesting on the C stack
+- an await of `anext()` of an iterator whose `__anext__` is a generator-based coroutine runs it without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
