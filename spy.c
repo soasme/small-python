@@ -30244,10 +30244,12 @@ static int subscript_slot(SPYContext *c, SPYValue *fn, SPYValue *self, size_t ar
 /* Of native method fn of self with argc further arguments argv: center's,
  * ljust's and rjust's width (not their fill), zfill's, expandtabs' tab
  * size, split's and rsplit's maxsplit, hex's bytes_per_sep, int.to_bytes'
- * length, a bytearray's pop() and insert() index and the byte of its
- * insert(), append() and remove(), a search's bounds (search_bounds) and
+ * length, a bytearray's pop() and insert() index, the byte of its
+ * insert(), append() and remove() and the size of its resize() and
+ * take_bytes(), a search's bounds (search_bounds) and
  * an unbound list's pop() and insert() index, the arguments converted
  * before the method looks at the others; else 0. */
+static SPYValue *bytearray_resize_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size_t argc, SPYValue *const *argv) {
     SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = fn->as.native.kwcall;
     intptr_t which = (intptr_t)fn->as.native.data;
@@ -30256,6 +30258,7 @@ static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size
     if (call == int_to_bytes) return argc == 1 || argc == 2;
     if (call == bytearray_method)
         return which == BA_INSERT ? argc == 2 ? 3 : 0 : (which == BA_POP || which == BA_APPEND || which == BA_REMOVE) && argc == 1;
+    if (call == bytearray_resize_method) return argc == 1;
     if (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex || hex_viewing(fn)) return argc == 2 ? 2 : 0;
     if (fn->as.native.call == string_search_method) {
         /* A bytearray's search is a bytes one. */
@@ -45530,18 +45533,19 @@ static SPYValue *bytearray_reduce(SPYContext *c, size_t argc, SPYValue *const *a
 static SPYValue *bytearray_resize_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int take = (int)(intptr_t)data;
     const char *name = take ? "take_bytes" : "resize";
-    SPYValue *self = method_self(c, argc, argv, SPY_BYTEARRAY, name), *args[1] = {NULL};
-    if (!self || parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 1, take ? 0 : 1, 1, args)) return NULL;
+    SPYValue *self = method_self(c, argc, argv, SPY_BYTEARRAY, name), *n = argc > 1 ? argv[1] : NULL;
+    if (!self || positional_only(c, "bytearray", name, !take, 1, argc - 1, keywords)) return NULL;
     int64_t size;
-    if (take && (!args[0] || args[0]->type == SPY_NONE)) size = (int64_t)self->as.string.len;
-    else if (index_value(c, args[0], &size)) {
+    if (take && (!n || n->type == SPY_NONE)) size = (int64_t)self->as.string.len;
+    else if (take && !class_lookup(value_class(c, n), "__index__")) return spy_error(c, "TypeError", "n must be an integer or None");
+    else if (index_value(c, n, &size)) {
         if (take && error_is(c, "OverflowError")) {
             spy_clear_error(c); spy_error(c, "IndexError", "cannot fit 'int' into an index-sized integer");
         }
         return NULL;
     }
     if (!take) {
-        if (size < 0) return spy_error(c, "ValueError", "negative count");
+        if (size < 0) return errorf(c, "ValueError", "Can only resize to positive sizes, got %lld", (long long)size);
         return bytearray_resize(c, self, (size_t)size) ? NULL : spy_none(c);
     }
     /* Conversion may have resized the buffer. Read its size afterwards. */

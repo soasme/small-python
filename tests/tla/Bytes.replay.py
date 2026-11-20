@@ -45,6 +45,9 @@ SOURCES = {
     "bytearray_arity": "ba = bytearray(b'ab')\ndef m(f):\n    try: f()\n    except TypeError as e: return str(e)\n"
                        "result = (m(lambda: ba.append()), m(lambda: ba.pop(1, 2)), m(lambda: ba.insert(0)), m(lambda: ba.clear(1)), m(lambda: ba.remove(x=1)))",
     "search_needle_last": "log = []\nclass X:\n    def __init__(self, v): self.v = v\n    def __index__(self):\n        for _ in (): pass\n        log.append(self.v)\n        return self.v\nb = b\"abcb\"\nresult = (b.find(X(98), X(2)), bytes.count(b, X(98), X(0), X(4)), bytearray(b).rfind(X(98), 0, X(3)), log)",
+    "bytearray_take_calls": "ba = bytearray(b'abc')\nclass R:\n    def __index__(self):\n        for _ in (): pass\n        ba[:] = b'xbxb'\n        return 2\n"
+                            "t = ba.take_bytes(R())\nr = (t, bytes(ba), ba.resize(R()) if ba.extend(b'xb') is None else 0, bytes(ba) + b'' if ba.resize(5) is None else 0)\n"
+                            "try: ba.take_bytes(1.5)\nexcept TypeError as e: m = str(e)\ntry: ba.resize(-1)\nexcept ValueError as e: v = str(e)\nresult = r + (m, v)",
     "bytearray_index_calls": "ba = bytearray(b'abc')\nclass R:\n    def __index__(self):\n        ba[:] = b'xbxb'\n        return 2\n"
                              "log = []\nclass L:\n    def __index__(self):\n        for _ in (): pass\n        log.append(1)\n        return 1\n"
                              "f = ba.count(b'b', R())\ng = bytes(ba)\n"

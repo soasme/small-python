@@ -668,6 +668,7 @@ Unreleased (0.10.0):
 - A function made from a module's, `eval()`'s or a generator expression's code runs it, or gets its iterator, without nesting on the C stack
 - An exception group's `split()` and `subgroup()` take a condition result's Python `__bool__` without nesting on the C stack
 - `reversed()` of a mappingproxy reads and calls its mapping's Python `__reversed__` without nesting on the C stack
+- `bytearray.resize()` and `take_bytes()` convert a Python `__index__` without nesting on the C stack, and raise CPython's argument errors
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
