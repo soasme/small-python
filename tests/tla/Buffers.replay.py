@@ -208,6 +208,17 @@ def subclass(p, log):
     if use == "concat": return repr(b"a" + x)
     if use == "compare": return repr(b"own" == x)
     if use == "decode": return repr(x.decode())
+    if use == "from_bytes": return repr(int.from_bytes(x, "big"))
+    if use == "super":
+        class Y(X.__bases__[0]):
+            def __buffer__(self, flags):
+                for _ in (): pass
+                return super().__buffer__(flags)
+        y = Y(b"own")
+        data = bytes(y)
+        if p["base"] == "bytearray": y.append(33)
+        else: y = y + b"!"
+        return repr(data) + " " + str(len(y))
     return repr(b"-".join([x, x]))
 
 

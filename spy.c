@@ -10422,6 +10422,13 @@ static int own_buffer(SPYValue *v) {
     SPYValue *function = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__buffer__") : NULL;
     return function && !(function->type == SPY_NATIVE && function->as.native.kwcall == buffer_export);
 }
+/* The __release_buffer__ of instance v's class, borrowed, unless it is
+ * the one bytearray exports its contents by, which a view another
+ * __buffer__ gave never reaches; else NULL. */
+static SPYValue *own_release(SPYValue *v) {
+    SPYValue *function = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__release_buffer__") : NULL;
+    return function && !(function->type == SPY_NATIVE && function->as.native.kwcall == buffer_export) ? function : NULL;
+}
 /* Whether b is what a bytes or bytearray concatenation takes: a value
  * with a buffer. */
 static int concatenable(SPYValue *b) {
@@ -25047,6 +25054,7 @@ static SPYValue *percent_released(SPYContext *c, Machine *m, SPYValue *after, SP
     return value;
 }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
+static SPYValue *memory_contents(SPYContext *, SPYValue *);
 /* str, bytes or bytearray x % y on machine m, y reaching an instance
  * (percent_reaches), x also a str subclass's (percent_text): its job's
  * first call (percent_build), c->unbound;
@@ -41687,8 +41695,40 @@ static SPYValue *from_bytes_called(SPYContext *c, Machine *m, SPYValue *ctx, SPY
     spy_release(result); spy_release(ctx);
     return made;
 }
+/* int.from_bytes of ctx's copy of a buffer (from_bytes_exported). */
+static SPYValue *from_bytes_copied(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *copy) {
+    SPYValue **items = ctx->as.seq.items;
+    return from_bytes_made(c, m, items[0], copy, items[2]->as.integer_data.small & 1, items[2]->as.integer_data.small >> 1);
+}
+/* What int.from_bytes's argument's Python __release_buffer__ returned in
+ * result, an error unraisable: after holds ctx, the copy and the view,
+ * which goes back. */
+static SPYValue *from_bytes_released(SPYContext *c, Machine *m, SPYValue *after, SPYValue *result) {
+    SPYValue **a = after->as.seq.items;
+    spy_release(result);
+    if (c->error_type[0]) release_unraisable(c, a[0]->as.seq.items[1]);
+    memory_unexport(a[2]);
+    SPYValue *made = from_bytes_copied(c, m, a[0], a[1]);
+    spy_release(after);
+    return made;
+}
+/* What int.from_bytes's argument's Python __buffer__ returned, the view
+ * result, ctx as from_bytes_called's: the int of its copy (buffer_copy),
+ * after a Python __release_buffer__, m's call (from_bytes_released). */
+static SPYValue *from_bytes_exported(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue *release = NULL, *inner = NULL, *copy = result ? buffer_copy(c, ctx->as.seq.items[1], 0, result, &release, &inner) : NULL, *made = NULL;
+    spy_release(result);
+    if (copy && !release) made = from_bytes_copied(c, m, ctx, copy);
+    else if (copy) {
+        SPYValue *after = tuple_of(c, 3, (SPYValue *[]){ctx, copy, inner}), *object = spy_retain(ctx->as.seq.items[1]);
+        if (after) made = callk(c, m, release, 2, (SPYValue *[]){object, inner}, from_bytes_released, after);
+        else { spy_release(object); memory_unexport(inner); spy_release(inner); }
+    }
+    spy_release(copy); spy_release(ctx);
+    return made;
+}
 /* int.from_bytes(bytes, byteorder='big', *, signed=False); a Python
- * __bytes__ and a subclass's call run on the step's machine. */
+ * __bytes__ or __buffer__ and a subclass's call run on the step's machine. */
 static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     static const char *const names[] = {"bytes", "byteorder", "signed"};
@@ -41698,7 +41738,13 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
     int little, is_signed = args[2] && truthy(args[2]);
     if (c->error_type[0] || byteorder_argument(c, "from_bytes", args[1], &little)) return NULL;
     Machine *m = step_machine(c);
-    /* A buffer comes before __bytes__. */
+    /* A buffer comes before __bytes__; a Python __buffer__ is m's call (from_bytes_exported). */
+    SPYValue *exporter = m && own_buffer(args[0]) ? class_lookup(args[0]->as.map.parent, "__buffer__") : NULL;
+    if (exporter && machine_function(c, exporter)) {
+        SPYValue *bits = spy_int(c, little | is_signed << 1), *ctx = bits ? tuple_of(c, 3, (SPYValue *[]){argv[0], args[0], bits}) : NULL;
+        spy_release(bits);
+        return ctx ? callk(c, m, exporter, 2, (SPYValue *[]){spy_retain(args[0]), spy_int(c, BUFFER_FLAGS)}, from_bytes_exported, ctx) : NULL;
+    }
     SPYValue *owned, *source = buffer_bytes(c, args[0], &owned);
     if (!source && c->error_type[0]) return NULL;
     SPYValue *method = !source && m && !builtin_value(c, args[0], SPY_BYTES) && args[0]->type != SPY_BYTEARRAY && args[0]->type != SPY_MEMORYVIEW ?
@@ -42367,7 +42413,7 @@ static int memory_release(SPYContext *c, SPYValue *m) {
     memory_unexport(m);
     SPYValue *view = m->as.memory.view;
     if (!view) return 0;
-    if (m->as.memory.obj->type == SPY_INSTANCE && class_lookup(m->as.memory.obj->as.map.parent, "__release_buffer__")) {
+    if (own_release(m->as.memory.obj)) {
         ErrorState pending = take_error(c);
         spy_release(call_special(c, m->as.memory.obj, "__release_buffer__", 1, &view));
         if (c->error_type[0]) release_unraisable(c, m->as.memory.obj);
@@ -42396,9 +42442,8 @@ static SPYValue *buffer_released(SPYContext *c, Machine *machine, SPYValue *pair
 /* The Python __release_buffer__, a machine function, that releasing view
  * m calls, borrowed; else NULL. */
 static SPYValue *release_function(SPYContext *c, SPYValue *m) {
-    SPYValue *obj = m->as.memory.obj, *function;
-    return m->as.memory.released || m->as.memory.exports || !m->as.memory.view || obj->type != SPY_INSTANCE ||
-           !(function = class_lookup(obj->as.map.parent, "__release_buffer__")) || !machine_function(c, function) ? NULL : function;
+    SPYValue *function = own_release(m->as.memory.obj);
+    return m->as.memory.released || m->as.memory.exports || !m->as.memory.view || !function || !machine_function(c, function) ? NULL : function;
 }
 static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m, SPYValue *value, SPYValue **result) {
     SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function = release_function(c, m), *pair;
@@ -42808,6 +42853,11 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
         spy_release(flags);
         return memory_exported(c, object, view);
     }
+    return memory_contents(c, object);
+}
+/* A view of the contents of object, a bytes or bytearray value or a
+ * subclass's instance, whatever __buffer__ its class defines. */
+static SPYValue *memory_contents(SPYContext *c, SPYValue *object) {
     SPYValue *source = builtin_value(c, object, SPY_BYTES);
     if (!source) source = builtin_value(c, object, SPY_BYTEARRAY);
     if (!source) return errorf(c, "TypeError", "memoryview: a bytes-like object is required, not '%s'", type_name(object));
@@ -43504,7 +43554,7 @@ static SPYValue *buffer_export(SPYContext *c, size_t argc, SPYValue *const *argv
     if (!is_int(arg)) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(arg));
     if (index_value(c, arg, &flags)) return NULL;
     if ((flags & 1) && type == SPY_BYTES) return spy_error(c, "BufferError", "Object is not writable.");
-    return memory_from(c, argv[0]);
+    return memory_contents(c, argv[0]);
 }
 static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;

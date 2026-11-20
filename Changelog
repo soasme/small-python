@@ -620,6 +620,9 @@ Unreleased (0.10.0):
 - `hash()` of a memoryview, and its `__hash__`, call the exporter's Python `__hash__` without nesting on the C stack
 - `hex()` of bytes, a bytearray or a memoryview calls its separator's Python `__len__` without nesting on the C stack
 - `map(bytes, ...)`, `map(bytearray, ...)` and a bytes `%b` call an exporter's Python `__release_buffer__` without nesting on the C stack
+- `int.from_bytes()` calls a Python `__buffer__` and `__release_buffer__` without nesting on the C stack
+- a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
+- a view a bytearray subclass's own `__buffer__` returns is released without bytearray's `__release_buffer__`, which reported an error
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

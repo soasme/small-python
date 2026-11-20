@@ -45,7 +45,9 @@
 (* a subclass X of bytes or bytearray whose __buffer__ logs "get" and      *)
 (* returns memoryview(b"BUF") and whose __release_buffer__ logs "rel", and *)
 (* x = X(b"own"): it reads memoryview(x) inside `with`, b"a" + x,         *)
-(* b"own" == x, x.decode(), or b"-".join([x, x]). The outcome is the log   *)
+(* b"own" == x, x.decode(), b"-".join([x, x]) or int.from_bytes(x), or,  *)
+(* its __buffer__ super()'s, bytes(x), then len(x) after an append for a  *)
+(* bytearray or len(x + b"!") for bytes. The outcome is the log            *)
 (* and the result or the exception. An item program stores into item 0 of *)
 (* a view of format B, d or ? an instance whose Python __index__,          *)
 (* __float__ or __bool__ logs its name and returns 7, 2.5 or True, or a    *)
@@ -66,7 +68,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"index"}, view : {"plain", "released", "readonly", "zero", "grid"}, store : BOOLEAN]
             \cup [part : {"grid"}, first : {"in", "out"}, store : BOOLEAN]
             \cup [part : {"several"}, op : {"replace", "join", "starred", "generator", "iterator", "dict", "first", "second", "compare"}]
-            \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice"}]
+            \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice", "from_bytes", "super"}]
             \cup [part : {"item"}, format : {"B", "d", "?"}, bad : BOOLEAN]
             \cup [part : {"needle"}, index : {"raise", "str", "byte"}, buffer : {"view", "raise"}, array : BOOLEAN]
             \cup [part : {"hash"}, exporter : {"int", "raise"}, call : {"hash", "method", "get"}]
@@ -113,6 +115,9 @@ Several(p) == CASE p.op = "replace" -> "getA getB relA relB b'zQz'"
 Subclass(p) == CASE p.use = "view" -> "get rel b'BUF'"
                  [] p.use = "concat" -> "get rel b'aBUF'"
                  [] p.use = "twice" -> "get get rel rel b'BUF-BUF'"
+                 [] p.use = "from_bytes" -> "get rel 4347206"
+                 \* super().__buffer__ exports the contents, released with the view.
+                 [] p.use = "super" -> "b'own' 4"
                  [] p.base = "bytes" -> IF p.use = "compare" THEN "True" ELSE "'own'"
                  [] OTHER -> IF p.use = "compare" THEN "get rel False" ELSE "get rel 'BUF'"
 
