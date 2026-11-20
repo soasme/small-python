@@ -613,6 +613,8 @@ Unreleased (0.10.0):
 - `sorted()` and `list.sort()` call a Python `__bool__` or `__len__` of `reverse` without nesting on the C stack
 - `zip()` and `map()`, strict or not, over instance iterators mixed with generators call their Python `__next__` without nesting on the C stack
 - `enumerate()`, `filter()`, `map()` and `zip()` over a zip, map or enumerate that holds a generator resume it without nesting on the C stack
+- a property whose getter is a callable instance or a bound method calls it without nesting on the C stack
+- `bytes.join()` and `bytearray.join()` release their items' buffers only after joining them all, and call Python `__buffer__` and `__release_buffer__` without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

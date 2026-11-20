@@ -16,11 +16,14 @@
 (* calls. For op doc, the property is made of a getter whose __doc__ is a  *)
 (* Python property returning "documented", raising LookupError, or raising *)
 (* AttributeError (absent), read once: the property's __doc__ is that      *)
-(* docstring, the error, or None.                                          *)
+(* docstring, the error, or None. For op get, the getter is an instance   *)
+(* whose Python __call__ returns "got" or raises LookupError, or absent,   *)
+(* read by c.x or __get__ as the method's how says: the value, the error,  *)
+(* or an AttributeError naming the getter, after its calls.                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [op : {"set", "delete", "doc"}, maker : {"property", "subclass"}, function : {"returns", "raises", "absent"},
+Programs == [op : {"set", "delete", "doc", "get"}, maker : {"property", "subclass"}, function : {"returns", "raises", "absent"},
              how : {"method", "class", "bound", "statement"}]
 
 VARIABLES program, outcome
@@ -28,11 +31,14 @@ vars == <<program, outcome>>
 
 Pending == "pending"
 
-Call(p) == CASE p.op = "set" -> "set(c, 1)" [] p.op = "delete" -> "delete(c)" [] OTHER -> "doc"
+Call(p) == CASE p.op = "set" -> "set(c, 1)" [] p.op = "delete" -> "delete(c)" [] p.op = "get" -> "get(c)" [] OTHER -> "doc"
 
 Run(p) == CASE p.op = "doc" -> (CASE p.function = "absent" -> "None doc"
                                  [] p.function = "raises" -> "LookupError doc"
                                  [] OTHER -> "'documented' doc")
+            [] p.op = "get" -> (CASE p.function = "absent" -> "AttributeError getter"
+                                 [] p.function = "raises" -> "LookupError get(c)"
+                                 [] OTHER -> "'got' get(c)")
             [] p.function = "absent" -> IF p.op = "set" THEN "AttributeError setter" ELSE "AttributeError deleter"
             [] p.function = "raises" -> "LookupError " \o Call(p)
             [] OTHER -> "None " \o Call(p)
@@ -45,5 +51,5 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* The function's own result never comes back.
-ReturnsNone == Done /\ program.op # "doc" /\ program.function = "returns" => outcome = "None " \o Call(program)
+ReturnsNone == Done /\ program.op \notin {"doc", "get"} /\ program.function = "returns" => outcome = "None " \o Call(program)
 =============================================================================

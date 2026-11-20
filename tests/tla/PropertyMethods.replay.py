@@ -1,5 +1,5 @@
 # Replays PropertyMethods.tla: each case makes the property and calls its
-# __set__ or __delete__ as the program says, then writes the result and the
+# __set__, __delete__ or __get__ as the program says, then writes the result and the
 # function's calls as the model does.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
@@ -31,9 +31,36 @@ def documented(p):
     return " ".join([result] + calls)
 
 
+def got(p):
+    calls = []
+
+    class Getter:
+        def __call__(self, obj):
+            for _ in (): pass
+            calls.append("get(c)")
+            if p["function"] == "raises": raise LookupError
+            return "got"
+
+    maker = property if p["maker"] == "property" else Sub
+    C = type("C", (), {"x": maker(None if p["function"] == "absent" else Getter())})
+    c = C()
+    x = C.__dict__["x"]
+    read = {"method": lambda: x.__get__(c), "class": lambda: maker.__get__(x, c, C),
+            "bound": x.__get__, "statement": lambda: c.x}[p["how"]]
+    try:
+        result = repr(read(c) if p["how"] == "bound" else read())
+    except LookupError:
+        result = "LookupError"
+    except AttributeError as e:
+        return "AttributeError " + ("getter" if "getter" in str(e) else str(e))
+    return " ".join([result] + calls)
+
+
 def outcome(p):
     if p["op"] == "doc":
         return documented(p)
+    if p["op"] == "get":
+        return got(p)
     calls = []
 
     def function(self, *value):

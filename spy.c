@@ -610,6 +610,7 @@ static int key_reaches(SPYContext *, SPYValue *);
 static int hashes_key(SPYValue *, int);
 static SPYValue *hash_entered(SPYContext *, SPYValue *);
 static int hash_calls(SPYContext *, SPYValue *);
+static int property_enters(SPYContext *, SPYValue *);
 static int tuple_push(SPYContext *, Machine *, SPYValue *, size_t, uint64_t);
 static SPYValue *tuple_next(SPYContext *, Machine *, SPYValue **, int64_t *);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
@@ -13078,7 +13079,7 @@ static SPYValue *get_function(SPYContext *c, SPYValue *kind) {
 /* Whether descriptor's getter is a Python function: a property's, or the
  * __get__ of an instance's class (get_function). */
 static int python_getter(SPYContext *c, SPYValue *descriptor) {
-    if (descriptor->type == SPY_PROPERTY) return machine_function(c, descriptor->as.property.get);
+    if (descriptor->type == SPY_PROPERTY) return property_enters(c, descriptor);
     return descriptor->type == SPY_INSTANCE && descriptor->ctx == c && get_function(c, descriptor->as.map.parent);
 }
 /* Whether class v's metaclass has a __getattr__ or its own
@@ -13130,14 +13131,14 @@ static void getter_args(SPYContext *c, SPYValue *v, const char *name, SPYValue *
 static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, const char *name, SPYValue **own) {
     SPYValue *descriptor = UNLIKELY(v == c->searched) ? c->searched_class : class_lookup(owner, name);
     *own = NULL;
-    if (descriptor && descriptor->type == SPY_PROPERTY) return machine_function(c, descriptor->as.property.get) ? spy_retain(descriptor) : NULL;
+    if (descriptor && descriptor->type == SPY_PROPERTY) return property_enters(c, descriptor) ? spy_retain(descriptor) : NULL;
     SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c && plain_mro(c, owner) ? descriptor->as.map.parent : NULL;
     SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
     int data = 0;
     /* A property subclass's inherited __get__ calls its property's getter. */
     if (get && get == name_local(c->types[SPY_PROPERTY], "__get__")) {
         descriptor = builtin_value(c, descriptor, SPY_PROPERTY);
-        return machine_function(c, descriptor->as.property.get) ? spy_retain(descriptor) : NULL;
+        return property_enters(c, descriptor) ? spy_retain(descriptor) : NULL;
     }
     if (!get || !get_function(c, kind) || !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
         return NULL;
@@ -13266,7 +13267,7 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
         if (e) return spy_retain(e->value);
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
-    if (calls && kind == ATTR_PROPERTY && machine_function(c, n->attr_method->as.property.get)) return NULL;
+    if (calls && kind == ATTR_PROPERTY && property_enters(c, n->attr_method)) return NULL;
     /* A function's, class's or module's __annotations__ its Python __annotate__ makes (getter_call). */
     if (calls && UNLIKELY(v->type == SPY_FUNCTION || v->type == SPY_CLASS || v->type == SPY_MODULE) &&
         !strcmp(n->b->text, "__annotations__") && annotate_pending(c, v)) {
@@ -27460,6 +27461,16 @@ static NO_INLINE int pair_listing(SPYContext *c, Machine *m, SPYValue *item) {
     return 1;
 }
 static NO_INLINE size_t operator_finish(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t);
+static int buffer_argument(SPYContext *, SPYValue *);
+static SPYValue *buffered_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, SPYValue *);
+/* Whether consumer s, its items all taken, is a bytes or bytearray join
+ * of them, one an exporter whose __buffer__ is a machine function. */
+static int joins_exporters(SPYContext *c, Consumer *s) {
+    SPYValue *callee = s->callee;
+    return callee && s->result && s->result->type == SPY_LIST && !c->error_type[0] &&
+           (s->method == M_JOIN ? callee->type == SPY_BYTES || callee->type == SPY_BYTEARRAY : s->method < 0 && bytes_joining(callee)) &&
+           buffer_argument(c, s->result);
+}
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
     /* A generator closes on the GeneratorExit its close threw. */
@@ -27530,6 +27541,18 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
         if (!began) machine_push(c, m, call_keywords(c, callee, 1, &items, keywords));
         release_all(3, (SPYValue *[]){items, callee, keywords});
         return began > 0;
+    }
+    if (status > 0 && joins_exporters(c, top->consumer)) {
+        /* A bytes join of items an exporter is among is a buffered call
+         * (buffered_call), each view going back after the copy. */
+        Consumer *s = top->consumer;
+        SPYValue *callee = spy_retain(s->callee), *name = spy_retain(s->name ? s->name : c->none), *args = spy_tuple(c, 1, &s->result);
+        int method = s->method;
+        pop_block(c, m, f);
+        SPYValue *result = args ? buffered_call(c, m, callee, method, name, args) : NULL;
+        release_all(3, (SPYValue *[]){callee, name, args});
+        if (result) machine_push(c, m, result);
+        return 0;
     }
     if (status > 0 && top->consumer->id == B_SET_TOGGLE) return set_toggled(c, m, f);
     if (status > 0 && top->consumer->sources && top->consumer->source < top->consumer->sources->as.seq.len) return set_source(c, top);
@@ -28381,6 +28404,24 @@ static SPYValue *bound_function(SPYContext *c, SPYValue *v) {
                          v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__call__") :
                          metaclassed(v) ? class_lookup(v->as.map.meta, "__call__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
+}
+/* Whether property p's getter runs on the machine: a Python function, or
+ * one a call of it calls with its self first (bound_function). */
+static int property_enters(SPYContext *c, SPYValue *p) {
+    SPYValue *get = p->as.property.get;
+    return machine_function(c, get) || (get->type != SPY_NONE && bound_function(c, get));
+}
+/* The function on the machine to enter for getter get, which it takes,
+ * called on the argc arguments in argv: get itself, or its bound function
+ * with get's self put first in argv, *argc counting it (bound_function). */
+static SPYValue *getter_bound(SPYContext *c, SPYValue *get, SPYValue **argv, size_t *argc) {
+    SPYValue *function = machine_function(c, get) ? NULL : bound_function(c, get);
+    if (!function) return get;
+    memmove(argv + 1, argv, *argc * sizeof(*argv));
+    argv[0] = spy_retain(get->type == SPY_METHOD ? get->as.method.self : get);
+    (*argc)++;
+    spy_retain(function); spy_release(get);
+    return function;
 }
 /* The function on the machine that calling staticmethod v calls; borrowed, or NULL. */
 static ALWAYS_INLINE SPYValue *static_function(SPYContext *c, SPYValue *v) {
@@ -29464,6 +29505,13 @@ static int choices_at(SPYValue *callee, int method) {
  * and its receiver is, or one of its argc arguments argv holds, a machine
  * exporter (buffer_argument), for the call to run on the machine
  * (buffered_call); else 0. */
+/* Whether v, not a list or tuple, is an iterable a join lists without
+ * Python code, whose items may be exporters (buffer_fast). */
+static int join_listable(SPYValue *v) {
+    return (UINT64_C(1) << v->type & (UINT64_C(1) << SPY_DICT | UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET |
+                                     UINT64_C(1) << SPY_DICT_KEYS | UINT64_C(1) << SPY_DICT_VALUES | UINT64_C(1) << SPY_DICT_ITEMS)) ||
+           (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE);
+}
 static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     if (method < 0 && callee->type == SPY_BOUND_METHOD) method = callee->as.bound.method;
@@ -29478,7 +29526,7 @@ static NO_INLINE unsigned buffer_arguments_rest(SPYContext *c, SPYValue *callee,
     if (callee == c->types[SPY_BYTES] && argc == 1 && argv[0]->type == SPY_INSTANCE && class_lookup(argv[0]->as.map.parent, "__bytes__")) return 0;
     for (size_t i = 0; i < argc; i++)
         if (argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE ? (joins || (int)i == choices) && buffer_argument(c, argv[i]) :
-                                                                      machine_exporter(c, argv[i]) != NULL)
+            joins && join_listable(argv[i]) ? 1 : machine_exporter(c, argv[i]) != NULL)
             return INDEX_BUFFERS;
     return 0;
 }
@@ -29494,7 +29542,9 @@ static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *c, SPYValue *callee, 
     for (size_t i = 0; i < argc; i++)
         if (argv[i]->type == SPY_INSTANCE || argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE)
             return buffer_arguments_rest(c, callee, method, argc, argv);
-    return 0;
+    /* A join of another iterable lists it first (buffer_fast). */
+    return argc && (method == M_JOIN || (method < 0 && callee->type != SPY_FUNCTION)) && join_listable(argv[argc - 1]) ?
+           buffer_arguments_rest(c, callee, method, argc, argv) : 0;
 }
 static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
@@ -30274,7 +30324,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         memmove(argv, argv + 1, --argc * sizeof(*argv));
         m->len--;
     }
-    if (calls && index_arguments(c, callee, -1, argc, argv)) {
+    /* So does a join of a list or tuple holding an exporter (buffer_arguments). */
+    if (calls && (index_arguments(c, callee, -1, argc, argv) || (argc <= INDEX_MOST && buffer_arguments(c, callee, -1, argc, argv)))) {
         SPYValue *args[INDEX_MOST];
         memcpy(args, argv, argc * sizeof(*argv));
         m->len -= argc + 1;
@@ -34307,7 +34358,7 @@ static SPYValue *item_function(SPYContext *c, SPYValue *object, const char *name
 static SPYValue *descriptor_getter(SPYContext *c, SPYValue *d) {
     SPYValue *get = !d ? NULL : d->type == SPY_PROPERTY ? d->as.property.get :
                     d->type == SPY_INSTANCE ? class_lookup(d->as.map.parent, "__get__") : NULL;
-    return get && machine_function(c, get) ? get : NULL;
+    return get && (machine_function(c, get) || (d->type == SPY_PROPERTY && property_enters(c, d))) ? get : NULL;
 }
 /* The read of descriptor d, which descriptor_getter reads, on self, as m's
  * call (callk), then k with ctx and what it gave. */
@@ -34813,7 +34864,7 @@ static NO_INLINE SPYValue *super_getter(SPYContext *c, SPYValue *v, const char *
     }
     if (!definition) return NULL;
     if (definition->type == SPY_PROPERTY)
-        return self != v->as.super.owner && machine_function(c, definition->as.property.get) ? spy_retain(definition) : NULL;
+        return self != v->as.super.owner && property_enters(c, definition) ? spy_retain(definition) : NULL;
     SPYValue *kind = definition->type == SPY_INSTANCE && !definition->as.map.base ? definition->as.map.parent : NULL;
     return kind && get_function(c, kind) ? spy_retain(definition) : NULL;
 }
@@ -34834,7 +34885,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
         SPYValue *self = v->as.super.self == v->as.super.owner ? c->none : v->as.super.self;
         if (function->type == SPY_PROPERTY) {
             argv[0] = spy_retain(self);
-            get = spy_retain(function->as.property.get);
+            get = getter_bound(c, spy_retain(function->as.property.get), argv, argc);
         } else {
             argv[0] = function; argv[1] = spy_retain(self); argv[2] = spy_retain(v->as.super.owner); *argc = 3;
             get = spy_retain(get_function(c, function->as.map.parent));
@@ -34848,8 +34899,9 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
         return spy_retain(get_function(c, function->as.map.parent));
     } else if (!(argv[1] = attribute_key(c, name, strlen(name)))) { spy_release(function); return NULL; }
     else { *argc = 2; get = function; function = NULL; }
-    spy_release(function);
     argv[0] = spy_retain(v);
+    if (function && function->type == SPY_PROPERTY) get = getter_bound(c, get, argv, argc);
+    spy_release(function);
     return get;
 }
 /* The call of function, which it takes, that c->fallback gave for a read
@@ -34927,7 +34979,7 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     c->fallback = NULL;
     c->entering_kind = CALL_MACHINE;
     if (function) return getter_enter(c, m, v, n->b->text, function, env);
-    function = spy_retain(n->attr_method->as.property.get);
+    function = getter_bound(c, spy_retain(n->attr_method->as.property.get), argv, &argc);
     if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
     spy_release(function);
     return NULL;
@@ -34988,7 +35040,7 @@ static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulte
     /* A __dict__ search by a Python __eq__ is m's call, the read going on after it (getattr_searched). */
     if (!own && kind != ATTR_PROPERTY && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, text))
         return search_begin(c, m, v, text, c->booleans[defaulted], getattr_searched);
-    if (kind == ATTR_PROPERTY && machine_function(c, method->as.property.get)) { function = spy_retain(method->as.property.get); spy_retain(v); }
+    if (kind == ATTR_PROPERTY && property_enters(c, method)) { spy_retain(v); function = getter_bound(c, spy_retain(method->as.property.get), argv, &argc); }
     else {
         /* An own entry, or its miss with a default, is read without an
          * AttributeError (ATTR_OWN). */
@@ -37808,8 +37860,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         a = flow.value; flow.value = NULL;
     consume_item:
         if (consumer_took(c, m, &f, a)) goto consume_generator;
-        /* An in inside a chain may jump out of it (contains_step). */
+        /* An in inside a chain may jump out of it (contains_step); a
+         * join's buffered call may begin (consumer_took). */
         a = NULL; pc = m->pc;
+        if (UNLIKELY(c->k_fn)) goto enter_k;
         continue;
     enter_call:
         m->pc = pc;
@@ -40719,28 +40773,34 @@ static SPYValue *text_expandtabs(SPYContext *c, size_t argc, SPYValue *const *ar
 /* Like CPython, join snapshots an iterable into a list (a list or tuple is
  * used directly), so an item's __buffer__ may change the sequence's size. */
 static int buffer_memo(SPYContext *, size_t *);
+static SPYValue *buffer_fast(SPYContext *, SPYValue *, size_t *);
 static SPYValue *buffer_item(SPYContext *, SPYValue *, size_t);
+static SPYValue *buffer_kept(SPYContext *, SPYValue *, SPYValue **, SPYValue *);
+static int memory_release(SPYContext *, SPYValue *);
 static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     SPYValue *self = method_self(c, argc, argv, type, "join"), *args[1];
     if (!self || parse_arguments(c, "join", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
-    SPYValue *seq = args[0];
-    if (!(seq = sequence_fast(c, seq, "can only join an iterable"))) return NULL;
+    /* A retry after a Python __buffer__ reads what was read before it
+     * (buffer_fast, buffer_item); the views exported are released after
+     * the copy. */
+    size_t n;
+    SPYValue *seq = buffer_fast(c, args[0], &n), *views = seq ? spy_list(c) : NULL;
+    if (!views) { spy_release(seq); return NULL; }
     Buffer out = {.ctx = c};
-    /* A retry after a Python __buffer__ reads what was read before it (buffer_item). */
-    size_t n = seq->as.seq.len;
-    if (buffer_memo(c, &n)) { spy_release(seq); return NULL; }
     for (size_t i = 0; !c->error_type[0] && i < n; i++) {
         if (i >= seq->as.seq.len) { spy_error(c, "RuntimeError", "sequence changed size during iteration"); break; }
         SPYValue *item = buffer_item(c, seq, i), *copy, *actual;
         if (!item) break;
-        actual = buffer_bytes(c, spy_retain(item), &copy);
+        actual = buffer_kept(c, spy_retain(item), &copy, views);
         if (!actual) { spy_clear_error(c); errorf(c, "TypeError", "sequence item %zu: expected a bytes-like object, %s found", i, type_name(item)); }
         else if (seq->as.seq.len != n) spy_error(c, "RuntimeError", "sequence changed size during iteration");
         else if (!i || !append(&out, self->as.string.data, self->as.string.len)) append(&out, actual->as.string.data, actual->as.string.len);
         spy_release(copy); spy_release(item);
     }
     spy_release(seq);
+    for (size_t i = 0; i < views->as.seq.len; i++) memory_release(c, views->as.seq.items[i]);
+    spy_release(views);
     SPYValue *result = c->error_type[0] ? NULL : type == SPY_BYTEARRAY ?
         bytearray_new(c, out.data ? out.data : "", out.len) : spy_bytes(c, out.data ? out.data : "", out.len);
     mem_free(out.data);
@@ -42499,6 +42559,28 @@ static int buffer_memo(SPYContext *c, size_t *v) {
     spy_release(memo);
     return status;
 }
+/* A join's list or tuple of iterable v (sequence_fast), owned, its
+ * length in *n: while a buffered operation's native code runs
+ * (buffered_go), the one, and the length, of when the operation first
+ * ran, so that a retry after a __buffer__ sees what came before that
+ * call; NULL with an error. */
+static SPYValue *buffer_fast(SPYContext *c, SPYValue *v, size_t *n) {
+    int buffered = c->buffer_views && c->buffer_depth == c->py_depth;
+    SPYValue *views = c->buffer_views, **items = buffered ? views->as.seq.items : NULL;
+    for (size_t i = 0; buffered && i + 1 < views->as.seq.len; i += 2)
+        if (items[i] == c->stepped) {
+            SPYValue **memo = items[i + 1]->as.seq.items;
+            *n = (size_t)memo[1]->as.integer_data.small;
+            return spy_retain(memo[0]);
+        }
+    SPYValue *seq = sequence_fast(c, v, "can only join an iterable");
+    if (!seq || !buffered) { if (seq) *n = seq->as.seq.len; return seq; }
+    *n = seq->as.seq.len;
+    SPYValue *length = int_value(c, (int64_t)*n), *memo = length ? spy_tuple(c, 2, (SPYValue *[]){seq, length}) : NULL;
+    if (!memo || sequence_append(c, views, c->stepped) || sequence_append(c, views, memo)) { spy_release(seq); seq = NULL; }
+    release_all(2, (SPYValue *[]){length, memo});
+    return seq;
+}
 /* Item i of list or tuple seq, borrowed, as a buffered operation (buffered_go)
  * first read it, so that a retry after a __buffer__ that changed seq sees
  * what each item was when reached; NULL with an error. */
@@ -42516,7 +42598,11 @@ static SPYValue *buffer_item(SPYContext *c, SPYValue *seq, size_t i) {
 /* The bytes of a bytes-like object: a borrowed bytes or bytearray value, or
  * for a memoryview or a __buffer__ exporter a contiguous copy returned in
  * *owned. NULL otherwise. */
-static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
+static SPYValue *buffer_kept(SPYContext *, SPYValue *, SPYValue **, SPYValue *);
+static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) { return buffer_kept(c, v, owned, NULL); }
+/* buffer_bytes, an exporter's view kept in list kept for its caller to
+ * release (memory_release) when given, else released at once. */
+static SPYValue *buffer_kept(SPYContext *c, SPYValue *v, SPYValue **owned, SPYValue *kept) {
     *owned = NULL;
     if (own_buffer(v)) {
         SPYValue *held = buffer_held(c, v);
@@ -42524,7 +42610,7 @@ static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
         if (c->error_type[0]) return NULL;
         SPYValue *view = memory_from(c, v);
         if (view) *owned = memory_check(c, view) ? NULL : memory_bytes(c, view);
-        if (view && memory_release(c, view)) { spy_release(*owned); *owned = NULL; }
+        if (view && (kept ? sequence_append(c, kept, view) : memory_release(c, view))) { spy_release(*owned); *owned = NULL; }
         spy_release(view);
         return *owned;
     }
@@ -46454,8 +46540,13 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         return NULL;
     }
     if (op != DESCR_GET) return NULL;
-    if (!p || argc < 1 || argc > 2 || argv[0]->type == SPY_NONE || !machine_function(c, p->as.property.get)) return NULL;
-    return (*env = function_env(c, p->as.property.get, 1, argv, NULL, 0)) ? spy_retain(p->as.property.get) : NULL;
+    if (!p || argc < 1 || argc > 2 || argv[0]->type == SPY_NONE || !property_enters(c, p)) return NULL;
+    SPYValue *args[2] = {spy_retain(argv[0])};
+    size_t n = 1;
+    function = getter_bound(c, spy_retain(p->as.property.get), args, &n);
+    if ((*env = function_env(c, function, n, args, NULL, 1))) return function;
+    spy_release(function);
+    return NULL;
 }
 static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     SPYValue *type = c->types[SPY_CLASS];
