@@ -46,7 +46,7 @@ Cases == {"int_float", "true_div", "floor_div", "mod_sign", "divmod", "complex_m
           "shift_float", "bitwise_float", "big_mul", "complex_zero_power", "complex_overflow", "complex_matmul",
           "bool_matmul", "complex_shift", "divmod_complex", "complex_zero_div", "pow3_instance", "pow3_methods", "divmod_methods", "builtin_declines", "divmod_descriptor",
           "pow3_float", "pow3_complex", "pow3_zero", "pow3_inverse", "inplace_messages", "inplace_pow_message",
-          "sequence_reflected"}
+          "sequence_reflected", "sequence_declined"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}]
             \cup [op : Ops, left : Kinds, right : {"same"}, relation : {"same"}]
             \cup [case : Cases]
@@ -162,6 +162,9 @@ Case(c) ==
       [] c = "inplace_pow_message" -> "TypeError: unsupported operand type(s) for **=: 'int' and 'str'"
       \* list and bytearray have no number slots: y's __radd__ comes before their own +=.
       [] c = "sequence_reflected" -> "('r', [1, 7], True, bytearray(b'xx'))"
+      \* Declined, a list's += takes y's items by its Python __iter__, and *=
+      \* a list's or bytearray's count by its Python __index__.
+      [] c = "sequence_declined" -> "([1, 1], [1, 7, 8], True, \"KeyError('index')\")"
 
 Run(p) == IF "case" \in DOMAIN p THEN <<Case(p.case), <<>>>> ELSE Arith(p)
 

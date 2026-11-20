@@ -35180,12 +35180,26 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             if (function) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
             if (m->len && m->stack[m->len - 1] == c->augmenting) spy_release(machine_pop(m));
             result = function || c->error_type[0] ? NULL : binary(c, o->token, x, y);
-        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_INPLACE && (x->type == SPY_LIST || x->type == SPY_BYTEARRAY)) {
+        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_INPLACE && op == T_ADDEQ && x->type == SPY_LIST && plain_instance(y)) {
+            /* A list's own += then extends it by y's items on m (consume),
+             * the list the step's value. */
+            size_t blocks = m->block_len;
+            consume(c, m, B_EXTEND, x, -1, NULL, spy_retain(y), NULL);
+            if (m->block_len > blocks) {
+                m->blocks[m->block_len - 1].consumer->instance = x; c->consuming = 1;
+                spy_release(y);
+                return m;
+            }
+            spy_release(x); spy_release(y);
+            return m;
+        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_INPLACE && (x->type == SPY_LIST || x->type == SPY_BYTEARRAY) &&
+                   !(op == T_MULEQ && y->type == SPY_INSTANCE && index_special(c, y))) {
             /* Their own in-place operation then (operator_call). */
             result = c->error_type[0] ? NULL : inplace(c, op, x, y);
-        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_BINARY && op == '*' && repeats(x) && y->type == SPY_INSTANCE &&
+        } else if (phase == OPERATOR_REFLECTED && (kind == OPERATE_BINARY ? op == '*' && repeats(x) : op == T_MULEQ) && y->type == SPY_INSTANCE &&
                    index_special(c, y)) {
-            /* The repetition then takes y's Python __index__ (operator_call). */
+            /* The repetition, or a list's or bytearray's own *=, then
+             * takes y's Python __index__ (operator_call). */
             size_t depth = m->len;
             int pushed = !operator_push(c, m, x, y, OPERATOR_INDEX);
             SPYValue *env = NULL, *entered = pushed ? special_env(c, m, index_special(c, y), y, NULL, NULL, &env) : NULL;

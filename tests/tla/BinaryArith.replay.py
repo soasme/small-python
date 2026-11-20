@@ -92,6 +92,11 @@ SOURCES = {
                           "    __rmul__ = __radd__\n    def __iter__(self): return iter([7])\n    def __index__(self): return 2\n"
                           "a = [1]; a += R('r')\nb = [1]; c = b; b += R(NotImplemented)\nd = bytearray(b'x'); d *= R(NotImplemented)\n"
                           "result = (a, b, b is c, d)",
+    "sequence_declined": "class R:\n    def __radd__(self, o): return NotImplemented\n    __rmul__ = __radd__\n"
+                         "    def __iter__(self):\n        for i in (7, 8): yield i\n    def __length_hint__(self): return 2\n"
+                         "    def __index__(self): return 2\nclass Bad(R):\n    def __index__(self): raise KeyError('index')\n"
+                         "a = [1]; a *= R()\nb = [1]; c = b; b += R()\ne = bytearray(b'x')\n"
+                         "try: e *= Bad()\nexcept KeyError as x: e = repr(x)\nresult = (a, b, b is c, e)",
 }
 
 
