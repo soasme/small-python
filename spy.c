@@ -31734,12 +31734,28 @@ static size_t python_item(SPYContext *c, SPYValue *x, SPYValue *seq, size_t at) 
  * tally, the item's index, the two operands in the order of the call and
  * c->unbound pushed on m's stack (operator_returned). Else NULL, the
  * method's value in *value (search_result). */
+static NO_INLINE SPYValue *equal_call(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **);
 static NO_INLINE SPYValue *search_call(SPYContext *c, Machine *m, int method, SPYValue *x, SPYValue *seq, size_t at,
                                        int64_t tally, SPYValue **env, SPYValue **value) {
     size_t found = SIZE_MAX;
     *value = NULL;
     for (int instance = instance_like(x); at < seq->as.seq.len && (method != M_INDEX || at < (uint64_t)tally); at++) {
         SPYValue *item = seq->as.seq.items[at], *function;
+        if (item != x && pair_python(c, item, x)) {
+            /* Two sequences or mappings compare their pairs, the item's
+             * first (equal_call), returning into the search
+             * (search_returned) with c->unbound over its state. */
+            size_t end, len = m->len;
+            if (machine_push_all(c, m, 6, (SPYValue *[]){spy_retain(x), spy_retain(seq), int_value(c, method), int_value(c, tally),
+                                                         int_value(c, (int64_t)at), spy_retain(c->unbound)}) ||
+                !(function = equal_call(c, m, item, x, python_pair(c, item, x, 0, &end), env))) {
+                while (m->len > len) spy_release(machine_pop(m));
+                return NULL;
+            }
+            c->entering_init = function; c->entering_kind = CALL_OPERATOR;
+            if (function != c->unbound) spy_release(function);
+            return function;
+        }
         if (item != x && (instance || instance_like(item)) &&
             ((function = rich_function(c, item, x, R_EQ)) || (function = rich_reflection(c, x, item, R_EQ)))) {
             SPYValue *left = rich_function(c, item, x, R_EQ) ? item : x, *right = left == x ? item : x;
@@ -34708,6 +34724,26 @@ static NO_INLINE Call *operator_truth(SPYContext *c, Machine *m, SPYValue *v) {
     SPYValue *function = v->type != SPY_BOOL && (v->type == SPY_INSTANCE || metaclassed(v)) ? truth_function(c, v, &length) : NULL, *self;
     return function ? operator_enter(c, m, function, 1, (self = spy_retain(v), &self), 2, (SPYValue *[]){v, c->booleans[!length]}) : NULL;
 }
+/* An item's comparison for index, count or remove (search_call) found
+ * whether it is equal, its search's state atop m: the method's value, or
+ * the next item's comparison, the machine to run on. */
+static NO_INLINE Machine *search_returned(SPYContext *c, Machine *m, int found) {
+    SPYValue *index = machine_pop(m), *tally = machine_pop(m), *method = machine_pop(m), *seq = machine_pop(m), *x = machine_pop(m);
+    SPYValue *env = NULL, *function = NULL, *value = NULL;
+    size_t at = (size_t)index->as.integer_data.small, len = m->len;
+    int id = (int)method->as.integer_data.small;
+    if (found && id != M_COUNT) value = c->error_type[0] ? NULL : search_result(c, id, seq, at, 0);
+    else if (!c->error_type[0]) function = search_call(c, m, id, x, seq, at + 1, tally->as.integer_data.small + found, &env, &value);
+    Call *call = function ? pair_enter(c, m, function == c->unbound ? function : spy_retain(function), env) : NULL;
+    spy_release(index); spy_release(tally); spy_release(method); spy_release(seq); spy_release(x);
+    if (call) {
+        call->m.outermost = CALL_OPERATOR;
+        return &call->m;
+    }
+    while (m->len > len) spy_release(machine_pop(m));
+    machine_push(c, m, value);
+    return m;
+}
 /* The __eq__ equal_call entered for step ins returned result: the pair
  * unequal, or the next pair's comparison, or the native comparison of the
  * rest; an ordering's then decides at the first unequal pair
@@ -34735,7 +34771,8 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
         while (m->len > len) spy_release(machine_pop(m));
         int nested = m->len && m->stack[m->len - 1] == c->nesting, probing = !nested && m->len && m->stack[m->len - 1] == c->probing,
             walking = m->len && m->stack[m->len - 1] == c->walking, searching = (op == O_IN || op == O_NOTIN) && m->len && m->stack[m->len - 1] == c->unbound,
-            ordered = !nested && !probing && !walking && !searching && op != T_EQ && op != T_NE;
+            searched = (ins->op == BC_CALLN || ins->op == BC_CALL) && m->len && m->stack[m->len - 1] == c->unbound,
+            ordered = !nested && !probing && !walking && !searching && !searched && op != T_EQ && op != T_NE;
         /* An unequal pair the comparison left past an end compares the lengths. */
         int same = c->error_type[0] ? -1 : ordered ? 0 : found ? pair_equal_from(c, x, y, end) :
                    !pair_mapping(x) && (at > x->as.seq.len || at > y->as.seq.len) ? x->as.seq.len == y->as.seq.len : 0;
@@ -34750,6 +34787,11 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
             spy_release(x); spy_release(y);
             if (!same) walk_unequal(c, m);
             return walk_resume(c, m, ins, NULL, NULL, pc);
+        }
+        /* An index, count or remove's item is x when these are equal (search_call). */
+        if (searched) {
+            spy_release(machine_pop(m)); spy_release(x); spy_release(y);
+            return search_returned(c, m, same > 0);
         }
         /* An in's item is x when these are equal (contains_call). */
         if (searching) {
@@ -34828,25 +34870,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         Call *call = NULL;
         int found = compare_found(c, m, c->unbound, T_EQ, result, &call, NULL);
         if (call) return &call->m;
-        if (ins->op == BC_CALLN || ins->op == BC_CALL) {
-            /* An item's comparison for index, count or remove (search_call):
-             * the method's value, or the next item's comparison. */
-            SPYValue *index = machine_pop(m), *tally = machine_pop(m), *method = machine_pop(m), *seq = machine_pop(m), *x = machine_pop(m);
-            SPYValue *env = NULL, *function = NULL, *value = NULL;
-            size_t at = (size_t)index->as.integer_data.small;
-            int id = (int)method->as.integer_data.small;
-            if (found && id != M_COUNT) value = c->error_type[0] ? NULL : search_result(c, id, seq, at, 0);
-            else if (!c->error_type[0]) function = search_call(c, m, id, x, seq, at + 1, tally->as.integer_data.small + found, &env, &value);
-            Call *call = function ? call_enter(c, spy_retain(function), env, m) : NULL;
-            spy_release(index); spy_release(tally); spy_release(method); spy_release(seq); spy_release(x);
-            if (call) {
-                call->m.outermost = CALL_OPERATOR;
-                return &call->m;
-            }
-            if (function) for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
-            machine_push(c, m, value);
-            return m;
-        }
+        if (ins->op == BC_CALLN || ins->op == BC_CALL) return search_returned(c, m, found);
         return contains_returned(c, m, ins, op, found, pc);
     }
     int op = 0, kind = step_operation(ins, &op);

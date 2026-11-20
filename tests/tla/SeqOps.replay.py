@@ -39,11 +39,20 @@ def bound(v):
     return None if v == 99 else v
 
 
+class Eq:
+    """An item whose Python __eq__ compares the value it holds."""
+    def __init__(self, v): self.v = v
+    def __eq__(self, other): return isinstance(other, Eq) and other.v == self.v
+    __hash__ = None
+
+
 def outcome(p):
     kind = p["type"]
     s = build(kind, p["items"])
     op = p["op"]
     x = ("_ab"[p["x"]] if p["x"] < 3 else "c") if kind == "str" and "x" in p else p.get("x")
+    if p.get("how") == "pair" and kind in ("tuple", "list"):
+        s, x = type(s)((Eq(v),) for v in s), (Eq(x),)
     try:
         if op == "index":
             r = s[by(p, p["i"])]
