@@ -633,6 +633,7 @@ Unreleased (0.10.0):
 - `yield from` a builtin iterator, and `enumerate()`, `filter()` or `zip()` nested in another, resume generators and call a filter's Python test without nesting on the C stack
 - a container's `__contains__` or rich comparison called explicitly, `index()`, `count()` and `remove()` given unpacked arguments, and `in` of an int subclass's instance call a Python `__eq__` without nesting on the C stack
 - a number of a subclass without its own comparison, compared with another number subclass's instance, answers by its own method before the other's reflected one, as an exact number does
+- a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
 - a view a bytearray subclass's own `__buffer__` returns is released without bytearray's `__release_buffer__`, which reported an error

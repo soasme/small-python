@@ -29,6 +29,26 @@ class Impostor:
         return other == "b"
 
 
+class Logged:
+    """A key whose __hash__ and __eq__ run on the machine and log."""
+    def __init__(self, name, log, fails=False):
+        self.name, self.log, self.fails = name, log, fails
+
+    def __hash__(self):
+        for _ in ():
+            pass
+        self.log.append("h")
+        if self.fails:
+            raise KeyError("h")
+        return hash(self.name)
+
+    def __eq__(self, other):
+        for _ in ():
+            pass
+        self.log.append("e")
+        return other == self.name
+
+
 def act(p, namespace, fr, g):
     op = p["op"]
     try:
@@ -79,6 +99,21 @@ def act(p, namespace, fr, g):
             return repr(fr.f_locals[[]])
         if op == "reversed":
             return type(reversed(fr.f_locals)).__name__
+        log = []
+        if op == "get_keyerror":
+            return fr.f_locals.get(Logged("b", log, True), "d") + " " + "".join(log)
+        if op == "setdefault_keyerror":
+            try:
+                fr.f_locals.setdefault(Logged("b", log, True), 1)
+            except KeyError:
+                return "KeyError " + "".join(log)
+        if op == "extra_calls":
+            proxy = fr.f_locals
+            proxy[Logged("z", log)] = 7
+            log.append(" ")
+            value = proxy[Logged("z", log)]
+            log.append(" ")
+            return f"{value} {Logged('z', log) in proxy} {''.join(log)}"
         fr.clear()
         return repr(dict(fr.f_locals)) + ("" if g is None else " " + repr(g.gi_frame))
     except (TypeError, AttributeError, ValueError, RuntimeError) as error:

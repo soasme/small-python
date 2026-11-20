@@ -9,8 +9,10 @@
 (* and f_trace_opcodes can be set (the latter two only to bools), f_lineno *)
 (* only by a trace function, the rest not at all, and f_lineno,          *)
 (* f_trace_lines and f_trace_opcodes not deleted; f_locals hashes its keys *)
-(* first, takes a key equal to a variable's name for that variable, and    *)
-(* reverses to a list; clear() drops the locals                            *)
+(* first, takes a key equal to a variable's name for that variable, keeps  *)
+(* another as an extra local, hashing it again, gives get() and            *)
+(* setdefault() the item, a KeyError their default, and reverses to a      *)
+(* list; clear() drops the locals                                          *)
 (* (of a generator's frame, once the generator finishes), finalizes a      *)
 (* generator that has not started, and raises RuntimeError for an          *)
 (* executing or suspended frame.                                           *)
@@ -38,7 +40,8 @@ EXTENDS Naturals, Sequences
 Sources == {"running", "finished", "gennew", "gensusp", "gendone", "gendropped", "genself"}
 Ops == {"f_code", "repr", "f_back", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator", "f_lineno", "f_trace",
         "settrace", "setlines", "setbadlines", "setlineno", "setcode", "clear",
-        "dellineno", "dellines", "delopcodes", "impostor", "unhashable", "reversed"}
+        "dellineno", "dellines", "delopcodes", "impostor", "unhashable", "reversed",
+        "get_keyerror", "setdefault_keyerror", "extra_calls"}
 Programs == [source : Sources, op : Ops]
 
 VARIABLES program, outcome
@@ -74,6 +77,13 @@ Run(p) ==
       [] p.op = "impostor" -> "5"
       [] p.op = "unhashable" -> "TypeError"
       [] p.op = "reversed" -> "list"
+      \* get() and setdefault() take the item, its KeyError their default:
+      \* a key whose __hash__ raises it is hashed once more by the store.
+      [] p.op = "get_keyerror" -> "d h"
+      [] p.op = "setdefault_keyerror" -> "KeyError hh"
+      \* A key no variable's name equals is hashed again for the extra
+      \* locals, where it is compared with the key stored there.
+      [] p.op = "extra_calls" -> "7 True hh hhee hhee"
       [] p.op = "clear" -> CASE s \in {"running", "gensusp"} -> "RuntimeError"
                              \* A generator that has not started is finalized; its frame stays its own.
                              [] s = "gennew" -> "{'a': 1} None"

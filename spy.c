@@ -33732,6 +33732,22 @@ static int operator_declines(SPYContext *c, SPYValue *cls, int type, const Opera
     return (type == SPY_FROZENDICT || (type == SPY_DICT && !inplace)) && o->token == '|';
 }
 static int declined_step(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *);
+static int frame_key_calls(SPYContext *, SPYValue *);
+static SPYValue *frame_operatek(SPYContext *, Machine *, int, SPYValue *, SPYValue *, SPYValue *, Continuation, SPYValue *);
+enum { FL_GETITEM, FL_SETITEM, FL_DELITEM, FL_CONTAINS, FL_ITER, FL_LEN, FL_REVERSED, FL_EQ, FL_NE,
+       FL_OR, FL_ROR, FL_IOR, FL_REPR, FL_UPDATE, FL_COPY, FL_KEYS, FL_VALUES, FL_ITEMS, FL_GET, FL_POP, FL_SETDEFAULT };
+/* What a FrameLocalsProxy's item or in, state's step (item_state), gave,
+ * result, negated for not in (item_called). */
+static SPYValue *frame_item_done(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    int op = 0;
+    step_operation(&m->code->items[state->as.seq.items[0]->as.integer_data.small], &op);
+    if (result && op == O_NOTIN) {
+        int truth = result == c->booleans[1];
+        spy_release(result);
+        result = spy_bool(c, !truth);
+    }
+    return item_called(c, m, state, result);
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -33764,6 +33780,14 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         return operator_call(c, m, ins, x, y->as.bound.self, env);
     }
     if (UNLIKELY(proxies_instance(x)) && ins->op == BC_INDEX) return operator_call(c, m, ins, x->as.bound.self, y, env);
+    /* A FrameLocalsProxy's item, or x in one, its key's Python __hash__
+     * and __eq__ on m (frame_operatek, frame_item_done). */
+    if (UNLIKELY(kind == OPERATE_INDEX ? x->type == SPY_FRAME_LOCALS && frame_key_calls(c, y) :
+                 contains && y->type == SPY_FRAME_LOCALS && frame_key_calls(c, x))) {
+        SPYValue *state = item_state(c, m, ins, x, y);
+        return state ? item_queued(c, state, frame_operatek(c, m, contains ? FL_CONTAINS : FL_GETITEM, contains ? y : x, contains ? x : y,
+                                                            NULL, frame_item_done, state)) : NULL;
+    }
     /* A set operation, augmented assignment or comparison, whose lookups
      * may call a Python __eq__. */
     if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) &&
@@ -34993,7 +35017,8 @@ static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key
     return setitem_function(c, object) ||
            (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(map = store_storage(c, object, "__setitem__"), key, 0) &&
                                                                         store_collides(c, map, key)))) ||
-           list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1) || memory_converter(c, object, key, value, &kind);
+           list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1) || memory_converter(c, object, key, value, &kind) ||
+           (object->type == SPY_FRAME_LOCALS && frame_key_calls(c, key));
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
@@ -35096,6 +35121,14 @@ static SPYValue *bases_mro_returned(SPYContext *c, Machine *m, SPYValue *state, 
     if (status) { bases_end(c, state, -1); return NULL; }
     return bases_go(c, m, state, NULL);
 }
+/* What a FrameLocalsProxy's store (store_call) gave, result: the store
+ * step ended. */
+static SPYValue *frame_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)ctx;
+    int failed = !result;
+    spy_release(result);
+    return failed ? NULL : store_ended(c, m, NULL);
+}
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->op == BC_NEXT ? ins->node->args : ins->node;
     if (n->kind == N_IMPORT || n->kind == N_FROM) return import_step(c, m, f, n, env);
@@ -35140,6 +35173,13 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     }
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
+        if (args[0]->type == SPY_FRAME_LOCALS && frame_key_calls(c, args[1])) {
+            /* A FrameLocalsProxy's key looked up on m (frame_operatek). */
+            relocate(c, n);
+            frame_operatek(c, m, FL_DELITEM, args[0], args[1], NULL, frame_stored, NULL);
+            release_all(2, args);
+            return NULL;
+        }
         SPYValue *map, *function = store_function(c, args[0], "__delitem__");
         if (!function && (hashes_first(c, args[0], "__delitem__") ? (function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
                                                    (store_lookup(map = store_storage(c, args[0], "__delitem__"), args[1], 0) &&
@@ -35164,6 +35204,13 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     else {
         args[0] = spy_retain(leaf_operand(f, n->a)); args[1] = spy_retain(leaf_operand(f, n->b));
         args[2] = spy_retain(m->stack[m->len - 1]);
+    }
+    if (args[0]->type == SPY_FRAME_LOCALS && frame_key_calls(c, args[1])) {
+        /* A FrameLocalsProxy's key looked up on m (frame_operatek). */
+        relocate(c, n);
+        frame_operatek(c, m, FL_SETITEM, args[0], args[1], args[2], frame_stored, NULL);
+        release_all(3, args);
+        return NULL;
     }
     if (args[0]->type == SPY_MEMORYVIEW) {
         /* A view's item converted on m (memory_store_call). */
@@ -39962,8 +40009,6 @@ static const char *const frame_locals_methods[] = {
     "__getitem__", "__setitem__", "__delitem__", "__contains__", "__iter__", "__len__", "__reversed__", "__eq__", "__ne__",
     "__or__", "__ror__", "__ior__", "__repr__", "update", "copy", "keys", "values", "items", "get", "pop", "setdefault"
 };
-enum { FL_GETITEM, FL_SETITEM, FL_DELITEM, FL_CONTAINS, FL_ITER, FL_LEN, FL_REVERSED, FL_EQ, FL_NE,
-       FL_OR, FL_ROR, FL_IOR, FL_REPR, FL_UPDATE, FL_COPY, FL_KEYS, FL_VALUES, FL_ITEMS, FL_GET, FL_POP, FL_SETDEFAULT };
 static SPYValue *frame_locals_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (argc != 1) return errorf(c, "TypeError", "FrameLocalsProxy expected 1 argument, got %zu", argc);
     if (argv[0]->type != SPY_FRAME) return errorf(c, "TypeError", "expect frame, not %s", type_name(argv[0]));
@@ -40005,7 +40050,196 @@ static SPYValue *frame_local_key(SPYContext *c, SPYValue *frame, SPYValue *key) 
     }
     return spy_retain(key);
 }
+/* Whether frame_local_key calls Python for key: its class's __hash__ or
+ * __eq__, which frame_keyk calls on the machine instead. */
+static int frame_key_calls(SPYContext *c, SPYValue *key) {
+    return key->type != SPY_STRING && instance_like(key) && (hash_function(c, key) || python_eq(key));
+}
+static SPYValue *frame_key_hashed(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *frame_key_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The rest of frame_keyk's search, from the frame's local variable i,
+ * for a name of hash that equals key, both borrowed: a Python __eq__ m's
+ * comparison (comparek, frame_key_compared); k with ctx at its end. */
+static SPYValue *frame_key_scan(SPYContext *c, Machine *m, SPYValue *proxy, SPYValue *key, int64_t hash, size_t i, Continuation k, SPYValue *ctx) {
+    SPYValue *frame = proxy->as.bound.self;
+    Scope *scope = function_frame(frame) ? frame_env(frame)->as.map.scope : NULL;
+    int64_t own;
+    for (; scope && i < scope->len; i++) {
+        SPYValue *name = spy_string(c, scope->symbols[i].name, strlen(scope->symbols[i].name));
+        if (!name || hash_value(c, name, &own)) { spy_release(name); return k(c, m, ctx, NULL); }
+        if (own != hash) { spy_release(name); continue; }
+        if (python_eq(key)) {
+            SPYValue *state = k_state(c, 4, (SPYValue *[]){spy_retain(proxy), spy_retain(key), int_value(c, hash), int_value(c, (int64_t)i), NULL, NULL}, k, ctx);
+            return state ? comparek(c, m, name, spy_retain(key), R_EQ, frame_key_compared, state) : (spy_release(name), NULL);
+        }
+        int same = equal(name, key);
+        if (same && !c->error_type[0] && frame_local_env(c, frame, name)) return k(c, m, ctx, name);
+        spy_release(name);
+        if (c->error_type[0]) return k(c, m, ctx, NULL);
+    }
+    return k(c, m, ctx, spy_retain(key));
+}
+/* frame_local_key of proxy's frame and key, both borrowed, its Python
+ * __hash__ and __eq__ m's calls (frame_key_calls): k with ctx, which it
+ * takes, and the key, owned, or NULL on error. */
+static SPYValue *frame_keyk(SPYContext *c, Machine *m, SPYValue *proxy, SPYValue *key, Continuation k, SPYValue *ctx) {
+    SPYValue *function = hash_function(c, key);
+    int64_t hash;
+    if (function) {
+        SPYValue *state = k_state(c, 2, (SPYValue *[]){spy_retain(proxy), spy_retain(key), NULL, NULL}, k, ctx);
+        return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(hash_self(key))}, frame_key_hashed, state) : NULL;
+    }
+    return hash_value(c, key, &hash) ? k(c, m, ctx, NULL) : frame_key_scan(c, m, proxy, key, hash, 0, k, ctx);
+}
+/* The Python __hash__ frame_keyk called returned result. */
+static SPYValue *frame_key_hashed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *proxy = spy_retain(state->as.seq.items[0]), *key = spy_retain(state->as.seq.items[1]);
+    Continuation k;
+    SPYValue *ctx = k_take(c, state, &k);
+    int64_t hash;
+    result = !result || hash_result(c, result, &hash) ? k(c, m, ctx, NULL) : frame_key_scan(c, m, proxy, key, hash, 0, k, ctx);
+    spy_release(proxy); spy_release(key);
+    return result;
+}
+/* A local variable's name compared with frame_keyk's key returned result:
+ * the name, a local bound, is the key, else the search goes on. */
+static SPYValue *frame_key_compared(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *proxy = spy_retain(items[0]), *key = spy_retain(items[1]);
+    int64_t hash = items[2]->as.integer_data.small;
+    size_t i = (size_t)items[3]->as.integer_data.small;
+    Continuation k;
+    SPYValue *ctx = k_take(c, state, &k), *frame = proxy->as.bound.self, *name = NULL;
+    int same = result && truthy(result);
+    spy_release(result);
+    if (same && !c->error_type[0]) {
+        Scope *scope = frame_env(frame)->as.map.scope;
+        name = spy_string(c, scope->symbols[i].name, strlen(scope->symbols[i].name));
+        if (name && !frame_local_env(c, frame, name)) { spy_release(name); name = NULL; }
+    }
+    result = !result || c->error_type[0] ? k(c, m, ctx, NULL) : name ? k(c, m, ctx, name) : frame_key_scan(c, m, proxy, key, hash, i + 1, k, ctx);
+    spy_release(proxy); spy_release(key);
+    return result;
+}
 static SPYValue *frame_locals_apply(SPYContext *, int, SPYValue *, SPYValue *const *);
+static SPYValue *frame_defaulted(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* What operation op of a FrameLocalsProxy gives for key, no local
+ * variable or extra local: pop()'s default value, False for in, or
+ * KeyError. */
+static SPYValue *frame_absent(SPYContext *c, int op, SPYValue *key, SPYValue *value) {
+    if (op == FL_CONTAINS) return spy_bool(c, 0);
+    if (op == FL_POP && value) return spy_retain(value);
+    if (op != FL_GETITEM) return missing_key(c, key);
+    SPYValue *text = spy_repr(c, key);
+    if (text) errorf(c, "KeyError", "local variable '%s' is not defined", text->as.string.data);
+    spy_release(text);
+    return NULL;
+}
+/* What the search of the frame's extra locals for frame_extrak's key
+ * found, result, the entry or -1, for (state, key, extra, hash): state's
+ * operation at that entry. */
+static SPYValue *frame_extra_found(SPYContext *c, Machine *m, SPYValue *ext, SPYValue *result) {
+    SPYValue *state = spy_retain(ext->as.seq.items[0]), *key = ext->as.seq.items[1], *map = namespace_map(ext->as.seq.items[2]);
+    SPYValue **items = state->as.seq.items, *value = items[2] == c->unbound ? NULL : items[2], *found = NULL;
+    int op = (int)items[0]->as.integer_data.small;
+    ptrdiff_t i = result ? (ptrdiff_t)result->as.integer_data.small : -1;
+    if (!result) ;
+    else if (op == FL_CONTAINS) found = spy_bool(c, i >= 0);
+    else if (op == FL_SETITEM) found = map_put(c, map, i, key, value, ext->as.seq.items[3]->as.integer_data.small) ? NULL : spy_none(c);
+    else if (i >= 0 && (op == FL_POP || op == FL_DELITEM)) {
+        Entry old = map_remove(map, (size_t)i);
+        spy_release(old.key);
+        if (op == FL_POP) found = old.value;
+        else { spy_release(old.value); found = spy_none(c); }
+    } else if (i >= 0) found = spy_retain(map->as.map.items[i].value);
+    else found = frame_absent(c, op, key, value);
+    spy_release(result); spy_release(ext);
+    return k_resume(c, m, state, found);
+}
+/* setdefault()'s store (frame_defaulting) returned result: its default,
+ * for state's continuation. */
+static SPYValue *frame_defaulted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    int failed = !result;
+    spy_release(result);
+    return k_resume(c, m, state, failed ? NULL : spy_retain(state->as.seq.items[2]));
+}
+/* The hash of frame_extrak's key, its search then going on (map_findk). */
+static SPYValue *frame_extra_hashed(SPYContext *c, Machine *m, SPYValue *ext, SPYValue *result) {
+    SPYValue **items = ext->as.seq.items, *hashed = NULL, *full = NULL;
+    int64_t hash;
+    if (result && !hash_result(c, result, &hash) && (hashed = int_value(c, hash)))
+        full = spy_tuple(c, 4, (SPYValue *[]){items[0], items[1], items[2], hashed});
+    spy_release(hashed);
+    if (!full) {
+        SPYValue *state = spy_retain(items[0]);
+        spy_release(ext);
+        return k_resume(c, m, state, NULL);
+    }
+    spy_release(ext);
+    SPYValue *map = full->as.seq.items[2];
+    return map_findk(c, m, map, full->as.seq.items[1], hash, map_cursor(namespace_map(map), hash), frame_extra_found, full);
+}
+/* State's operation, at key, which it takes, no local variable, on the
+ * frame's extra locals extra: key hashed again, by its Python __hash__
+ * on m (callk), and compared with their keys there (map_findk). */
+static SPYValue *frame_extrak(SPYContext *c, Machine *m, SPYValue *extra, SPYValue *key, SPYValue *state) {
+    SPYValue *function = hash_function(c, key), *ext = spy_tuple(c, 3, (SPYValue *[]){state, key, extra});
+    spy_release(key);
+    if (!ext) return k_resume(c, m, state, NULL);
+    spy_release(state);
+    if (function) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(hash_self(ext->as.seq.items[1]))}, frame_extra_hashed, ext);
+    int64_t hash;
+    return frame_extra_hashed(c, m, ext, hash_value(c, ext->as.seq.items[1], &hash) ? NULL : int_value(c, hash));
+}
+/* The key frame_keyk gave for state's operation (op, proxy, its second
+ * argument or c->unbound): the operation's value for state's
+ * continuation (k_resume). One on no local variable but the extra locals
+ * searches them by key's Python methods (frame_extrak): a store begins
+ * them, a pop() of none finds nothing at once, as does any but
+ * setdefault()'s, which stores the key, when there are none. */
+static SPYValue *frame_keyed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *key) {
+    SPYValue **items = state->as.seq.items, *result = NULL, *frame = items[1]->as.bound.self, *extra = frame->as.frame.extra;
+    int op = (int)items[0]->as.integer_data.small;
+    if (key && frame_key_calls(c, key) && !frame_local_env(c, frame, key) && !c->error_type[0]) {
+        if (op == FL_SETITEM && !extra && !(extra = frame->as.frame.extra = value_new(c, SPY_DICT))) { spy_release(key); return k_resume(c, m, state, NULL); }
+        if (extra && op == FL_POP && !extra->as.map.len) result = frame_absent(c, op, key, items[2] == c->unbound ? NULL : items[2]);
+        else if (extra) return frame_extrak(c, m, extra, key, state);
+        else result = frame_absent(c, op, key, items[2] == c->unbound ? NULL : items[2]);
+        spy_release(key);
+        return k_resume(c, m, state, result);
+    }
+    if (key) result = frame_locals_apply(c, op, items[1], (SPYValue *[]){key, items[2] == c->unbound ? NULL : items[2]});
+    spy_release(key);
+    return k_resume(c, m, state, result);
+}
+/* What a FrameLocalsProxy's item for get() gave, result: a KeyError
+ * makes it the default of state (proxy, key, default), for state's
+ * continuation. */
+static SPYValue *frame_got(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (!result && error_is(c, "KeyError")) { spy_clear_error(c); result = spy_retain(state->as.seq.items[2]); }
+    return k_resume(c, m, state, result);
+}
+/* The item for setdefault() gave result: a KeyError stores state's
+ * default (frame_defaulted). */
+static SPYValue *frame_defaulting(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (result || !error_is(c, "KeyError")) return k_resume(c, m, state, result);
+    spy_clear_error(c);
+    SPYValue **items = state->as.seq.items;
+    return frame_operatek(c, m, FL_SETITEM, items[0], items[1], items[2], frame_defaulted, state);
+}
+/* Operation op of proxy on key and value, or NULL, all borrowed, key
+ * looked up on m (frame_keyk, frame_keyed), then k with ctx, which it
+ * takes, and the operation's value. */
+static SPYValue *frame_operatek(SPYContext *c, Machine *m, int op, SPYValue *proxy, SPYValue *key, SPYValue *value, Continuation k, SPYValue *ctx) {
+    /* get() and setdefault() are the item, a KeyError their default
+     * (frame_got), setdefault() storing it. */
+    if (op == FL_GET || op == FL_SETDEFAULT) {
+        if (!(ctx = k_state(c, 3, (SPYValue *[]){spy_retain(proxy), spy_retain(key), spy_retain(value ? value : c->none), NULL, NULL}, k, ctx))) return NULL;
+        k = op == FL_GET ? frame_got : frame_defaulting;
+        op = FL_GETITEM; value = NULL;
+    }
+    SPYValue *state = k_state(c, 3, (SPYValue *[]){int_value(c, op), spy_retain(proxy), spy_retain(value ? value : c->unbound), NULL, NULL}, k, ctx);
+    return state ? frame_keyk(c, m, proxy, key, frame_keyed, state) : NULL;
+}
 static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
     const char *name = frame_locals_methods[op];
@@ -40021,6 +40255,19 @@ static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const
         return errorf(c, "TypeError", n < 1 ? "pop expected at least 1 argument, got %zu" : "pop expected at most 2 arguments, got %zu", n);
     if (parse_arguments(c, name, n, argv + 1, keywords, NULL, count, required, 0, args)) return NULL;
     SPYValue *key = NULL;
+    /* A key's Python __hash__ and __eq__ run on the call step's machine. */
+    if ((op <= FL_CONTAINS || op >= FL_GET) && step_machine(c) && frame_key_calls(c, args[0]))
+        return frame_operatek(c, step_machine(c), op, proxy, args[0], args[1], unchanged, NULL);
+    if (op == FL_GET || op == FL_SETDEFAULT) {
+        /* get() and setdefault() take the item, a KeyError their default,
+         * setdefault() storing it. */
+        SPYValue *value = args[1] ? args[1] : c->none, *result = frame_locals_method(c, 2, (SPYValue *[]){proxy, args[0]}, NULL, (void *)FL_GETITEM);
+        if (result || !error_is(c, "KeyError")) return result;
+        spy_clear_error(c);
+        if (op == FL_SETDEFAULT && !(result = frame_locals_method(c, 3, (SPYValue *[]){proxy, args[0], value}, NULL, (void *)FL_SETITEM))) return NULL;
+        spy_release(result);
+        return spy_retain(value);
+    }
     if (op <= FL_CONTAINS || op >= FL_GET) {
         if (!(key = frame_local_key(c, frame, args[0]))) return NULL;
         args[0] = key;
@@ -40032,16 +40279,9 @@ static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const
 static SPYValue *frame_locals_apply(SPYContext *c, int op, SPYValue *proxy, SPYValue *const *args) {
     SPYValue *frame = proxy->as.bound.self;
     switch (op) {
-    case FL_GETITEM: case FL_GET: case FL_SETDEFAULT: {
+    case FL_GETITEM: {
         SPYValue *value = frame_local_get(c, frame, args[0]);
-        if (value || c->error_type[0]) return value;
-        if (op == FL_GETITEM) {
-            SPYValue *text = spy_repr(c, args[0]);
-            if (text) errorf(c, "KeyError", "local variable '%s' is not defined", text->as.string.data);
-            spy_release(text); return NULL;
-        }
-        value = args[1] ? args[1] : c->none;
-        return op == FL_SETDEFAULT && frame_local_set(c, frame, args[0], value) ? NULL : spy_retain(value);
+        return value || c->error_type[0] ? value : frame_absent(c, op, args[0], NULL);
     }
     case FL_SETITEM: case FL_DELITEM: return frame_local_set(c, frame, args[0], op == FL_SETITEM ? args[1] : NULL) ? NULL : spy_none(c);
     case FL_CONTAINS: {
@@ -48325,7 +48565,7 @@ static int class_method_set(SPYContext *c, SPYValue *cls, const char *name, Nati
     method->as.native.data = (void *)data;
     method->as.native.method = kind == METHOD_INSTANCE;
     /* Its C code may leave a call to its step (step_native). */
-    method->as.native.host = call == object_method || call == mappingproxy_method || call == bytearray_reduce ||
+    method->as.native.host = call == object_method || call == mappingproxy_method || call == bytearray_reduce || call == frame_locals_method ||
                              (call == set_item_method && (data & 0xff) == SET_REDUCE) ? 2 : 0;
     /* Allocators stay bound to their type, as tp_new wrappers are. */
     method->as.native.static_method = kind == METHOD_STATIC && strcmp(name, "__new__");
