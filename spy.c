@@ -16513,6 +16513,13 @@ static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, 
 static ALWAYS_INLINE int proxies_instance(SPYValue *v) {
     return v->type == SPY_MAPPINGPROXY && v->as.bound.self->type == SPY_INSTANCE;
 }
+/* Whether calling builtin class callee with argc arguments argv may leave
+ * a call to its step (step_native): property(), which reads its getter's
+ * __doc__ (property_init), and reversed() of a mappingproxy of an
+ * instance, which calls its mapping's __reversed__ (mappingproxy_method). */
+static ALWAYS_INLINE int class_steps(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    return callee->type == SPY_CLASS && (callee == c->types[SPY_PROPERTY] || (argc == 1 && callee == c->iterator_types[IT_REVERSED] && proxies_instance(argv[0])));
+}
 /* Whether len() of a mappingproxy of an instance, in argv, is that of
  * its mapping (mappingproxy_len), put in its place. */
 static int is_builtin(SPYValue *, int);
@@ -29846,7 +29853,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     /* A builtin function runs as the step (step_native). */
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : c->error_type[0] ? NULL :
-             (method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin) || UNLIKELY(anext_steps(callee, method)) ?
+             (method < 0 && callee->type == SPY_NATIVE && callee->as.native.call == builtin) || UNLIKELY(anext_steps(callee, method)) ||
+             (method < 0 && UNLIKELY(class_steps(c, callee, argc, argv))) ?
              step_native(c, m, callee, method, n, argc, argv, NULL) : step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
@@ -31353,8 +31361,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
-    if (calls && callee == c->types[SPY_PROPERTY]) {
-        /* property() reads its getter's __doc__ on m (property_init). */
+    if (calls && UNLIKELY(class_steps(c, callee, argc, argv))) {
         result = step_native(c, m, callee, -1, NULL, argc, argv, NULL);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
@@ -41817,6 +41824,29 @@ static SPYValue *proxy_compared(SPYContext *c, SPYValue *proxy, SPYValue *other)
     }
     return proxy;
 }
+/* What reading a mapping's __reversed__ gave, method: its call on m
+ * (mapping_reversed). */
+static SPYValue *reversed_read(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *method) {
+    spy_release(ctx);
+    SPYValue *result = method ? callk(c, m, method, 0, NULL, unchanged, NULL) : NULL;
+    spy_release(method);
+    return result;
+}
+/* A mappingproxy's __reversed__ (mappingproxy_reversed): its mapping's
+ * own, read and called on m when there is one (attribute_callk, callk). */
+static SPYValue *mapping_reversed(SPYContext *c, Machine *m, SPYValue *mapping) {
+    SPYValue *method = m ? attribute_step(c, mapping, "__reversed__") : attribute(c, mapping, "__reversed__");
+    if (!method && m && c->fallback && !c->error_type[0]) {
+        SPYValue *function = c->fallback;
+        c->fallback = NULL;
+        return attribute_callk(c, m, mapping, "__reversed__", function, reversed_read, spy_none(c));
+    }
+    if (c->fallback) { spy_release(c->fallback); c->fallback = NULL; }
+    if (!method || m) return method ? reversed_read(c, m, spy_none(c), method) : NULL;
+    SPYValue *result = call(c, method, 0, NULL);
+    spy_release(method);
+    return result;
+}
 static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
     const char *name = mappingproxy_methods[op];
@@ -41848,11 +41878,7 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     case MP_CONTAINS: return comparison(c, O_IN, args[0], mapping);
     case MP_ITER: return get_iterator(c, mapping);
     case MP_LEN: return builtin(c, 1, &mapping, (void *)(intptr_t)B_LEN);
-    case MP_REVERSED: {
-        /* The mapping's own __reversed__ (mappingproxy_reversed). */
-        SPYValue *method = attribute(c, mapping, "__reversed__"), *result = method ? call(c, method, 0, NULL) : NULL;
-        spy_release(method); return result;
-    }
+    case MP_REVERSED: return mapping_reversed(c, m, mapping);
     case MP_HASH: return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
     case MP_EQ: case MP_NE: {
         SPYValue *compared = proxy_compared(c, spy_retain(proxy), args[0]);
@@ -46537,6 +46563,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (!(source = get_iterator(c, a))) { spy_release(counter); return NULL; }
         }
         if (id != B_REVERSED) return adapter_new(c, id, source, counter);
+        /* An instance's proxy calls its __reversed__ on the step's machine (class_steps). */
+        Machine *m = proxies_instance(a) ? step_machine(c) : NULL;
+        if (m) return mapping_reversed(c, m, a->as.bound.self);
         if (special_dispatch(a)) {
             /* reversed_new: __reversed__, else the sequence protocol. */
             SPYValue *cls = value_class(c, a), *method = class_lookup(cls, "__reversed__");

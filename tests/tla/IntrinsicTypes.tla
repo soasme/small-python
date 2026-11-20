@@ -39,7 +39,7 @@ Module(n) == CASE n = "GenericAlias" -> "types" [] n = "UnionType" -> "typing" [
 
 
 Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name", "cell_empty", "cell_set",
-          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare", "proxy_forward", "proxy_reflected", "proxy_declined_calls", "proxy_contains_calls", "proxy_machine_calls",
+          "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare", "proxy_forward", "proxy_reflected", "proxy_declined_calls", "proxy_contains_calls", "proxy_machine_calls", "proxy_reversed_read",
           "class_dict_proxy", "function_ctor", "function_module_code", "function_genexp_code",
           "code_replace", "notimplemented_ctor", "none_ctor",
           "classmethod_descr_repr", "classmethod_descr_call", "classmethod_descr_get",
@@ -81,6 +81,7 @@ Case(c) ==
       \* in searches the mapping, by its Python __contains__.
       [] c = "proxy_contains_calls" -> "(True, False, ['k', 'z'])"
       \* Its [], iteration and len are its mapping's, reversed its __reversed__.
+      [] c = "proxy_reversed_read" -> "(['z'], 42, ['ga', 'rev', 'ga', 'rev'])"
       [] c = "proxy_machine_calls" -> "('kk', ('a', 'b'), ['a', 'b'], 2, ['z'], 'AttributeError', ['get', 'iter', 'iter', 'len', 'rev'])"
       [] c = "class_dict_proxy" -> "TypeError: 'mappingproxy' object does not support item assignment"
       [] c = "function_ctor" -> "(5, 'g')"

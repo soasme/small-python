@@ -98,6 +98,9 @@ SOURCES = {
     "proxy_bad": 'types.MappingProxyType([1])',
     "proxy_or": "result = types.MappingProxyType({'a': 1}) | {'b': 2}",
     "proxy_copy": "c = types.MappingProxyType({'a': 1}).copy()\nresult = (type(c).__name__, c)",
+    "proxy_reversed_read": "log = []\nclass M:\n    def __getattribute__(self, n):\n        for _ in (): pass\n        log.append('ga'); return object.__getattribute__(self, n)\n"
+                           "    def __getitem__(self, k): return k\n    def __reversed__(self):\n        log.append('rev'); return iter('z') if len(log) < 3 else 42\n"
+                           "p = type(type.__dict__)(M())\nresult = (list(reversed(p)), p.__reversed__(), log)",
     "proxy_machine_calls": "log = []\nclass M:\n    def __getitem__(self, k):\n        for _ in (): pass\n        log.append('get'); return k * 2\n"
                            "    def __iter__(self):\n        for _ in (): pass\n        log.append('iter'); return iter('ab')\n"
                            "    def __len__(self):\n        for _ in (): pass\n        log.append('len'); return 2\n"
