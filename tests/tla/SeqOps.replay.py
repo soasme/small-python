@@ -51,11 +51,11 @@ def outcome(p):
         if op == "slice":
             r = s[bound(p["start"]):bound(p["stop"]):bound(p["step"])]
         elif op == "in":
-            return ("bool", "", (int(x in s),))
+            return ("bool", "", (int(type(s).__contains__(s, x) if p["how"] == "explicit" else x in s),))
         elif op == "count":
-            return ("int", "", (s.count(x),))
+            return ("int", "", (s.count(*(x,)) if p["how"] == "explicit" else s.count(x),))
         elif op == "find":
-            return ("int", "", (s.index(x),))
+            return ("int", "", (s.index(*(x,)) if p["how"] == "explicit" else s.index(x),))
         elif op == "find from":
             return ("int", "", (s.index(x, p["start"]) if p["stop"] == 99 else s.index(x, p["start"], p["stop"]),))
         elif op == "concat":

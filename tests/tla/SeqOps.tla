@@ -14,7 +14,9 @@
 (* ("a", "b"), tuple, bytes, list, or bytearray, and one of                *)
 (*                                                                         *)
 (*     s[i]  for i in -4..3        s[start:stop:step]                      *)
-(*     x in s  s.count(x)  s.index(x)  for x 1 (present or not) or 3        *)
+(*     x in s  s.count(x)  s.index(x)  for x 1 (present or not) or 3,      *)
+(*     or explicitly ("how"): type(s).__contains__(s, x), and count and    *)
+(*     index given x unpacked from a tuple, with the same outcome          *)
 (*     s.index(x, start) or s.index(x, start, stop) for start in           *)
 (*     {-4, -1, 1, 4}, stop in {-1, 2, 4}                                  *)
 (*     s + <2> (same type)  s + [2] (a list)   s * n  for n in -1..2       *)
@@ -33,7 +35,7 @@ None == 99   \* a missing start, stop, or step
 Steps == {None, 1, 2, -1, -2, 0}
 Op == {[op |-> "index", i |-> i, by |-> b] : i \in -4..3, b \in {"int", "index"}}
       \cup {[op |-> "slice", start |-> a, stop |-> b, step |-> c] : a \in {None, -4, -1, 0, 2, 4}, b \in {None, -4, -1, 0, 2, 4}, c \in Steps}
-      \cup {[op |-> o, x |-> x] : o \in {"in", "count", "find"}, x \in {1, 3}}
+      \cup {[op |-> o, x |-> x, how |-> h] : o \in {"in", "count", "find"}, x \in {1, 3}, h \in {"plain", "explicit"}}
       \cup {[op |-> "find from", x |-> x, start |-> a, stop |-> b] : x \in {1, 3}, a \in {-4, -1, 1, 4}, b \in {None, -1, 2, 4}}
       \cup {[op |-> o] : o \in {"concat", "concat list", "hash"}}
       \cup {[op |-> "repeat", n |-> n, by |-> b] : n \in -1..2, b \in {"int", "index", "method"}}
