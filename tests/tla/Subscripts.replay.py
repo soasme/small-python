@@ -24,6 +24,7 @@ FORMS = {"one": "1", "pair": "1, 2", "trailing": "1,", "empty": "()", "star": "*
          "star_empty": "*t([])", "slice": "1:2", "slice_item": "1:2, 3", "full_slice": "::", "colon": ":",
          "step": "1:2:3", "ellipsis": "..., 1", "walrus": "a := 1", "star_slice": "*t([1]), 1:2"}
 ACTIONS = {"get": "result = t(r)[%s]", "set": "t(r)[%s] = t('v')", "del": "del t(r)[%s]"}
+IDX = "class I:\n    def __init__(s, v): s.v = v\n    def __index__(s):\n        log.append('index')\n        return s.v\n"
 SOURCES = {
     "aug_order": "class A:\n    def __repr__(s): return 'a'\n    def __getitem__(s, k):\n        log.append('get')\n"
                  "        return 1\n    def __setitem__(s, k, v):\n        log.append('set %r' % v)\nt(A())[t(0)] += t(5)",
@@ -62,6 +63,10 @@ SOURCES = {
     "star_in_slice": "r[*a:b]",
     "star_bare_index": "r[*]",
     "nested_star": "result = r[*t((1,)), *t((2,))]",
+    "slot_index": IDX + "l = [5, 6]\nresult = (l.__getitem__(I(1)), list.__setitem__(l, I(1), 7), l)",
+    "slot_big_index": IDX + "[1].__getitem__(I(2**100))",
+    "range_slot_index": IDX + "result = (range(10).__getitem__(I(4)), range(10)[I(6)])",
+    "range_big_index": IDX + "range(10).__getitem__(I(2**100))",
 }
 
 

@@ -31,7 +31,8 @@ Cases == {"aug_order", "not_subscriptable", "not_subscriptable_none", "no_setite
           "list_out", "list_neg_out", "list_str_index", "list_float_index", "list_index_dunder", "list_big_index",
           "tuple_out", "str_out", "dict_missing", "dict_tuple_key", "dict_unhashable", "dict_missing_hook",
           "range_index", "range_out", "bytes_index", "getitem_none", "list_set_out", "list_del_out",
-          "seq_getitem_iter", "generator_subscript", "star_in_slice", "star_bare_index", "nested_star"}
+          "seq_getitem_iter", "generator_subscript", "star_in_slice", "star_bare_index", "nested_star",
+          "slot_index", "slot_big_index", "range_slot_index", "range_big_index"}
 Programs == [form : Forms, action : {"get", "set", "del"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -98,6 +99,12 @@ Case(c) ==
       [] c = "star_in_slice" -> <<"SyntaxError: invalid syntax", <<>>>>
       [] c = "star_bare_index" -> <<"SyntaxError: Invalid star expression", <<>>>>
       [] c = "nested_star" -> <<"(1, 2)", <<"(1,)", "(2,)", "get (1, 2)">>>>
+      \* A sequence's slot methods convert the index once, as a subscript;
+      \* only a range takes an index beyond the index size.
+      [] c = "slot_index" -> <<"(6, None, [5, 7])", <<"index", "index">>>>
+      [] c = "slot_big_index" -> <<"IndexError: cannot fit 'I' into an index-sized integer", <<"index">>>>
+      [] c = "range_slot_index" -> <<"(4, 6)", <<"index", "index">>>>
+      [] c = "range_big_index" -> <<"IndexError: range object index out of range", <<"index">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Subscript(p)
 

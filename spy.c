@@ -9735,7 +9735,7 @@ static SPYValue *range_index(SPYContext *c, SPYValue *range, SPYValue *key) {
         spy_release(start); spy_release(stop); spy_release(step); spy_release(bounds); return result;
     }
     int64_t unused;
-    if (!is_int(key) && subscript_index(c, range, key, &unused)) return NULL;
+    if (!is_int(key) && !index_defined(c, key) && subscript_index(c, range, key, &unused)) return NULL;
     SPYValue *index = index_object(c, key);
     if (!index) return NULL;
     if (integer_sign(index) < 0) {
@@ -28931,6 +28931,20 @@ static int searches(SPYValue *callee) {
     return callee->type == SPY_STRING || callee->type == SPY_BYTES ||
            (callee->type == SPY_NATIVE && callee->as.native.call == string_search_method);
 }
+/* Whether native fn is the __getitem__ or __delitem__ (argc 1) or the
+ * __setitem__ (argc 2) of a list, tuple, str, bytes, bytearray or range
+ * self, whose key's __index__ converts first, as a subscript's does:
+ * SPY_RANGE for a range, whose index may not fit a Py_ssize_t, else 1. */
+static int subscript_slot(SPYContext *c, SPYValue *fn, SPYValue *self, size_t argc) {
+    if (fn->type != SPY_NATIVE || fn->as.native.kwcall != slot_call || !fn->as.native.owner) return 0;
+    const char *name = fn->as.native.name->as.string.data;
+    int set = !strcmp(name, "__setitem__");
+    if (argc != 1u + (size_t)set || (!set && strcmp(name, "__getitem__") && strcmp(name, "__delitem__"))) return 0;
+    static const int types[] = {SPY_LIST, SPY_TUPLE, SPY_STRING, SPY_BYTES, SPY_BYTEARRAY, SPY_RANGE};
+    for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++)
+        if (fn->as.native.owner == c->types[types[i]]) return builtin_value(c, self, types[i]) ? types[i] == SPY_RANGE ? SPY_RANGE : 1 : 0;
+    return 0;
+}
 /* Of native method fn of self with argc further arguments argv: center's,
  * ljust's and rjust's width (not their fill), zfill's, expandtabs' tab
  * size, split's and rsplit's maxsplit, hex's bytes_per_sep, int.to_bytes'
@@ -28954,6 +28968,7 @@ static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size
         return seq ? search_bounds(c, type == SPY_BYTEARRAY ? &view : seq, (int)(which & 65535), argc, argv) : 0;
     }
     if (call != slot_call || !fn->as.native.owner) return 0;
+    if (argc && subscript_slot(c, fn, self, argc)) return 1;
     /* An unbound list or tuple method as the bound one. */
     const char *name = fn->as.native.name->as.string.data;
     SPYValue *owner = fn->as.native.owner, *seq = NULL;
@@ -29091,7 +29106,13 @@ static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYVal
         value = next ? index_from(c, m, next, (int)parts[1]->as.integer_data.small, parts[2], args, n,
                                   (unsigned)parts[5]->as.integer_data.small) : NULL;
         spy_release(next);
-    } else if ((items[i] = index_result(c, args->as.seq.items[i], result))) {
+    } else if ((items[i] = index_result(c, args->as.seq.items[i], result)) && items[i]->as.integer_data.big &&
+               subscript_slot(c, parts[0]->type == SPY_METHOD ? parts[0]->as.method.function : parts[0],
+                              parts[0]->type == SPY_METHOD ? parts[0]->as.method.self : items[0], n - (parts[0]->type != SPY_METHOD)) == 1) {
+        /* A sequence's index fits a Py_ssize_t, as its key's. */
+        errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(args->as.seq.items[i]));
+        spy_release(items[i]);
+    } else if (items[i]) {
         SPYValue *converted = spy_tuple(c, n, items);
         value = converted ? index_from(c, m, parts[0], (int)parts[1]->as.integer_data.small, parts[2], converted, i + 1,
                                        (unsigned)parts[5]->as.integer_data.small) : NULL;
