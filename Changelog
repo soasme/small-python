@@ -642,6 +642,7 @@ Unreleased (0.10.0):
 - `throw()` into a `yield from` with arguments a generator refuses, or a GeneratorExit whose delegate closes first, runs without nesting on the C stack; the generator runs while its delegate closes
 - A `yield from` whose delegate generator was closed takes later sends, throws and closes without nesting on the C stack; a GeneratorExit class thrown with a value into a `yield from` of a builtin iterator is made of that value
 - A dead async generator awaiting a generator that was closed first closes without nesting on the C stack
+- `send()`, `__next__()`, `next()`, `throw()` and `close()` of an `anext()` awaitable over a coroutine run without nesting on the C stack
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

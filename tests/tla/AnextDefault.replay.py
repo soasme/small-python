@@ -66,11 +66,11 @@ def outcome(p):
         return await anext(source, "d")
 
     source = {"coroutine": It, "generator": Based, "agen": agen}[p["source"]]()
-    if p["via"] == "direct":
-        co = anext(source, "d").__await__()
-    else:
+    if p["via"] == "await":
         co = driver(source)
-    co.send(None)
+    else:
+        co = anext(source, "d").__await__()
+    next(co) if p["via"] == "next" else co.send(None)
     if p["via"] == "await":
         assert type(co.cr_await).__name__ == "anext_awaitable"
     resume = p["resume"]

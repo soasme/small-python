@@ -26257,18 +26257,25 @@ static SPYValue *anext_asend(SPYValue *op) {
     SPYValue *source = op->as.iterator.source;
     return source->type == SPY_ASYNC_GENERATOR_ASEND ? source : NULL;
 }
-/* What an anext() awaitable of an asend relays its send, throw or close
- * to (awaitable_method): for callee, the awaitable of method number
- * *method or a method of it bound, that asend, *method then its number
+/* What anext() awaitable op relays its send, throw or close to
+ * (awaitable_method): the asend an async generator's __anext__ returned,
+ * or the coroutine another's did; else NULL. */
+static SPYValue *anext_relay(SPYValue *op) {
+    SPYValue *source = op->as.iterator.source;
+    return source->type == SPY_ASYNC_GENERATOR_ASEND || source->type == SPY_COROUTINE ? source : NULL;
+}
+/* What an anext() awaitable relays its send, throw or close to
+ * (anext_relay): for callee, the awaitable of method number *method or a
+ * method of it bound, that asend or coroutine, *method then its number
  * and *defaulted, given, its default; else callee. */
 static SPYValue *anext_relayed(SPYValue *callee, int *method, SPYValue **defaulted) {
     SPYValue *self = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module ? callee->as.bound.self : *method >= 0 ? callee : NULL;
     int number = self != callee && self ? callee->as.bound.method : *method;
-    if (!self || self->type != SPY_ANEXT_AWAITABLE || !anext_asend(self) ||
+    if (!self || self->type != SPY_ANEXT_AWAITABLE || !anext_relay(self) ||
         (number != M_NEXT && number != M_SEND && number != M_THROW && number != M_CLOSE)) return callee;
     *method = number;
     if (defaulted) *defaulted = self->as.iterator.counter;
-    return anext_asend(self);
+    return anext_relay(self);
 }
 static void finish_delegate(SPYContext *c, Machine *m) {
     /* An awaited comprehension's StopIteration is its value only when it
@@ -27248,11 +27255,13 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
     if (built) callee = built;
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    SPYValue *relaying = callee;
     callee = anext_relayed(callee, &method, NULL);
     /* A coroutine wrapper's methods are its coroutine's, its __next__ and
-     * next() of it the coroutine's send(None). */
-    int wrapped = callee->type == SPY_COROUTINE_ITERATOR && method >= 0;
-    if (wrapped) callee = callee->as.iterator.source;
+     * next() of it the coroutine's send(None), as an anext() awaitable's
+     * of its coroutine. */
+    int wrapped = (callee->type == SPY_COROUTINE_ITERATOR && method >= 0) || (callee != relaying && callee->type == SPY_COROUTINE);
+    if (callee->type == SPY_COROUTINE_ITERATOR && wrapped) callee = callee->as.iterator.source;
     if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_COROUTINE_ITERATOR && is_builtin(callee, B_NEXT))
         return suspended(argv[0]->as.iterator.source) ? B_NEXT : -1;
     /* A throw into an operation that may resume its generator (asend_open),
@@ -27269,8 +27278,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (method < 0 && argc == 2 && self_consumer(c, callee, argv[0])) { argc--; argv++; }
     if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ASEND && is_builtin(callee, B_NEXT))
         return asend_resumes(argv[0], M_NEXT, 0, NULL) ? B_NEXT : -1;
-    if (method < 0 && argc == 1 && argv[0]->type == SPY_ANEXT_AWAITABLE && anext_asend(argv[0]) && is_builtin(callee, B_NEXT))
-        return asend_resumes(anext_asend(argv[0]), M_NEXT, 0, NULL) ? B_NEXT : -1;
+    if (method < 0 && argc == 1 && argv[0]->type == SPY_ANEXT_AWAITABLE && anext_relay(argv[0]) && is_builtin(callee, B_NEXT))
+        return anext_asend(argv[0]) ? asend_resumes(anext_asend(argv[0]), M_NEXT, 0, NULL) ? B_NEXT : -1 : suspended(anext_relay(argv[0])) ? B_NEXT : -1;
     /* An athrow's or aclose's first send, or next() of it, throws its
      * exception into its async generator (athrow_args). */
     if (method < 0 && argc == 1 && argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW && is_builtin(callee, B_NEXT)) {
@@ -27597,8 +27606,8 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         spy_release(generator); spy_release(start); spy_release(defaulted);
         return;
     }
-    if (id == B_NEXT && method < 0 && generator && generator->type == SPY_ANEXT_AWAITABLE && anext_asend(generator)) {
-        SPYValue *asend = spy_retain(anext_asend(generator));
+    if (id == B_NEXT && method < 0 && generator && generator->type == SPY_ANEXT_AWAITABLE && anext_relay(generator)) {
+        SPYValue *asend = spy_retain(anext_relay(generator));
         defaulted = generator->as.iterator.counter;
         spy_release(generator); generator = asend;
     }
