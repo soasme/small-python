@@ -2570,6 +2570,12 @@ static int64_t hash_number(SPYValue *owner, SPYValue *number) {
 }
 static int hash_value(SPYContext *, SPYValue *, int64_t *);
 static int memory_hash(SPYContext *, SPYValue *, int64_t *);
+static int memory_hashed(SPYContext *, SPYValue *, int64_t *);
+static int memory_hash_method(SPYValue *);
+static SPYValue *buffer_copy(SPYContext *, SPYValue *, int, SPYValue *, SPYValue **, SPYValue **);
+static void release_unraisable(SPYContext *, SPYValue *);
+static void memory_unexport(SPYValue *);
+static SPYValue *memory_hasher(SPYContext *, SPYValue *);
 static uint64_t hash_lane(uint64_t hash, int64_t part) {
     hash += (uint64_t)part * UINT64_C(14029467366897019727);
     hash = (hash << 31) | (hash >> 33);
@@ -24999,8 +25005,25 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
 }
 /* What the method of a % job's instance (percent_build) returned: a
  * number's TypeError, c->unbound, is the spec's (percent_type). */
+static SPYValue *percent_released(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static int buffer_named(SPYValue *);
 static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **saved = state->as.seq.items;
+    if (result && saved[8] != c->none && buffer_named(saved[8])) {
+        /* A %b's copied buffer goes back by its Python __release_buffer__ on m (percent_released). */
+        SPYValue *release = NULL, *inner = NULL, *copy = buffer_copy(c, saved[7], 0, result, &release, &inner);
+        spy_release(result);
+        if (!release) {
+            SPYValue *value = copy ? percent_build(c, m, saved[0], saved[1], state, copy) : NULL;
+            spy_release(state);
+            return value;
+        }
+        SPYValue *after = tuple_of(c, 3, (SPYValue *[]){state, copy, inner});
+        spy_release(copy); spy_release(state);
+        if (!after) { memory_unexport(inner); spy_release(inner); return NULL; }
+        SPYValue *object = spy_retain(after->as.seq.items[0]->as.seq.items[7]);
+        return callk(c, m, release, 2, (SPYValue *[]){object, inner}, percent_released, after);
+    }
     SPYValue *text = !result ? NULL : saved[8] == c->none ? spy_retain(result) : conversion_value(c, NULL, saved[7], saved[8], result);
     const char *name = saved[8] == c->none ? "" : saved[8]->as.string.data;
     if (!text && error_is(c, "TypeError") && (!strcmp(name, "int") || !strcmp(name, "float") || !strcmp(name, "__int__") || !strcmp(name, "__float__"))) {
@@ -25009,6 +25032,18 @@ static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, S
     }
     SPYValue *value = text ? percent_build(c, m, saved[0], saved[1], state, text) : NULL;
     spy_release(result); spy_release(state);
+    return value;
+}
+/* What the Python __release_buffer__ that percent_converted called
+ * returned in result, an error unraisable: the view, after's third, goes
+ * back, and the job goes on with the copy, its second. */
+static SPYValue *percent_released(SPYContext *c, Machine *m, SPYValue *after, SPYValue *result) {
+    SPYValue **a = after->as.seq.items, **saved = a[0]->as.seq.items;
+    spy_release(result);
+    if (c->error_type[0]) release_unraisable(c, saved[7]);
+    memory_unexport(a[2]);
+    SPYValue *value = percent_build(c, m, saved[0], saved[1], a[0], spy_retain(a[1]));
+    spy_release(after);
     return value;
 }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
@@ -28717,14 +28752,17 @@ static ALWAYS_INLINE int format_reached(SPYContext *c, SPYValue *callee, int met
 static int hashing_call(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, SPYValue **);
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv may be a hashing_call: a dict's get, setdefault or pop,
- * or a native function, an instance or a class with a metaclass among its
- * first two arguments. */
+ * or a native function, an instance, a class with a metaclass, a tuple or
+ * a view among its first two arguments. */
 static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) method = callee->as.bound.method;
     int native = method >= 0 ? method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP :
                  callee->type == SPY_NATIVE || (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE);
-    return native && argc && (instance_like(argv[0]) || argv[0]->type == SPY_TUPLE ||
-                              (argc == 2 && (instance_like(argv[1]) || argv[1]->type == SPY_TUPLE)));
+    /* A view hashes its exporter (memory_hasher). */
+    uint64_t hashing = UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_MEMORYVIEW;
+    if (!argc) return callee->type == SPY_METHOD && callee->as.method.self->type == SPY_MEMORYVIEW;
+    return native && (instance_like(argv[0]) || (UINT64_C(1) << argv[0]->type & hashing) ||
+                      (argc == 2 && (instance_like(argv[1]) || (UINT64_C(1) << argv[1]->type & hashing))));
 }
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *hashed_map(SPYValue *, int, size_t, SPYValue *const *, size_t *);
@@ -28862,7 +28900,9 @@ static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const
 static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
 static int keys_set_call(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
-enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_MOST = 4 };
+enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_LENGTH = 1u << 10, INDEX_MOST = 4 };
+static int hex_separator(SPYContext *, SPYValue *, size_t, SPYValue *const *);
+static int hex_viewing(SPYValue *);
 /* Whether mask marks argument i: marks are the bits below INDEX_PARTS,
  * flags the bits from it up, and a later argument has no mark. */
 static int index_marked(unsigned mask, size_t i) { return i < 8 && mask >> i & 1; }
@@ -29033,6 +29073,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
                  metaclassed(argv[0]) ||
                  (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS || (argv[1]->type == SPY_TUPLE && argv[1]->listed))) ||
+                 /* hash() of a view (memory_hasher) */
+                 (argc == 1 && argv[0]->type == SPY_MEMORYVIEW && memory_hasher(c, argv[0])) ||
                  UNLIKELY(proxy_unwrapped(c, callee, method, argc, argv))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     /* A set's method given its set first, as a method call's operands
@@ -29466,7 +29508,7 @@ static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size
     if (call == int_to_bytes) return argc == 1 || argc == 2;
     if (call == bytearray_method)
         return which == BA_INSERT ? argc == 2 ? 3 : 0 : (which == BA_POP || which == BA_APPEND || which == BA_REMOVE) && argc == 1;
-    if (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex) return argc == 2 ? 2 : 0;
+    if (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex || hex_viewing(fn)) return argc == 2 ? 2 : 0;
     if (fn->as.native.call == string_search_method) {
         /* A bytearray's search is a bytes one. */
         int type = (int)(which >> 16);
@@ -29560,10 +29602,51 @@ static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, 
                     argc == 1 && argv[0]->type == SPY_INSTANCE && (!argv[0]->as.map.base || !is_int(argv[0]->as.map.base)) &&
                     class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
+    /* hex() takes its separator's length by its Python __len__ (index_from). */
+    if (hex_separator(c, callee, argc, argv) >= 0) return mask | buffers | INDEX_LENGTH;
     for (size_t i = 0; i < argc; i++) if (index_marked(mask, i) && argv[i]->type == SPY_INSTANCE) return mask | buffers;
     return indices && slice_part(c, callee) ? mask | buffers : buffers;
 }
 static SPYValue *buffered_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, SPYValue *);
+static int memory_c_contiguous(SPYValue *);
+static int memory_check(SPYContext *, SPYValue *);
+static SPYValue *index_from(SPYContext *, Machine *, SPYValue *, int, SPYValue *, SPYValue *, size_t, unsigned);
+/* A hex() receiver self stays exported while its separator's __len__ runs
+ * (delta 1), then goes back (-1): a bytearray, or a C-contiguous view. */
+static void hex_export(SPYValue *self, int delta) {
+    if (self->type == SPY_BYTEARRAY) self->as.string.exports += (size_t)delta;
+    else if (self->type == SPY_MEMORYVIEW && memory_c_contiguous(self)) self->as.memory.exports += (size_t)delta;
+}
+/* What hex()'s separator's Python __len__ that index_from called
+ * returned in result: of length 1, the call goes on with its first
+ * character as a str or bytes; else ValueError, or TypeError for a
+ * separator neither. */
+static SPYValue *hex_measured(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **parts = state->as.seq.items, *args = parts[3], *value = NULL;
+    size_t at = (size_t)parts[4]->as.integer_data.small, n = args->as.seq.len;
+    hex_export(parts[6], -1);
+    int64_t length = 0;
+    if (result && !length_result(c, result, &length)) {
+        SPYValue *sep = args->as.seq.items[at], *text = builtin_value(c, sep, SPY_STRING), *base = text ? text : builtin_value(c, sep, SPY_BYTES);
+        char first = base && base->as.string.len ? base->as.string.data[0] : 0;
+        SPYValue *one = length != 1 ? spy_error(c, "ValueError", "sep must be length 1.") :
+                        !base ? spy_error(c, "TypeError", "sep must be str or bytes.") : text ? spy_string(c, &first, 1) : spy_bytes(c, &first, 1);
+        SPYValue *call = one ? tuple_of(c, n, args->as.seq.items) : NULL;
+        if (call) { spy_release(call->as.seq.items[at]); call->as.seq.items[at] = one; one = NULL; }
+        if (call && parts[7] != c->none) {
+            /* A view's hex is that of the bytes copied, its receiver's place. */
+            SPYValue *argv[INDEX_MOST + 1] = {parts[7]};
+            size_t from = parts[0]->type != SPY_METHOD;
+            memcpy(argv + 1, call->as.seq.items + from, (n - from) * sizeof(*argv));
+            value = bytes_hex(c, n - from + 1, argv, NULL, (void *)(intptr_t)SPY_BYTES);
+        } else if (call)
+            value = index_from(c, m, parts[0], (int)parts[1]->as.integer_data.small, parts[2], call, n,
+                               (unsigned)parts[5]->as.integer_data.small & ~(unsigned)INDEX_LENGTH);
+        spy_release(one); spy_release(call);
+    }
+    spy_release(result); spy_release(state);
+    return value;
+}
 /* The call (index_arguments) of state's callee, method number and name
  * (or -1 and None) on the arguments of its tuple, from the i-th on: the
  * next masked one's Python __index__ is m's call (callk), the call going
@@ -29596,6 +29679,20 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         /* enumerate() goes on to its iterable's Python __iter__ (adapter_call). */
         for (size_t k = 0; k < args->as.seq.len; k++) spy_retain(args->as.seq.items[k]);
         return adapter_call(c, m, spy_retain(callee), args->as.seq.len, args->as.seq.items);
+    }
+    int at = mask & INDEX_LENGTH ? hex_separator(c, callee, args->as.seq.len, args->as.seq.items) : -1;
+    if (at >= 0) {
+        /* hex()'s separator's Python __len__ comes after the group's
+         * __index__, its receiver exported meanwhile, a view's bytes
+         * copied first (hex_measured). */
+        SPYValue *sep = args->as.seq.items[at], *self = callee->type == SPY_METHOD ? callee->as.method.self : args->as.seq.items[0], *copy = NULL;
+        if (self->type == SPY_MEMORYVIEW && (memory_check(c, self) || !(copy = memory_bytes(c, self)))) return NULL;
+        SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, at), int_value(c, mask), self, copy ? copy : c->none};
+        SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 8, parts) : NULL;
+        release_all(4, (SPYValue *[]){parts[1], parts[4], parts[5], copy});
+        if (!state) return NULL;
+        hex_export(self, 1);
+        return special_callk(c, m, class_lookup(sep->as.map.parent, "__len__"), sep, 0, NULL, NULL, hex_measured, state);
     }
     if (mask & INDEX_BUFFERS) return buffered_call(c, m, callee, method, name, args);
     return method >= 0 ? call_native_method(c, callee, method, name, args->as.seq.len, args->as.seq.items) :
@@ -29640,7 +29737,7 @@ static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 /* The position, after argc arguments, at which keyword entry kw of a call
  * of callee converts by its Python __index__ as native_indices' arguments
  * do: split's and rsplit's maxsplit, the sep before it None, hex's
- * bytes_per_sep after its sep, expandtabs' tabsize, to_bytes' length,
+ * bytes_per_sep after its sep and sep itself, expandtabs' tabsize, to_bytes' length,
  * int()'s base and enumerate()'s start, given a value; else -1. A bound method's object is not
  * among the arguments. */
 static ptrdiff_t keyword_index(SPYContext *c, SPYValue *callee, size_t argc, const Entry *kw) {
@@ -29653,7 +29750,10 @@ static ptrdiff_t keyword_index(SPYContext *c, SPYValue *callee, size_t argc, con
     if (fn->type != SPY_NATIVE || !(argc + bound)) return -1;
     SPYValue *(*call)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *) = fn->as.native.kwcall;
     if ((call == text_split || call == bytearray_split) && argc + bound <= 2 && !strcmp(name, "maxsplit")) return 2 - (ptrdiff_t)bound;
-    if ((call == bytes_hex || call == bytearray_hex) && argc + bound == 2 && !strcmp(name, "bytes_per_sep")) return (ptrdiff_t)argc;
+    int hex = call == bytes_hex || call == bytearray_hex || hex_viewing(fn);
+    if (hex && argc + bound == 2 && !strcmp(name, "bytes_per_sep")) return (ptrdiff_t)argc;
+    /* And hex's sep, by its Python __len__ (hex_separator). */
+    if (hex && argc + bound == 1 && !strcmp(name, "sep")) return (ptrdiff_t)argc;
     return argc + bound == 1 && ((call == text_expandtabs && !strcmp(name, "tabsize")) || (call == int_to_bytes && !strcmp(name, "length"))) ?
            (ptrdiff_t)argc : -1;
 }
@@ -31610,6 +31710,8 @@ static SPYValue *hash_function(SPYContext *c, SPYValue *key) {
 /* What key's Python __hash__ (hash_function) is called with: key, or the
  * self of the method object its class holds, borrowed. */
 static SPYValue *hash_self(SPYValue *key) {
+    /* A view's is its exporter's (memory_hasher). */
+    if (key->type == SPY_MEMORYVIEW) key = key->as.memory.obj;
     SPYValue *kind = key->type == SPY_INSTANCE ? key->as.map.parent : metaclassed(key) ? key->as.map.meta : NULL;
     SPYValue *held = kind ? class_lookup(kind, "__hash__") : NULL;
     return held && held->type == SPY_METHOD ? held->as.method.self : key;
@@ -31741,7 +31843,8 @@ static ALWAYS_INLINE int key_reaches(SPYContext *c, SPYValue *key) {
 }
 /* Whether hashing key enters a Python __hash__ (hash_entered). */
 static ALWAYS_INLINE int hash_calls(SPYContext *c, SPYValue *key) {
-    return key->type == SPY_TUPLE ? key->listed && !key->as.seq.plain && hash_reaches(c, key, 0) : hash_function(c, key) != NULL;
+    return key->type == SPY_TUPLE ? key->listed && !key->as.seq.plain && hash_reaches(c, key, 0) :
+           UNLIKELY(key->type == SPY_MEMORYVIEW) ? memory_hasher(c, key) != NULL : hash_function(c, key) != NULL;
 }
 /* The Python __hash__ that hashing key enters first (hash_entered),
  * owned, with its env, to enter on m (CALL_HASH) with the key on the
@@ -31749,7 +31852,7 @@ static ALWAYS_INLINE int hash_calls(SPYContext *c, SPYValue *key) {
  * the hash (hash_returned), and a tuple's walk over the key (tuple_next);
  * else NULL. */
 static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, size_t count, SPYValue *const *operands, SPYValue **env) {
-    SPYValue *function = hash_entered(c, key);
+    SPYValue *function = key->type == SPY_MEMORYVIEW ? memory_hasher(c, key) : hash_entered(c, key);
     size_t len = m->len;
     int64_t hash;
     if (!function) return NULL;
@@ -31757,8 +31860,11 @@ static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, s
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_HASH;
     if (key->type == SPY_TUPLE ? !tuple_push(c, m, key, 0, HASH_SEED) && (function = tuple_next(c, m, env, &hash))
-                               : !!(*env = function_env(c, function, 1, (SPYValue *[]){hash_self(key)}, NULL, 0)))
+                               : !!(*env = function_env(c, function, 1, (SPYValue *[]){hash_self(key)}, NULL, 0))) {
+        /* A view stays exported while its exporter hashes (memory_hash). */
+        if (key->type == SPY_MEMORYVIEW) key->as.memory.exports++;
         return key->type == SPY_TUPLE ? function : spy_retain(function);
+    }
     /* A __hash__ that cannot bind, or an item that cannot hash, fails again
      * in C, as the step reports it. */
     while (m->len > len) spy_release(machine_pop(m));
@@ -32548,6 +32654,11 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     int64_t hash = 0;
     int hashed = result && !hash_result(c, result, &hash), op = 0;
     SPYValue *key = machine_pop(m);
+    if (key->type == SPY_MEMORYVIEW) {
+        /* A view's hash is that of its bytes, its exporter's taken. */
+        key->as.memory.exports--;
+        hashed = hashed && !memory_hashed(c, key, &hash);
+    }
     /* A display's or BC_LOAD_TARGET's step runs again on its operands. */
     if (ins->op == BC_MAP || ins->op == BC_LOAD_TARGET) {
         if (!hashed) hash_failed(c, m->stack[m->len - 2 - (ins->op == BC_MAP)], key);
@@ -36366,6 +36477,31 @@ static SPYValue *new_converted(SPYContext *c, Machine *m, SPYValue *cls, SPYValu
     }
     return result;
 }
+/* Whether conversion name is bytes()'s or bytearray()'s of a buffer
+ * (conversion_method). */
+static int buffer_named(SPYValue *name) {
+    return name->type == SPY_STRING && (!strcmp(name->as.string.data, "bytes") || !strcmp(name->as.string.data, "bytearray"));
+}
+/* A next call's bytes() or bytearray(), name, of item, whose __buffer__
+ * returned view: the copy (buffer_copy); a Python __release_buffer__ is
+ * the next call of kind, left in c->k_fn, the copy and item, then the
+ * view, on m's stack under c->converting (item_converted), NULL. */
+static SPYValue *buffer_item_copied(SPYContext *c, Machine *m, SPYValue *item, SPYValue *name, SPYValue *view, int kind) {
+    SPYValue *release = NULL, *inner = NULL, *copy = buffer_copy(c, item, name->as.string.data[4] == 'a', view, &release, &inner), *env;
+    if (!release) return copy;
+    SPYValue *pair = tuple_of(c, 2, (SPYValue *[]){copy, item});
+    spy_release(copy);
+    size_t depth = m->len;
+    if (!pair || machine_push_all(c, m, 3, (SPYValue *[]){pair, spy_retain(inner), spy_retain(c->converting)}) ||
+        !(env = function_env(c, release, 2, (SPYValue *[]){item, inner}, NULL, 0))) {
+        while (m->len > depth) spy_release(machine_pop(m));
+        memory_unexport(inner); spy_release(inner);
+        return NULL;
+    }
+    spy_release(inner);
+    c->k_fn = spy_retain(release); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
+    return NULL;
+}
 /* What a next call of kind that convert_call or init_convert made
  * returned in result, which it takes: the item's conversion, owned
  * (conversion_value, a buffer released here), or the new instance item when name is its class,
@@ -36383,6 +36519,19 @@ static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *r
         }
         spy_release(item);
         return NULL;
+    }
+    if (name->type == SPY_MEMORYVIEW) {
+        /* A copied buffer's Python __release_buffer__ returned (buffer_item_copied). */
+        SPYValue *copy = spy_retain(item->as.seq.items[0]);
+        if (!result) release_unraisable(c, item->as.seq.items[1]);
+        memory_unexport(name);
+        release_all(3, (SPYValue *[]){result, name, item});
+        return copy;
+    }
+    if (result && buffer_named(name)) {
+        SPYValue *copy = buffer_item_copied(c, m, item, name, result, kind);
+        release_all(3, (SPYValue *[]){result, name, item});
+        return copy;
     }
     SPYValue *value = !result ? NULL : name->type != SPY_CLASS ? conversion_value(c, NULL, item, name, result) :
                     item->type == SPY_TUPLE ? new_converted(c, m, name, item, spy_retain(result), kind) :
@@ -42121,11 +42270,15 @@ static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue 
  * arguments argv hashes a key that enters a Python __hash__ (hash_calls)
  * first, or compares it by a Python __eq__ (eq_reaches), *key then: in its
  * dict or set (hashed_map), though pop of an empty dict hashes none, or a
- * tuple hash() takes. */
+ * tuple or view hash() takes, or a view's own __hash__. */
 static NO_INLINE int hashing_call(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **key) {
     size_t at = 0;
     SPYValue *map = hashed_map(callee, method, argc, argv, &at);
-    if ((!map && (method >= 0 || argc != 1 || argv[0]->type != SPY_TUPLE || !is_builtin(callee, B_HASH))) ||
+    /* A view's bound __hash__ hashes its view. */
+    SPYValue *view = !argc && callee->type == SPY_METHOD && memory_hash_method(callee->as.method.function) ? callee->as.method.self : NULL;
+    if (view) return hash_calls(c, *key = view);
+    if ((!map && (method >= 0 || argc != 1 || (argv[0]->type != SPY_TUPLE && argv[0]->type != SPY_MEMORYVIEW) ||
+                  !(is_builtin(callee, B_HASH) || (argv[0]->type == SPY_MEMORYVIEW && memory_hash_method(callee))))) ||
         !(hash_calls(c, argv[at]) || (map && eq_reaches(argv[at])))) return 0;
     *key = argv[at];
     return !map || (method != M_DICT_POP && (callee->type != SPY_BOUND_METHOD || callee->as.bound.method != M_DICT_POP)) || map->as.map.len;
@@ -42240,10 +42393,16 @@ static SPYValue *buffer_released(SPYContext *c, Machine *machine, SPYValue *pair
  * released when it returns (buffer_released), value, which it takes, the
  * call's; 1 with *result what callk returned, or 0 to release m as
  * memory_release does. */
+/* The Python __release_buffer__, a machine function, that releasing view
+ * m calls, borrowed; else NULL. */
+static SPYValue *release_function(SPYContext *c, SPYValue *m) {
+    SPYValue *obj = m->as.memory.obj, *function;
+    return m->as.memory.released || m->as.memory.exports || !m->as.memory.view || obj->type != SPY_INSTANCE ||
+           !(function = class_lookup(obj->as.map.parent, "__release_buffer__")) || !machine_function(c, function) ? NULL : function;
+}
 static NO_INLINE int memory_released(SPYContext *c, Machine *machine, SPYValue *m, SPYValue *value, SPYValue **result) {
-    SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function, *pair;
-    if (m->as.memory.released || m->as.memory.exports || !view || obj->type != SPY_INSTANCE ||
-        !(function = class_lookup(obj->as.map.parent, "__release_buffer__")) || !machine_function(c, function)) return 0;
+    SPYValue *obj = m->as.memory.obj, *view = m->as.memory.view, *function = release_function(c, m), *pair;
+    if (!function) return 0;
     memory_unexport(m);
     pair = tuple_of(c, 3, (SPYValue *[]){view, value, obj});
     spy_release(value);
@@ -42901,6 +43060,19 @@ static NO_INLINE SPYValue *machine_operand(SPYContext *c, Machine *m, Instructio
  * __release_buffer__ as m's call (memory_released) leaving NULL, c->k_fn
  * set, the copy its value, or at once when that call cannot start. */
 static SPYValue *buffer_copied(SPYContext *c, Machine *m, SPYValue *object, int array, SPYValue *view) {
+    SPYValue *release = NULL, *inner = NULL, *copy = buffer_copy(c, object, array, view, m ? &release : NULL, &inner);
+    if (!release) return copy;
+    SPYValue *pair = tuple_of(c, 3, (SPYValue *[]){inner, copy, object});
+    spy_release(copy);
+    if (!pair) { memory_unexport(inner); spy_release(inner); return NULL; }
+    return callk(c, m, release, 2, (SPYValue *[]){spy_retain(object), inner}, buffer_released, pair);
+}
+/* bytes() or bytearray() (array) of object, whose __buffer__ returned
+ * view: a copy of the view's bytes, the view then released; when release
+ * is given and the exporter's __release_buffer__ is a machine function,
+ * *release, borrowed, is that call's to make on object and *inner, the
+ * view it gave, owned, which its caller unexports after it. */
+static SPYValue *buffer_copy(SPYContext *c, SPYValue *object, int array, SPYValue *view, SPYValue **release, SPYValue **inner) {
     SPYValue *exported = memory_exported(c, object, spy_retain(view)), *copy = NULL;
     if (!exported) return NULL;
     if (!memory_check(c, exported)) {
@@ -42908,7 +43080,11 @@ static SPYValue *buffer_copied(SPYContext *c, Machine *m, SPYValue *object, int 
         copy = bytes && array ? bytearray_new(c, bytes->as.string.data, bytes->as.string.len) : spy_retain(bytes);
         spy_release(bytes);
     }
-    if ((!copy || !m || !memory_released(c, m, exported, copy, &copy)) && memory_release(c, exported)) { spy_release(copy); copy = NULL; }
+    SPYValue *function = copy && release ? release_function(c, exported) : NULL;
+    if (function) {
+        memory_unexport(exported);
+        *release = function; *inner = spy_retain(exported->as.memory.view);
+    } else if (memory_release(c, exported)) { spy_release(copy); copy = NULL; }
     spy_release(exported);
     return copy;
 }
@@ -43162,13 +43338,23 @@ static int memory_hash(SPYContext *c, SPYValue *m, int64_t *result) {
     m->as.memory.exports++;
     int failed = hash_value(c, m->as.memory.obj, &ignored);
     m->as.memory.exports--;
-    if (failed) return -1;
+    return failed ? -1 : memory_hashed(c, m, result);
+}
+/* memory_hash of m once its exporter's hash is taken: the hash of its
+ * bytes, kept. */
+static int memory_hashed(SPYContext *c, SPYValue *m, int64_t *result) {
     SPYValue *bytes = memory_bytes(c, m);
     int status = !bytes || hash_value(c, bytes, &m->as.memory.hash);
     spy_release(bytes);
     if (status) return -1;
     m->as.memory.hashed = 1; *result = m->as.memory.hash;
     return 0;
+}
+/* The Python __hash__ that hashing view v calls first, that of an
+ * instance exporting it (hash_function), when v's checks pass; else NULL. */
+static SPYValue *memory_hasher(SPYContext *c, SPYValue *v) {
+    return !v->as.memory.hashed && !v->as.memory.released && v->as.memory.readonly && byte_format(memory_code(v)) &&
+           v->as.memory.obj->type == SPY_INSTANCE ? hash_function(c, v->as.memory.obj) : NULL;
 }
 static SPYValue *memory_attribute(SPYContext *c, SPYValue *m, const char *name) {
     static const char *const fields[] = {"obj", "nbytes", "readonly", "itemsize", "format", "ndim", "shape", "strides", "suboffsets",
@@ -43206,6 +43392,25 @@ static const char *const memory_methods[] = {
 };
 enum { MV_GETITEM, MV_SETITEM, MV_DELITEM, MV_LEN, MV_ITER, MV_EQ, MV_NE, MV_HASH, MV_REPR, MV_ENTER, MV_EXIT,
        MV_BUFFER, MV_RELEASE_BUFFER, MV_RELEASE, MV_TOBYTES, MV_TOLIST, MV_HEX, MV_TOREADONLY, MV_CAST, MV_COUNT, MV_INDEX, MV_NEW };
+static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether native fn is memoryview.hex. */
+static int hex_viewing(SPYValue *fn) { return fn->as.native.kwcall == memory_method && (intptr_t)fn->as.native.data == MV_HEX; }
+/* The index among argv of the separator of a hex() call of callee, a
+ * bytes, bytearray or memoryview hex unbound (its receiver first) or
+ * bound, when it is an instance whose __len__ is Python; else -1. */
+static int hex_separator(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    int bound = callee->type == SPY_METHOD;
+    SPYValue *fn = bound ? callee->as.method.function : callee;
+    size_t at = !bound;
+    if (fn->type != SPY_NATIVE || argc <= at || argv[at]->type != SPY_INSTANCE ||
+        !(fn->as.native.kwcall == bytes_hex || fn->as.native.kwcall == bytearray_hex || hex_viewing(fn))) return -1;
+    SPYValue *function = class_lookup(argv[at]->as.map.parent, "__len__");
+    return function && special_function(c, function) ? (int)at : -1;
+}
+/* Whether callee is memoryview.__hash__, unbound. */
+static int memory_hash_method(SPYValue *callee) {
+    return callee->type == SPY_NATIVE && callee->as.native.kwcall == memory_method && (intptr_t)callee->as.native.data == MV_HASH;
+}
 /* PEP 661 sentinels: unique named objects whose module is the creating frame's. */
 static SPYValue *sentinel_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     size_t given = argc + (keywords ? keywords->as.map.len : 0);

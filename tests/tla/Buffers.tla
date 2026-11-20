@@ -19,7 +19,8 @@
 (* its flags, 284, and returns memoryview(b"abc") or b"abc", or raises     *)
 (* ValueError, with no __release_buffer__ or one that logs "release" and   *)
 (* returns or then raises KeyError;                                        *)
-(* then takes bytes(B()) or bytes(bytearray(B())), or makes m =            *)
+(* then takes bytes(B()), bytes(bytearray(B())), map(bytes, [B()])'s     *)
+(* item or b"%b" % (B(),), or makes m =                                    *)
 (* memoryview(B()) and reads bytes(m) inside `with m:`, before m.release() *)
 (* or memoryview.release(m), or before del m. A resize program appends to  *)
 (* a bytearray with a view that is unreleased or released; a plain program *)
@@ -51,11 +52,14 @@
 (* bad 256, "x" or 1, and reads the item back. A needle program tests    *)
 (* n in b"abcd" or bytearray(b"abcd"), n's __index__ logging "index" and  *)
 (* raising, returning "x" or 98, its __buffer__ logging "get" and giving   *)
-(* b"bc" or raising KeyError, its __release_buffer__ logging "rel".        *)
+(* b"bc" or raising KeyError, its __release_buffer__ logging "rel". A     *)
+(* hash program hashes v = memoryview(X(b"ab")) twice, by hash(v),         *)
+(* v.__hash__() or a dict's get, X a bytes subclass whose __hash__ logs    *)
+(* "hash" and returns 7 or raises KeyError.                                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"none", "logs", "fails"}, how : {"bytes", "bytearray", "with", "release", "unbound", "del"}]
+Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"none", "logs", "fails"}, how : {"bytes", "bytearray", "map", "percent", "with", "release", "unbound", "del"}]
             \cup [part : {"resize"}, released : BOOLEAN]
             \cup [part : {"plain"}]
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
@@ -65,6 +69,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice"}]
             \cup [part : {"item"}, format : {"B", "d", "?"}, bad : BOOLEAN]
             \cup [part : {"needle"}, index : {"raise", "str", "byte"}, buffer : {"view", "raise"}, array : BOOLEAN]
+            \cup [part : {"hash"}, exporter : {"int", "raise"}, call : {"hash", "method", "get"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -116,7 +121,12 @@ Needle(p) == CASE p.index = "byte" -> "index True"
                [] p.buffer = "raise" -> "index get KeyError"
                [] OTHER -> "index get rel True"
 
+\* A view hashes its exporter once, then keeps the hash of its bytes.
+Hash(p) == IF p.exporter = "raise" THEN "hash KeyError"
+           ELSE "hash " \o (IF p.call = "get" THEN "None None" ELSE "True True")
+
 Run(p) == CASE p.part = "export" -> Export(p)
+            [] p.part = "hash" -> Hash(p)
             [] p.part = "needle" -> Needle(p)
             [] p.part = "subclass" -> Subclass(p)
             [] p.part = "several" -> Several(p)
@@ -168,6 +178,9 @@ EachAsked == Done /\ program.part = "subclass" /\ program.use = "twice" => outco
 \* A needle whose __index__ fails is searched by its buffer, released after.
 BufferNeedle == Done /\ program.part = "needle" /\ program.index # "byte" =>
     outcome \in {"index get rel True", "index get KeyError"}
+
+\* The exporter's __hash__ runs once, however often the view is hashed.
+HashedOnce == Done /\ program.part = "hash" => outcome \in {"hash True True", "hash None None", "hash KeyError"}
 
 \* A dimension out of bounds stops the key before its next item's __index__.
 DimensionsInOrder == Done /\ program.part = "grid" /\ program.first = "out" => outcome = "a IndexError"

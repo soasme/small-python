@@ -24,6 +24,10 @@ def export(p, log):
         return repr(bytes(B()))
     if how == "bytearray":
         return repr(bytes(bytearray(B())))
+    if how == "map":
+        return repr(list(map(bytes, [B()]))[0])
+    if how == "percent":
+        return repr(b"%b" % (B(),))
     m = memoryview(B())
     if how == "with":
         with m:
@@ -137,6 +141,21 @@ def star(f, *args):
     return f(*args)
 
 
+def hashed(p, log):
+    class X(bytes):
+        def __hash__(self):
+            for _ in (): pass
+            log.append("hash")
+            if p["exporter"] == "raise": raise KeyError
+            return 7
+    v = memoryview(X(b"ab"))
+    ways = {"hash": lambda: hash(v) == hash(b"ab"), "method": lambda: v.__hash__() == hash(b"ab"), "get": lambda: {}.get(v)}
+    try:
+        return " ".join(repr(ways[p["call"]]()) for _ in range(2))
+    except KeyError:
+        return "KeyError"
+
+
 def needle(p, log):
     class N:
         def __index__(self):
@@ -225,6 +244,8 @@ def outcome(p):
             result = several(p, log)
         elif p["part"] == "needle":
             result = needle(p, log)
+        elif p["part"] == "hash":
+            result = hashed(p, log)
         elif p["part"] == "subclass":
             result = subclass(p, log)
         elif p["part"] == "item":

@@ -617,6 +617,9 @@ Unreleased (0.10.0):
 - `bytes.join()` and `bytearray.join()` release their items' buffers only after joining them all, and call Python `__buffer__` and `__release_buffer__` without nesting on the C stack
 - `in` of a bytes or bytearray calls a needle's Python `__buffer__`, after its `__index__` fails, without nesting on the C stack
 - `bytes()` and `bytearray()` of a builtin subclass's instance call its Python `__index__` without nesting on the C stack
+- `hash()` of a memoryview, and its `__hash__`, call the exporter's Python `__hash__` without nesting on the C stack
+- `hex()` of bytes, a bytearray or a memoryview calls its separator's Python `__len__` without nesting on the C stack
+- `map(bytes, ...)`, `map(bytearray, ...)` and a bytes `%b` call an exporter's Python `__release_buffer__` without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack
