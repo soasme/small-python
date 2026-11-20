@@ -162,6 +162,12 @@ SOURCES = {
     "callable_calls": "log = []\nn = [0]\ndef f():\n    for _ in (): pass\n    n[0] += 1\n    log.append(n[0])\n    return n[0] % 3\n"
                       "a = [x for x in iter(f, 0)]\nn[0] = 0\nb = sum(iter(f, 0))\nn[0] = 0\nc = list(iter(f, 0))\nn[0] = 0\n"
                       "result = (a, b, c, next(iter(f, 0)), log)",
+    "map_index": "log = []\nclass X:\n    def __init__(s, v): s.v = v\n    def __index__(s):\n        for _ in (): pass\n"
+                 "        log.append(s.v)\n        if s.v == 'raise': raise LookupError('x')\n        return s.v\n"
+                 "result = (list(map(round, [2.25, 3.375], [X(1), X(2)])), list(map(int, ['11'], [X(3)])), "
+                 "list(map(str.ljust, ['a'], [X(3)])), list(map('abc'.__getitem__, [X(-1)])), log)",
+    "map_index_bad": "class X:\n    def __index__(s):\n        for _ in (): pass\n        raise LookupError('x')\n"
+                     "result = list(map(int, ['1'], [X()]))",
     "map_hash_tuple": "log = []\nclass H:\n    def __init__(s, v): s.v = v\n    def __hash__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return s.v\nresult = (list(map(hash, [(H(1),), (2, (H(3), H(4)))])) == [hash((1,)), hash((2, (3, 4)))], log)",
     "map_class": "log = []\nclass P:\n    def __init__(s, *a):\n        for _ in (): pass\n        log.append(a[0])\n        s.a = a\n"
                  "out = []\nfor p in map(P, [1, 2], 'ab'):\n    out.append(p.a)\n    log.append(('t', p.a[0]))\nresult = (out, log)",
