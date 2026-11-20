@@ -45,6 +45,9 @@ def outcome(p):
     if op == "== python":
         wrap = lambda m: kinds[type(m).__name__]({k: Value(v) for k, v in m.items()})
         return ("bool", repr(wrap(x) == wrap(y)), ())
+    if op == "== python keys":
+        wrap = lambda m: kinds[type(m).__name__]({Value(k): v for k, v in m.items()})
+        return ("bool", repr(wrap(x) == wrap(y)), ())
     if op == "hash once":
         w = kinds[p["kx"]]({k: Value(v) for k, v in x.items()})
         del Value.calls[:]
