@@ -20970,6 +20970,17 @@ static void generator_close(SPYValue *v) {
     if (frame && !frame->as.frame.env) frame->as.frame.env = v->as.generator.env;
     else spy_release(v->as.generator.env);
     v->as.generator.env = NULL;
+    /* A generator that lives on lets its frame go: one nothing else holds
+     * dies with the locals; one a traceback holds keeps the code and the
+     * line it ended at, not the generator (27.2.4). */
+    if (frame && v->refs && !v->finalized) {
+        v->as.generator.frame = NULL;
+        if (frame->refs > 1) {
+            frame->as.frame.owner = spy_retain(v->as.generator.code); frame->as.frame.generator = NULL;
+            frame->as.frame.line = v->as.generator.line ? v->as.generator.line : v->as.generator.node ? v->as.generator.node->line : 0;
+        }
+        spy_release(frame);
+    }
     spy_release(v->as.generator.unit); v->as.generator.unit = NULL;
     v->as.generator.done = 1;
 }
@@ -40125,7 +40136,8 @@ static SPYValue *frame_attribute(SPYContext *c, SPYValue *frame, const char *nam
     if (!strcmp(name, "f_code") && owner->type == V_UNIT && scope && scope->kind == S_CLASS && scope->owner)
         return definition_code(c, owner, scope->owner);
     if (!strcmp(name, "f_code"))
-        return owner->type == SPY_FUNCTION ? attribute(c, owner, "__code__") : owner->type == V_UNIT ? spy_retain(owner) : spy_retain(owner->as.generator.code);
+        return owner->type == SPY_FUNCTION ? attribute(c, owner, "__code__") : owner->type == V_UNIT || owner->type == SPY_CODE ? spy_retain(owner) :
+               spy_retain(owner->as.generator.code);
     if (!strcmp(name, "f_generator"))
         return spy_retain((owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) &&
                           !owner->as.generator.done ? owner : c->none);

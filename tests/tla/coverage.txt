@@ -493,7 +493,7 @@ Contents | - navigation
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.1 GeneratorResume ( *g*, *mode*, *value* ) | Generators
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.2 Methods | Generators, DelegateThrowArguments
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.3 Attributes | Generators, Frames
-27 Control Abstraction Objects > 27.2 Generator objects > 27.2.4 Finalization | GCGenerators, SpyGCGenerators, Generators
+27 Control Abstraction Objects > 27.2 Generator objects > 27.2.4 Finalization | GCGenerators, SpyGCGenerators, Generators, GeneratorLocals
 27 Control Abstraction Objects > 27.3 Awaitables | Awaitables
 27 Control Abstraction Objects > 27.4 Coroutine objects | = sections
 27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.1 Coroutines | Awaitables
