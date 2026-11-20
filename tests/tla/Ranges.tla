@@ -17,7 +17,9 @@
 (* -1, 0, 2, and 4 and every step from -2 to 2, and reports its items,     *)
 (* length, first and last items (or IndexError), r[::-1], r[1:], whether 2 *)
 (* is in it, and 2's index; or runs one of the sources of CASES in a fresh *)
-(* namespace. The outcome is the repr of that tuple or of the case's       *)
+(* namespace, among them searches of a range, list and tuple, bound and by *)
+(* the class's method, for an instance whose Python __eq__ logs each item. *)
+(* The outcome is the repr of that tuple or of the case's                  *)
 (* result, or the exception and its message.                               *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, TLC
@@ -52,7 +54,7 @@ Cases == {"one_arg", "index_args", "index_order", "index_refused", "float_arg", 
           "repeat", "contains_float", "contains_bool", "contains_other", "index_missing", "count",
           "doc_example", "slice_step", "index_bad_type", "index_too_big", "immutable", "attr_readonly",
           "bool", "reversed_type", "subclass", "iter_type", "repr_step", "negative_index_out",
-          "len_bool_index"}
+          "len_bool_index", "search_python", "search_missing", "search_unbound"}
 Programs == [start : Vs, stop : Vs, step : -2..2]
             \cup [case : Cases]
 
@@ -101,6 +103,11 @@ Case(c) ==
       [] c = "repr_step" -> "('range(1, 2)', 'range(1, 2, 3)')"
       [] c = "negative_index_out" -> "IndexError: range object index out of range"
       [] c = "len_bool_index" -> "(range(0, 1), 0)"
+      \* An instance's Python __eq__ compares it with each item in turn, as a
+      \* sequence's index and count do, the search stopping at a match.
+      [] c = "search_python" -> "(3, 1, True, 4, [0, 1, 2, 3, 0, 1, 2, 3, 4, 0, 1, 0, 1, 2, 3, 4])"
+      [] c = "search_missing" -> "ValueError: sequence.index(x): x not in sequence"
+      [] c = "search_unbound" -> "(1, 2, [1, 2, 2, 2])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

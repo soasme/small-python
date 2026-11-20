@@ -6,6 +6,13 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 class I:
     def __init__(self, v): self.v = v
     def __index__(self): return self.v
+class E:
+    def __init__(self, v, log): self.v, self.log = v, log
+    def __eq__(self, other):
+        for _ in ():  # a loop: __eq__ runs on the machine
+            pass
+        self.log.append(other)
+        return other == self.v
 class J:
     def __init__(self, v, log): self.v, self.log = v, log
     def __index__(self):
@@ -51,7 +58,10 @@ SOURCES = {
     "iter_type": "result = type(iter(range(3))).__name__",
     "repr_step": "result = (repr(range(1, 2, 1)), repr(range(1, 2, 3)))",
     "negative_index_out": "result = range(3)[-4]",
-    "len_bool_index": "result = (range(True), len(range(-5)))"
+    "len_bool_index": "result = (range(True), len(range(-5)))",
+    "search_python": "log = []\nr = range(5)\nresult = (r.index(E(3, log)), r.count(E(2, log)), E(1, log) in r, range.index(r, E(4, log)), log)",
+    "search_missing": "log = []\nresult = range(1, 3).index(E(5, log))",
+    "search_unbound": "log = []\nresult = (list.index([1, 2], E(2, log)), tuple.count((2, 2), E(2, log)), log)"
 }
 
 

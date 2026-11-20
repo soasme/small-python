@@ -30391,6 +30391,7 @@ static NO_INLINE SPYValue *fold_begin(SPYContext *c, Machine *m, size_t argc, SP
     return function ? spy_retain(c->types[SPY_STRING]) : value;
 }
 static ALWAYS_INLINE SPYValue *searched(SPYValue *, int, size_t, SPYValue *const *, int *);
+static SPYValue *range_search(SPYContext *, Machine *, int, SPYValue *, SPYValue *);
 static void search_span(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, size_t *, int64_t *);
 static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, int64_t, SPYValue **, SPYValue **);
 /* The call of class callee in m's stack below its argc arguments, called
@@ -30663,17 +30664,28 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     int id;
     SPYValue *seq = calls ? searched(callee, -1, argc, argv, &id) : NULL;
+    /* A method descriptor's call takes the sequence first (slot_searched). */
+    size_t skip = seq && callee->type == SPY_NATIVE;
+    if (seq && seq->type == SPY_RANGE) {
+        /* A range's index or count of an instance (range_search). */
+        SPYValue *x = spy_retain(argv[skip]);
+        spy_retain(seq);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        result = range_search(c, m, id, x, seq);
+        spy_release(x); spy_release(seq);
+        return result;
+    }
     if (seq) {
         /* So does a bound index, count or remove of a list or tuple
          * evaluated before its argument (search_call). */
-        SPYValue *x = spy_retain(argv[0]);
+        SPYValue *x = spy_retain(argv[skip]);
         size_t at;
         int64_t tally;
-        search_span(c, seq, id, argc, argv, &at, &tally);
-        spy_retain(callee);
+        search_span(c, seq, id, argc - skip, argv + skip, &at, &tally);
+        spy_retain(callee); spy_retain(seq);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         SPYValue *function = search_call(c, m, id, x, seq, at, tally, env, &result);
-        spy_release(x); spy_release(callee);
+        spy_release(x); spy_release(seq); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
     /* A set's method given the set first consumes its sources as the bound method does. */
@@ -30704,16 +30716,83 @@ static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue 
  * method, with argc arguments argv is index, count or remove of one item,
  * index's start and stop ints too, which search_call runs, *id that
  * method; else NULL. */
+static SPYValue *slot_searched(SPYValue *, size_t, SPYValue *const *, int *);
 static ALWAYS_INLINE SPYValue *searched(SPYValue *callee, int method, size_t argc, SPYValue *const *argv, int *id) {
     SPYValue *seq = callee;
     if (method < 0) {
+        if (callee->type == SPY_NATIVE && callee->as.native.kwcall == slot_call) return slot_searched(callee, argc, argv, id);
         if (callee->type != SPY_BOUND_METHOD || callee->as.bound.module) return NULL;
         method = callee->as.bound.method; seq = callee->as.bound.self;
     }
     *id = method;
     return (method == M_INDEX || method == M_COUNT || method == M_REMOVE) &&
            (argc == 1 || (method == M_INDEX && argc <= 3 && is_int(argv[1]) && (argc == 2 || is_int(argv[2])))) &&
-           (seq->type == SPY_LIST || seq->type == SPY_TUPLE) ? seq : NULL;
+           (seq->type == SPY_LIST || seq->type == SPY_TUPLE || (seq->type == SPY_RANGE && argc == 1 && argv[0]->type == SPY_INSTANCE)) ? seq : NULL;
+}
+static SPYValue *equal_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, int, Continuation, SPYValue *);
+static SPYValue *range_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* index or count, its method in state (x, the range's iterator, method,
+ * the next item's position, the count), of instance x in a range by its
+ * items (_PySequence_IterSearch): the next item whose comparison with x
+ * calls a Python __eq__ m's call (equal_callk, range_compared), those
+ * before it compared in C; the method's value, or NULL. State taken. */
+static SPYValue *range_go(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items, *x = items[0], *item, *result = NULL;
+    int64_t at = items[3]->as.integer_data.small, tally = items[4]->as.integer_data.small;
+    int index = items[2]->as.integer_data.small == M_INDEX;
+    while ((item = native_next(c, items[1]))) {
+        SPYValue *function = rich_function(c, item, x, R_EQ), *left = item;
+        if (!function && (function = rich_function(c, x, item, R_EQ))) left = x;
+        if (function) {
+            SPYValue *position = int_value(c, at), *count = int_value(c, tally);
+            if (position && count) {
+                spy_release(items[3]); items[3] = position; spy_release(items[4]); items[4] = count;
+                result = equal_callk(c, m, function, left, left == x ? item : x, 0, range_compared, state);
+                spy_release(item);
+                return result;
+            }
+            spy_release(position); spy_release(count); spy_release(item);
+            break;
+        }
+        int same = equal(item, x);
+        spy_release(item);
+        if (c->error_type[0] || spend(c, 1)) break;
+        if (same && index) { result = int_value(c, at); break; }
+        tally += same; at++;
+    }
+    if (!result && !c->error_type[0])
+        result = index ? spy_error(c, "ValueError", "sequence.index(x): x not in sequence") : int_value(c, tally);
+    spy_release(state);
+    return result;
+}
+/* What a range search's comparison (range_go) gave, its truth result. */
+static SPYValue *range_compared(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items;
+    if (!result) { spy_release(state); return NULL; }
+    int64_t at = items[3]->as.integer_data.small, tally = items[4]->as.integer_data.small + (result == c->booleans[1]);
+    spy_release(result);
+    if (tally > items[4]->as.integer_data.small && items[2]->as.integer_data.small == M_INDEX) {
+        spy_release(state);
+        return int_value(c, at);
+    }
+    SPYValue *position = int_value(c, at + 1), *count = int_value(c, tally);
+    if (!position || !count) { spy_release(position); spy_release(count); spy_release(state); return NULL; }
+    spy_release(items[3]); items[3] = position; spy_release(items[4]); items[4] = count;
+    return range_go(c, m, state);
+}
+/* index or count, as method, of instance x in range r on m (range_go). */
+static SPYValue *range_search(SPYContext *c, Machine *m, int method, SPYValue *x, SPYValue *r) {
+    SPYValue *state = parts_tuple(c, 5, (SPYValue *[]){spy_retain(x), get_iterator(c, r), int_value(c, method), int_value(c, 0), int_value(c, 0)});
+    return state ? range_go(c, m, state) : NULL;
+}
+/* The list, tuple or range argv[0], or a subclass instance's, whose
+ * index, count or remove callee, its class's method descriptor, searches
+ * by argv's rest (searched). */
+static NO_INLINE SPYValue *slot_searched(SPYValue *callee, size_t argc, SPYValue *const *argv, int *id) {
+    const char *name = callee->as.native.name->as.string.data;
+    int method = !strcmp(name, "index") ? M_INDEX : !strcmp(name, "count") ? M_COUNT : !strcmp(name, "remove") ? M_REMOVE : -1;
+    SPYValue *seq = argc > 1 && argv[0]->type == SPY_INSTANCE ? argv[0]->as.map.base : argv[0];
+    return method >= 0 && argc > 1 && seq && callee->as.native.owner == callee->ctx->types[seq->type] ? searched(seq, method, argc - 1, argv + 1, id) : NULL;
 }
 /* Where index, count or remove of seq with argc arguments argv, of ints
  * past the item (searched), starts, in *at, and index's stop, normalized
@@ -30794,15 +30873,26 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         return set_call(c, m, callee, argc + !skip, held + skip, env);
     }
     SPYValue *seq = callee && calls ? searched(callee, method, argc, argv + 1, &id) : NULL;
+    size_t first = seq && callee->type == SPY_NATIVE;
+    if (seq && seq->type == SPY_RANGE) {
+        /* A range's index or count of an instance (range_search). */
+        SPYValue *x = spy_retain(argv[1 + first]);
+        spy_retain(seq);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        result = range_search(c, m, id, x, seq);
+        spy_release(x); spy_release(seq); spy_release(callee);
+        return result;
+    }
     if (seq) {
         /* index, count or remove of a list or tuple (search_call). */
-        SPYValue *x = spy_retain(argv[1]);
+        SPYValue *x = spy_retain(argv[1 + first]);
         size_t at;
         int64_t tally;
-        search_span(c, seq, id, argc, argv + 1, &at, &tally);
+        search_span(c, seq, id, argc - first, argv + 1 + first, &at, &tally);
+        spy_retain(seq);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         SPYValue *function = search_call(c, m, id, x, seq, at, tally, env, &result);
-        spy_release(x); spy_release(callee);
+        spy_release(x); spy_release(seq); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
     if (callee && calls && method == M_UPDATE && argc == 1 && merges(callee, argv[1])) {
@@ -31755,11 +31845,13 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
  * replaces it. */
 static NO_INLINE int contains_step(SPYContext *c, Machine *m, Instruction *ins, int op, SPYValue *x, SPYValue *y, int absent) {
     if (contained_base(c, y)) return 0;
-    if (y->type != SPY_DICT_VALUES && !(y->type == SPY_ITERATOR && y->as.iterator.kind == I_REVERSED) && !resumable(y) &&
+    /* A range searches an instance by its items (range_contains). */
+    int ranged = y->type == SPY_RANGE && x->type == SPY_INSTANCE;
+    if (!ranged && y->type != SPY_DICT_VALUES && !(y->type == SPY_ITERATOR && y->as.iterator.kind == I_REVERSED) && !resumable(y) &&
         (!(iter_function(c, y) || getitem_iterated(c, y)) || (!absent && class_lookup(y->as.map.parent, "__contains__")))) return 0;
     /* An __iter__ on the machine is the search's first call (KEY_ITER). */
-    SPYValue *items = spy_retain(y);
-    int keyed = consumer_source(c, &items);
+    SPYValue *items = ranged ? get_iterator(c, y) : spy_retain(y);
+    int keyed = ranged ? 0 : consumer_source(c, &items);
     if (!items) contains_refused(c, y);
     int chained = ins->op == BC_COMPARE && ins->arg;
     Consumer *s = items ? allocate(c, sizeof(*s)) : NULL;
@@ -33886,6 +33978,8 @@ static SPYValue *k_take(SPYContext *c, SPYValue *state, Continuation *k) {
     return ctx;
 }
 static SPYValue *equal_returned(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *equal_tested(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
 /* The call of a Python __eq__, function, on left and right for equalk,
  * then k with ctx, which it takes; reflected whether it is the
  * reflected call. */
@@ -33913,9 +34007,22 @@ static SPYValue *equal_returned(SPYContext *c, Machine *m, SPYValue *state, SPYV
         spy_release(left); spy_release(self);
         return result;
     }
+    int length = 0;
+    SPYValue *bool_fn = test && test->type != SPY_BOOL && (test->type == SPY_INSTANCE || metaclassed(test)) ? truth_function(c, test, &length) : NULL;
+    if (bool_fn) {
+        /* Its Python __bool__ or __len__ is m's call (equal_tested). */
+        Continuation k;
+        SPYValue *ctx = k_take(c, state, &k), *held = k_state(c, 2, (SPYValue *[]){test, spy_bool(c, !length), NULL, NULL}, k, ctx);
+        return held ? callk(c, m, bool_fn, 1, (SPYValue *[]){spy_retain(held->as.seq.items[0])}, equal_tested, held) : NULL;
+    }
     int truth = test && truthy(test);
     spy_release(test);
     return k_resume(c, m, state, c->error_type[0] ? NULL : spy_bool(c, truth));
+}
+/* What the __bool__, or __len__, of an __eq__'s result returned (equal_returned). */
+static SPYValue *equal_tested(SPYContext *c, Machine *m, SPYValue *held, SPYValue *result) {
+    int truth = result && truth_result(c, held->as.seq.items[0], held->as.seq.items[1] == c->booleans[1], result);
+    return k_resume(c, m, held, c->error_type[0] ? NULL : spy_bool(c, truth));
 }
 /* a == b as a bool for continuation k with ctx, which it takes, calling
  * a Python __eq__ on m (callk): a's, or b's when b's class is a subclass
