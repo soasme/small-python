@@ -605,6 +605,8 @@ Unreleased (0.10.0):
 - comparing two slices calls their parts' Python `__eq__` and `__lt__` without nesting on the C stack
 - a name looked up in a dict subclass namespace, such as builtins, calls its Python `__missing__` without nesting on the C stack
 - a class statement looks up `__build_class__` before evaluating its bases, through a Python builtins lookup without nesting on the C stack
+- a call's duplicate keyword names its callee through a Python `__getattribute__`, `__getattr__` or `__str__` without nesting on the C stack
+- `dict()` and `dict.update()` merge a function, module or class that has a `keys` attribute as a mapping
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

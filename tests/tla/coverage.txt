@@ -183,7 +183,7 @@ Contents | - navigation
 13 Expressions > 13.3 Primaries > 13.3.1 Attribute references | Attributes
 13 Expressions > 13.3 Primaries > 13.3.2 Subscriptions | Subscripts
 13 Expressions > 13.3 Primaries > 13.3.3 Slicings | Subscripts, Slices
-13 Expressions > 13.3 Primaries > 13.3.4 Calls | Calls, KeywordHashes
+13 Expressions > 13.3 Primaries > 13.3.4 Calls | Calls, KeywordHashes, DuplicateKeywordName
 13 Expressions > 13.4 The `await` expression | Awaitables
 13 Expressions > 13.5 The power operator | BinaryArith, Precedence
 13 Expressions > 13.6 Unary arithmetic and bitwise operations | BinaryArith, NumericTypes

@@ -16308,6 +16308,19 @@ static SPYValue *filesystem_path(SPYContext *c, SPYValue *value) {
     spy_release(result);
     return converted;
 }
+/* "module.qualname()" of qualname and module, which it takes, or
+ * "qualname()" when module is NULL, None or builtins (function_str). */
+static SPYValue *function_named(SPYContext *c, SPYValue *qualname, SPYValue *module) {
+    SPYValue *result = NULL;
+    Buffer text = {.ctx = c};
+    int builtins = !module || module->type == SPY_NONE ||
+        (module->type == SPY_STRING && !strcmp(module->as.string.data, "builtins"));
+    if (!(!builtins && (format_value(&text, module, 0) || puts_buffer(&text, "."))) &&
+        !format_value(&text, qualname, 0) && !puts_buffer(&text, "()"))
+        result = spy_string(c, text.data ? text.data : "", text.len);
+    mem_free(text.data); spy_release(qualname); spy_release(module);
+    return result;
+}
 /* _PyObject_FunctionStr: "module.qualname()", "qualname()" when the module
  * is None or builtins, or str(f) when f has no __qualname__. */
 static SPYValue *function_str(SPYContext *c, SPYValue *f) {
@@ -16318,7 +16331,7 @@ static SPYValue *function_str(SPYContext *c, SPYValue *f) {
             spy_string(c, text.data ? text.data : "", text.len);
         mem_free(text.data); return result;
     }
-    SPYValue *qualname = attribute(c, f, "__qualname__"), *module = NULL, *result = NULL;
+    SPYValue *qualname = attribute(c, f, "__qualname__"), *module = NULL;
     if (!qualname) {
         if (!error_is(c, "AttributeError")) return NULL;
         spy_clear_error(c);
@@ -16328,35 +16341,97 @@ static SPYValue *function_str(SPYContext *c, SPYValue *f) {
         if (!error_is(c, "AttributeError")) { spy_release(qualname); return NULL; }
         spy_clear_error(c);
     }
-    Buffer text = {.ctx = c};
-    int builtins = !module || module->type == SPY_NONE ||
-        (module->type == SPY_STRING && !strcmp(module->as.string.data, "builtins"));
-    if (!(!builtins && (format_value(&text, module, 0) || puts_buffer(&text, "."))) &&
-        !format_value(&text, qualname, 0) && !puts_buffer(&text, "()"))
-        result = spy_string(c, text.data ? text.data : "", text.len);
-    mem_free(text.data); spy_release(qualname); spy_release(module);
-    return result;
+    return function_named(c, qualname, module);
 }
 /* Whether a call's keywords already have key, found at entry at or
  * not (-1), the duplicate keyword's error raised then for callable; -1
  * on an error. */
+/* The TypeError of a call's duplicate keyword key for the callee named
+ * name, which it takes: "function" when naming it failed, its NULL, as %V
+ * in _PyEval_FormatKwargsError. */
+static SPYValue *keyword_repeated(SPYContext *c, SPYValue *name, SPYValue *key) {
+    if (!name) spy_clear_error(c);
+    SPYValue *text = stringify(c, key, 0);
+    if (text) errorf(c, "TypeError", "%s got multiple values for keyword argument '%s'", name ? name->as.string.data : "function", text->as.string.data);
+    spy_release(name); spy_release(text);
+    return NULL;
+}
 static int keyword_found(SPYContext *c, ptrdiff_t at, SPYValue *key, SPYValue *callable) {
-    if (at >= 0) {
-        /* As %V in _PyEval_FormatKwargsError: "function" when naming it fails. */
-        SPYValue *name = function_str(c, callable);
-        if (!name) spy_clear_error(c);
-        SPYValue *text = stringify(c, key, 0);
-        if (text) errorf(c, "TypeError", "%s got multiple values for keyword argument '%s'", name ? name->as.string.data : "function", text->as.string.data);
-        spy_release(name); spy_release(text);
-        return 1;
-    }
+    if (at >= 0) { keyword_repeated(c, function_str(c, callable), key); return 1; }
     return c->error_type[0] ? -1 : 0;
 }
 static int keyword_taken(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *callable) {
     return keyword_found(c, map_find(result, key), key, callable);
 }
-static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
-    return keyword_taken(c, result, key, callable) ? -1 : map_set(c, result, key, value);
+static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether function_str names fn without calling Python. */
+static int named_plainly(SPYContext *c, SPYValue *fn) {
+    if (fn->type == SPY_METHOD) fn = fn->as.method.function;
+    return fn->type == SPY_FUNCTION || fn->type == SPY_NATIVE || fn->type == SPY_STRING ||
+           (fn->type == SPY_CLASS && value_class(c, fn) == c->types[SPY_CLASS]);
+}
+/* The read of v's attribute name on m, then continuation k with ctx,
+ * which it takes, and its value, as callk calls (attribute_callk). */
+static SPYValue *attribute_readk(SPYContext *c, Machine *m, SPYValue *v, const char *name, Continuation k, SPYValue *ctx) {
+    SPYValue *value = attribute_step(c, v, name), *function = c->fallback;
+    if (value || c->error_type[0] || !function) return k(c, m, ctx, value);
+    c->fallback = NULL;
+    return attribute_callk(c, m, v, name, function, k, ctx);
+}
+/* What naming a call's callee, first in state, for the TypeError of its
+ * duplicate keyword, second (keyword_namedk), read on the machine:
+ * its str() when it has no __qualname__ (named_text), its __module__
+ * after its __qualname__, third (named_module). */
+static SPYValue *named_text(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    if (result && !builtin_value(c, result, SPY_STRING)) {
+        errorf(c, "TypeError", "__str__ returned non-string (type %s)", type_name(result));
+        spy_release(result); result = NULL;
+    }
+    keyword_repeated(c, result, state->as.seq.items[1]);
+    spy_release(state);
+    return NULL;
+}
+static SPYValue *named_module(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    SPYValue **items = state->as.seq.items, *name = NULL;
+    if (result || error_is(c, "AttributeError")) {
+        spy_clear_error(c);
+        name = function_named(c, spy_retain(items[2]), result);
+    }
+    keyword_repeated(c, name, items[1]);
+    spy_release(state);
+    return NULL;
+}
+static SPYValue *named_qualname(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *f = items[0];
+    if (result) {
+        SPYValue *next = tuple_of(c, 3, (SPYValue *[]){f, items[1], result});
+        spy_release(result); spy_release(state);
+        return next ? attribute_readk(c, m, next->as.seq.items[0], "__module__", named_module, next) : NULL;
+    }
+    if (!error_is(c, "AttributeError")) return named_text(c, m, state, NULL);
+    spy_clear_error(c);
+    /* str(f): a Python __str__, or __repr__ under object's, is m's call. */
+    SPYValue *cls = value_class(c, f), *method = class_lookup(cls, "__str__");
+    if (!method || (method->type == SPY_NATIVE && method->as.native.kwcall == slot_call && method->as.native.owner == c->object))
+        method = class_lookup(cls, "__repr__");
+    if (method && machine_function(c, method)) return callk(c, m, method, 1, (SPYValue *[]){spy_retain(f)}, named_text, state);
+    return named_text(c, m, state, stringify(c, f, 0));
+}
+/* The TypeError of a call's duplicate keyword key for callee fn, both
+ * borrowed, naming fn on m (named_qualname): NULL, with the error or
+ * c->k_fn. */
+static NO_INLINE SPYValue *keyword_namedk(SPYContext *c, Machine *m, SPYValue *fn, SPYValue *key) {
+    SPYValue *state = tuple_of(c, 2, (SPYValue *[]){fn, key});
+    return state ? attribute_readk(c, m, fn, "__qualname__", named_qualname, state) : NULL;
+}
+/* Keyword key of value into a call's keywords result for callable, -1
+ * when it is a duplicate, named on m when given (keyword_namedk). */
+static int merge_keyword(SPYContext *c, Machine *m, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
+    ptrdiff_t at = map_find(result, key);
+    if (UNLIKELY(at >= 0) && m && !named_plainly(c, callable)) { keyword_namedk(c, m, callable, key); return -1; }
+    return keyword_found(c, at, key, callable) ? -1 : map_set(c, result, key, value);
 }
 /* The iterator of keys, what mapping source's keys() returned; a
  * TypeError when keys is not iterable names the method. */
@@ -16494,10 +16569,11 @@ static int dict_pair(SPYContext *c, SPYValue *dict, SPYValue *pair, size_t index
     spy_release(items);
     return c->error_type[0] ? -1 : 0;
 }
-/* Whether instance a has an attribute keys, so is a mapping to dict(); -1
- * on an error. */
+/* Whether a, a value that may hold attributes of its own, has an
+ * attribute keys, so is a mapping to dict(); -1 on an error. */
 static int instance_keys(SPYContext *c, SPYValue *a) {
-    SPYValue *keys = a->type == SPY_INSTANCE ? attribute(c, a, "keys") : NULL;
+    int own = a->type == SPY_INSTANCE || a->type == SPY_FUNCTION || a->type == SPY_MODULE || a->type == SPY_CLASS;
+    SPYValue *keys = own ? attribute(c, a, "keys") : NULL;
     if (!keys && error_is(c, "AttributeError")) spy_clear_error(c);
     spy_release(keys);
     return c->error_type[0] ? -1 : !!keys;
@@ -17053,7 +17129,7 @@ static int eval_arguments(SPYContext *c, Frame *f, Node *arguments, SPYValue *ca
             if (arg->kind == N_MAPPING) extend_container(c, keywords, value, callable, 0);
             else if (arg->kind == N_KEYWORD) {
                 SPYValue *key = spy_string(c, arg->text, strlen(arg->text));
-                if (key) merge_keyword(c, keywords, key, value, callable);
+                if (key) merge_keyword(c, NULL, keywords, key, value, callable);
                 spy_release(key);
             } else if (arg->kind == N_STAR) extend_display(c, args, value);
             else sequence_append(c, args, value);
@@ -26312,9 +26388,14 @@ static SPYValue *asked_function(SPYContext *c, SPYValue *v, const char *name) {
     return function && machine_function(c, function) ? function : NULL;
 }
 /* The Python keys() that dict() and dict.update() call to merge plain
- * instance v (KEY_KEYS): its class's (method_function), *bound then, or
- * a function v holds itself, called alone; else NULL. */
+ * instance or function v (KEY_KEYS): its class's (method_function),
+ * *bound then, or a function v holds itself, called alone; else NULL. */
 static SPYValue *keys_function(SPYContext *c, SPYValue *v, int *bound) {
+    if (v->type == SPY_FUNCTION) {
+        SPYValue *own = v->as.function.attributes ? name_local(v->as.function.attributes, "keys") : NULL;
+        *bound = 0;
+        return own && own->type == SPY_FUNCTION && own->ctx == c ? own : NULL;
+    }
     if (v->type == SPY_INSTANCE && v->as.map.base && is_dict(v->as.map.base) && !v->as.map.namespace) {
         /* A dict subclass's merges by its keys() when it iterates its own way (extend_container). */
         SPYValue *base = builtin_base(c, v, "__iter__", NULL), *hook = class_lookup(v->as.map.parent, "__getattribute__");
@@ -26337,6 +26418,11 @@ static int keyless(SPYValue *v) {
     SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
     return (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) && !class_lookup(cls, "keys") &&
            !class_lookup(cls, "__getattr__");
+}
+/* Whether dict() and dict.update() merge v by its keys() (consumer_id):
+ * an instance not keyless, or a function holding a Python keys. */
+static int keyed_mapping(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_INSTANCE ? !keyless(v) : v->type == SPY_FUNCTION && keys_function(c, v, &(int){0});
 }
 /* Whether instance v iterates by a getitem_function, its class having no
  * __iter__. */
@@ -26643,7 +26729,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
      * mapping, on the machine when its keys() is Python (method_function);
      * one with no keys as pairs. */
     int dicts = callee == c->types[SPY_DICT] || callee == c->types[SPY_FROZENDICT];
-    int mapping = argc && argv[0]->type == SPY_INSTANCE && !keyless(argv[0]) && (dicts || (method == M_UPDATE && callee->type == SPY_DICT));
+    int mapping = argc && keyed_mapping(c, argv[0]) && (dicts || (method == M_UPDATE && callee->type == SPY_DICT));
     /* dict.fromkeys, as a set, hashes its keys on the machine. */
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
     int fromkeys = function && callee->as.method.self == c->types[SPY_DICT] && function->type == SPY_NATIVE &&
@@ -26733,7 +26819,7 @@ static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
-                     metaclassed(argv[0]) ||
+                     metaclassed(argv[0]) || (argv[0]->type == SPY_FUNCTION && argv[0]->as.function.attributes) ||
                      argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
@@ -27027,8 +27113,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     /* dict.fromkeys's keys take its value, None by default. */
     SPYValue *value = id != B_FROMKEYS ? NULL : start ? start : spy_none(c);
     /* dict() and dict.update() of an instance with keys merge it as a mapping (consumer_id). */
-    int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE &&
-                  !keyless(generator);
+    int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && keyed_mapping(c, generator);
     /* bytes() and bytearray.extend(), not bytearray(), ask the length hint too (7.7.7). */
     int hints = id == B_LIST || id == B_SORTED || id == B_BYTES || (id == B_EXTEND && callee->type == SPY_LIST) || (id == B_BYTEARRAY && collects);
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
@@ -27104,7 +27189,7 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
  * (KEY_KEYS) when keys() or __getitem__ is on the machine, gives them on the machine (BLOCK_CONSUME, EXTEND_ITEMS);
  * else 0, a extended into the display and released. */
 static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg, int hints) {
-    SPYValue *keys = a->type == SPY_INSTANCE && display->type == SPY_DICT ? keys_function(c, a, &(int){0}) : NULL;
+    SPYValue *keys = (a->type == SPY_INSTANCE || a->type == SPY_FUNCTION) && display->type == SPY_DICT ? keys_function(c, a, &(int){0}) : NULL;
     int merging = keys && (machine_function(c, keys) || getitem_function(c, a));
     if (!merging && ((!machine_items(c, a) &&
                       !(is_set(display) && hashed_items(c, a))) || is_dict(display))) {
@@ -27129,11 +27214,18 @@ static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, S
  * ** does (extend_step), 1 when its consumer began; else here
  * (extend_container), 0. */
 static NO_INLINE int keywords_merge(SPYContext *c, Machine *m, SPYValue *keywords, SPYValue *a, SPYValue *fn) {
-    SPYValue *keys = a->type == SPY_INSTANCE ? keys_function(c, a, &(int){0}) : NULL;
+    SPYValue *keys = a->type == SPY_INSTANCE || a->type == SPY_FUNCTION ? keys_function(c, a, &(int){0}) : NULL;
     if (keys && (machine_function(c, keys) || getitem_function(c, a))) {
         if (!extend_step(c, m, keywords, a, 0, 0)) return 0;
         m->blocks[m->block_len - 1].consumer->call = spy_retain(fn);
         return 1;
+    }
+    /* A dict's duplicate keyword for a callee named by Python is named
+     * on m (keyword_namedk). */
+    for (size_t i = 0; keywords->as.map.len && a->type == SPY_DICT && !named_plainly(c, fn) && i < a->as.map.len; i++) {
+        Entry entry = map_items(a)[i];
+        if (entry.key->type != SPY_STRING) break;
+        if (map_find_hash(keywords, entry.key, entry.hash) >= 0) { keyword_namedk(c, m, fn, entry.key); spy_release(a); return 0; }
     }
     extend_container(c, keywords, a, fn, 0);
     spy_release(a);
@@ -36851,7 +36943,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg == N_KEYWORD) {
                 b = spy_string(c, n->text, strlen(n->text));
                 if (!b || !UNLIKELY(eq_keyed(keywords))) {
-                    if (b) merge_keyword(c, keywords, b, a, fn);
+                    if (b && merge_keyword(c, m, keywords, b, a, fn) && c->k_fn) { spy_release(a); spy_release(b); a = b = NULL; goto enter_k; }
                     break;
                 }
                 /* After a ** of a name that may call a Python __eq__, a
@@ -36876,6 +36968,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 int began = keywords_merge(c, m, keywords, a, fn);
                 a = NULL;
                 if (began) goto consume_generator;
+                if (UNLIKELY(c->k_fn != NULL)) goto enter_k;
             } else if (ins->arg == N_STAR) {
                 if (extend_step(c, m, args, a, 0, 0)) { a = NULL; goto consume_generator; }
                 a = NULL;
