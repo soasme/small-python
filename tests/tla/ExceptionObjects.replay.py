@@ -27,6 +27,10 @@ class Key(KeyError):
     def __str__(self): return "<" + super().__str__() + ">"
 class Quiet(ValueError):
     def __repr__(self): return "Quiet!"
+class Shown:
+    def __init__(self, log, n): self.log, self.n = log, n
+    def __repr__(self): self.log.append("r%d" % self.n); return "R%d" % self.n
+    def __str__(self): self.log.append("s%d" % self.n); return "S%d" % self.n
 
 SOURCES = {
     "args_set_by_new": 'e = NoSuper(5)\nresult = (e.args, e.x, str(e))',
@@ -71,7 +75,11 @@ SOURCES = {
     "new_args_only": "e = SystemExit.__new__(SystemExit, 5)\nresult = (e.code, e.args)",
     "init_receiver": "SystemExit.__init__(ValueError())",
     "oserror_use_init": "class Q(OSError):\n    def __init__(self, *a): pass\nresult = (Q(2, 'x').args, Q(2, 'x').errno, OSError.__new__(OSError, 2, 'x').errno)",
-    "group_module": "result = (vars(ExceptionGroup)['__module__'], ExceptionGroup('m', [ValueError()]).__weakref__)"
+    "group_module": "result = (vars(ExceptionGroup)['__module__'], ExceptionGroup('m', [ValueError()]).__weakref__)",
+    "argument_methods": "log = []\nresult = (str(KeyError(Shown(log, 1))), repr(ValueError(Shown(log, 2), Shown(log, 3))), str(Exception(Shown(log, 4))), str(OSError(Shown(log, 5))), log)",
+    "unicode_text_methods": "log = []\ne = UnicodeDecodeError('x', b'ab', 0, 1, 'z')\ne.reason = Shown(log, 1)\ne.encoding = Shown(log, 2)\nresult = (str(e), log)",
+    "deleted_field_unset": "e = ImportError('m', name='n')\ndel e.name\nu = UnicodeEncodeError('x', 'a', 0, 1, 'z')\ndel u.reason\nresult = (repr(e), e.name, str(u))",
+    "import_fields_none": "result = (repr(ImportError('x', path=None)), repr(ImportError('x', name=None)))"
 }
 
 

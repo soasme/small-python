@@ -11840,7 +11840,9 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
         if (!strcmp(name, "__suppress_context__") || !strcmp(name, "start") || !strcmp(name, "end")) {
             spy_error(c, "TypeError", "can't delete numeric/char attribute"); return -1;
         }
-        return set_hidden_field(c, object, name, c->none);
+        /* A deleted field is unset, read as None. */
+        if (hidden_field(object, name)) delete_name(object->as.map.class_cell, name);
+        return 0;
     }
     if (!slot) {
         if ((!strcmp(name, "__cause__") || !strcmp(name, "__context__")) && value->type != SPY_NONE &&
@@ -17971,6 +17973,19 @@ static int oserror_fields(SPYContext *c, SPYValue *v, size_t argc, SPYValue *con
 }
 /* UnicodeEncodeError, UnicodeDecodeError, and UnicodeTranslateError: 0, 1,
  * 2; -1 for other classes. */
+/* Whether Unicode error v has its object, its text not empty. */
+static int unicode_error_set(SPYValue *v) {
+    return hidden_field(v, "object") && hidden_field(v, "start") && hidden_field(v, "end");
+}
+/* The str of Unicode error v's field name, "<NULL>" when it is unset. */
+static SPYValue *unicode_field_str(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *field = hidden_field(v, name);
+    return field ? spy_str(c, field) : spy_string(c, "<NULL>", 6);
+}
+/* The start and end of initialized Unicode error v, into bounds. */
+static int unicode_error_bounds(SPYContext *c, SPYValue *v, int64_t *bounds) {
+    return spy_as_int(c, hidden_field(v, "start"), &bounds[0]) || spy_as_int(c, hidden_field(v, "end"), &bounds[1]);
+}
 static int unicode_error_kind(SPYContext *c, SPYValue *cls) {
     if (!subclass(cls, c->exceptions[X_UNICODE_ERROR])) return -1;
     for (int i = 0; i < 3; i++) if (subclass(cls, c->exceptions[X_UNICODE_ENCODE_ERROR + i])) return i;
@@ -18012,18 +18027,30 @@ static int unicode_fields(SPYContext *c, SPYValue *v, int kind, size_t argc, SPY
     spy_release(object); spy_release(first); spy_release(last);
     return status ? -1 : 0;
 }
+static int unicode_error_rest(Buffer *, SPYValue *, int, const int64_t *, SPYValue *, SPYValue *);
+/* Append str (or str subclass) value text's characters, not its str. */
+static int text_append(Buffer *b, SPYValue *text) {
+    SPYValue *data = builtin_value(b->ctx, text, SPY_STRING);
+    return append(b, data->as.string.data, data->as.string.len);
+}
 /* UnicodeEncodeError_str and its siblings; empty before initialization. */
 static int unicode_error_text(Buffer *b, SPYValue *v, int kind) {
     SPYContext *c = b->ctx;
-    SPYValue *object = hidden_field(v, "object"), *first = hidden_field(v, "start"), *last = hidden_field(v, "end");
-    SPYValue *encoding = hidden_field(v, "encoding"), *reason = hidden_field(v, "reason");
-    if (!object || !first || !last || !reason) return 0;
-    int64_t start = 0, end = 0;
-    if (spy_as_int(c, first, &start) || spy_as_int(c, last, &end)) return -1;
+    int64_t bounds[2];
+    if (!unicode_error_set(v)) return 0;
+    if (unicode_error_bounds(c, v, bounds)) return -1;
     /* The reason and encoding as str, whose conversions may change the object. */
-    SPYValue *reason_text = spy_str(c, reason), *encoding_text = reason_text && kind != 2 ? spy_str(c, encoding ? encoding : c->none) : NULL;
+    SPYValue *reason_text = unicode_field_str(c, v, "reason");
+    SPYValue *encoding_text = reason_text && kind != 2 ? unicode_field_str(c, v, "encoding") : NULL;
     if (!reason_text || (kind != 2 && !encoding_text)) { spy_release(reason_text); return -1; }
-    object = hidden_field(v, "object");
+    return unicode_error_rest(b, v, kind, bounds, reason_text, encoding_text);
+}
+/* The text of Unicode error v of kind, between bounds, after its reason's
+ * and encoding's str, reason_text and encoding_text, which it takes. */
+static int unicode_error_rest(Buffer *b, SPYValue *v, int kind, const int64_t *bounds, SPYValue *reason_text, SPYValue *encoding_text) {
+    SPYContext *c = b->ctx;
+    SPYValue *object = hidden_field(v, "object");
+    int64_t start = bounds[0], end = bounds[1];
     SPYValue *text = object ? builtin_value(c, object, kind == 1 ? SPY_BYTES : SPY_STRING) : NULL;
     if (!text) {
         errorf(c, "TypeError", "UnicodeError 'object' attribute %s", !object ? "is not set" : kind == 1 ? "must be a bytes" : "must be a string");
@@ -18031,7 +18058,7 @@ static int unicode_error_text(Buffer *b, SPYValue *v, int kind) {
     }
     int64_t len = kind == 1 ? (int64_t)text->as.string.len : (int64_t)string_length(text);
     static const char *const verbs[] = {"encode", "decode", "translate"};
-    int status = kind != 2 && (puts_buffer(b, "'") || format_value(b, encoding_text, 0) || puts_buffer(b, "' codec "));
+    int status = kind != 2 && (puts_buffer(b, "'") || text_append(b, encoding_text) || puts_buffer(b, "' codec "));
     spy_release(encoding_text);
     if (status) { spy_release(reason_text); return -1; }
     char detail[96];
@@ -18049,7 +18076,7 @@ static int unicode_error_text(Buffer *b, SPYValue *v, int kind) {
                       code <= 0xff ? "x" : code <= 0xffff ? "u" : "U", code <= 0xff ? 2 : code <= 0xffff ? 4 : 8, code, (long long)start);
     } else snprintf(detail, sizeof(detail), "can't %s %s in position %lld-%lld: ", verbs[kind], kind == 1 ? "bytes" : "characters",
                     (long long)start, (long long)end - 1);
-    status = puts_buffer(b, detail) || format_value(b, reason_text, 0);
+    status = puts_buffer(b, detail) || text_append(b, reason_text);
     spy_release(reason_text);
     return status;
 }
@@ -29193,6 +29220,21 @@ static int buffer_argument(SPYContext *, SPYValue *);
 static SPYValue *complex_construct(SPYContext *, Machine *, SPYValue *, SPYValue *, int, SPYValue *);
 static SPYValue *complex_keywords(SPYContext *, Machine *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *builtin_call(SPYContext *, Machine *, Node *, SPYValue *, size_t, SPYValue **, SPYValue **);
+static SPYValue *exception_str_target(SPYContext *, SPYValue *, SPYValue *, SPYValue **);
+static size_t exception_shown(SPYValue *, SPYValue *, SPYValue **, int *);
+static int unicode_error_python(SPYContext *, SPYValue *, SPYValue *);
+/* The native __str__ or __repr__ of exception v's class that callee, str
+ * or repr, calls, borrowed, when an argument's Python method gives its
+ * text (exception_str_target, exception_shown); else NULL. */
+static SPYValue *exception_texter(SPYContext *c, SPYValue *callee, SPYValue *v) {
+    int repr = callee == c->field_calls[0];
+    if (v->type != SPY_INSTANCE || (!repr && callee != c->types[SPY_STRING])) return NULL;
+    SPYValue *fn = class_lookup(v->as.map.parent, repr ? "__repr__" : "__str__"), *converter, *field[2];
+    int python = 0;
+    if (!fn || !is_builtin(fn, repr ? B_EXCEPTION_REPR : B_EXCEPTION_STR) || !fn->as.native.owner) return NULL;
+    if (repr) exception_shown(v, fn->as.native.owner, field, &python);
+    return python || (!repr && (exception_str_target(c, v, fn->as.native.owner, &converter) || unicode_error_python(c, v, fn->as.native.owner) >= 0)) ? fn : NULL;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -29339,6 +29381,14 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     /* A set method walking another set (set_call). */
     if (method < 0 && argc && argc <= 9 && walk_operand(argv[argc - 1]) && (result = set_call(c, m, callee, argc, argv, env)) != c->unbound)
         return result;
+    /* str() or repr() of an exception whose text is an argument's Python
+     * __str__ or __repr__ runs its class's method as the step (exception_texter). */
+    SPYValue *texter = method < 0 && argc == 1 ? exception_texter(c, callee, argv[0]) : NULL;
+    if (texter) {
+        result = step_native(c, m, texter, -1, n, 1, argv, NULL);
+        spy_release(argv[0]); spy_release(callee);
+        return result;
+    }
     if ((argc ? argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
                 metaclassed(argv[0]) ||
                 (argc <= 2 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
@@ -30736,6 +30786,15 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (callee->type == SPY_CLASS && ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->k_fn || c->error_type[0])) return result;
     if (calls && callee->type == SPY_CLASS && ((result = class_described(c, m, callee, 0, argc, argv, NULL, unchanged, NULL)) || c->k_fn || c->error_type[0])) {
         /* So does one whose __new__ is read first (class_described). */
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return result;
+    }
+    SPYValue *texter = calls && argc == 1 ? exception_texter(c, callee, argv[0]) : NULL;
+    if (texter) {
+        /* str() or repr() of an exception whose text is an argument's
+         * Python __str__ or __repr__ runs its class's method as the step
+         * (exception_texter). */
+        result = step_native(c, m, texter, -1, NULL, argc, argv, NULL);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
@@ -40122,6 +40181,22 @@ static SPYValue *frame_key_compared(SPYContext *c, Machine *m, SPYValue *state, 
 }
 static SPYValue *frame_locals_apply(SPYContext *, int, SPYValue *, SPYValue *const *);
 static SPYValue *frame_defaulted(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *frame_absent(SPYContext *, int, SPYValue *, SPYValue *);
+/* The repr of a FrameLocalsProxy's absent key (frame_missingk) returned
+ * text: the KeyError naming it, for state's continuation. */
+static SPYValue *frame_unnamed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *text) {
+    if (text) errorf(c, "KeyError", "local variable '%s' is not defined", text->as.string.data);
+    spy_release(text);
+    return k_resume(c, m, state, NULL);
+}
+/* What state's operation op gives for key, borrowed, absent (frame_absent),
+ * for state's continuation: an item's KeyError names the key by its
+ * Python __repr__ on m (comparek, repr, frame_unnamed). */
+static SPYValue *frame_missingk(SPYContext *c, Machine *m, int op, SPYValue *key, SPYValue *value, SPYValue *state) {
+    SPYValue *args = op == FL_GETITEM && item_function(c, key, "__repr__") ? tuple_of(c, 1, &key) : NULL;
+    if (args) return comparek(c, m, spy_retain(c->field_calls[0]), args, COMPARE_CALL + 1, frame_unnamed, state);
+    return k_resume(c, m, state, c->error_type[0] ? NULL : frame_absent(c, op, key, value));
+}
 /* What operation op of a FrameLocalsProxy gives for key, no local
  * variable or extra local: pop()'s default value, False for in, or
  * KeyError. */
@@ -40151,7 +40226,12 @@ static SPYValue *frame_extra_found(SPYContext *c, Machine *m, SPYValue *ext, SPY
         if (op == FL_POP) found = old.value;
         else { spy_release(old.value); found = spy_none(c); }
     } else if (i >= 0) found = spy_retain(map->as.map.items[i].value);
-    else found = frame_absent(c, op, key, value);
+    else {
+        spy_release(result);
+        found = frame_missingk(c, m, op, key, value, state);
+        spy_release(ext);
+        return found;
+    }
     spy_release(result); spy_release(ext);
     return k_resume(c, m, state, found);
 }
@@ -40201,11 +40281,10 @@ static SPYValue *frame_keyed(SPYContext *c, Machine *m, SPYValue *state, SPYValu
     int op = (int)items[0]->as.integer_data.small;
     if (key && frame_key_calls(c, key) && !frame_local_env(c, frame, key) && !c->error_type[0]) {
         if (op == FL_SETITEM && !extra && !(extra = frame->as.frame.extra = value_new(c, SPY_DICT))) { spy_release(key); return k_resume(c, m, state, NULL); }
-        if (extra && op == FL_POP && !extra->as.map.len) result = frame_absent(c, op, key, items[2] == c->unbound ? NULL : items[2]);
-        else if (extra) return frame_extrak(c, m, extra, key, state);
-        else result = frame_absent(c, op, key, items[2] == c->unbound ? NULL : items[2]);
+        if (extra && (op != FL_POP || extra->as.map.len)) return frame_extrak(c, m, extra, key, state);
+        result = frame_missingk(c, m, op, key, items[2] == c->unbound ? NULL : items[2], state);
         spy_release(key);
-        return k_resume(c, m, state, result);
+        return result;
     }
     if (key) result = frame_locals_apply(c, op, items[1], (SPYValue *[]){key, items[2] == c->unbound ? NULL : items[2]});
     spy_release(key);
@@ -46832,7 +46911,7 @@ static int exception_text(Buffer *b, SPYValue *v, int repr, SPYValue *cls) {
         int shown = argc != 0;
         for (int i = 0; i < 2 && !status && !strcmp(name, "ImportError"); i++) {
             SPYValue *field = hidden_field(v, i ? "path" : "name");
-            if (field && field->type != SPY_NONE)
+            if (field)
                 status = (shown++ && puts_buffer(b, ", ")) || puts_buffer(b, i ? "path=" : "name=") || format_value(b, field, 1);
         }
         return status || puts_buffer(b, ")") ? -1 : 0;
@@ -46873,6 +46952,109 @@ static int exception_text(Buffer *b, SPYValue *v, int repr, SPYValue *cls) {
     /* KeyError_str: a lone key shows as its repr. */
     return argc ? format_value(b, argc == 1 ? args->as.seq.items[0] : args, argc == 1 && !strcmp(name, "KeyError")) : 0;
 }
+/* The value whose str, by converter (borrowed), exception v's text by
+ * cls's __str__ is, given by a Python method: the lone argument, or the
+ * arguments' tuple; else NULL, for the text in C. The texts of the
+ * arguments alone, as exception_text makes them: the __str__ of
+ * BaseException, KeyError, an OSError without its errno's fields, and an
+ * ImportError without a str message. */
+static SPYValue *exception_str_target(SPYContext *c, SPYValue *v, SPYValue *cls, SPYValue **converter) {
+    SPYValue *args = hidden_field(v, "args"), *message = hidden_field(v, "msg");
+    const char *name = name_text(cls, "__name__")->as.string.data;
+    size_t argc = args && args->type == SPY_TUPLE ? args->as.seq.len : 0;
+    int key = !strcmp(name, "KeyError");
+    if (!argc || !(!strcmp(name, "BaseException") || key || (!strcmp(name, "OSError") && !oserror_text(v)) ||
+                   (!strcmp(name, "ImportError") && !(message && message->type == SPY_STRING)))) return NULL;
+    SPYValue *target = argc == 1 ? args->as.seq.items[0] : args;
+    *converter = argc == 1 && !key ? c->types[SPY_STRING] : c->field_calls[0];
+    return instance_like(target) || repr_container(target) ? target : NULL;
+}
+/* The values exception v's repr by cls shows, borrowed into field: an
+ * ImportError's given name and path; its count of arguments, and whether
+ * one of those values has a Python __repr__ in *python. */
+static size_t exception_shown(SPYValue *v, SPYValue *cls, SPYValue **field, int *python) {
+    SPYValue *args = hidden_field(v, "args");
+    size_t argc = args && args->type == SPY_TUPLE ? args->as.seq.len : 0;
+    int import = !strcmp(name_text(cls, "__name__")->as.string.data, "ImportError");
+    *python = 0;
+    for (size_t i = 0; i < argc + 2; i++) {
+        SPYValue *x = i < argc ? args->as.seq.items[i] : import ? (field[i - argc] = hidden_field(v, i > argc ? "path" : "name")) : (field[i - argc] = NULL);
+        *python |= x && (instance_like(x) || repr_container(x));
+    }
+    return argc;
+}
+static SPYValue *exception_reprk(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The repr of shown value i on m (comparek), after head, the text
+ * before it, which it takes with shown: an ImportError's fields after
+ * argc arguments named, its path alone (fields 2) or second. */
+static SPYValue *exception_repr_next(SPYContext *c, Machine *m, SPYValue *head, SPYValue *shown, size_t i, size_t argc, int fields) {
+    SPYValue *item = shown->as.seq.items[i];
+    const char *label = i < argc ? "" : fields == 2 || i > argc ? "path=" : "name=";
+    Buffer b = {.ctx = c};
+    SPYValue *text = (!i || !puts_buffer(&b, ", ")) && !puts_buffer(&b, label) ? spy_string(c, b.data ? b.data : "", b.len) : NULL;
+    SPYValue *joined = text ? text_concat(c, SPY_STRING, head, text) : NULL;
+    mem_free(b.data); spy_release(text); spy_release(head);
+    SPYValue *state = parts_tuple(c, 5, (SPYValue *[]){joined, spy_retain(shown), int_value(c, (int64_t)i), int_value(c, (int64_t)argc), int_value(c, fields)});
+    SPYValue *args = state ? tuple_of(c, 1, &item) : NULL;
+    spy_release(shown);
+    if (!args) { spy_release(state); return NULL; }
+    return comparek(c, m, spy_retain(c->field_calls[0]), args, COMPARE_CALL + 1, exception_reprk, state);
+}
+/* The repr text of state's shown value, (head, shown, i, argc, fields), joined to
+ * its head, then the next value's (exception_repr_next), or the closing
+ * parenthesis after the last. */
+static SPYValue *exception_reprk(SPYContext *c, Machine *m, SPYValue *state, SPYValue *text) {
+    SPYValue *head = text ? text_concat(c, SPY_STRING, state->as.seq.items[0], text) : NULL, *shown = spy_retain(state->as.seq.items[1]);
+    size_t i = (size_t)state->as.seq.items[2]->as.integer_data.small + 1, argc = (size_t)state->as.seq.items[3]->as.integer_data.small;
+    int fields = (int)state->as.seq.items[4]->as.integer_data.small;
+    spy_release(text); spy_release(state);
+    if (head && i < shown->as.seq.len) return exception_repr_next(c, m, head, shown, i, argc, fields);
+    SPYValue *close = head ? spy_string(c, ")", 1) : NULL, *result = close ? text_concat(c, SPY_STRING, head, close) : NULL;
+    release_all(3, (SPYValue *[]){head, close, shown});
+    return result;
+}
+/* The kind of initialized Unicode error v, by cls's __str__, whose
+ * reason's or encoding's Python __str__ gives its text; else -1. */
+static int unicode_error_python(SPYContext *c, SPYValue *v, SPYValue *cls) {
+    const char *name = name_text(cls, "__name__")->as.string.data;
+    int kind = strncmp(name, "Unicode", 7) ? -1 : unicode_error_kind(c, cls);
+    SPYValue *reason = hidden_field(v, "reason"), *encoding = hidden_field(v, "encoding");
+    return kind >= 0 && unicode_error_set(v) &&
+           ((reason && instance_like(reason)) || (kind != 2 && encoding && instance_like(encoding))) ? kind : -1;
+}
+/* The str of Unicode error v's field name on m, then continuation k with
+ * state, which it takes: a Python __str__ a call (comparek), an unset
+ * field "<NULL>" (unicode_field_str). */
+static SPYValue *unicode_fieldk(SPYContext *c, Machine *m, SPYValue *v, const char *name, Continuation k, SPYValue *state) {
+    SPYValue *field = hidden_field(v, name), *args;
+    if (!field || !instance_like(field)) return k(c, m, state, unicode_field_str(c, v, name));
+    if (!(args = tuple_of(c, 1, &field))) return k(c, m, state, NULL);
+    return comparek(c, m, spy_retain(c->types[SPY_STRING]), args, COMPARE_CALL + 1, k, state);
+}
+/* Unicode error text from state, (v, kind, start, end, reason's str), and
+ * the encoding's str, text, which it takes, none for a translation's
+ * (unicode_error_rest). */
+static SPYValue *unicode_encodedk(SPYContext *c, Machine *m, SPYValue *state, SPYValue *text) {
+    (void)m;
+    SPYValue **s = state->as.seq.items;
+    int64_t bounds[2] = {s[2]->as.integer_data.small, s[3]->as.integer_data.small};
+    Buffer b = {.ctx = c};
+    int kind = (int)s[1]->as.integer_data.small;
+    SPYValue *result = (text || kind == 2) && !unicode_error_rest(&b, s[0], kind, bounds, spy_retain(s[4]), text) ?
+                       spy_string(c, b.data ? b.data : "", b.len) : NULL;
+    mem_free(b.data); spy_release(state);
+    return result;
+}
+/* Unicode error state's (v, kind, start, end) reason's str, text, then
+ * its encoding's, read after it, on m (comparek, unicode_encodedk). */
+static SPYValue *unicode_reasonk(SPYContext *c, Machine *m, SPYValue *state, SPYValue *text) {
+    SPYValue **s = state->as.seq.items;
+    SPYValue *next = text ? parts_tuple(c, 5, (SPYValue *[]){spy_retain(s[0]), spy_retain(s[1]), spy_retain(s[2]), spy_retain(s[3]), text}) : NULL;
+    int kind = (int)s[1]->as.integer_data.small;
+    spy_release(state);
+    if (!next || kind == 2) return next ? unicode_encodedk(c, m, next, NULL) : NULL;
+    return unicode_fieldk(c, m, next->as.seq.items[0], "encoding", unicode_encodedk, next);
+}
 static SPYValue *exception_text_method(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int repr) {
     SPYValue *cls = fn->as.native.owner;
     const char *name = repr ? "__repr__" : "__str__", *owner = name_text(cls, "__name__")->as.string.data;
@@ -46880,6 +47062,31 @@ static SPYValue *exception_text_method(SPYContext *c, SPYValue *fn, size_t argc,
     if (!subclass(value_class(c, argv[0]), cls))
         return errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, owner, type_name(argv[0]));
     if (wrapper_arguments(c, name, argc - 1, keywords, 0, 0)) return NULL;
+    /* A shown value's Python __str__ or __repr__ runs on the call step's
+     * machine (comparek): a str's lone value, a repr's each in turn
+     * (exception_repr_next). */
+    Machine *m = step_machine(c);
+    SPYValue *converter, *target = m && !repr ? exception_str_target(c, argv[0], cls, &converter) : NULL, *field[2];
+    if (target) return comparek(c, m, spy_retain(converter), tuple_of(c, 1, &target), COMPARE_CALL + 1, unchanged, NULL);
+    int kind = m && !repr ? unicode_error_python(c, argv[0], cls) : -1;
+    int64_t bounds[2];
+    if (kind >= 0) {
+        if (unicode_error_bounds(c, argv[0], bounds)) return NULL;
+        SPYValue *state = parts_tuple(c, 4, (SPYValue *[]){spy_retain(argv[0]), int_value(c, kind), int_value(c, bounds[0]), int_value(c, bounds[1])});
+        return state ? unicode_fieldk(c, m, argv[0], "reason", unicode_reasonk, state) : NULL;
+    }
+    int python;
+    size_t shown = m && repr ? exception_shown(argv[0], cls, field, &python) : 0;
+    if (m && repr && python) {
+        SPYValue *args = hidden_field(argv[0], "args"), *values = value_alloc(c, SPY_TUPLE, shown + 2), *head = spy_string(c, type_name(argv[0]), strlen(type_name(argv[0])));
+        SPYValue *open = head ? spy_string(c, "(", 1) : NULL, *start = open ? text_concat(c, SPY_STRING, head, open) : NULL;
+        int status = !values || !start;
+        for (size_t i = 0; i < shown && !status; i++) status = sequence_append(c, values, args->as.seq.items[i]);
+        for (int i = 0; i < 2 && !status; i++) if (field[i]) status = sequence_append(c, values, field[i]);
+        release_all(2, (SPYValue *[]){head, open});
+        if (status) { spy_release(values); spy_release(start); return NULL; }
+        return exception_repr_next(c, m, start, values, 0, shown, !!field[0] | !!field[1] << 1);
+    }
     Buffer out = {.ctx = c};
     SPYValue *result = exception_text(&out, argv[0], repr, cls) ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     mem_free(out.data); return result;
