@@ -9275,6 +9275,8 @@ static SPYValue *iterator_length_hint(SPYContext *c, SPYValue *v) {
         spy_release(at); return left;
     }
     case I_GETITEM: case I_REVERSED: {
+        /* A reversed iterator past its first item asks no length. */
+        if (v->as.iterator.kind == I_REVERSED && !index) return spy_int(c, 0);
         if (source->type != SPY_INSTANCE && v->as.iterator.kind == I_REVERSED) {
             SPYValue *sized = is_view(source) ? source->as.bound.self : source;
             if ((sized->type == SPY_DICT || sized->type == SPY_FROZENDICT) && v->as.iterator.size != sized->as.map.len) return spy_int(c, 0);
@@ -9303,6 +9305,16 @@ static SPYValue *iterator_length_hint(SPYContext *c, SPYValue *v) {
     }
     }
 }
+static Machine *step_machine(SPYContext *);
+/* What the Python __len__ of a __getitem__ or reversed iterator's
+ * instance returned, result, for v's __length_hint__ (iterator_length_hint). */
+static SPYValue *length_hint_sized(SPYContext *c, Machine *m, SPYValue *v, SPYValue *result) {
+    (void)m;
+    int64_t len, index = (int64_t)v->as.iterator.index;
+    int failed = !result || length_result(c, result, &len), reversed = v->as.iterator.kind == I_REVERSED, done = v->as.iterator.done;
+    spy_release(result); spy_release(v);
+    return failed ? NULL : spy_int(c, done || index > len ? 0 : reversed ? index : len - index);
+}
 static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     SPYValue *owner = c->iterator_types[(intptr_t)data];
     const char *owner_name = iterator_names[(intptr_t)data];
@@ -9310,7 +9322,13 @@ static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue 
     if (argv[0]->type != SPY_ITERATOR || c->iterator_types[iterator_class_id(argv[0])] != owner)
         return errorf(c, "TypeError", "descriptor '__length_hint__' for '%s' objects doesn't apply to a '%s' object", owner_name, type_name(argv[0]));
     if (argc != 1) return errorf(c, "TypeError", "%s.__length_hint__() takes no arguments (%zu given)", owner_name, argc - 1);
-    return iterator_length_hint(c, argv[0]);
+    /* One over an instance with a Python __len__ calls it on the step's machine (length_hint_sized). */
+    SPYValue *v = argv[0], *source = v->as.iterator.source, *function;
+    Machine *m = !v->as.iterator.done && (v->as.iterator.kind == I_GETITEM || (v->as.iterator.kind == I_REVERSED && v->as.iterator.index)) &&
+                 source->type == SPY_INSTANCE &&
+                 (function = class_lookup(source->as.map.parent, "__len__")) && machine_function(c, function) ? step_machine(c) : NULL;
+    if (m) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(source)}, length_hint_sized, spy_retain(v));
+    return iterator_length_hint(c, v);
 }
 /* LengthHint (7.7.7) of o, which it takes: its __len__, else, when that
  * is absent or raises TypeError, its __length_hint__, each called on
@@ -47192,6 +47210,8 @@ SPYContext *spy_context_new(void) {
         if (!hint) { spy_release(module); goto fail; }
         hint->as.native.call = iterator_length_hint_call; hint->as.native.data = (void *)(intptr_t)i;
         hint->as.native.method = 1;
+        /* It may leave a Python __len__ to its step (length_hint_sized). */
+        if (i == IT_ITERATOR || i == IT_REVERSED) hint->as.native.host = 2;
         hint->as.native.name = spy_string(c, "__length_hint__", 15);
         hint->as.native.owner = spy_retain(c->iterator_types[i]);
         int status = !hint->as.native.name || name_set(c, c->iterator_types[i], "__length_hint__", hint);

@@ -127,6 +127,12 @@ SOURCES = {
     "dict_keys_replaced_ok": "d = {1: 1, 2: 2}\nfor k in d: d[k] = 0\nresult = d",
     "iterator_type_names": "result = sorted({type(iter(x)).__name__ for x in ([], (), '', b'', {}, set(), range(1), bytearray())})",
     "length_hint": "it = iter([1, 2, 3])\nnext(it)\nresult = it.__length_hint__()",
+    "hint_sized": "log = []\nclass S:\n    def __len__(s):\n        for _ in (): pass\n        log.append('len')\n        return 3\n"
+                  "    def __getitem__(s, i): return i\nit = iter(S())\nnext(it)\nr = reversed(S())\nnext(r)\nnext(r)\n"
+                  "result = (it.__length_hint__(), r.__length_hint__(), log)",
+    "hint_reversed_spent": "log = []\nclass S:\n    def __len__(s):\n        log.append('len')\n        return len(log) - 1\n"
+                           "    def __getitem__(s, i): return i\nr = reversed(S())\ns = S()\nq = reversed(s)\nnext(q)\nlog.clear()\n"
+                           "result = (r.__length_hint__(), q.__length_hint__(), log)",
     "next_dunder_direct": "it = iter('ab')\nresult = (it.__next__(), next(it))",
     "zip_strict": "result = list(zip([1, 2], [3], strict=True))",
     "map_multi": "result = list(map(pow, [2, 3], [3, 2, 9]))",
