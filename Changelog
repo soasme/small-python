@@ -647,6 +647,7 @@ Unreleased (0.10.0):
 - `dict()`, `dict.update()` and `frozendict()` of an object whose `keys` comes from a Python `__getattr__` merge it without nesting on the C stack
 - A set built from a dict view of keys, values or items with a Python `__hash__` hashes them without nesting on the C stack
 - `frozendict.__getitem__` called on a frozendict subclass's instance calls its Python `__missing__` without nesting on the C stack
+- A dict's `|=` and `dict.__ior__` merge a dict subclass's instance that overrides `__iter__` by its `keys()`
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

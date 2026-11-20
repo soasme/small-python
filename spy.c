@@ -21045,7 +21045,9 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     int kind = base ? base->type : SPY_NONE, set_operator = token == '|' || token == '&' || token == '-' || token == '^';
     if (((kind == SPY_LIST || kind == SPY_BYTEARRAY) && (token == '+' || token == '*')) || (kind == SPY_DICT && token == '|') ||
         (kind == SPY_SET && set_operator && (builtin_value(c, rhs, SPY_SET) || builtin_value(c, rhs, SPY_FROZENSET)))) {
-        SPYValue *other = rhs->type == SPY_INSTANCE && rhs->as.map.base && !(kind == SPY_BYTEARRAY && own_buffer(rhs)) ? rhs->as.map.base : rhs;
+        /* A dict's update takes the mapping itself (extend_container). */
+        SPYValue *other = rhs->type == SPY_INSTANCE && rhs->as.map.base && kind != SPY_DICT && !(kind == SPY_BYTEARRAY && own_buffer(rhs)) ?
+                          rhs->as.map.base : rhs;
         result = inplace(c, op, base, other);
         if (!result) return NULL;
         spy_release(result); return spy_retain(old);
@@ -48428,11 +48430,11 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         }
         return slot_result(c, kind == SLOT_BINARY ? binary(c, op, value, other) : binary(c, op, other, value));
     case SLOT_INPLACE: {
-        /* dict.__ior__ is dict.update and list and bytearray concatenation
-         * is extend: their errors propagate. */
+        /* dict.__ior__ is dict.update, of the operand itself, and list and
+         * bytearray concatenation is extend: their errors propagate. */
         int extends = type == SPY_DICT || type == SPY_LIST || type == SPY_BYTEARRAY;
         if (!extends && !slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
-        SPYValue *result = inplace(c, op, value, type == SPY_BYTEARRAY && own_buffer(argv[0]) ? argv[0] : other);
+        SPYValue *result = inplace(c, op, value, type == SPY_DICT || (type == SPY_BYTEARRAY && own_buffer(argv[0])) ? argv[0] : other);
         if (!extends) result = slot_result(c, result);
         if (result && result == value && value != self) { spy_release(result); result = spy_retain(self); }
         return result;

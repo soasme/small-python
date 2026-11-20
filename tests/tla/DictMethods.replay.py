@@ -100,6 +100,9 @@ SOURCES = {
     "popitem_empty": 'result = {}.popitem()',
     "setdefault": "d = {}\nresult = (d.setdefault('a'), d.setdefault('b', 1), d.setdefault('b', 2), d)",
     "ctor_own_keys_calls": "log = []\nclass Own:\n    def __init__(s, ks):\n        def keys():\n            for _ in (): pass\n            log.append('k'); return ks\n        s.keys = keys\n    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k); return k * 2\nd = {}\nd.update(Own(['a', 'b']))\nresult = (dict(Own(['c'])), d, {**Own(['e'])}, log)",
+    "ior_keyed_mapping": "log = []\nclass K(dict):\n    def __iter__(s): return iter(())\n    def keys(s):\n        for _ in (): pass\n"
+                         "        log.append('keys'); return ['b']\n    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k); return 2\n"
+                         "class L(dict): pass\nd = L(a=1)\nz = d\nd |= K(z=0)\nresult = (d, d is z, dict.__ior__({'a': 1}, K(z=0)), log)",
     "ctor_asked_keys": "log = []\nclass Asked:\n    def __init__(s, has): s.has = has\n    def __getattr__(s, name):\n        for _ in (): pass\n"
                        "        log.append(name)\n        if name == 'keys' and s.has: return lambda: ['a']\n        raise AttributeError(name)\n"
                        "    def __iter__(s): return iter([('x', 1)])\n    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k); return k * 2\n"

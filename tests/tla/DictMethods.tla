@@ -77,7 +77,7 @@ SortedItems(S) == LET s == SelectSeq(AllItems, LAMBDA e : e \in S) IN List([i \i
 Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
-Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_function_keys", "ctor_own_keys_calls", "ctor_asked_keys", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_listed_pairs", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
+Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_function_keys", "ctor_own_keys_calls", "ctor_asked_keys", "ior_keyed_mapping", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_listed_pairs", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_slot", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "subclass_equal_key_methods", "subclass_missing_equal_keys", "getitem_key_calls", "subclass_hashed", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "ior_mapping", "merge_dict_iter", "copy_shallow", "merge_empty", "merge_equal_keys", "merge_mutated", "clear",
@@ -162,6 +162,9 @@ Case(c) ==
       [] c = "ctor_own_keys_calls" -> "({'c': 'cc'}, {'a': 'aa', 'b': 'bb'}, {'e': 'ee'}, ['k', 'a', 'b', 'k', 'c', 'k', 'e'])"
       \* A keys a Python __getattr__ gives is asked for twice, as the check
       \* and as keys()'s lookup; its AttributeError merges the pairs.
+      \* |= is update() of the operand itself, a dict subclass's not
+      \* iterating as a dict merged by its keys(), into a subclass too.
+      [] c = "ior_keyed_mapping" -> "({'a': 1, 'b': 2}, True, {'a': 1, 'b': 2}, ['keys', 'b', 'keys', 'b'])"
       [] c = "ctor_asked_keys" -> "({'a': 'aa'}, {'x': 1}, {'a': 'aa'}, ['keys', 'keys', 'a', 'keys', 'keys', 'a', 'keys'])"
       \* A mapping's keys are listed before the first is looked up (13.2.3 DictMerge).
       [] c = "ctor_keys_listed" -> "({'a': 'A', 'b': 'B'}, None, ['ka', 'kb', 'ga', 'gb', 'ka', 'kb', 'ga', 'gb'])"
