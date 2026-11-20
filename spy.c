@@ -10676,19 +10676,21 @@ static ALWAYS_INLINE int python_kinds(SPYValue *a, SPYValue *b) {
 }
 static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
 /* Whether str or bytes % y may convert an argument by a Python method on the
- * machine (percent_call): an instance, not a str's, or a container of a
- * repr job (repr_items), y or an item of a tuple or value of a dict y. */
+ * machine (percent_call): an instance, not a str's, a class with a
+ * metaclass, or a container of a repr job (repr_items), y or an item of
+ * a tuple or value of a dict y. */
 static NO_INLINE int percent_items(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_LIST && v->type != SPY_TUPLE) return repr_items(c, c->types[SPY_STRING], v);
     for (size_t i = 0; i < v->as.seq.len; i++)
-        if (v->as.seq.items[i]->type == SPY_INSTANCE || repr_container(v->as.seq.items[i])) return repr_items(c, c->types[SPY_STRING], v);
+        if (instance_like(v->as.seq.items[i]) || repr_container(v->as.seq.items[i])) return repr_items(c, c->types[SPY_STRING], v);
     return 0;
 }
 static ALWAYS_INLINE int percent_arg(SPYContext *c, SPYValue *v) {
-    return v->type == SPY_INSTANCE || (repr_container(v) && percent_items(c, v));
+    return instance_like(v) || (repr_container(v) && percent_items(c, v));
 }
 static int percent_reaches(SPYContext *c, SPYValue *y) {
     if (y->type == SPY_INSTANCE) return !subclass(y->as.map.parent, c->types[SPY_STRING]);
+    if (metaclassed(y)) return 1;
     if (y->type == SPY_TUPLE) {
         for (size_t i = 0; i < y->as.seq.len; i++) if (percent_arg(c, y->as.seq.items[i])) return 1;
     } else if (y->type == SPY_DICT) {
@@ -24369,7 +24371,7 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
     SPYValue *found[2] = {NULL, NULL}, *function = NULL, *job = NULL, *env = NULL;
     if (index) {
         if (!(function = index_function(c, v)) || !(found[0] = bytes && ch == 'c' ? spy_string(c, "index", 5) : spy_string(c, "int", 3))) return 0;
-    } else if (v->type == SPY_INSTANCE ? !(function = conversion_method(c, callee, 1, &v, found)) && (number || c->error_type[0] || !repr_job(c, callee, v)) :
+    } else if (instance_like(v) ? !(function = conversion_method(c, callee, 1, &v, found)) && (number || c->error_type[0] || !repr_job(c, callee, v)) :
                number || !repr_job(c, callee, v)) return 0;
     SPYValue *parts[] = {spy_retain(held[0]), spy_retain(held[1]), spy_string(c, out->data ? out->data : "", out->len),
                          int_value(c, at[0]), int_value(c, at[1]), int_value(c, at[2]), int_value(c, at[3]),
@@ -24531,7 +24533,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             } else if (ch == 'b') goto unsupported;
             else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
             else if (converted) { piece = ch == 'a' || bytes ? ascii_text(c, converted, converted) : converted; converted = NULL; }
-            else if (m && (v->type == SPY_INSTANCE || repr_container(v)) &&
+            else if (m && (instance_like(v) || repr_container(v)) &&
                      (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
                 deferred = defer == 1;
             else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));

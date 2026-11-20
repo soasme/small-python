@@ -19,6 +19,12 @@ class L:
     def __init__(self, tag): self.tag = tag
     def __str__(self): spin(); L.log.append('s' + self.tag); return self.tag
     def __repr__(self): spin(); L.log.append('r' + self.tag); return self.tag.upper() + '\xe9'
+class LM(type):
+    log = []
+    def __str__(cls): spin(); LM.log.append('s' + cls.__name__); return cls.__name__
+    def __repr__(cls): spin(); LM.log.append('r' + cls.__name__); return cls.__name__.upper() + '\xe9'
+Ca = LM('a', (), {})
+Cb = LM('b', (), {})
 class Q:
     log = []
     def __int__(self): spin(); Q.log.append('int'); return 9
@@ -111,7 +117,8 @@ SOURCES = {
     "bytearray_methods": "Q.log.clear(); result = (bytearray(b'%d-%x-%c|%s') % (Q(), Q(), Q(), Y()), Q.log)",
     "bytearray_exported": "Grow.log.clear(); b = bytearray(b'%c'); t = b % Grow(b); b.append(1); result = (t, b, Grow.log)",
     "method_items_augmented": "L.log.clear()\nt = '%s|%a'\nt %= ([L('a')], [L('b')])\nresult = (t, L.log)",
-    "method_items": "L.log.clear(); result = ('%s|%r|%a' % ([L('a'), 1], (L('b'),), [L('c')]), L.log)"
+    "method_items": "L.log.clear(); result = ('%s|%r|%a' % ([L('a'), 1], (L('b'),), [L('c')]), L.log)",
+    "metaclass_methods": "LM.log.clear(); result = ('%s-%r|%a|%s' % (Ca, Cb, Ca, [Cb]), LM.log)"
 }
 
 
