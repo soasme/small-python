@@ -134,7 +134,7 @@ Contents | - navigation
 10 Object Behaviours > 10.3 Descriptors | Descriptors, MethodDescriptors
 10 Object Behaviours > 10.4 Class objects | = sections
 10 Object Behaviours > 10.4 Class objects > 10.4.1 Attribute access on classes | ClassObjects, Descriptors, ClassAttributeHooks
-10 Object Behaviours > 10.4 Class objects > 10.4.2 Type attributes | ClassObjects
+10 Object Behaviours > 10.4 Class objects > 10.4.2 Type attributes | ClassObjects, BasesAssignment
 10 Object Behaviours > 10.5 Special method names | SpecialLookup, BasicCustomization, NumericProtocol, Containers
 11 Source Text | = sections
 11 Source Text > 11.1 Source code | LineStructure

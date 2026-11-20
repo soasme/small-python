@@ -571,6 +571,10 @@ static ALWAYS_INLINE int instance_like(SPYValue *v) { return v->type == SPY_INST
 /* Whether stores to v's attributes may call a Python setter (setter_function):
  * an instance's class's, or a class's metaclass's. */
 static ALWAYS_INLINE int setter_object(SPYValue *v) { return v->type == SPY_INSTANCE || metaclassed(v); }
+/* Whether setattr() of object and name assigns a class's __bases__ (bases_go). */
+static int bases_named(SPYValue *object, SPYValue *name) {
+    return object->type == SPY_CLASS && name->type == SPY_STRING && !strcmp(name->as.string.data, "__bases__");
+}
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static SPYValue *contained_base(SPYContext *, SPYValue *);
 static int special_dispatch(SPYValue *);
@@ -20311,7 +20315,10 @@ static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, cons
  * would not store at once, calls a Python setter on the machine: then
  * store_call enters c->entering_init with the descriptor c->fallback. */
 static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
-    SPYValue *descriptor, *function = setter_object(object) ? setter_function(c, object, n->b->text, &descriptor, 0) : NULL;
+    SPYValue *descriptor = NULL, *function = setter_object(object) ? setter_function(c, object, n->b->text, &descriptor, 0) : NULL;
+    /* A class's __bases__, whose MROs a metaclass's Python mro() may
+     * rebuild, too (bases_go): c->unbound. */
+    if (!function && object->type == SPY_CLASS && !strcmp(n->b->text, "__bases__")) function = object->ctx->unbound;
     if (!function) return 0;
     c->entering_init = function; c->fallback = spy_retain(descriptor);
     return 1;
@@ -20985,80 +20992,116 @@ static int bases_slots(SPYContext *c, SPYValue *bases, SPYValue **slotted) {
     }
     return slots;
 }
-/* type.__bases__ assignment: validate the new bases, then rebuild the MRO
- * of cls and of every class that inherits from it, oldest first. */
-static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
+/* A __bases__ assignment's state (bases_begin), a list: cls, its old
+ * bases and MRO (None for none), the bases installed, how many MROs are
+ * rebuilt, whether setattr() assigns them, then each class inheriting
+ * from cls with its old MRO, newest first. */
+enum { BASES_CLASS, BASES_OLD, BASES_OLD_MRO, BASES_INSTALLED, BASES_DONE, BASES_CALLED, BASES_FIRST };
+/* type.__bases__ assignment's start: validate the new bases and install
+ * them, its state; else NULL, the old ones kept. */
+static SPYValue *bases_begin(SPYContext *c, SPYValue *cls, SPYValue *value) {
     const char *name = name_text(cls, "__name__")->as.string.data;
-    if (builtin_class(c, cls)) { errorf(c, "TypeError", "cannot set '__bases__' attribute of immutable type '%s'", name); return -1; }
-    if (!value) { errorf(c, "TypeError", "cannot delete '__bases__' attribute of type '%s'", name); return -1; }
-    if (value->type != SPY_TUPLE) { errorf(c, "TypeError", "can only assign tuple to %s.__bases__, not %s", name, type_name(value)); return -1; }
-    if (!value->as.seq.len) { errorf(c, "TypeError", "can only assign non-empty tuple to %s.__bases__, not ()", name); return -1; }
+    if (builtin_class(c, cls)) { errorf(c, "TypeError", "cannot set '__bases__' attribute of immutable type '%s'", name); return NULL; }
+    if (!value) { errorf(c, "TypeError", "cannot delete '__bases__' attribute of type '%s'", name); return NULL; }
+    if (value->type != SPY_TUPLE) { errorf(c, "TypeError", "can only assign tuple to %s.__bases__, not %s", name, type_name(value)); return NULL; }
+    if (!value->as.seq.len) { errorf(c, "TypeError", "can only assign non-empty tuple to %s.__bases__, not ()", name); return NULL; }
     for (size_t i = 0; i < value->as.seq.len; i++) {
         SPYValue *base = value->as.seq.items[i], *mro = base->type == SPY_CLASS ? base->as.map.mro : NULL;
         if (base->type != SPY_CLASS)
-            { errorf(c, "TypeError", "%s.__bases__ must be tuple of classes, not '%s'", name, type_name(base)); return -1; }
-        if (!acceptable_base(c, base)) { errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base)); return -1; }
+            { errorf(c, "TypeError", "%s.__bases__ must be tuple of classes, not '%s'", name, type_name(base)); return NULL; }
+        if (!acceptable_base(c, base)) { errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base)); return NULL; }
         int cycle = reaches_through_bases(base, cls);
         for (size_t j = 0; mro && j < mro->as.seq.len; j++) cycle |= mro->as.seq.items[j] == cls;
-        if (cycle) { spy_error(c, "TypeError", "a __bases__ item causes an inheritance cycle"); return -1; }
+        if (cycle) { spy_error(c, "TypeError", "a __bases__ item causes an inheritance cycle"); return NULL; }
     }
     SPYValue *slotted, *new_slotted;
     int layout = class_layout(c, cls), slots = bases_slots(c, cls->as.map.bases, &slotted);
     int own = (cls->as.map.flags & CLASS_OWN_DICT ? 1 : 0) | (cls->as.map.flags & CLASS_OWN_WEAKREF ? 2 : 0); /* cls's own slots */
     SPYValue *old_bases = spy_retain(cls->as.map.bases), *old_mro = spy_retain(cls->as.map.mro);
-    if (set_class_bases(c, cls, value)) { spy_release(old_bases); spy_release(old_mro); return -1; }
-    SPYValue *installed = cls->as.map.bases;
+    if (set_class_bases(c, cls, value)) { spy_release(old_bases); spy_release(old_mro); return NULL; }
+    SPYValue *state = spy_list(c), *zero = int_value(c, 0);
+    if (!state || !zero || sequence_append(c, state, cls) || sequence_append(c, state, old_bases) ||
+        sequence_append(c, state, old_mro ? old_mro : c->none) || sequence_append(c, state, cls->as.map.bases) || sequence_append(c, state, zero) ||
+        sequence_append(c, state, c->booleans[0])) {
+        spy_release(state); state = NULL;
+    }
+    spy_release(zero);
     int kind = -1;
     for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
         int k = class_layout(c, cls->as.map.bases->as.seq.items[i]);
         if (k >= 0) kind = k;
     }
-    int status = 0;
     if (kind != layout || (bases_slots(c, cls->as.map.bases, &new_slotted) | own) != (slots | own) ||
         (slotted != new_slotted && (!slotted || !new_slotted || !same_slot_layout(slotted, new_slotted)))) {
         errorf(c, "TypeError", "__bases__ assignment: '%s' object layout differs from '%s'",
                name_text(cls->as.map.bases->as.seq.items[0], "__name__")->as.string.data,
                name_text(old_bases->as.seq.items[0], "__name__")->as.string.data);
-        status = -1;
+        spy_release(state); state = NULL;
     }
-    if (!status) status = initialize_mro(c, cls);
-    /* Then every class inheriting from cls, oldest first; values are listed
-     * newest first, and a subclass is younger than its bases. */
-    size_t count = 0, size = 0, done = 0;
-    SPYValue **descendants = NULL;
-    for (SPYValue *v = c->values; v && !status; v = v->next) {
+    if (!state) {
+        ErrorState error = take_error(c);
+        set_class_bases(c, cls, old_bases);
+        cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = spy_retain(old_mro);
+        restore_error(c, &error);
+    }
+    spy_release(old_bases); spy_release(old_mro);
+    return state;
+}
+/* The class whose MRO a __bases__ assignment's state rebuilds next: cls,
+ * then every class that inherits from it, oldest first; or NULL. */
+static SPYValue *bases_pending(SPYValue *state) {
+    SPYValue **items = state->as.seq.items;
+    size_t done = (size_t)items[BASES_DONE]->as.integer_data.small, count = (state->as.seq.len - BASES_FIRST) / 2;
+    return !done ? items[BASES_CLASS] : done <= count ? items[BASES_FIRST + 2 * (count - done)] : NULL;
+}
+/* The pending class's MRO rebuilt, status 0, else -1: once cls's, the
+ * classes inheriting from it join the state, values listed newest first
+ * and a subclass younger than its bases. */
+static int bases_rebuilt(SPYContext *c, SPYValue *state, int status) {
+    SPYValue **items = state->as.seq.items, *cls = items[BASES_CLASS];
+    int64_t done = items[BASES_DONE]->as.integer_data.small;
+    if (status) return -1;
+    spy_release(items[BASES_DONE]);
+    if (!(items[BASES_DONE] = int_value(c, done + 1))) return -1;
+    for (SPYValue *v = c->values; !done && v; v = v->next) {
         if (v->type != SPY_CLASS || v == cls || !v->as.map.mro) continue;
         for (size_t i = 1; i < v->as.map.mro->as.seq.len; i++)
             if (v->as.map.mro->as.seq.items[i] == cls) {
-                if (count == size) {
-                    SPYValue **grown = mem_realloc(c, descendants, (size = size ? size * 2 : 8) * 2 * sizeof(*grown));
-                    if (!grown) { spy_error(c, "MemoryError", "out of memory"); status = -1; break; }
-                    descendants = grown;
-                }
-                descendants[2 * count] = spy_retain(v);
-                descendants[2 * count++ + 1] = spy_retain(v->as.map.mro);
+                if (sequence_append(c, state, v) || sequence_append(c, state, v->as.map.mro)) return -1;
                 break;
             }
     }
-    for (size_t i = count; !status && i-- > 0; done++) status = initialize_mro(c, descendants[2 * i]);
+    return 0;
+}
+/* A __bases__ assignment's end, status -1 on an error: type_set_bases
+ * restores every MRO it rebuilt or was rebuilding, and the bases unless a
+ * reentrant mro() assigned others meanwhile. It takes state. */
+static int bases_end(SPYContext *c, SPYValue *state, int status) {
+    SPYValue **items = state->as.seq.items, *cls = items[BASES_CLASS];
     if (status) {
-        /* type_set_bases restores every MRO it rebuilt, and the bases unless a
-         * reentrant mro() assigned others meanwhile. */
         ErrorState error = take_error(c);
-        for (size_t i = count; done && i-- > count - done;) {
-            SPYValue *v = descendants[2 * i];
-            v->ctx->classes_changed++; spy_release(v->as.map.mro); v->as.map.mro = spy_retain(descendants[2 * i + 1]);
+        size_t count = (state->as.seq.len - BASES_FIRST) / 2, done = (size_t)items[BASES_DONE]->as.integer_data.small;
+        for (size_t k = 1; k <= done && k <= count; k++) {
+            SPYValue *v = items[BASES_FIRST + 2 * (count - k)];
+            v->ctx->classes_changed++; spy_release(v->as.map.mro); v->as.map.mro = spy_retain(items[BASES_FIRST + 2 * (count - k) + 1]);
         }
-        if (cls->as.map.bases == installed) {
-            set_class_bases(c, cls, old_bases);
-            cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = spy_retain(old_mro);
+        if (cls->as.map.bases == items[BASES_INSTALLED]) {
+            set_class_bases(c, cls, items[BASES_OLD]);
+            SPYValue *mro = items[BASES_OLD_MRO] == c->none ? NULL : items[BASES_OLD_MRO];
+            cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = spy_retain(mro);
         }
         restore_error(c, &error);
     }
-    for (size_t i = 0; i < 2 * count; i++) spy_release(descendants[i]);
-    mem_free(descendants);
-    spy_release(old_bases); spy_release(old_mro);
+    spy_release(state);
     return status;
+}
+/* type.__bases__ assignment: validate the new bases, then rebuild the MRO
+ * of cls and of every class that inherits from it, oldest first. */
+static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
+    SPYValue *state = bases_begin(c, cls, value), *next;
+    int status = state ? 0 : -1;
+    while (!status && (next = bases_pending(state))) status = bases_rebuilt(c, state, initialize_mro(c, next));
+    return state ? bases_end(c, state, status) : -1;
 }
 /* Turn the namespace's __slots__ into member descriptors on cls. */
 /* Turn the namespace's __slots__ into member descriptors on cls, and add
@@ -28430,7 +28473,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     /* So do setattr() and delattr() of an instance or a class with a
      * metaclass and a str (setattr_call). */
-    if (method < 0 && (argc == 2 || argc == 3) && setter_object(argv[0]) && attribute_named(c, argv[1]) &&
+    if (method < 0 && (argc == 2 || argc == 3) && (setter_object(argv[0]) || (argc == 3 && bases_named(argv[0], argv[1]))) && attribute_named(c, argv[1]) &&
         builtin_id(callee) == (argc == 3 ? B_SETATTR : B_DELATTR)) {
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
         m->stack[m->len++] = callee;
@@ -29799,7 +29842,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         (callee->as.native.data == (void *)(intptr_t)B_MIN || callee->as.native.data == (void *)(intptr_t)B_MAX) &&
         (argc > 1 || (argc && (argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) && argv[0]->as.seq.len)))
         return fold_begin(c, m, argc, env);
-    if (calls && argc > 1 && setter_object(argv[0]) && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
+    if (calls && argc > 1 && (setter_object(argv[0]) || (argc == 3 && bases_named(argv[0], argv[1]))) && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
         callee->as.native.data == (void *)(intptr_t)(argc == 3 ? B_SETATTR : argc == 2 ? B_DELATTR : -1) &&
         attribute_named(c, argv[1]))
         return setattr_call(c, m, argc, env);
@@ -33780,6 +33823,39 @@ static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, Node *
     return name_walk(c, m, f->env, f->env, node_name(n), 1, 0, NULL, unchanged, NULL);
 }
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
+/* Store step ins's end after its call (CALL_STORE), ins NULL for m's
+ * last: the value it leaves goes for an assignment of exec() or a loop's,
+ * or BC_STORE 1's. */
+static SPYValue *store_ended(SPYContext *c, Machine *m, Instruction *ins) {
+    if (!ins) ins = &m->code->items[m->pc - 1];
+    if (ins->op == BC_EXEC || ins->op == BC_NEXT || (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
+    return c->stepped;
+}
+static SPYValue *bases_mro_returned(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* A __bases__ assignment's MROs rebuilt on m from its state, which it
+ * takes, each Python mro() of a metaclass m's call (callk,
+ * bases_mro_returned): store step ins ended (store_ended), or setattr()'s
+ * None; else NULL. */
+static SPYValue *bases_go(SPYContext *c, Machine *m, SPYValue *state, Instruction *ins) {
+    SPYValue *next, *function;
+    int status = 0;
+    while (!status && (next = bases_pending(state))) {
+        if ((function = mro_function(c, next))) {
+            mro_clear(next);
+            return callk(c, m, function, 1, (SPYValue *[]){spy_retain(next)}, bases_mro_returned, state);
+        }
+        status = bases_rebuilt(c, state, initialize_mro(c, next));
+    }
+    int called = state->as.seq.items[BASES_CALLED] == c->booleans[1];
+    return bases_end(c, state, status) ? NULL : called ? spy_none(c) : store_ended(c, m, ins);
+}
+/* What the pending class's metaclass's mro() returned, result (bases_go). */
+static SPYValue *bases_mro_returned(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    int status = bases_rebuilt(c, state, mro_install(c, bases_pending(state), result));
+    spy_release(result);
+    if (status) { bases_end(c, state, -1); return NULL; }
+    return bases_go(c, m, state, NULL);
+}
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->op == BC_NEXT ? ins->node->args : ins->node;
     if (n->kind == N_IMPORT || n->kind == N_FROM) return import_step(c, m, f, n, env);
@@ -33800,6 +33876,13 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         } else { function = c->entering_init; descriptor = c->fallback; c->fallback = NULL; }
         relocate(c, n);
         if (!function) { delete_attribute(c, object, n->b->text); spy_release(object); return NULL; }
+        if (function == c->unbound) {
+            /* A class's __bases__ (setter_called). */
+            SPYValue *state = bases_begin(c, object, value ? value : m->stack[m->len - 1]);
+            spy_release(object); spy_release(value);
+            if (state) bases_go(c, m, state, ins);
+            return NULL;
+        }
         SPYValue *name = descriptor ? NULL : spy_string(c, n->b->text, strlen(n->b->text));
         SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : object, descriptor ? object : name,
                             deleting ? NULL : value ? value : m->stack[m->len - 1]};
@@ -34284,7 +34367,8 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
     return result;
 }
 /* setattr() of an instance or a class with a metaclass, a str and a
- * value, or delattr() of one and a str (argc 2), the step of a call with its callee and
+ * value, or of a class, "__bases__" and a value, or delattr() of an
+ * instance or a class with a metaclass and a str (argc 2), the step of a call with its callee and
  * operands on m's stack: the Python __setattr__, property setter or
  * __set__ a store calls, or the __delattr__, deleter or __delete__ a
  * deletion calls (setter_function), is the call to enter (CALL_STORE),
@@ -34294,7 +34378,17 @@ static NO_INLINE SPYValue *setattr_call(SPYContext *c, Machine *m, size_t argc, 
     SPYValue **slots = &m->stack[m->len - argc - 1], *descriptor, *saved = c->attribute_name;
     const char *name = builtin_value(c, slots[2], SPY_STRING)->as.string.data;
     c->attribute_name = slots[2];
-    SPYValue *function = setter_function(c, slots[1], name, &descriptor, argc == 2);
+    SPYValue *function = setter_object(slots[1]) ? setter_function(c, slots[1], name, &descriptor, argc == 2) : NULL;
+    if (!function && argc == 3 && bases_named(slots[1], slots[2])) {
+        /* A class's __bases__, rebuilt on m (bases_go). */
+        SPYValue *state = bases_begin(c, slots[1], slots[3]);
+        c->attribute_name = saved;
+        m->len -= argc + 1;
+        release_all(argc + 1, slots);
+        if (!state) return NULL;
+        spy_release(state->as.seq.items[BASES_CALLED]); state->as.seq.items[BASES_CALLED] = spy_retain(c->booleans[1]);
+        return bases_go(c, m, state, NULL);
+    }
     if (function) {
         /* __setattr__ and __delattr__ take the name, a property's setter
          * or deleter the instance (and value), and __set__ and __delete__
