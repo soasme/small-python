@@ -10685,6 +10685,7 @@ static NO_INLINE int iterated_python(SPYContext *c, SPYValue *x, SPYValue *y) {
     return 0;
 }
 static SPYValue *rich_function(SPYContext *, SPYValue *, SPYValue *, int);
+static SPYValue *rich_reflection(SPYContext *, SPYValue *, SPYValue *, int);
 /* Whether y, a dict's values, holds before any value that is x one whose
  * comparison with x calls a Python __eq__ (rich_function), which an in
  * compares on the machine (contains_step). */
@@ -10694,7 +10695,7 @@ static NO_INLINE int values_python(SPYContext *c, SPYValue *x, SPYValue *y) {
     for (size_t i = 0; i < map->as.map.len; i++) {
         SPYValue *v = e[i].value;
         if (v == x) return 0;
-        if ((v->type == SPY_INSTANCE || x->type == SPY_INSTANCE) && (rich_function(c, v, x, R_EQ) || rich_function(c, x, v, R_EQ))) return 1;
+        if ((v->type == SPY_INSTANCE || x->type == SPY_INSTANCE) && (rich_function(c, v, x, R_EQ) || rich_reflection(c, x, v, R_EQ))) return 1;
     }
     return 0;
 }
@@ -12027,12 +12028,14 @@ static int number_accepts(const Operator *o, int rich, SPYValue *x, SPYValue *y)
     return token != '@' && (rank == 0 || (token != T_LSHIFT && token != T_RSHIFT && token != '&' && token != '|' && token != '^' &&
                                           (rank == 1 || (token != '%' && token != T_FLOORDIV && token != O_DIVMOD))));
 }
-/* Whether exact number x takes y, an instance of a number's subclass not
- * x's, by its own method of o or rich (number_accepts), which then
- * answers before y's reflected one. */
+/* Whether number x, exact or of a subclass that left its number's method
+ * of o or rich, takes y, an instance of a number's subclass not x's, by
+ * that method (number_accepts), which then answers before y's reflected
+ * one. */
 static int number_takes(SPYContext *c, const Operator *o, int rich, SPYValue *x, SPYValue *y) {
-    return y->type == SPY_INSTANCE && y->as.map.base && number_accepts(o, rich, x, y->as.map.base) &&
-           !subclass(y->as.map.parent, value_class(c, x));
+    if (y->type != SPY_INSTANCE || !y->as.map.base) return 0;
+    SPYValue *n = x->type == SPY_INSTANCE && x->as.map.base && builtin_base(c, x, o ? o->direct : rich_names[rich], NULL) ? x->as.map.base : x;
+    return number_accepts(o, rich, n, y->as.map.base) && !subclass(y->as.map.parent, value_class(c, x));
 }
 /* Whether a and b, numbers or instances of a number's subclass, have a
  * number's method of o or rich left once their Python methods declined:
@@ -27874,6 +27877,12 @@ static SPYValue *rich_function(SPYContext *c, SPYValue *x, SPYValue *y, int rich
     SPYValue *function = other != cls && subclass(other, cls) ? NULL : class_lookup(cls, rich_names[rich]);
     return function && machine_function(c, function) ? function : NULL;
 }
+/* The Python rich comparison rich of y, borrowed, that comparing x with y
+ * calls once x's has declined, reflected (rich_function): none when x is
+ * a number that takes y by its own method first (number_takes). */
+static SPYValue *rich_reflection(SPYContext *c, SPYValue *y, SPYValue *x, int rich) {
+    return number_takes(c, NULL, rich_reflected[rich], x, y) ? NULL : rich_function(c, y, x, rich);
+}
 /* The comparison x op y whose x method returned result, taking it: a
  * NotImplemented leaves y's reflected method and then the default. */
 static SPYValue *compared(SPYContext *c, int op, SPYValue *x, SPYValue *y, SPYValue *result) {
@@ -28385,7 +28394,7 @@ static void pairs_walk(SPYContext *c, Machine *m, SPYValue *lookup, SPYValue *x,
         a = x->as.seq.items[at]; b = y->as.seq.items[at];
     }
     SPYValue *left = (function = rich_function(c, a, b, R_EQ)) ? a : b, *right = left == a ? b : a;
-    if (!function) function = rich_function(c, b, a, R_EQ);
+    if (!function) function = rich_reflection(c, b, a, R_EQ);
     walk = parts_tuple(c, 7, (SPYValue *[]){lookup, x, y, int_value(c, (int64_t)at + 1), outer, spy_retain(left), spy_retain(right)});
     if (walk) callk(c, m, function, 2, (SPYValue *[]){spy_retain(left), spy_retain(right)}, pairs_compared, walk);
 }
@@ -28451,7 +28460,7 @@ static int consumer_lookup(SPYContext *c, Machine *m, Consumer *s, SPYValue *ite
         SPYValue *candidate = map->as.map.items[i].key, *left = candidate, *function;
         if (candidate == item) return consumer_store(c, m, s, item, hash, i);
         size_t end;
-        if (!(function = rich_function(c, candidate, item, R_EQ)) && (function = rich_function(c, item, candidate, R_EQ))) left = item;
+        if (!(function = rich_function(c, candidate, item, R_EQ)) && (function = rich_reflection(c, item, candidate, R_EQ))) left = item;
         if (function || (sequence_pair(candidate, item) && python_pair(c, candidate, item, 0, &end) != SIZE_MAX))
             return consumer_compare(c, m, item, hash, cursor, i, 0, candidate, function, left, left == item ? candidate : item);
         spy_retain(candidate);
@@ -30936,7 +30945,7 @@ static SPYValue *range_go(SPYContext *c, Machine *m, SPYValue *state) {
     int index = items[2]->as.integer_data.small == M_INDEX;
     while ((item = native_next(c, items[1]))) {
         SPYValue *function = rich_function(c, item, x, R_EQ), *left = item;
-        if (!function && (function = rich_function(c, x, item, R_EQ))) left = x;
+        if (!function && (function = rich_reflection(c, x, item, R_EQ))) left = x;
         if (function) {
             SPYValue *position = int_value(c, at), *count = int_value(c, tally);
             if (position && count) {
@@ -31629,7 +31638,7 @@ static int step_operation(Instruction *ins, int *op) {
 /* Whether item is x or its comparison with x calls a Python __eq__
  * (rich_function), or its pairs' (pair_python). */
 static int python_at(SPYContext *c, SPYValue *x, SPYValue *item) {
-    return item == x || ((instance_like(x) || instance_like(item)) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))) ||
+    return item == x || ((instance_like(x) || instance_like(item)) && (rich_function(c, item, x, R_EQ) || rich_reflection(c, x, item, R_EQ))) ||
            pair_python(c, x, item);
 }
 /* The first item of seq, a list or tuple, from at on that is x or calls
@@ -31654,7 +31663,7 @@ static NO_INLINE SPYValue *search_call(SPYContext *c, Machine *m, int method, SP
     for (int instance = instance_like(x); at < seq->as.seq.len && (method != M_INDEX || at < (uint64_t)tally); at++) {
         SPYValue *item = seq->as.seq.items[at], *function;
         if (item != x && (instance || instance_like(item)) &&
-            ((function = rich_function(c, item, x, R_EQ)) || (function = rich_function(c, x, item, R_EQ)))) {
+            ((function = rich_function(c, item, x, R_EQ)) || (function = rich_reflection(c, x, item, R_EQ)))) {
             SPYValue *left = rich_function(c, item, x, R_EQ) ? item : x, *right = left == x ? item : x;
             SPYValue *args[] = {spy_retain(left), spy_retain(right)};
             if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(seq)) || machine_push(c, m, int_value(c, method)) ||
@@ -31696,7 +31705,7 @@ static NO_INLINE SPYValue *fold_call(SPYContext *c, Machine *m, int op, SPYValue
         int called = op;
         if (instance_like(item) || instance_like(best)) {
             function = rich_function(c, item, best, rich_kind(op));
-            if (!function && (function = rich_function(c, best, item, rich_kind(other)))) called = other;
+            if (!function && (function = rich_reflection(c, best, item, rich_kind(other)))) called = other;
         }
         if (function) {
             SPYValue *left = called == op ? item : best, *right = called == op ? best : item;
@@ -31806,7 +31815,7 @@ static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at, si
     for (SPYValue *x, *y; pair_at(a, b, at, &x, &y); at++) {
         if (x == y) continue;
         if (instance_like(x) || instance_like(y)) {
-            if (rich_function(c, x, y, R_EQ) || rich_function(c, y, x, R_EQ)) return at;
+            if (rich_function(c, x, y, R_EQ) || rich_reflection(c, y, x, R_EQ)) return at;
             if (plain_equal(x) && plain_equal(y) && equal(x, y)) continue;
             break;
         }
@@ -31849,7 +31858,7 @@ static int order_python(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (end >= a->as.seq.len || end >= b->as.seq.len) return 0;
     SPYValue *x = a->as.seq.items[end], *y = b->as.seq.items[end];
     int rich = op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : R_GE;
-    return plain_equal(x) && plain_equal(y) && (rich_function(c, x, y, rich) || rich_function(c, y, x, rich_reflected[rich]));
+    return plain_equal(x) && plain_equal(y) && (rich_function(c, x, y, rich) || rich_reflection(c, y, x, rich_reflected[rich]));
 }
 /* Whether a and b, lists or tuples, are equal from item at on, as
  * list_richcompare decides, an unequal pair left past an end comparing the
@@ -31905,7 +31914,7 @@ static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SP
     }
     function = rich_function(c, a, b, R_EQ);
     SPYValue *left = function ? a : b, *right = function ? b : a;
-    if (!function) function = rich_function(c, b, a, R_EQ);
+    if (!function) function = rich_reflection(c, b, a, R_EQ);
     SPYValue *args[] = {spy_retain(left), spy_retain(right)};
     if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
         machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->pairing))) {
@@ -32021,7 +32030,7 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
         return function;
     }
     SPYValue *left = (function = rich_function(c, item, x, R_EQ)) ? item : x, *right = left == x ? item : x;
-    if (!function) function = rich_function(c, x, item, R_EQ);
+    if (!function) function = rich_reflection(c, x, item, R_EQ);
     if (!iterator) return NULL;
     iterator->as.iterator.index = at + 1;
     SPYValue *args[] = {spy_retain(left), spy_retain(right)};
@@ -32402,7 +32411,7 @@ static NO_INLINE SPYValue *lookup_call(SPYContext *c, Machine *m, SPYValue *map,
         SPYValue *candidate = storage->as.map.items[i].key, *left = candidate, *function;
         if (candidate == key) { *found = i; return NULL; }
         size_t end;
-        if (!(function = rich_function(c, candidate, key, R_EQ)) && (function = rich_function(c, key, candidate, R_EQ))) left = key;
+        if (!(function = rich_function(c, candidate, key, R_EQ)) && (function = rich_reflection(c, key, candidate, R_EQ))) left = key;
         if (function || (sequence_pair(candidate, key) && python_pair(c, candidate, key, 0, &end) != SIZE_MAX))
             return lookup_push(c, m, storage, key, hash, cursor, i, candidate, 0, function, left, left == key ? candidate : key, env);
         spy_retain(candidate);
@@ -34227,7 +34236,7 @@ static SPYValue *equal_tested(SPYContext *c, Machine *m, SPYValue *held, SPYValu
  * of a's, or a has none; else in C. */
 static SPYValue *equalk(SPYContext *c, Machine *m, SPYValue *a, SPYValue *b, Continuation k, SPYValue *ctx) {
     SPYValue *left = a, *function = a == b ? NULL : rich_function(c, a, b, R_EQ);
-    if (!function && a != b && (function = rich_function(c, b, a, R_EQ))) left = b;
+    if (!function && a != b && (function = rich_reflection(c, b, a, R_EQ))) left = b;
     if (function) return equal_callk(c, m, function, left, left == a ? b : a, 0, k, ctx);
     int truth = a == b || equal(a, b);
     return k(c, m, ctx, c->error_type[0] ? NULL : spy_bool(c, truth));
@@ -34244,7 +34253,7 @@ static int map_scan(SPYContext *c, SPYValue *map, SPYValue *key, int64_t hash, M
     for (MapCursor before = *cursor; (*found = map_next(storage, hash, cursor)) >= 0; before = *cursor) {
         SPYValue *candidate = storage->as.map.items[*found].key;
         if (candidate == key) return 0;
-        if (rich_function(c, candidate, key, R_EQ) || rich_function(c, key, candidate, R_EQ)) { *cursor = before; *found = -1; return 1; }
+        if (rich_function(c, candidate, key, R_EQ) || rich_reflection(c, key, candidate, R_EQ)) { *cursor = before; *found = -1; return 1; }
         spy_retain(candidate);
         int matches = equal(candidate, key), unchanged = entry_unchanged(storage, *found, candidate, *cursor);
         spy_release(candidate);
@@ -34324,7 +34333,7 @@ static SPYValue *lookup_contains(SPYContext *c, Machine *m, SPYValue *ctx, SPYVa
  * (rich_function), or two sequences' items' (python_pair). */
 static int equal_python(SPYContext *c, SPYValue *a, SPYValue *b) {
     size_t end;
-    return rich_function(c, a, b, R_EQ) || rich_function(c, b, a, R_EQ) || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
+    return rich_function(c, a, b, R_EQ) || rich_reflection(c, b, a, R_EQ) || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
 }
 /* The truth of the comparison result, which it takes, for state's
  * continuation (k_resume). */
@@ -36735,7 +36744,7 @@ static SPYValue *sentinel_tested(SPYContext *c, SPYValue *v, SPYValue *result, i
 static SPYValue *sentinel_function(SPYContext *c, SPYValue *sentinel, SPYValue *item, int *swapped) {
     SPYValue *function = rich_function(c, sentinel, item, R_EQ);
     *swapped = !function && !(sentinel->type == SPY_INSTANCE && sentinel->as.map.base);
-    return function ? function : *swapped ? rich_function(c, item, sentinel, R_EQ) : NULL;
+    return function ? function : *swapped ? rich_reflection(c, item, sentinel, R_EQ) : NULL;
 }
 /* The next call of kind, Python __eq__ function of self and other, left
  * in c->k_fn comparing callable iterator v's item, which it takes, with
@@ -44601,7 +44610,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         /* item == x calls item's Python __eq__, or x's reflected one, first
          * (contains_call). */
         SPYValue *x = s->best, *function = item == x ? NULL : rich_function(c, item, x, R_EQ);
-        int swapped = !function && item != x && (function = rich_function(c, x, item, R_EQ));
+        int swapped = !function && item != x && (function = rich_reflection(c, x, item, R_EQ));
         if (function) { s->callee = spy_retain(function); s->item = item; s->swapped = swapped; s->keyed = KEY_EQ; return 0; }
         int found = item == x || equal(item, x);
         spy_release(item);
