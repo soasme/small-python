@@ -16599,13 +16599,9 @@ static int merge_keyword(SPYContext *c, Machine *m, SPYValue *result, SPYValue *
 static SPYValue *keys_iterator(SPYContext *c, SPYValue *source, SPYValue *keys) {
     SPYValue *iterator = get_iterator(c, keys);
     if (!iterator && error_is(c, "TypeError") && !iterable_type(keys)) {
-        SPYValue *module = source->type == SPY_INSTANCE ? name_local(source->as.map.parent, "__module__") : NULL;
+        char fq[256];
         spy_clear_error(c);
-        /* %T names the module, unless it is builtins or __main__. */
-        if (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins") &&
-            strcmp(module->as.string.data, "__main__"))
-            errorf(c, "TypeError", "%s.%s.keys() must return an iterable, not %s", module->as.string.data, type_name(source), type_name(keys));
-        else errorf(c, "TypeError", "%s.keys() must return an iterable, not %s", type_name(source), type_name(keys));
+        errorf(c, "TypeError", "%s.keys() must return an iterable, not %s", type_fqname(source, fq, sizeof(fq)), type_name(keys));
     }
     return iterator;
 }

@@ -100,6 +100,9 @@ SOURCES = {
     "popitem_empty": 'result = {}.popitem()',
     "setdefault": "d = {}\nresult = (d.setdefault('a'), d.setdefault('b', 1), d.setdefault('b', 2), d)",
     "ctor_own_keys_calls": "log = []\nclass Own:\n    def __init__(s, ks):\n        def keys():\n            for _ in (): pass\n            log.append('k'); return ks\n        s.keys = keys\n    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k); return k * 2\nd = {}\nd.update(Own(['a', 'b']))\nresult = (dict(Own(['c'])), d, {**Own(['e'])}, log)",
+    "keys_not_iterable": "def make():\n    class Local:\n        def keys(s): return 5\n        def __getitem__(s, k): return k\n    return Local\n"
+                         "M = type('M', (make(),), {'__module__': 'pkg'})\nlog = []\nfor v in (make()(), M()):\n"
+                         "    try: dict(v)\n    except TypeError as e: log.append(str(e))\nresult = log",
     "ior_keyed_mapping": "log = []\nclass K(dict):\n    def __iter__(s): return iter(())\n    def keys(s):\n        for _ in (): pass\n"
                          "        log.append('keys'); return ['b']\n    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k); return 2\n"
                          "class L(dict): pass\nd = L(a=1)\nz = d\nd |= K(z=0)\nresult = (d, d is z, dict.__ior__({'a': 1}, K(z=0)), log)",
