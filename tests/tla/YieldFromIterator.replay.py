@@ -16,6 +16,27 @@ def iterator(kind, called):
         raise StopIteration(8)
     if kind == "builtin":
         return iter([1])
+    if kind in ("enumerate", "zip"):
+        def gen():
+            for _ in range(2):
+                pass
+            yield 1
+
+        class One:
+            def __init__(self):
+                self.left = 1
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                for _ in ():
+                    pass
+                if not self.left:
+                    raise StopIteration
+                self.left = 0
+                return 1
+        return enumerate(gen()) if kind == "enumerate" else zip(One(), gen())
     if kind == "map":
         def function(x):
             for _ in ():

@@ -51,6 +51,19 @@ def iterate(op, l):
         return "ValueError: %s" % error
 
 SOURCES = {
+    "filter_nested_generator": "log = []\n"
+                               "def gen():\n"
+                               "    for x in (1, 2, 3, 0):\n"
+                               "        for _ in (): pass\n"
+                               "        log.append(x)\n"
+                               "        yield x\n"
+                               "def odd(x):\n"
+                               "    log.append(('odd', x))\n"
+                               "    return x % 2\n"
+                               "def yf(it):\n"
+                               "    yield from it\n"
+                               "result = (list(zip(filter(odd, gen()), 'ab')), list(yf(enumerate(filter(None, gen())))),\n"
+                               "          next(zip(gen(), filter(odd, gen()), strict=True)), log)\n",
     "enumerate_start_first": "log = []\n"
                              "class I:\n"
                              "    def __iter__(self):\n"

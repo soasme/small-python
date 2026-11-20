@@ -59,7 +59,7 @@ Zero(s) == [i \in DOMAIN s |-> s[i] - 1]
 Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 
-Cases == {"iter_sequence_protocol", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
+Cases == {"iter_sequence_protocol", "filter_nested_generator", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_strict_mixed", "adapter_zip_generator", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_generator", "map_repr", "map_metaclass", "callable_generator", "iterator_subclass", "iterator_subclass_next", "adapter_subclass_iter", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "map_index", "map_index_bad", "callable_bound", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next", "filter_adapted", "filter_next_truth",
@@ -99,6 +99,8 @@ Case(c) ==
     CASE c = "iter_sequence_protocol" -> "([0, 10, 20], [20, 10, 0], True)"
       \* enumerate() converts its start, by position or keyword, before it calls iter() of the iterable.
       [] c = "enumerate_start_first" -> "([(3, 'a'), (4, 'b')], [(3, 'a'), (4, 'b')], ['index', 'iter', 'index', 'iter'])"
+      \* A filter inside another adapter tests each item of its generator as the generator yields it.
+      [] c = "filter_nested_generator" -> "([(1, 'a'), (3, 'b')], [(0, 1), (1, 2), (2, 3)], (1, 1), [1, ('odd', 1), 2, ('odd', 2), 3, ('odd', 3), 0, ('odd', 0), 1, 2, 3, 0, 1, 1, ('odd', 1)])"
       [] c = "reversed_hook" -> "['r', 'e', 'v']"
       \* reversed() of a sequence calls its Python __len__, which must give a
       \* length and must exist

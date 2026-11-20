@@ -34,13 +34,18 @@
 (* looking it up raises ZeroDivisionError. Or it is a map whose            *)
 (* Python function acts as that __next__, and has none of the three        *)
 (* methods, or a builtin list iterator of the one item 1, which ends with  *)
-(* StopIteration(None) and has no methods. The outcome is the              *)
+(* StopIteration(None) and has no methods, as do an enumerate of a         *)
+(* generator yielding 1 and a zip of an iterator whose Python __next__     *)
+(* gives 1 with such a generator, the machine resuming the generator for   *)
+(* them. The outcome is the                                                *)
 (* step's result or exception, the methods it called, and whether g        *)
 (* finished.                                                               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Kinds == {"defined", "own", "raises", "missing", "broken", "map", "builtin"}
+\* Builtin iterators with no send, throw or close, ending with StopIteration(None).
+Builtins == {"builtin", "enumerate", "zip"}
+Kinds == {"defined", "own", "raises", "missing", "broken", "map"} \cup Builtins
 Programs == [kind : Kinds, step : {"close", "throw", "throwclass", "send", "next", "loop", "nested", "consume", "drop"}, first : BOOLEAN]
 
 VARIABLES program, outcome
@@ -52,9 +57,9 @@ Method(step) == CASE step \in {"close", "drop"} -> "close" [] step = "throwclass
 
 Run(p) ==
     LET m == Method(p.step)
-        called == IF p.kind = "builtin" THEN "" ELSE IF p.kind \in {"defined", "own", "raises"} \/ m = "next" THEN m ELSE ""
-    IN CASE p.kind = "builtin" /\ p.step = "next" -> [result |-> "StopIteration None", called |-> called, finished |-> TRUE]
-         [] p.kind = "builtin" /\ p.step = "loop" -> [result |-> "[('ret', None)]", called |-> called, finished |-> TRUE]
+        called == IF p.kind \in Builtins THEN "" ELSE IF p.kind \in {"defined", "own", "raises"} \/ m = "next" THEN m ELSE ""
+    IN CASE p.kind \in Builtins /\ p.step = "next" -> [result |-> "StopIteration None", called |-> called, finished |-> TRUE]
+         [] p.kind \in Builtins /\ p.step = "loop" -> [result |-> "[('ret', None)]", called |-> called, finished |-> TRUE]
          [] p.step = "next" -> [result |-> "StopIteration 8", called |-> called, finished |-> TRUE]
          [] p.step = "loop" -> [result |-> "[('ret', 8)]", called |-> called, finished |-> TRUE]
          [] p.step = "consume" -> [result |-> "[]", called |-> called, finished |-> TRUE]
