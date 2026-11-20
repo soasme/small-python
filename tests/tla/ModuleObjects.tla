@@ -24,6 +24,8 @@
 (*     getattr   m.__getattr__ = lambda n: n * 2 (a Python function);      *)
 (*               m.ab, hasattr(m, "zz"), m.__eq__(m), "ab" in m.__dict__   *)
 (*     typefirst m.__getattr__ answers "GA"; m.__repr__, m.__init__ types  *)
+(*     call      m.__getattr__ gives print for "m"; m() raises TypeError   *)
+(*               suggesting m.m(...), the name asked once                  *)
 (*                                                                         *)
 (* The outcome is the repr of the result, or the exception.                *)
 (***************************************************************************)
@@ -33,7 +35,7 @@ Reads == {"__name__", "__doc__", "__package__", "__loader__", "__spec__", "__fil
           "__annotate__"}
 Programs == [doc : BOOLEAN, op : {"read"}, attr : Reads]
             \cup [doc : BOOLEAN, op : {"set", "dictset", "del", "delmiss", "getmiss", "setdict", "global", "annotate", "rename",
-                                              "getattr", "typefirst"}]
+                                              "getattr", "typefirst", "call"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -56,6 +58,7 @@ Run(p) == CASE p.op = "read" -> Read(p, p.attr)
              [] p.op = "rename" -> "'r'"
              [] p.op = "getattr" -> "('abab', True, True, False)"
              [] p.op = "typefirst" -> "('method-wrapper', 'method-wrapper')"
+             [] p.op = "call" -> "(\"'module' object is not callable. Did you mean: 'm.m(...)'?\", ['m'])"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

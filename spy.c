@@ -19352,17 +19352,45 @@ static SPYValue *call_native_method(SPYContext *c, SPYValue *self, int method, S
     if (deeper(c, " while calling a Python object")) return NULL;
     return call_result(c, call_method(c, self, method, name, argc, argv, NULL));
 }
-/* A module with a callable attribute of its own name, as pprint.pprint,
- * suggests calling that; any error looking for it is dropped. */
-static void not_callable(SPYContext *c, SPYValue *fn) {
-    SPYValue *name = fn->type == SPY_MODULE ? name_local(fn, "__name__") : NULL;
-    name = name ? builtin_value(c, name, SPY_STRING) : NULL;
-    SPYValue *attr = name ? attribute(c, fn, name->as.string.data) : NULL;
+/* The TypeError calling fn raises, a module's attribute named name, its
+ * own name, being attr, which it takes: callable, it suggests calling
+ * that; any error looking for it is dropped. NULL. */
+static SPYValue *not_callable_named(SPYContext *c, SPYValue *fn, SPYValue *name, SPYValue *attr) {
     if (!attr) spy_clear_error(c);
     if (attr && callable_value(c, attr))
         errorf(c, "TypeError", "'module' object is not callable. Did you mean: '%s.%s(...)'?", name->as.string.data, name->as.string.data);
     else errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
     spy_release(attr);
+    return NULL;
+}
+/* What the Python __getattr__ of module state[0] gave for its own name
+ * state[1], attr (not_callable). */
+static SPYValue *not_callable_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *attr) {
+    (void)m;
+    not_callable_named(c, state->as.seq.items[0], state->as.seq.items[1], attr);
+    spy_release(state);
+    return NULL;
+}
+/* A module with a callable attribute of its own name, as pprint.pprint,
+ * suggests calling that; a Python __getattr__ asked for it runs on the
+ * step's machine (attribute_callk, not_callable_read). */
+static void not_callable(SPYContext *c, SPYValue *fn) {
+    SPYValue *name = fn->type == SPY_MODULE ? name_local(fn, "__name__") : NULL;
+    name = name ? builtin_value(c, name, SPY_STRING) : NULL;
+    SPYValue *attr = name ? attribute_step(c, fn, name->as.string.data) : NULL;
+    Machine *m = !attr && !c->error_type[0] && c->fallback ? step_machine(c) : NULL;
+    SPYValue *state = m ? spy_tuple(c, 2, (SPYValue *[]){fn, name}) : NULL;
+    if (state) {
+        SPYValue *function = c->fallback;
+        c->fallback = NULL;
+        attribute_callk(c, m, fn, name->as.string.data, function, not_callable_read, state);
+        return;
+    }
+    if (!attr && c->fallback) {
+        spy_release(c->fallback); c->fallback = NULL;
+        if (!c->error_type[0]) attr = attribute(c, fn, name->as.string.data);
+    }
+    not_callable_named(c, fn, name, attr);
 }
 static SPYValue *template_construct(SPYContext *, int, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *mappingproxy_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -19618,6 +19646,8 @@ static NO_INLINE SPYValue *step_native(SPYContext *, Machine *, SPYValue *, int,
 static ALWAYS_INLINE SPYValue *step_call(SPYContext *c, Machine *m, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv) {
     if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host))
         return fn->as.native.host == 1 ? host_call(c, m, fn, argc, argv, NULL) : step_native(c, m, fn, method, n, argc, argv, NULL);
+    /* A module's TypeError may ask its __getattr__ (not_callable). */
+    if (UNLIKELY(fn->type == SPY_MODULE)) return step_native(c, m, fn, method, n, argc, argv, NULL);
     return call_plain(c, fn, method, n, argc, argv);
 }
 /* call_plain of fn and method, or call_keywords of fn with keywords, as

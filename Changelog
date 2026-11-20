@@ -663,6 +663,7 @@ Unreleased (0.10.0):
 - `compile()` converts its arguments once each in parameter order, without nesting on the C stack; `dont_inherit`'s `__bool__` was called twice and the file name's `__fspath__` last
 - `split()`, `rsplit()` and `hex()` given `sep` and `maxsplit` or `bytes_per_sep` by keyword call the latter's Python `__index__` without nesting on the C stack
 - `min()` and `max()` with `key` or `default` call their source's Python `__iter__` without nesting on the C stack
+- Calling a module asks its `__getattr__` for the suggestion without nesting on the C stack
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

@@ -12,6 +12,8 @@ OPS = {"set": "m.x = 1\nr = m.__dict__['x']", "dictset": "m.__dict__['y'] = 2\nr
        "annotate": "exec('a: int = 1', m.__dict__)\nr = m.__annotations__", "rename": "m.__name__ = 'r'\nr = m.__name__",
        "getattr": "def f(n):\n    for _ in (): pass\n    return n * 2\nm.__getattr__ = f\n"
                   "r = (m.ab, hasattr(m, 'zz'), m.__eq__(m), 'ab' in m.__dict__)",
+       "call": "log = []\ndef f(n):\n    for _ in (): pass\n    log.append(n)\n    return print\nm.__getattr__ = f\n"
+               "try: m()\nexcept TypeError as e: r = (str(e), log)",
        "typefirst": "m.__getattr__ = lambda n: 'GA'\nr = (type(m.__repr__).__name__, type(m.__init__).__name__)"}
 
 
