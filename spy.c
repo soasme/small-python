@@ -26208,7 +26208,7 @@ static int compared_items(SPYContext *c, SPYValue *set, SPYValue *v, int which) 
         which = 1;
     }
     if (is_dict(v)) {
-        if (!(which == 1 || which == 5 || which == 6 || which == 9 || which == 10 || (which == 2 && set->as.map.len >> 2 > v->as.map.len)))
+        if (!(which == 1 || which == 5 || which == 6 || which == 8 || which == 9 || which == 10 || (which == 2 && set->as.map.len >> 2 > v->as.map.len)))
             return 0;
         for (size_t i = 0; i < v->as.map.len; i++) if (hashed_item(c, map_items(v)[i].key) || eq_reaches(map_items(v)[i].key)) return 1;
     } else if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
@@ -28384,6 +28384,7 @@ static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n,
 }
 static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, int *, int *, SPYValue **);
 static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
+static int keys_set_call(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
 enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_MOST = 4 };
 /* Whether mask marks argument i: marks are the bits below INDEX_PARTS,
@@ -29913,7 +29914,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     SPYValue *y;
     size_t sets;
     if (calls && argc && argc <= 9 && walk_operand(argv[argc - 1]) &&
-        (set_walk_call(c, callee, argc, argv, &op, &inplace, &y) || set_chain_call(callee, argc, argv, &op, &sets) || merge_call(callee, argc, argv))) {
+        (set_walk_call(c, callee, argc, argv, &op, &inplace, &y) || set_chain_call(callee, argc, argv, &op, &sets) || merge_call(callee, argc, argv) ||
+         keys_set_call(c, callee, argc, argv))) {
         /* A set method walking another set (set_call) takes them from the stack. */
         SPYValue *held[9];
         memcpy(held, argv, argc * sizeof(*argv));
@@ -29946,10 +29948,16 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(x); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
-    id = consumer_of(c, callee, -1, argc, argv);
-    SPYValue *generator = id >= 0 && argc ? spy_retain(argv[0]) : NULL;
-    SPYValue *start = id >= 0 && argc > 3 ? set_rest(c, argc, argv) : id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
-    SPYValue *traceback = id >= 0 && argc > 3 ? c->unbound : id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
+    /* A set's method given the set first consumes its sources as the bound method does. */
+    SPYValue *bound = calls && argc >= 2 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method && set_like(argv[0]) ?
+                      bind_method(c, argv[0], callee) : NULL;
+    size_t from = bound != NULL, given = argc - from;
+    id = consumer_of(c, bound ? bound : callee, -1, given, argv + from);
+    SPYValue *consumer = id < 0 ? NULL : bound ? bound : spy_retain(callee);
+    if (id < 0) spy_release(bound);
+    SPYValue *generator = id >= 0 && given ? spy_retain(argv[from]) : NULL;
+    SPYValue *start = id >= 0 && given > 3 ? set_rest(c, given, argv + from) : id >= 0 && given > 1 ? spy_retain(argv[from + 1]) : NULL;
+    SPYValue *traceback = id >= 0 && given > 3 ? c->unbound : id >= 0 && given > 2 ? spy_retain(argv[from + 2]) : NULL;
     SPYValue *getter = id < 0 && calls ? (callee->type == SPY_INSTANCE ? call_described(c, m, callee, argc, argv, NULL) : native_entered(c, m, callee, argc, argv, env)) : NULL;
     int plain = 0;
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
@@ -29957,9 +29965,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         getter = class_described(c, m, callee, 0, argc, argv, NULL, unchanged, NULL);
     result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, callee, argc, argv, NULL) :
              init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
-    if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-    if (id >= 0) { consume_traced(c, m, id, callee, -1, NULL, generator, start, traceback); spy_release(callee); if (traceback != c->unbound) spy_release(traceback); }
+    if (id >= 0) { consume_traced(c, m, id, consumer, -1, NULL, generator, start, traceback); spy_release(consumer); if (traceback != c->unbound) spy_release(traceback); }
     return result;
 }
 /* BC_CALLN of method call node n: its object, then its arguments, on the
@@ -31584,10 +31591,10 @@ static int set_walks(int op, SPYValue *x, SPYValue *y) {
 }
 /* Whether set method op of set x, in place for inplace, walks dict y's
  * keys with their stored hashes, as a set's (set_method): a union, its
- * update, a symmetric difference update, or a difference unless x is more
- * than four times larger; and one key may call a Python __eq__. */
+ * update, a symmetric difference or its update, or a difference unless x
+ * is more than four times larger; and one key may call a Python __eq__. */
 static int keys_walk(int op, int inplace, SPYValue *x, SPYValue *y) {
-    if (!(op == '|' || (op == '^' && inplace) || (op == '-' && !inplace && x->as.map.len >> 2 <= y->as.map.len))) return 0;
+    if (!(op == '|' || op == '^' || (op == '-' && !inplace && x->as.map.len >> 2 <= y->as.map.len))) return 0;
     for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++)
         if (eq_reaches(i < x->as.map.len ? map_items(x)[i].key : map_items(y)[i - x->as.map.len].key)) return 1;
     return 0;
@@ -31683,23 +31690,25 @@ static SPYValue *set_walk(SPYContext *, Machine *, int, SPYValue *, SPYValue *, 
 /* A chain of set walks (chain_begin): set method which of the set self
  * and each of the sets args in turn, or (CHAIN_DISCARD plus the walk's
  * inplace) a difference update of self by a set more than eight times
- * larger, args alone, which discards their intersection. Its state, self,
+ * larger, args alone, which discards their intersection; or (CHAIN_TOGGLE)
+ * self's symmetric difference of a dict, args alone: a union of its keys
+ * into an empty set, then self's entries toggled in it. Its state, self,
  * args, the next one's index, which and the result so far, goes on m's
  * stack under c->chaining, each walk above it. */
-enum { CHAIN_DISCARD = 16 };
+enum { CHAIN_DISCARD = 16, CHAIN_TOGGLE = 32 };
 /* Walk i of a chain (chain_begin) whose result so far is r, which it
  * takes: its first Python __eq__ to enter with *env, the walk under it;
  * else NULL, the chain's value in c->looked, or an error. */
 static SPYValue *chain_step(SPYContext *c, Machine *m, SPYValue *self, SPYValue *args, size_t i, int which, SPYValue *r, SPYValue **env) {
     static const int ops[] = {'|', '&', '-', 0, '|', '&', '-'};
     size_t len = m->len;
-    int op = which >= CHAIN_DISCARD ? (i ? '-' : '&') : ops[which];
+    int toggle = which == CHAIN_TOGGLE, op = toggle ? (i ? '^' : '|') : which >= CHAIN_DISCARD ? (i ? '-' : '&') : ops[which];
     /* union and difference build their result from self's, which updates
      * then change in place, as the update methods change self. */
-    int inplace = which >= CHAIN_DISCARD ? (i ? which - CHAIN_DISCARD : 0) : which == 4 || which == 6 ? 2 :
+    int inplace = toggle ? (i ? 3 : 0) : which >= CHAIN_DISCARD ? (i ? which - CHAIN_DISCARD : 0) : which == 4 || which == 6 ? 2 :
                   (which == 0 || which == 2) && i ? 3 : 0;
-    SPYValue *x = which == 4 || which == 6 || which >= CHAIN_DISCARD || !i ? self : r;
-    SPYValue *y = which >= CHAIN_DISCARD && i ? r : args->as.seq.items[which >= CHAIN_DISCARD ? 0 : i];
+    SPYValue *x = toggle ? r : which == 4 || which == 6 || which >= CHAIN_DISCARD || !i ? self : r;
+    SPYValue *y = toggle && i ? self : which >= CHAIN_DISCARD && i ? r : args->as.seq.items[which >= CHAIN_DISCARD ? 0 : i];
     if (machine_push_all(c, m, 6, (SPYValue *[]){spy_retain(self), spy_retain(args), int_value(c, (int64_t)i), int_value(c, which), r,
                                                 spy_retain(c->chaining)})) {
         while (m->len > len) spy_release(machine_pop(m));
@@ -31736,7 +31745,8 @@ static NO_INLINE SPYValue *chain_next(SPYContext *c, Machine *m, SPYValue *value
  * walks (chain_step), or self's difference update by args[0], a larger
  * set (CHAIN_DISCARD). */
 static NO_INLINE SPYValue *chain_begin(SPYContext *c, Machine *m, int which, SPYValue *self, SPYValue *args, SPYValue **env) {
-    return chain_step(c, m, self, args, 0, which, spy_retain(self), env);
+    SPYValue *r = which == CHAIN_TOGGLE ? value_new(c, set_storage(self)->type) : spy_retain(self);
+    return r ? chain_step(c, m, self, args, 0, which, r, env) : NULL;
 }
 static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
     for (;;) {
@@ -31845,6 +31855,14 @@ static NO_INLINE SPYValue *merge_walk(SPYContext *c, Machine *m, SPYValue *targe
     }
     return walk_next(c, m, env);
 }
+/* Whether a call of callee on argc arguments argv is set() or frozenset()
+ * of one exact dict or frozendict a key of which may call a Python __eq__
+ * (eq_reaches): its keys walked with their stored hashes (set_call). */
+static int keys_set_call(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    if (argc != 1 || !is_dict(argv[0]) || (callee != c->types[SPY_SET] && callee != c->types[SPY_FROZENSET])) return 0;
+    for (size_t i = 0; i < argv[0]->as.map.len; i++) if (eq_reaches(map_items(argv[0])[i].key)) return 1;
+    return 0;
+}
 /* Whether a call of callee on argc arguments argv is a dict's update of
  * one dict that merges on the machine (merges). */
 static int merge_call(SPYValue *callee, size_t argc, SPYValue *const *argv) {
@@ -31927,7 +31945,16 @@ static NO_INLINE SPYValue *set_call(SPYContext *c, Machine *m, SPYValue *callee,
         spy_release(callee);
         return update_call(c, m, dict, argv[0], env);
     }
-    if (x) function = set_walk(c, m, op, x, y, inplace, env);
+    /* set() or frozenset() of a dict is its keys' union into an empty set. */
+    if (keys_set_call(c, callee, argc, argv)) {
+        SPYValue *empty = value_new(c, callee == c->types[SPY_SET] ? SPY_SET : SPY_FROZENSET);
+        function = empty ? set_walk(c, m, '|', empty, argv[0], 0, env) : NULL;
+        spy_release(empty);
+    /* A symmetric difference of a dict first makes a set of its keys (CHAIN_TOGGLE). */
+    } else if (x && op == '^' && !inplace && is_dict(y)) {
+        function = (args = tuple_of(c, 1, &y)) ? chain_begin(c, m, CHAIN_TOGGLE, x, args, env) : NULL;
+        spy_release(args);
+    } else if (x) function = set_walk(c, m, op, x, y, inplace, env);
     else if (!(x = set_chain_call(callee, argc, argv, &op, &n))) return c->unbound;
     else {
         function = (args = tuple_of(c, n, argv + argc - n)) ? chain_begin(c, m, op, x, args, env) : NULL;

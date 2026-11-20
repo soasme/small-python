@@ -25,7 +25,12 @@
 (* difference or update of two sets b and c is that of b, then of c. A     *)
 (* set's union, update, difference or symmetric_difference_update of a    *)
 (* dict or frozendict b walks b's keys as a set's, but a union into an     *)
-(* empty set compares them too.                                            *)
+(* empty set compares them too; its issubset intersects a with b's keys    *)
+(* until the result is as large as a, and its symmetric_difference makes   *)
+(* a set of b's keys, then toggles a's entries in it. A method called      *)
+(* unbound, given a first, gives the bound method's outcome. set() or      *)
+(* frozenset() of a dict or frozendict b adds b's keys to an empty set,    *)
+(* comparing them with one another.                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -36,11 +41,12 @@ Methods == {"union", "intersection", "difference", "symmetric_difference", "issu
 Updates == {"update", "intersection_update", "difference_update", "symmetric_difference_update"}
 Chains == {"union", "intersection", "difference", "update", "intersection_update", "difference_update"}
 Dicts == {"dict", "frozendict"}
-Keyed == {"union", "update", "difference", "symmetric_difference_update"}
+Keyed == {"union", "update", "difference", "symmetric_difference_update", "issubset", "symmetric_difference"}
 Programs == [ka : {"set", "frozenset", "subset"}, a : Small, op : Operators \cup Methods, kb : {"set", "subset"}, b : Small]
             \cup [ka : {"set", "subset"}, a : Small, op : Updates, kb : {"set", "subset"}, b : Small]
             \cup [ka : {"set"}, a : Small, chain : Chains, kb : {"set"}, b : Small, c : Small]
             \cup [ka : {"set"}, a : Small, op : Keyed, kb : Dicts, b : Small]
+            \cup [built : {"set", "frozenset"}, kb : Dicts, b : Small]
 
 \* A set built in the order of the values: its elements <<side, value>>.
 Build(side, s) == LET RECURSIVE From(_) From(i) == IF i > 3 THEN <<>>
@@ -88,6 +94,14 @@ Discard(A, B) == Walk("discard", B, 1, A, <<>>, <<>>)
 Toggle(A, B) == Walk("toggle", B, 1, A, <<>>, <<>>)
 Subset(A, B) == IF Len(A) > Len(B) THEN [r |-> <<>>, log |-> <<>>, bool |-> "False"] ELSE Walk("subset", A, 1, <<>>, B, <<>>)
 False == [r |-> <<>>, log |-> <<>>, bool |-> "False"]
+\* issubset of a dict's keys W from i: each found in A is added to R after
+\* a lookup there, until R is as large as A.
+RECURSIVE Within(_, _, _, _, _)
+Within(A, W, i, R, log) ==
+    IF (Len(R) = Len(A) /\ i > 1) \/ i > Len(W) THEN [r |-> R, log |-> log, bool |-> IF Len(R) = Len(A) THEN "True" ELSE "False"]
+    ELSE LET f == Lookup(A, W[i])  again == Lookup(R, W[i])
+         IN IF f.at = 0 THEN Within(A, W, i + 1, R, log \o f.log)
+            ELSE Within(A, W, i + 1, IF again.at = 0 THEN Append(R, W[i]) ELSE R, log \o f.log \o again.log)
 
 Reflected == [o \in {"<=", "<", ">=", ">", "=="} |-> CASE o = "<=" -> ">=" [] o = "<" -> ">" [] o = ">=" -> "<="
                                                        [] o = ">" -> "<" [] o = "==" -> "=="]
@@ -112,8 +126,10 @@ Apply(p) ==
          [] op \in {"&", "&=", "intersection", "intersection_update"} -> Inter(A, B)
          [] op \in {"-", "difference"} -> Diff(A, B)
          [] op \in {"-=", "difference_update"} -> Discard(A, B)
-         [] op \in {"^", "symmetric_difference"} -> Toggle(B, A)
+         [] op \in {"^", "symmetric_difference"} -> IF p.kb \in Dicts THEN Then(Walk("add", B, 1, <<>>, <<>>, <<>>), LAMBDA R : Toggle(R, A))
+                                                    ELSE Toggle(B, A)
          [] op \in {"^=", "symmetric_difference_update"} -> Toggle(A, B)
+         [] op = "issubset" /\ p.kb \in Dicts -> Within(A, B, 1, <<>>, <<>>)
          [] op \in {"<=", "issubset"} -> Subset(A, B)
          [] op \in {">=", "issuperset"} -> Subset(B, A)
          [] op = "<" -> IF Len(A) >= Len(B) THEN False ELSE Subset(A, B)
@@ -129,7 +145,8 @@ Join(s) == IF s = <<>> THEN "" ELSE " " \o Head(s) \o Join(Tail(s))
 Shown(S) == LET RECURSIVE From(_) From(i) == IF i > 3 THEN ""
                                              ELSE (IF \E j \in 1..Len(S) : S[j][2] = Values[i] THEN Values[i] ELSE "") \o From(i + 1)
             IN "{" \o From(1) \o "}"
-Show(p) == IF "chain" \in DOMAIN p THEN LET w == Chain(p) IN Shown(w.r) \o Join(w.log)
+Show(p) == IF "built" \in DOMAIN p THEN LET w == Walk("add", Build("b", p.b), 1, <<>>, <<>>, <<>>) IN Shown(w.r) \o Join(w.log)
+           ELSE IF "chain" \in DOMAIN p THEN LET w == Chain(p) IN Shown(w.r) \o Join(w.log)
            ELSE LET w == Apply(p) IN (IF p.op \in Compares THEN w.bool ELSE Shown(w.r)) \o Join(w.log)
 
 VARIABLES program, outcome
