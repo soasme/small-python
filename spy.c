@@ -35978,25 +35978,49 @@ static NO_INLINE Result zip_left(SPYContext *c, Block *top) {
     else if (zip_ended(c, v, (v->as.iterator.kind == I_MAP) + (pending ? pending->as.seq.len : 0))) return (Result){FLOW_NORMAL, NULL};
     return (Result){FLOW_YIELD, NULL};
 }
+static SPYValue *adapted_chain(SPYContext *, Machine *, SPYValue *, int *, int, int);
+/* What the generator the adapters on m's stack wait for gave in flow
+ * (adapted_call), each taking it in turn, innermost first (adapted_chain):
+ * a yield of the outermost's item, top's value; of none, to ask it again;
+ * else its end or error. next() drops the generator's return value. */
+static NO_INLINE Result adapters_resumed(SPYContext *c, Machine *m, Block *top, Result flow) {
+    int again = 0;
+    if (top->kind == BLOCK_CONSUME && top->consumer->id == B_NEXT) { spy_release(top->consumer->sent); top->consumer->sent = NULL; }
+    SPYValue *item = adapted_chain(c, m, flow.flow == FLOW_YIELD ? flow.value : NULL, &again, 1, CALL_NEXT);
+    return again || item ? (Result){FLOW_YIELD, item} : (Result){FLOW_NORMAL, NULL};
+}
 static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **, SPYValue **);
 static int next_call_of(SPYContext *, Machine *, SPYValue *, SPYValue **, SPYValue **);
 /* Whether filter v's iterator may give its next item by a call on the
  * machine (adapted_source, filter_next). */
 static int filter_fetches(SPYContext *c, SPYValue *v) { return adapted_source(c, v->as.iterator.source->as.seq.items[1]); }
+/* m's stack back to len: the adapters a next call left waiting for a
+ * generator (adapted_call), dropped for a step that takes the item in C. */
+static void adapters_dropped(Machine *m, size_t len) {
+    while (m->len > len) spy_release(machine_pop(m));
+}
 /* Filter v's next item to test: the one its iterator's call gave on the
  * machine (adapted_returned), waiting in its counter, its index 1; else
  * its iterator's next made at once, or in C; NULL, with *status -1 at its
  * end or on an error, or 1 when that call (next_call_of) begins on m, v
- * and c->adapting under it. */
+ * and c->adapting under it, or 2 when the generator *fn it waits for is
+ * the machine's to resume (adapted_call). */
 static SPYValue *filter_next(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env, int *status) {
     SPYValue *source = v->as.iterator.source->as.seq.items[1], *item = v->as.iterator.counter;
     *status = -1;
     if (v->as.iterator.index) { v->as.iterator.index = 0; v->as.iterator.counter = NULL; return item; }
     if (!filter_fetches(c, v)) return iterator_next(c, source);
+    size_t len = m->len;
     if (machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->adapting))) return NULL;
     int called = next_call_of(c, m, source, fn, env);
     if (called == 1) { *status = 1; return NULL; }
-    spy_release(machine_pop(m)); spy_release(machine_pop(m));
+    /* Or the generator the source waits for, *fn, 2 (adapted_call). */
+    if (called == 2 && (m->len > len + 2 || (!machine_push(c, m, spy_retain(source)) && !machine_push(c, m, spy_retain(c->adapting))))) {
+        *status = 2;
+        return NULL;
+    }
+    adapters_dropped(m, len);
+    if (called == 2) return NULL;
     if (called == 3) return *fn;
     return called < 0 ? NULL : iterator_next(c, source);
 }
@@ -36457,11 +36481,16 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
                 return -1;
             }
         }
+        size_t len = m->len + 2;
         if (machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->adapting))) return -1;
         int status = next_call_of(c, m, inner, fn, env);
         if (status == 1) return 1;
-        spy_release(machine_pop(m)); spy_release(machine_pop(m));
-        if (status == 2) return 0;
+        /* The generator inner waits for is the machine's to resume, inner
+         * and v waiting on m's stack for its item (adapters_resumed). */
+        if (status == 2 && (m->len > len || (!machine_push(c, m, spy_retain(inner)) && !machine_push(c, m, spy_retain(c->adapting)))))
+            return 2;
+        adapters_dropped(m, len - 2);
+        if (status == 2) return -1;
         /* A map of a host function, or an ended iterable, gives its item here. */
         if (status == 0 && !(item = iterator_next(c, inner))) status = -1;
         if (status < 0 && strict && !c->error_type[0]) {
@@ -36618,7 +36647,10 @@ static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed,
     } else if (next && d->type == SPY_ITERATOR && !(d->as.iterator.removed & 1) && adapts(d)) {
         /* An adapter's next call, as a loop's (adapted_call), or its item;
          * one that ended raises StopIteration. */
+        size_t len = m->len;
         int status = next_call_of(c, m, d, &call, env);
+        /* A generator an adapter waits for resumes in C here. */
+        if (status == 2) { adapters_dropped(m, len); status = 0; }
         if (status == 3) *item = call;
         if (status != 1) call = NULL;
         if (status == 0 && !c->error_type[0]) *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
@@ -37751,7 +37783,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A generator an enumerate or filter takes from gives its item
          * (adapted_step); one the filter drops, a yield of no item,
          * resumes it again. */
-        if (flow.value && top->value != g) flow = adapted_flow(c, top->value, flow);
+        if (UNLIKELY(top->value != g && m->len && m->stack[m->len - 1] == c->adapting)) flow = adapters_resumed(c, m, top, flow);
+        else if (flow.value && top->value != g) flow = adapted_flow(c, top->value, flow);
         else if (UNLIKELY(top->value != g && flow.flow != FLOW_YIELD && zip_strict(top->value))) flow = zip_left(c, top);
         if (top->kind == BLOCK_CONSUME) {
             a = flow.flow == FLOW_YIELD ? flow.value : NULL;
