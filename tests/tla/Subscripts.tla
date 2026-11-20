@@ -32,7 +32,7 @@ Cases == {"aug_order", "not_subscriptable", "not_subscriptable_none", "no_setite
           "tuple_out", "str_out", "dict_missing", "dict_tuple_key", "dict_unhashable", "dict_missing_hook", "dict_missing_described", "dict_missing_unreadable", "meta_setitem",
           "range_index", "range_out", "bytes_index", "getitem_none", "list_set_out", "list_del_out",
           "seq_getitem_iter", "generator_subscript", "star_in_slice", "star_bare_index", "nested_star",
-          "slot_index", "slot_big_index", "range_slot_index", "range_big_index"}
+          "slot_index", "slot_big_index", "range_slot_index", "range_big_index", "slot_slice_index", "array_slice_iterable"}
 Programs == [form : Forms, action : {"get", "set", "del"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -110,6 +110,15 @@ Case(c) ==
       [] c = "slot_big_index" -> <<"IndexError: cannot fit 'I' into an index-sized integer", <<"index">>>>
       [] c = "range_slot_index" -> <<"(4, 6)", <<"index", "index">>>>
       [] c = "range_big_index" -> <<"IndexError: range object index out of range", <<"index">>>>
+      \* So do their slice keys' parts, a bytearray's store of a value no
+      \* other bytearray twice, around the value's copy; a view's store
+      \* takes its value's buffer first; a list's zero step is refused
+      \* before its value is iterated.
+      [] c = "slot_slice_index" -> <<"([2, 3], bytearray(b'Zcd'), b'b', \"a bytes-like object is required, not 'int'\", 'slice step cannot be zero')",
+                                     <<"0", "2", "0", "2", "1", "1">>>>
+      \* A bytearray's slice assignment of another iterable converts the
+      \* slice, iterates the value into a copy, then converts it again.
+      [] c = "array_slice_iterable" -> <<"(bytearray(b'ABc'), bytearray(b'Fbc'))", <<"0", "2", "iter", "0", "2", "gen">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Subscript(p)
 

@@ -29495,7 +29495,8 @@ static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const
 static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
 static int keys_set_call(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
-enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_LENGTH = 1u << 10, INDEX_NEEDLE = 1u << 11, INDEX_MOST = 4 };
+enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_LENGTH = 1u << 10, INDEX_NEEDLE = 1u << 11, INDEX_SLICE = 1u << 12,
+       INDEX_TWICE = 1u << 13, INDEX_MOST = 4 };
 static int hex_separator(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static int hex_viewing(SPYValue *);
 /* Whether mask marks argument i: marks are the bits below INDEX_PARTS,
@@ -29508,7 +29509,7 @@ static unsigned index_arguments_rest(SPYContext *, SPYValue *, int, size_t, SPYV
 static ALWAYS_INLINE unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (argc > INDEX_MOST) return 0;
     for (size_t i = 0; i < argc; i++)
-        if (argv[i]->type == SPY_INSTANCE) return index_arguments_rest(c, callee, method, argc, argv);
+        if (argv[i]->type == SPY_INSTANCE || UNLIKELY(argv[i]->type == SPY_SLICE)) return index_arguments_rest(c, callee, method, argc, argv);
     /* A slice's indices() may call its parts' __index__, bound too (slice_part). */
     return method == M_INDICES || (method < 0 && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_INDICES) ?
            index_arguments_rest(c, callee, method, argc, argv) : 0;
@@ -30221,8 +30222,33 @@ static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *c, SPYValue *callee, 
 /* Mask, an unbound method's (native_indices), its arguments' marks one
  * place on for the self the call takes first. */
 static unsigned index_shifted(unsigned mask) { return (mask & 0xffu) << 1 | (mask & ~0xffu); }
+static int subscript_slot(SPYContext *, SPYValue *, SPYValue *, size_t);
+static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static int machine_source(SPYContext *, SPYValue *);
+static int memory_slot(SPYValue *, SPYValue *, size_t, SPYValue *const *);
+/* Of a sequence's __getitem__, __setitem__ or __delitem__ (subscript_slot)
+ * callee, bound or given its object first, with argc arguments argv: its
+ * slice key's parts convert first (INDEX_SLICE), and for a bytearray's
+ * store of a value no other bytearray, again after the value's copy
+ * (INDEX_TWICE, bytearray_ass_subscript), as when a list's or
+ * bytearray's store has a value the machine iterates; else 0. */
+static unsigned slice_slot(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    int bound = callee->type == SPY_METHOD;
+    SPYValue *fn = bound ? callee->as.method.function : callee, *self = bound ? callee->as.method.self : argc ? argv[0] : NULL;
+    size_t at = !bound;
+    if (!self || argc <= at || argv[at]->type != SPY_SLICE) return 0;
+    int parts = slice_part(c, argv[at]) != NULL;
+    if (fn->type == SPY_NATIVE && fn->as.native.kwcall == memory_method) return parts && memory_slot(fn, self, argc - at, argv + at) ? INDEX_SLICE : 0;
+    if (!subscript_slot(c, fn, self, argc - at)) return 0;
+    int twice = argc == at + 2 && builtin_value(c, self, SPY_BYTEARRAY) && (argv[at + 1] == self || !builtin_value(c, argv[at + 1], SPY_BYTEARRAY));
+    /* Without a part's __index__, a store's value the machine iterates. */
+    int iterated = argc == at + 2 && (twice || builtin_value(c, self, SPY_LIST)) && machine_source(c, argv[at + 1]);
+    return parts || iterated ? INDEX_SLICE | (twice ? INDEX_TWICE : 0) : 0;
+}
 static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    unsigned sliced = method < 0 && (callee->type == SPY_METHOD || callee->type == SPY_NATIVE) ? slice_slot(c, callee, argc, argv) : 0;
+    if (sliced) return sliced;
 
     unsigned buffers = buffer_arguments(c, callee, method, argc, argv);
     int indices = method == M_INDICES && callee->type == SPY_SLICE && argc == 1;
@@ -30281,6 +30307,74 @@ static SPYValue *hex_measured(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(result); spy_release(state);
     return value;
 }
+static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *index_from(SPYContext *, Machine *, SPYValue *, int, SPYValue *, SPYValue *, size_t, unsigned);
+static int percent_number(SPYContext *, SPYValue *);
+static SPYValue *slice_copied(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static int slice_source(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+static int slice_plain(SPYValue *);
+static SPYValue *comparek(SPYContext *, Machine *, SPYValue *, SPYValue *, int, Continuation, SPYValue *);
+/* index_from of a slot call's slice key (INDEX_SLICE), args[at]: its next
+ * part's Python __index__ is m's call (slice_part), the call going on
+ * with a slice of its int (index_argued); then the call. With
+ * INDEX_TWICE the slice as written rides after the arguments: its parts
+ * convert, then the value is copied to a bytearray and the slice as
+ * written converts again before the store. */
+static NO_INLINE SPYValue *slice_key_from(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args, unsigned mask) {
+    size_t at = callee->type != SPY_METHOD, n = args->as.seq.len;
+    SPYValue **items = args->as.seq.items, *again;
+    if (mask & INDEX_TWICE && n == at + 2) {
+        SPYValue *kept[INDEX_MOST + 1];
+        memcpy(kept, items, n * sizeof(*kept));
+        kept[n] = items[at];
+        if (!(again = tuple_of(c, n + 1, kept))) return NULL;
+        SPYValue *result = slice_key_from(c, m, callee, method, name, again, mask);
+        spy_release(again);
+        return result;
+    }
+    SPYValue *part = slice_part(c, items[at]);
+    if (part) {
+        SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)n + 1), int_value(c, mask)};
+        SPYValue *state = parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
+        release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
+        return state ? special_callk(c, m, index_special(c, part), part, 0, NULL, NULL, index_argued, state) : NULL;
+    }
+    if (c->error_type[0]) return NULL;
+    /* A zero step is refused before a store takes its value, the slice
+     * as written that INDEX_TWICE keeps left out. */
+    size_t given = mask & INDEX_TWICE ? n - 1 : n;
+    if (given == at + 2 && !slice_plain(items[at])) return call(c, callee, given, items);
+    /* A list's store lists a value the machine iterates (slice_source). */
+    SPYValue *list = !(mask & INDEX_TWICE) && n == at + 2 ? builtin_value(c, at ? items[0] : callee->as.method.self, SPY_LIST) : NULL;
+    int listed = list && slice_source(c, list, items[at], items[at + 1]);
+    if (!(mask & INDEX_TWICE) && !listed) return call(c, callee, n, items);
+    /* A number or str is no value to copy (bytearray_ass_subscript). */
+    if (!listed && (percent_number(c, items[at + 1]) || builtin_value(c, items[at + 1], SPY_STRING)))
+        return spy_error(c, "TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)");
+    /* list() or bytearray() of the value, a call step on m (comparek),
+     * then the store (slice_copied). */
+    SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, mask)};
+    SPYValue *state = parts[1] && parts[4] ? spy_tuple(c, 5, parts) : NULL, *value = state ? spy_tuple(c, 1, &items[at + 1]) : NULL;
+    release_all(2, (SPYValue *[]){parts[1], parts[4]});
+    if (!value) { spy_release(state); return NULL; }
+    return comparek(c, m, spy_retain(c->types[listed ? SPY_LIST : SPY_BYTEARRAY]), value, COMPARE_CALL + 1, slice_copied, state);
+}
+/* The list or bytearray copy of the value slice_key_from's store made,
+ * in result: the store of it, a bytearray's slice as written converted
+ * again (INDEX_TWICE). */
+static SPYValue *slice_copied(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **parts = state->as.seq.items, *args = parts[3], **items = args->as.seq.items, *store[INDEX_MOST], *again;
+    size_t at = parts[0]->type != SPY_METHOD, n = args->as.seq.len;
+    unsigned mask = (unsigned)parts[4]->as.integer_data.small;
+    memcpy(store, items, at * sizeof(*store));
+    store[at] = items[mask & INDEX_TWICE ? n - 1 : at]; store[at + 1] = result;
+    again = result ? tuple_of(c, at + 2, store) : NULL;
+    SPYValue *value = !again ? NULL : mask & INDEX_TWICE ? index_from(c, m, parts[0], (int)parts[1]->as.integer_data.small, parts[2], again, at + 2,
+                                                                      mask & ~(unsigned)INDEX_TWICE) :
+                      call(c, parts[0], again->as.seq.len, again->as.seq.items);
+    release_all(3, (SPYValue *[]){again, result, state});
+    return value;
+}
 /* The call (index_arguments) of state's callee, method number and name
  * (or -1 and None) on the arguments of its tuple, from the i-th on: the
  * next masked one's Python __index__ is m's call (callk), the call going
@@ -30312,6 +30406,7 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         if (state) return special_callk(c, m, function, item, 0, NULL, NULL, index_argued, state);
         if (function) return NULL;
     }
+    if (i == args->as.seq.len && mask & INDEX_SLICE) return slice_key_from(c, m, callee, method, name, args, mask);
     SPYValue *part = i == args->as.seq.len && mask & INDEX_PARTS && integer_sign(builtin_value(c, args->as.seq.items[0], SPY_INT)) >= 0 ?
                      slice_part(c, callee) : NULL;
     if (part) {
@@ -30377,6 +30472,20 @@ static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYVal
             value = bytes && array ? builtin(c, 1, &bytes, (void *)(intptr_t)B_BYTEARRAY) : spy_retain(bytes);
         }
         spy_release(bytes);
+    } else if (i == n + 1) {
+        /* A slot's slice key's part (slice_key_from): the call goes on
+         * with a slice of its int. */
+        size_t at = parts[0]->type != SPY_METHOD;
+        SPYValue *s = items[at], *part = slice_part(c, s), *converted = index_result(c, part, result);
+        items[at] = converted ? slice_new(c, part == s->as.slice.start ? converted : s->as.slice.start,
+                                          part == s->as.slice.stop ? converted : s->as.slice.stop,
+                                          part == s->as.slice.step ? converted : s->as.slice.step) : NULL;
+        spy_release(converted);
+        SPYValue *next = items[at] ? tuple_of(c, n, items) : NULL;
+        spy_release(items[at]);
+        value = next ? index_from(c, m, parts[0], (int)parts[1]->as.integer_data.small, parts[2], next, n,
+                                  (unsigned)parts[5]->as.integer_data.small) : NULL;
+        spy_release(next);
     } else if (i == n) {
         /* A slice's part: the call goes on with a slice of its int. */
         SPYValue *s = parts[0], *part = slice_part(c, s), *converted = index_result(c, part, result);
@@ -30640,7 +30749,8 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        callee->as.native.kwcall == set_method ||
                                                        (((argv[1]->type == SPY_TUPLE && argv[1]->listed) || argv[1]->type == SPY_FROZENDICT) && callee->as.native.kwcall == set_item_method) ||
                                                        /* dict.__getitem__ of a subclass's instance (native_entered) */
-                                                       ((walk_operand(argv[1]) || argv[0]->type == SPY_INSTANCE) && callee->as.native.kwcall == slot_call) ||
+                                                       ((walk_operand(argv[1]) || argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_SLICE) &&
+                                                        callee->as.native.kwcall == slot_call) ||
                                                        /* a bytes join of exporters (buffer_argument), or choices (buffered_choice) */
                                                        ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||
                                                        (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
@@ -30652,8 +30762,8 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                                                          is_builtin(callee, B_OBJECT_REDUCE_EX))))) ||
                                         (argc == 3 && ((argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                                        (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
-                                                       /* an instance's __index__ or __buffer__ (index_arguments) */
-                                                       argv[1]->type == SPY_INSTANCE || argv[2]->type == SPY_INSTANCE)) ||
+                                                       /* an instance's __index__ or __buffer__, a slot's slice key (index_arguments) */
+                                                       argv[1]->type == SPY_INSTANCE || argv[2]->type == SPY_INSTANCE || argv[1]->type == SPY_SLICE)) ||
                                         /* type.__new__ (class_make) */
                                         (argc == 4 && callee->as.native.kwcall == type_method) ||
                                         /* a set method given its set and others (set_chain_call) */
@@ -33674,10 +33784,11 @@ static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, 
     size_t len = m->len, d = 0;
     /* A slice store into a bytearray or a view takes its value's buffer,
      * which only bytes, a bytearray or a view gives without Python
-     * (index_returned copies it for a bytearray). */
+     * (index_returned copies it for a bytearray), or a bytearray's copy
+     * of a value the machine iterates (array_copy). */
     if (function && value && key->type == SPY_SLICE && value->type != SPY_BYTES && value->type != SPY_BYTEARRAY && value->type != SPY_MEMORYVIEW) {
         SPYValue *base = operands[0]->type == SPY_INSTANCE ? builtin_base(c, operands[0], "__setitem__", NULL) : operands[0];
-        if (base && base->type != SPY_LIST) function = NULL;
+        if (base && base->type != SPY_LIST && (base->type != SPY_BYTEARRAY || !machine_source(c, value))) function = NULL;
     }
     /* A view's tuple key, from its first instance (memory_key_next). */
     if (!function && count == 3 && memory_key_calls(c, operands[0], key, 1)) {
@@ -33695,6 +33806,33 @@ static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, 
 }
 static int slice_source(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static int slice_list(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static int slice_plain(SPYValue *);
+static SPYValue *store_ended(SPYContext *, Machine *, Instruction *);
+static SPYValue *comparek(SPYContext *, Machine *, SPYValue *, SPYValue *, int, Continuation, SPYValue *);
+/* What bytearray() of a store's value returned in result (array_copy):
+ * the store of the copy into state's object at its slice as written,
+ * whose part's Python __index__ is m's call first (index_call, CALL_INDEX),
+ * else the store step ended. */
+static SPYValue *array_copied(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *object = state->as.seq.items[0], *key = state->as.seq.items[1], *env = NULL, *function = NULL;
+    int status = -1;
+    if (result && slice_part(c, key)) {
+        function = index_call(c, m, key, 3, (SPYValue *[]){object, key, result}, &env);
+        if (function) { c->k_fn = function; c->k_env = env; c->k = NULL; c->k_kind = CALL_INDEX; }
+    }
+    if (result && !function && !c->error_type[0]) status = set_index(c, object, key, result);
+    release_all(2, (SPYValue *[]){result, state});
+    return function ? c->stepped : status ? NULL : store_ended(c, m, NULL);
+}
+/* A store of value, which the machine iterates (machine_source), at
+ * slice key of object, a bytearray or its subclass's instance: bytearray()
+ * of the value, a call step on m (comparek), then the store of the copy
+ * (array_copied), as bytearray_ass_subscript copies it. */
+static void array_copy(SPYContext *c, Machine *m, SPYValue *object, SPYValue *key, SPYValue *value) {
+    SPYValue *state = spy_tuple(c, 2, (SPYValue *[]){object, key}), *args = state ? spy_tuple(c, 1, &value) : NULL;
+    if (!args) { spy_release(state); return; }
+    comparek(c, m, spy_retain(c->types[SPY_BYTEARRAY]), args, COMPARE_CALL + 1, array_copied, state);
+}
 /* The __index__ index_call entered for store ins returned result: the
  * store or deletion runs on the operands it kept under the key, at the
  * index, which must fit a Py_ssize_t as the key's; a view's tuple key
@@ -33721,6 +33859,14 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
         /* A bytearray stores a copy of a value that is no other bytearray,
          * converting the slice as written again (bytearray_ass_subscript). */
         SPYValue *base = !function && index && value ? builtin_value(c, object, SPY_BYTEARRAY) : NULL;
+        if (base && machine_source(c, value)) {
+            /* A value the machine iterates is copied there (array_copy),
+             * the slice's zero step refused first. */
+            if (slice_plain(index)) array_copy(c, m, object, item, value);
+            else spy_error(c, "ValueError", "slice step cannot be zero");
+            release_all(5, (SPYValue *[]){index, object, item, value, key});
+            return;
+        }
         if (base && (value->type != SPY_BYTEARRAY || value == base)) {
             SPYValue *owned, *bytes = buffer_bytes(c, value, &owned);
             SPYValue *copy = bytes ? bytearray_new(c, bytes->as.string.data, bytes->as.string.len) : NULL;
@@ -35495,7 +35641,23 @@ static void memory_store_call(SPYContext *, Machine *, SPYValue *, const char *,
  * Python __setitem__, or the key's Python __hash__ for a dict, or a
  * comparison of the key for an exact one (native_store), or its Python
  * __index__ for a list, or an item's of a view's tuple key (index_call),
- * or the value's conversion for a view's item (memory_store_call). */
+ * or the value's conversion for a view's item (memory_store_call), or a
+ * bytearray's copy of its slice's value (array_copies). */
+/* Whether key is a slice whose parts are ints or None, which call no
+ * Python __index__, its step not zero, which a store refuses before
+ * taking its value. */
+static int slice_plain(SPYValue *key) {
+    if (key->type != SPY_SLICE) return 0;
+    SPYValue *parts[] = {key->as.slice.start, key->as.slice.stop, key->as.slice.step};
+    for (int i = 0; i < 3; i++) if (parts[i]->type != SPY_NONE && parts[i]->type != SPY_INT && parts[i]->type != SPY_BOOL) return 0;
+    return parts[2]->type == SPY_NONE || integer_sign(parts[2]);
+}
+/* Whether a store of value at key into object copies the value on the
+ * machine (array_copy): object a bytearray or its subclass's instance,
+ * key a plain slice (slice_plain), value one the machine iterates. */
+static int array_copies(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
+    return slice_plain(key) && builtin_value(c, object, SPY_BYTEARRAY) && machine_source(c, value);
+}
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
     SPYValue *map;
     const char *kind;
@@ -35503,6 +35665,7 @@ static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key
            (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(map = store_storage(c, object, "__setitem__"), key, 0) &&
                                                                         store_collides(c, map, key)))) ||
            list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1) || memory_converter(c, object, key, value, &kind) ||
+           array_copies(c, object, key, value) ||
            (object->type == SPY_FRAME_LOCALS && frame_key_calls(c, key));
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
@@ -35718,6 +35881,11 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
             release_all(3, args); return function;
         }
         relocate(c, n);
+        if (array_copies(c, args[0], args[1], args[2])) {
+            array_copy(c, m, args[0], args[1], args[2]);
+            release_all(3, args);
+            return NULL;
+        }
         if (!set_index(c, args[0], args[1], args[2]) && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
         release_all(3, args);
         return NULL;
@@ -36586,12 +36754,9 @@ static NO_INLINE int dir_list(SPYContext *c, Machine *m, SPYValue *result) {
 }
 /* Whether a store of value to slice key of object, a list, takes its
  * items from a generator or another the machine iterates (machine_source),
- * the slice's parts ints or None, which call no Python __index__ first. */
+ * the slice plain (slice_plain). */
 static NO_INLINE int slice_source(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
-    if (object->type != SPY_LIST || key->type != SPY_SLICE) return 0;
-    SPYValue *parts[] = {key->as.slice.start, key->as.slice.stop, key->as.slice.step};
-    for (int i = 0; i < 3; i++) if (parts[i]->type != SPY_NONE && parts[i]->type != SPY_INT && parts[i]->type != SPY_BOOL) return 0;
-    return machine_source(c, value);
+    return object->type == SPY_LIST && slice_plain(key) && machine_source(c, value);
 }
 /* BC_SET_TARGET's store to a slice of a list, of a value whose items
  * slice_source takes: the object and key above the value leave m's
@@ -44559,7 +44724,10 @@ static int memory_assign(SPYContext *c, SPYValue *m, SPYValue *key, SPYValue *va
         return memory_full_index(c, m, key, &at) ? -1 : memory_pack(c, m, at, value);
     }
     if (key->type == SPY_SLICE && m->as.memory.ndim == 1) {
-        SPYValue *source = value->type == SPY_MEMORYVIEW ? spy_retain(value) : memory_from(c, value);
+        /* A value no buffer is refused without memoryview()'s prefix. */
+        SPYValue *source = value->type == SPY_MEMORYVIEW ? spy_retain(value) :
+                           own_buffer(value) || builtin_value(c, value, SPY_BYTES) || builtin_value(c, value, SPY_BYTEARRAY) ? memory_from(c, value) :
+                           errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(value));
         if (!source) return -1;
         SPYValue *target = memory_subscript(c, m, key);
         int status = -1;
@@ -44684,6 +44852,18 @@ static const char *const memory_methods[] = {
 enum { MV_GETITEM, MV_SETITEM, MV_DELITEM, MV_LEN, MV_ITER, MV_EQ, MV_NE, MV_HASH, MV_REPR, MV_ENTER, MV_EXIT,
        MV_BUFFER, MV_RELEASE_BUFFER, MV_RELEASE, MV_TOBYTES, MV_TOLIST, MV_HEX, MV_TOREADONLY, MV_CAST, MV_COUNT, MV_INDEX, MV_NEW };
 static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether native memoryview method fn of self, with argc arguments argv
+ * after it, is the __getitem__ of a view not zero-dimensional, or the
+ * __setitem__ of a one-dimensional writable view's of a bytes, bytearray
+ * or view value, whose buffer it takes before the key; its slice key's parts convert then
+ * (slice_slot). */
+static int memory_slot(SPYValue *fn, SPYValue *self, size_t argc, SPYValue *const *argv) {
+    intptr_t op = (intptr_t)fn->as.native.data;
+    if (self->type != SPY_MEMORYVIEW || self->as.memory.released || !self->as.memory.ndim) return 0;
+    if (op == MV_GETITEM) return argc == 1;
+    return op == MV_SETITEM && argc == 2 && self->as.memory.ndim == 1 && !self->as.memory.readonly &&
+           (argv[1]->type == SPY_BYTES || argv[1]->type == SPY_BYTEARRAY || argv[1]->type == SPY_MEMORYVIEW);
+}
 /* Whether native fn is memoryview.hex. */
 static int hex_viewing(SPYValue *fn) { return fn->as.native.kwcall == memory_method && (intptr_t)fn->as.native.data == MV_HEX; }
 /* The index among argv of the separator of a hex() call of callee, a

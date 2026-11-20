@@ -77,6 +77,15 @@ SOURCES = {
     "slot_big_index": IDX + "[1].__getitem__(I(2**100))",
     "range_slot_index": IDX + "result = (range(10).__getitem__(I(4)), range(10)[I(6)])",
     "range_big_index": IDX + "range(10).__getitem__(I(2**100))",
+    "array_slice_iterable": "class J:\n    def __init__(s, v): s.v = v\n    def __index__(s):\n        for _ in (): pass\n"
+                            "        log.append(str(s.v))\n        return s.v\nclass V:\n    def __iter__(s):\n        for _ in (): pass\n"
+                            "        log.append('iter'); return iter([65, 66])\ndef g():\n    log.append('gen'); yield 70\n"
+                            "b = bytearray(b'abc')\nb[J(0):J(2)] = V()\nd = bytearray(b'abc')\nd[0:1] = g()\nresult = (b, d)",
+    "slot_slice_index": "class J:\n    def __init__(s, v): s.v = v\n    def __index__(s):\n        for _ in (): pass\n"
+                        "        log.append(str(s.v))\n        return s.v\nb = bytearray(b'abcd')\nb.__setitem__(slice(J(0), J(2)), b'Z')\n"
+                        "v = memoryview(bytearray(b'ab'))\ntry: v.__setitem__(slice(J(0), J(1)), 5)\nexcept TypeError as e: m = str(e)\n"
+                        "def g():\n    log.append('gen'); yield 9\nL = [1, 2]\ntry: L[0::0] = g()\nexcept ValueError as e: z = str(e)\n"
+                        "result = (list.__getitem__([1, 2, 3], slice(J(1), None)), b, v.__getitem__(slice(J(1), None)).tobytes(), m, z)",
 }
 
 
