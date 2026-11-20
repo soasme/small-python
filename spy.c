@@ -28733,6 +28733,14 @@ static int map_steps(SPYValue *callee) {
 static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
 static SPYValue *check_next(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* What the read of an item's hook gave, method, for check_from's test of
+ * state's a: its call (check_next). */
+static SPYValue *check_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *method) {
+    if (!method) return check_next(c, m, state, NULL);
+    SPYValue *result = callk(c, m, method, 1, (SPYValue *[]){spy_retain(state->as.seq.items[0])}, check_next, state);
+    spy_release(method);
+    return result;
+}
 /* isinstance() of a, or issubclass() for sub, against the items of tuple
  * choices from i on, on m: an item's Python __instancecheck__ or
  * __subclasscheck__ is m's call (callk), the test going on with the next
@@ -28773,11 +28781,14 @@ static SPYValue *check_from(SPYContext *c, Machine *m, int sub, SPYValue *a, SPY
             choices = inner; i = (size_t)-1;
             continue;
         }
-        if ((sub || value_class(c, a) != item) && (function = item_function(c, item, sub ? "__subclasscheck__" : "__instancecheck__"))) {
+        if ((sub || value_class(c, a) != item) && (function = item_special(c, item, sub ? "__subclasscheck__" : "__instancecheck__"))) {
             SPYValue *parts[] = {spy_retain(a), spy_retain(choices), int_value(c, (int64_t)i + 1), spy_bool(c, sub)};
             SPYValue *state = spy_tuple(c, 4, parts);
             release_all(4, parts);
-            result = state ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(item), spy_retain(a)}, check_next, state) : NULL;
+            /* A descriptor's Python __get__ reads the hook first (check_read). */
+            result = !state ? NULL : machine_function(c, function) ?
+                     callk(c, m, function, 2, (SPYValue *[]){spy_retain(item), spy_retain(a)}, check_next, state) :
+                     descriptor_readk(c, m, function, item, check_read, state);
             break;
         }
         /* One by the abstract protocol goes on with the next item when false. */
@@ -28795,7 +28806,13 @@ static NO_INLINE int checks_call_rest(SPYContext *c, Machine *m, int id, size_t 
     int sub = id == B_ISSUBCLASS;
     if ((!sub && id != B_ISINSTANCE) || argc != 2) return 0;
     if (argv[1]->type == SPY_TUPLE) *result = check_from(c, m, sub, argv[0], argv[1], 0);
-    else if (abstract_reaches(c, sub, argv[0], argv[1])) *result = abstract_from(c, m, sub, argv[0], argv[1], NULL, 0);
+    else if ((sub || value_class(c, argv[0]) != argv[1]) && !item_function(c, argv[1], sub ? "__subclasscheck__" : "__instancecheck__") &&
+             item_special(c, argv[1], sub ? "__subclasscheck__" : "__instancecheck__")) {
+        /* A hook a descriptor's Python __get__ reads tests it as a tuple of it alone does. */
+        SPYValue *alone = tuple_of(c, 1, argv + 1);
+        *result = alone ? check_from(c, m, sub, argv[0], alone, 0) : NULL;
+        spy_release(alone);
+    } else if (abstract_reaches(c, sub, argv[0], argv[1])) *result = abstract_from(c, m, sub, argv[0], argv[1], NULL, 0);
     else return 0;
     return 1;
 }
@@ -32123,7 +32140,7 @@ static NO_INLINE Machine *lookup_returned(SPYContext *c, Machine *m, Instruction
     release_all(10, (SPYValue *[]){test, right, left, candidate, index, changes, at, hash, key, map});
     return m;
 }
-static SPYValue *based_item(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue **);
+static SPYValue *based_item(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
 /* The __hash__ hash_call entered for step ins returned result, the key's
  * hash, kept for the step to use once: a display's step runs again; an
  * operator or a store runs on the operands it kept under the key, a
@@ -32197,7 +32214,7 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     } else {
         hash_kept(c, key, hashed && !c->looked, hash);
         /* A dict subclass's absent item is its Python __missing__'s (based_item). */
-        SPYValue *env = NULL, *function = hashed && !contains && x->type == SPY_INSTANCE ? based_item(c, m, x, y, &env) : NULL;
+        SPYValue *env = NULL, *function = hashed && !contains && x->type == SPY_INSTANCE ? based_item(c, m, NULL, x, y, &env) : NULL;
         Call *call = function ? call_enter(c, function, env, m) : NULL;
         if (call) call->m.outermost = CALL_OPERATOR;
         else if (function) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
@@ -32416,13 +32433,54 @@ static int native_absent(SPYContext *c, SPYValue *dict, SPYValue *key) {
     if (kept) { c->hashed = NULL; spy_release(key); }
     return 1;
 }
+/* The state of operator step ins's x[y] while a continuation computes it
+ * (item_called): the step's index, x, y and whether the caller still
+ * waits, which item_queued ends; held twice, or NULL. */
+static SPYValue *item_state(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y) {
+    SPYValue *index = int_value(c, (int64_t)(ins - m->code->items));
+    SPYValue *state = index ? spy_tuple(c, 4, (SPYValue *[]){index, x, y, c->booleans[1]}) : NULL;
+    spy_release(index);
+    return spy_retain(state);
+}
+/* What x[y]'s method returned, result, for state (item_state): the step
+ * ends (operator_finish), or its caller, still waiting, has the result. */
+static SPYValue *item_called(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **s = state->as.seq.items;
+    if (s[3] == c->booleans[1]) { spy_release(state); return result; }
+    m->pc = operator_finish(c, m, &m->code->items[s[0]->as.integer_data.small], s[2], result, m->pc);
+    spy_release(state);
+    return c->stepped;
+}
+/* The caller's end of state's wait, value what started its continuation
+ * gave: c->unbound when it is queued on m, the continuation then ending
+ * the step; else value, NULL with an error for the step. */
+static SPYValue *item_queued(SPYContext *c, SPYValue *state, SPYValue *value) {
+    spy_release(state->as.seq.items[3]);
+    state->as.seq.items[3] = spy_retain(c->booleans[0]);
+    spy_release(state);
+    return c->k_fn ? c->unbound : value;
+}
+/* What the read of x's __missing__ descriptor gave, method, for x[y]
+ * (state): its call with y (item_called). */
+static SPYValue *missing_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *method) {
+    if (!method) return item_called(c, m, state, NULL);
+    SPYValue *result = callk(c, m, method, 1, (SPYValue *[]){spy_retain(state->as.seq.items[2])}, item_called, state);
+    spy_release(method);
+    return result;
+}
 /* x[y], x an instance of a builtin's subclass: its class's Python
  * __getitem__, or for a dict's subclass, of a key y that is absent,
  * found without calling Python (native_absent), its Python
  * __missing__, entered as an operator's method with its env, x, y and the
- * phase pushed on m's stack; else NULL. */
-static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+ * phase pushed on m's stack; with step ins, one a descriptor's Python
+ * __get__ reads (missing_read); else NULL. */
+static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *base = builtin_base(c, x, "__getitem__", NULL), *function = class_lookup(x->as.map.parent, base ? "__missing__" : "__getitem__");
+    if (ins && function && base && is_dict(base) && !machine_missing(c, function) && descriptor_getter(c, function) && native_absent(c, base, y)) {
+        /* A __missing__ descriptor's Python __get__ reads it first (missing_read). */
+        SPYValue *state = item_state(c, m, ins, x, y);
+        return state ? item_queued(c, state, descriptor_readk(c, m, function, x, missing_read, state)) : NULL;
+    }
     if (!function || !(base ? machine_missing(c, function) : machine_function(c, function)) ||
         (base && (!is_dict(base) || !native_absent(c, base, y))) || operator_push(c, m, x, y, OPERATOR_FIRST)) return NULL;
     if ((function = missing_env(c, function, x, y, env))) return function;
@@ -32455,18 +32513,8 @@ static SPYValue *class_item_function(SPYContext *c, SPYValue *x, int *generic) {
     }
     return function;
 }
-/* What x[y]'s __class_getitem__ returned, result, state its step's
- * index, x, y and whether class_item still waits: the step ends
- * (operator_finish), or class_item has the result. */
-static SPYValue *class_item_called(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    SPYValue **s = state->as.seq.items;
-    if (s[3] == c->booleans[1]) { spy_release(state); return result; }
-    m->pc = operator_finish(c, m, &m->code->items[s[0]->as.integer_data.small], s[2], result, m->pc);
-    spy_release(state);
-    return c->stepped;
-}
 /* What the read of x's __class_getitem__ gave, method, for x[y] (state):
- * its call with y on m (class_item_called); none, or None, makes x not
+ * its call with y on m (item_called); none, or None, makes x not
  * subscriptable. */
 static SPYValue *class_item_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *method) {
     SPYValue *x = state->as.seq.items[1];
@@ -32474,9 +32522,9 @@ static SPYValue *class_item_read(SPYContext *c, Machine *m, SPYValue *state, SPY
     if (!method || method->type == SPY_NONE) {
         if (!c->error_type[0]) errorf(c, "TypeError", "type '%s' is not subscriptable", class_tname(x));
         spy_release(method);
-        return class_item_called(c, m, state, NULL);
+        return item_called(c, m, state, NULL);
     }
-    SPYValue *result = callk(c, m, method, 1, (SPYValue *[]){spy_retain(state->as.seq.items[2])}, class_item_called, state);
+    SPYValue *result = callk(c, m, method, 1, (SPYValue *[]){spy_retain(state->as.seq.items[2])}, item_called, state);
     spy_release(method);
     return result;
 }
@@ -32488,21 +32536,14 @@ static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, Instruction *in
     if (generic || function || x == c->types[SPY_CLASS] || (x->as.map.meta && class_lookup(x->as.map.meta, "__getitem__"))) return NULL;
     /* Else x's __class_getitem__, read by attribute_step or a Python
      * lookup (attribute_callk), is called on m (class_item_read). */
-    SPYValue *index = int_value(c, (int64_t)(ins - m->code->items)), *method;
-    SPYValue *state = index ? spy_tuple(c, 4, (SPYValue *[]){index, x, y, c->booleans[1]}) : NULL;
-    spy_release(index);
+    SPYValue *state = item_state(c, m, ins, x, y), *method;
     if (!state) return NULL;
-    spy_retain(state);
     if (!(method = attribute_step(c, x, "__class_getitem__")) && !c->error_type[0] && c->fallback) {
         function = c->fallback;
         c->fallback = NULL;
         method = attribute_callk(c, m, x, "__class_getitem__", function, class_item_read, state);
     } else method = class_item_read(c, m, state, method);
-    /* Queued, the continuation ends the step; else its error does here. */
-    spy_release(state->as.seq.items[3]);
-    state->as.seq.items[3] = spy_retain(c->booleans[0]);
-    spy_release(state);
-    return c->k_fn ? c->unbound : method;
+    return item_queued(c, state, method);
 }
 /* Whether operator step ins of x and y calls an intrinsic (class_item,
  * union_call). */
@@ -32938,7 +32979,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             !(function = o ? item_special(c, y, reflected) : rich_special(c, y, rich_reflected[rich], &negated))) return NULL;
         self = y; other = x; phase = OPERATOR_LAST;
     } else {
-        if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, x, y, env);
+        if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, ins, x, y, env);
         if (kind == OPERATE_INDEX && x->type == SPY_CLASS) return class_item(c, m, ins, x, y, env);
         /* A list's or tuple's items compared by a Python __eq__ (equal_call). */
         if ((rich == R_EQ || rich == R_NE) && pair_python(c, x, y))

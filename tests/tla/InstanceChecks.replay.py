@@ -23,22 +23,33 @@ class Empty:
 RESULTS = {"true": lambda: 1, "false": lambda: 0, "truthy": Truthy, "empty": Empty}
 
 
-def hooks(kind):
+class Described:
+    def __init__(self, function):
+        self.function = function
+
+    def __get__(self, obj, owner):
+        for _ in ():  # a loop: the read runs on the machine
+            pass
+        return self.function.__get__(obj, owner)
+
+
+def hooks(kind, via="function"):
     def check(cls, other):
         for _ in ():  # a loop: the hook runs on the machine
             pass
         if kind == "raise":
             raise ValueError
         return RESULTS[kind]()
-    return {"__instancecheck__": check, "__subclasscheck__": check}
+    hook = Described(check) if via == "descriptor" else check
+    return {"__instancecheck__": hook, "__subclasscheck__": hook}
 
 
 def outcome(p):
     hook = p["hook"]
     if hook in ("true", "false", "truthy", "empty", "raise"):
-        C = type("Meta", (type,), hooks(hook))("C", (), {})
+        C = type("Meta", (type,), hooks(hook, p["via"]))("C", (), {})
     else:
-        C = type("C", (), hooks("true") if hook == "onclass" else {})
+        C = type("C", (), hooks("true", p["via"]) if hook == "onclass" else {})
     D = type("D", (C,), {})
     cls = {"C": C, "tuple": (str, C), "pair": (C, int), "nested": ((str, (C,)),), "five": 5}[p["cls"]] if p["cls"] != "instance" else C()
     try:

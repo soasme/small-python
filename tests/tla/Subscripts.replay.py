@@ -52,6 +52,12 @@ SOURCES = {
     "dict_tuple_key": "d = {(1, 2): 'x'}\nresult = d[1, 2]",
     "dict_unhashable": "{}[[1]]",
     "dict_missing_hook": "class D(dict):\n    def __missing__(s, k): return ('missing', k)\nresult = D()['k']",
+    "dict_missing_described": "log = []\nclass G:\n    def __init__(s, f): s.f = f\n    def __get__(s, obj, owner):\n        for _ in (): pass\n"
+                               "        log.append('get')\n        if s.f is None: raise ValueError('unread')\n        return s.f.__get__(obj, owner)\n"
+                               "def missing(s, k): return ('missing', k, log)\nclass D(dict):\n    __missing__ = G(missing)\nresult = D()['k']",
+    "dict_missing_unreadable": "log = []\nclass G:\n    def __init__(s, f): s.f = f\n    def __get__(s, obj, owner):\n        for _ in (): pass\n"
+                               "        log.append('get')\n        if s.f is None: raise ValueError('unread')\n        return s.f.__get__(obj, owner)\n"
+                                "class D(dict):\n    __missing__ = G(None)\nresult = D(k=1)['k'], D()['j']",
     "range_index": "result = (range(10)[-1], range(0, 10, 3)[2], range(10)[2:5])",
     "range_out": "range(3)[3]",
     "bytes_index": "result = (b'ab'[0], bytearray(b'ab')[-1])",

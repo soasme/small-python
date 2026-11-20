@@ -591,6 +591,8 @@ Unreleased (0.10.0):
 - an iterator's or `reversed` object's `__length_hint__` calls a Python `__len__` without nesting on the C stack, and a spent `reversed` object's no longer calls it
 - subscripting a class calls a `__class_getitem__` that a metaclass's `__getattribute__` or `__getattr__` reads, or a plain function or staticmethod, without nesting on the C stack
 - `list()` and `bytes()` of an instance read its `__len__` and `__length_hint__` descriptors' Python `__get__` without nesting on the C stack, and a `TypeError` from reading `__len__` now falls back to `__length_hint__`
+- `isinstance()` and `issubclass()` read an `__instancecheck__` or `__subclasscheck__` descriptor's Python `__get__` without nesting on the C stack
+- a dict subclass's subscript reads a `__missing__` descriptor's Python `__get__` without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

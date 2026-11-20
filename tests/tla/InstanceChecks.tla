@@ -22,12 +22,15 @@
 (* (str, C), (C, int), ((str, (C,)),), 5, or C(). The outcome is the      *)
 (* result or the                                                           *)
 (* exception; a tuple's items are checked in order until one is true.     *)
+(* Each hook is a function, or a descriptor whose Python __get__ binds it  *)
+(* (via), which leaves the outcome as it is.                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Hooks == {"true", "false", "truthy", "empty", "raise", "onclass", "none"}
 Subjects == {"C", "D", "int"}
-Programs == [check : {"isinstance", "issubclass"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "pair", "nested", "five", "instance"}]
+Programs == [check : {"isinstance", "issubclass"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "pair", "nested", "five", "instance"},
+             via : {"function", "descriptor"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
