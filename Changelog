@@ -639,6 +639,7 @@ Unreleased (0.10.0):
 - `index()`, `count()` and `remove()` of a list or tuple compare tuple, list, dict and frozendict items by their items' Python `__eq__` without nesting on the C stack
 - `==` of frozendicts whose keys compare by a Python `__eq__`, and `in`, `index()` and `count()` of such a dict or frozendict in a list or tuple, compare the keys without nesting on the C stack
 - A generator that ends by an exception releases its local variables then, unless a traceback still holds its frame
+- `throw()` into a `yield from` with arguments a generator refuses, or a GeneratorExit whose delegate closes first, runs without nesting on the C stack; the generator runs while its delegate closes
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

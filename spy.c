@@ -26472,6 +26472,164 @@ static int made_natively(SPYValue *k) {
 static NO_INLINE int thrown_at(Machine *m, size_t argc) {
     return argc < 2 || raises_at(innermost(m));
 }
+static int method_absent(SPYValue *, const char *);
+/* Whether v is an exception class or instance. */
+static int exception_like(SPYContext *c, SPYValue *v) {
+    SPYValue *k = v->type == SPY_INSTANCE ? v->as.map.parent : v->type == SPY_CLASS ? v : NULL;
+    return k && subclass(k, c->exceptions[X_BASE_EXCEPTION]);
+}
+static int thrown_raw(SPYContext *, SPYValue *, SPYValue *);
+/* Whether the argc arguments argv of a throw into generator g are ones
+ * thrown_exception refuses before calling any class: a traceback that is
+ * none, an exception instance given a value, or no exception: 1; 2 for a
+ * GeneratorExit into a yield from, which closes the delegate first. */
+static NO_INLINE int throw_refused(SPYContext *c, SPYValue *g, size_t argc, SPYValue *const *argv) {
+    SPYValue *e = argv[0], *k = e->type == SPY_INSTANCE ? e->as.map.parent : e;
+    if (argc > 3 || (g->type != SPY_GENERATOR && g->type != SPY_COROUTINE)) return 0;
+    if (!exception_like(c, e)) return 1;
+    if (!(argc == 3 && argv[2]->type != SPY_NONE && argv[2]->type != SPY_TRACEBACK) && !(e != k && argc > 1 && argv[1]->type != SPY_NONE)) return 0;
+    return subclass(k, c->exceptions[X_GENERATOR_EXIT]) && g->as.generator.machine && g->as.generator.machine->awaiting == AWAIT_DELEGATE ? 2 : 1;
+}
+/* Whether generator machine m checks a throw's arguments itself: at a
+ * yield, or a yield from of an iterator with no throw (raises_at). */
+static int refuses(Machine *m) {
+    return raises_at(m) || (m->awaiting == AWAIT_DELEGATE && !m->operation && method_absent(m->delegate, "throw"));
+}
+/* The Python close a yield from's delegate d, an instance, has on the
+ * machine, borrowed; else NULL. */
+static SPYValue *method_function(SPYContext *, SPYValue *, const char *);
+static NO_INLINE SPYValue *close_function(SPYContext *c, SPYValue *d) {
+    SPYValue *function = method_function(c, d, "close");
+    return function && machine_function(c, function) ? function : NULL;
+}
+static int consumer_id(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+/* Whether yield from delegate d closes on the machine (exit_refused):
+ * a generator's close at a yield, an instance's Python close, or none. */
+static int exit_closes(SPYContext *c, SPYValue *d) {
+    return method_absent(d, "close") || close_function(c, d) || consumer_id(c, d, M_CLOSE, 0, NULL) == B_CLOSE;
+}
+static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *);
+/* What the close of generator g's yield from's delegate returned
+ * (exit_refused), ctx g and the refused throw's error: the error raises;
+ * an error closing raises in g at its yield from instead, which drops the
+ * delegate (consume). g runs meanwhile, so that no close ends it. */
+static SPYValue *exit_closed(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue *g = ctx->as.seq.items[0];
+    g->as.generator.running = 0;
+    if (result) { spy_release(result); raise_value(c, ctx->as.seq.items[1]); }
+    else if (!c->stopped) {
+        if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+        ErrorState error = take_error(c);
+        Machine *gm = g->as.generator.machine;
+        SPYValue *d = gm->delegate;
+        gm->delegate = NULL; gm->awaiting = AWAIT_YIELD; gm->drop = 0;
+        spy_release(d);
+        consume(c, m, B_THROW, g, M_THROW, NULL, error.value, NULL);
+    }
+    spy_release(ctx);
+    return NULL;
+}
+/* A delegate's close that exit_refused consumed ended, given what the
+ * delegate yielded (item) or its error: its continuation goes on
+ * (exit_closed); 1 when m consumes again. */
+static NO_INLINE int exit_closing(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
+    Consumer *s = m->blocks[m->block_len - 1].consumer;
+    SPYValue *ctx = s->closed_ctx, *g = m->blocks[m->block_len - 1].value;
+    Continuation closed = s->closed;
+    s->closed_ctx = NULL;
+    if (item) {
+        spy_release(item);
+        spy_error(c, "RuntimeError", g->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
+    }
+    SPYValue *result = c->error_type[0] ? NULL : spy_none(c);
+    pop_block(c, m, f);
+    size_t depth = m->block_len;
+    SPYValue *value = closed(c, m, ctx, result);
+    if (value) return machine_push(c, m, value), 0;
+    return c->k_fn || (!c->error_type[0] && m->block_len > depth);
+}
+/* A throw of a GeneratorExit with refused arguments, generator, start
+ * and traceback, into generator g, a yield from: its delegate closes on
+ * m (exit_closes), a generator consumed (exit_closing), an instance's
+ * Python close called, and the TypeError raises after it (exit_closed);
+ * one with no close leaves it raised at once (13.16.3). */
+static NO_INLINE void exit_refused(SPYContext *c, Machine *m, SPYValue *g, SPYValue *generator, SPYValue *start, SPYValue *traceback) {
+    SPYValue *d = g->as.generator.machine->delegate, *function = close_function(c, d);
+    thrown_exception(c, traceback ? 3 : start ? 2 : 1, (SPYValue *[]){generator, start ? start : c->none, traceback});
+    if (method_absent(d, "close")) return;
+    if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+    ErrorState error = take_error(c);
+    SPYValue *ctx = tuple_of(c, 2, (SPYValue *[]){g, error.value});
+    spy_release(error.value);
+    if (!ctx) return;
+    g->as.generator.running = 1;
+    if (function) { callk(c, m, function, 1, (SPYValue *[]){spy_retain(d)}, exit_closed, ctx); return; }
+    size_t depth = m->block_len;
+    consume(c, m, B_CLOSE, d, M_CLOSE, NULL, NULL, NULL);
+    if (m->block_len > depth) { m->blocks[depth].consumer->closed = exit_closed; m->blocks[depth].consumer->closed_ctx = ctx; }
+    else { g->as.generator.running = 0; spy_release(ctx); }
+}
+/* The Python throw of the instance generator machine m's yield from waits
+ * on, borrowed, which takes a throw's arguments as given; else NULL. */
+static NO_INLINE SPYValue *passed_function(SPYContext *c, Machine *m) {
+    SPYValue *function = m->awaiting == AWAIT_DELEGATE && !m->operation ? method_function(c, m->delegate, "throw") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* Mark generator g and the generators its yield from waits on down to
+ * machine inner running, or not. */
+static void chain_running(SPYValue *g, Machine *inner, int running) {
+    for (;;) {
+        g->as.generator.running = running;
+        if (g->as.generator.machine == inner) return;
+        g = g->as.generator.machine->delegate;
+    }
+}
+/* What the Python throw that throw_passed called returned, ctx generator
+ * g, whose yield from's delegates down to it ran meanwhile: its value is
+ * the throw()'s; its error raises at the yield from waiting on it, which
+ * drops the delegate (consume). */
+static SPYValue *throw_returned(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    Machine *inner = innermost(ctx->as.generator.machine);
+    chain_running(ctx, inner, 0);
+    if (!result && !c->stopped) {
+        if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+        ErrorState error = take_error(c);
+        SPYValue *d = inner->delegate;
+        inner->delegate = NULL; inner->awaiting = AWAIT_YIELD; inner->drop = 0;
+        spy_release(d);
+        consume(c, m, B_THROW, ctx, M_THROW, NULL, error.value, NULL);
+    }
+    spy_release(ctx);
+    return result;
+}
+/* A throw of argc refused arguments argv into generator g whose innermost
+ * yield from waits on an instance with a Python throw (passed_function):
+ * a call of it with them as given on m, g's delegates running meanwhile
+ * (throw_returned) (13.16.3). */
+static NO_INLINE void throw_passed(SPYContext *c, Machine *m, SPYValue *g, size_t argc, SPYValue *const *argv) {
+    Machine *inner = innermost(g->as.generator.machine);
+    SPYValue *args[4] = {spy_retain(inner->delegate)};
+    for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(argv[i]);
+    chain_running(g, inner, 1);
+    callk(c, m, passed_function(c, inner), argc + 1, args, throw_returned, spy_retain(g));
+}
+/* The TypeError of a throw's refused arguments (thrown_exception) into
+ * generator g suspended in a yield from of generators, owned: the
+ * innermost refused them unresumed, so the yield from waiting on it drops
+ * it and raises the error, as at a yield (13.16.3); else NULL, the error
+ * left for the throw's caller. */
+static NO_INLINE SPYValue *thrown_dropped(SPYContext *c, SPYValue *g) {
+    Machine *m = g->as.generator.machine, *inner = innermost(m);
+    if (m == inner || c->stopped) return NULL;
+    while (m->delegate->as.generator.machine != inner) m = m->delegate->as.generator.machine;
+    if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+    ErrorState error = take_error(c);
+    if (!error.value) { restore_error(c, &error); return NULL; }
+    SPYValue *d = m->delegate;
+    m->delegate = NULL; m->awaiting = AWAIT_YIELD; m->drop = 0;
+    spy_release(d);
+    return error.value;
+}
 /* Whether a close of, or a throw of exception into, a generator or
  * coroutine raises at its yield on the machine (consume): one suspended
  * there, or delegating to a yield (delegating); into an async
@@ -27112,10 +27270,20 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (method == M_CLOSE || method == M_THROW)
         /* A throw of a class and its value, and a traceback or None, into a
          * yield, or a yield from of a builtin iterator, too. */
+    {
+        /* A throw whose arguments are refused raises where its generator
+         * would check them (refuses), or closes its yield from first
+         * (exit_refused). */
+        int refused = method == M_THROW && argc ? throw_refused(c, callee, argc, argv) : 0;
+        if (refused)
+            return refused == 1 ? (suspended(callee) && (refuses(innermost(callee->as.generator.machine)) || (argc == 1 && thrown_raw(c, callee, argv[0])))) ||
+                                  (argc > 1 && !callee->as.generator.running && passed_function(c, innermost(callee->as.generator.machine))) ? B_THROW : -1 :
+                   !callee->as.generator.running && !callee->as.generator.done && exit_closes(c, callee->as.generator.machine->delegate) ? B_THROW : -1;
         return (argc == (method == M_THROW) || (argc >= 2 && method == M_THROW && argv[0]->type == SPY_CLASS &&
                                                 (argc == 2 || argv[2]->type == SPY_NONE || argv[2]->type == SPY_TRACEBACK))) &&
                throws_in(c, callee, argc ? argv[0] : NULL) && thrown_at(callee->as.generator.machine, argc) ?
                method == M_THROW ? B_THROW : B_CLOSE : -1;
+    }
     /* An iterator's __next__, bound or given it, of a Python function is next() of it. */
     if (method == M_NEXT && !argc && callee->type == SPY_ITERATOR) return next_calls(c, callee) ? B_NEXT : -1;
     SPYValue *slot = method < 0 ? slotted_next(c, callee, argc, argv) : NULL;
@@ -27353,15 +27521,16 @@ static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(state);
     return NULL;
 }
-/* Whether class k thrown into generator g reaches, as given, the
- * instance its yield from, or its delegates', waits on (throws_in): one
+/* Whether class k, or what is no exception, thrown into generator g
+ * reaches, as given, the instance its yield from, or its delegates',
+ * waits on (throws_in): one
  * with its close, for a GeneratorExit, or throw method. */
 static NO_INLINE int thrown_raw(SPYContext *c, SPYValue *g, SPYValue *k) {
     if (g->type == SPY_BOUND_METHOD) g = g->as.bound.self;
     if (g->type == SPY_COROUTINE_ITERATOR) g = g->as.iterator.source;
     Machine *m = (g->type == SPY_GENERATOR || g->type == SPY_COROUTINE) && g->as.generator.machine ? innermost(g->as.generator.machine) : NULL;
     return m && m->awaiting == AWAIT_DELEGATE && !m->operation && m->delegate->type == SPY_INSTANCE &&
-           !method_absent(m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
+           !method_absent(m->delegate, exits(c, k) ? "close" : "throw");
 }
 /* Whether class k thrown into generator g is a GeneratorExit made by
  * Python (made_natively) after g's yield from's delegates close, as
@@ -27392,6 +27561,22 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     int relayed = method;
     callee = anext_relayed(callee, &method, &defaulted);
     if (callee == relaying) relaying = NULL;
+    /* A GeneratorExit refused into a yield from closes it first; other
+     * refused arguments pass as given to an instance's Python throw. */
+    SPYValue *thrower = method == M_THROW ? callee : callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_THROW ? callee->as.bound.self : NULL;
+    size_t thrown = traceback ? 3 : start ? 2 : 1;
+    SPYValue *const thrown_args[] = {generator, start ? start : c->none, traceback};
+    int refused = id == B_THROW && thrower && generator ? throw_refused(c, thrower, thrown, thrown_args) : 0;
+    if (refused == 1 && thrown > 1 && !(thrower->as.generator.machine && refuses(innermost(thrower->as.generator.machine)))) {
+        throw_passed(c, m, thrower, thrown, thrown_args);
+        spy_release(generator); spy_release(start); spy_release(defaulted);
+        return;
+    }
+    if (refused == 2) {
+        exit_refused(c, m, thrower, generator, start, traceback);
+        spy_release(generator); spy_release(start); spy_release(defaulted);
+        return;
+    }
     if (id == B_NEXT && method < 0 && generator && generator->type == SPY_ANEXT_AWAITABLE && anext_asend(generator)) {
         SPYValue *asend = spy_retain(anext_asend(generator));
         defaulted = generator->as.iterator.counter;
@@ -27436,8 +27621,9 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
                !(start && start->type == SPY_INSTANCE && subclass(start->as.map.parent, generator)) &&
                !(start && start->type == SPY_TUPLE && start->as.seq.len > 8) &&
                (!traceback || traceback->type == SPY_NONE || traceback->type == SPY_TRACEBACK),
-        raw = late || (id == B_THROW && generator->type == SPY_CLASS && thrown_raw(c, callee, generator));
-    if (id == B_THROW && generator->type == SPY_CLASS && !raw) {
+        raw = late || (id == B_THROW && (generator->type == SPY_CLASS || (!start && !traceback && !exception_like(c, generator))) &&
+                       thrown_raw(c, callee, generator));
+    if (id == B_THROW && generator->type == SPY_CLASS && !raw && !(traceback && traceback->type != SPY_NONE && traceback->type != SPY_TRACEBACK)) {
         /* The value is the instance, the tuple of arguments, none, or the
          * one argument (thrown_exception). */
         size_t argc = start && start->type == SPY_TUPLE ? start->as.seq.len : start && start->type != SPY_NONE;
@@ -27505,6 +27691,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     SPYValue *exit = late && (start || traceback) ? tuple_of(c, 3, (SPYValue *[]){generator, start ? start : c->none, traceback ? traceback : c->none}) : NULL;
     if (id == B_THROW) {
         sent = raw ? spy_retain(generator) : thrown_exception(c, traceback ? 3 : start ? 2 : 1, (SPYValue *[]){generator, start ? start : c->none, traceback});
+        if (!sent && method >= 0) sent = thrown_dropped(c, callee);
         spy_release(generator); spy_release(start); start = NULL;
     }
     if ((id == B_NEXT || id == B_CLOSE || id == B_THROW) && method >= 0) generator = spy_retain(callee);
@@ -27560,7 +27747,7 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
         /* A throw of a GeneratorExit closes a yield from's delegates, a
          * new one raised at the innermost yield, and raises at the
          * outermost (delegate_closed). */
-        int closing = id == B_CLOSE || late || subclass(sent->as.map.parent, c->exceptions[X_GENERATOR_EXIT]);
+        int closing = id == B_CLOSE || late || exits(c, sent);
         if (id == B_THROW && closing && g->awaiting == AWAIT_DELEGATE) {
             consumer->made = exit ? exit : sent; consumer->sent = close_exception(c);
             if (exit) spy_release(sent);
@@ -27825,6 +28012,7 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     if (UNLIKELY(top->consumer->id == B_CLOSE)) {
         if (!item && error_is(c, "GeneratorExit")) spy_clear_error(c);
         if (top->consumer->finalizing) return finalize_closed(c, m, f, item);
+        if (top->consumer->closed) return exit_closing(c, m, f, item);
         /* A coroutine that yields has its own error. */
         if (item && top->value->type == SPY_COROUTINE) {
             spy_release(item); item = NULL;
@@ -37504,7 +37692,7 @@ static ALWAYS_INLINE int next_call(SPYContext *c, Machine *m, SPYValue *v, SPYVa
  * ended (finish_delegate). */
 static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed, int *kind, SPYValue **env, SPYValue **item) {
     SPYValue *d = m->delegate, *thrown = resumed ? delegate_thrown(m) : NULL, *sent = resumed && !thrown ? resumed_with(c, m->resumer) : NULL;
-    int closing = thrown && subclass(thrown->type == SPY_CLASS ? thrown : thrown->as.map.parent, c->exceptions[X_GENERATOR_EXIT]),
+    int closing = thrown && exits(c, thrown),
         next = !thrown && (!sent || sent->type == SPY_NONE);
     SPYValue *function = thrown ? method_function(c, d, closing ? "close" : "throw") : next ? next_function(c, d) : method_function(c, d, "send"), *call = NULL;
     *kind = !thrown ? CALL_DELEGATE : closing ? CALL_CLOSED : CALL_THROWN;
