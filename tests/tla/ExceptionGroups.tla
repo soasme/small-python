@@ -53,7 +53,8 @@ Cases == {"base_to_exception", "eg_rejects_base", "empty", "not_sequence", "not_
           "arity", "attributes", "readonly", "repr", "derive_custom", "derive_default_drops_subclass",
           "split_copies_metadata", "split_tuple_types", "split_all_returns_self", "split_group_type",
           "split_bad_arg", "subgroup_none", "str_count", "except_star_unwrap", "nested_traceback_kept",
-          "generic_alias", "list_copied", "custom_repr_saved", "custom_repr_not_str"}
+          "generic_alias", "list_copied", "custom_repr_saved", "custom_repr_not_str",
+          "split_truth"}
 Programs == [op : Ops, items : UNION {[1..n -> {"V", "T", "GVT", "GT"}] : n \in 1..3}]
             \cup [case : Cases]
 
@@ -81,6 +82,7 @@ Case(c) ==
       \* A custom sequence's Python __repr__ comes first, its text kept for the group's repr.
       [] c = "custom_repr_saved" -> "(\"ExceptionGroup('m', S)\", ['repr', 0, 1])"
       [] c = "custom_repr_not_str" -> "TypeError: S.__repr__() must return a str, not int"
+      [] c = "split_truth" -> "(1, 1, [False, False], 'T.__bool__() must return a bool, not int')"
       [] c = "derive_custom" -> "('MyEG', 'm!', 'm!')"
       [] c = "derive_default_drops_subclass" -> "('ExceptionGroup', 'ExceptionGroup')"
       [] c = "split_copies_metadata" -> "(['n'], 'KeyError', False)"

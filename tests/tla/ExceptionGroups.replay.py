@@ -62,6 +62,9 @@ SOURCES = {
                          "        log.append(i)\n        if i: raise IndexError\n        return ValueError()\n"
                          "    def __repr__(s):\n        for _ in (): pass\n        log.append('repr')\n        return s.r\n"
                          "seq = S('S')\ng = ExceptionGroup('m', seq)\nseq.r = 'T'\nresult = (repr(g), log)",
+    "split_truth": "log = []\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return s.v\n"
+                   "g = ExceptionGroup('m', [ValueError(1), TypeError(2)])\nm, r = g.split(lambda e: T(isinstance(e, TypeError)))\n"
+                   "try: g.split(lambda e: T(1))\nexcept TypeError as e: err = str(e)\nresult = (len(m.exceptions), len(r.exceptions), log[:2], err)",
     "custom_repr_not_str": "class S:\n    def __getitem__(s, i): return ValueError()\n    def __repr__(s):\n        for _ in (): pass\n"
                            "        return 1\nresult = ExceptionGroup('m', S())",
     "derive_custom": "g = MyEG('m', [ValueError(1), TypeError(2)])\nm, r = g.split(ValueError)\nresult = (type(m).__name__, m.message, r.message)",

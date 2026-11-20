@@ -24071,6 +24071,18 @@ static SPYValue *split_resumed(SPYContext *c, Machine *m, SPYValue *job, SPYValu
     if (!result) { spy_release(job); return NULL; }
     return split_run(c, m, job, result);
 }
+static SPYValue *split_run(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
+static int truth_result(SPYContext *, SPYValue *, int, SPYValue *);
+/* What the Python __bool__ (state[2] true) or __len__ of state[1], a split
+ * condition's result, returned: split state[0] goes on with that truth. */
+static SPYValue *split_truth(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *job = spy_retain(state->as.seq.items[0]);
+    int matched = result ? truth_result(c, state->as.seq.items[1], state->as.seq.items[2] == c->booleans[1], result) : 0;
+    spy_release(state);
+    if (c->error_type[0]) { spy_release(job); return NULL; }
+    return split_run(c, m, job, spy_bool(c, matched));
+}
 /* Split job's call of fn with arg, awaited in phase: m's (callk), which
  * takes job, 1; else called here into *result, 0, or -1 on an error. */
 static int split_call(SPYContext *c, Machine *m, SPYValue *job, SPYValue *fn, SPYValue *arg, int phase, SPYValue **result) {
@@ -24108,6 +24120,17 @@ static SPYValue *split_run(SPYContext *c, Machine *m, SPYValue *job, SPYValue *r
             return value;
         }
         if (result && phase == SPLIT_TEST) {
+            /* A Python __bool__ or __len__ of the test's result is m's call
+             * (split_truth). */
+            int length = 0;
+            SPYValue *truth = m && result->type != SPY_BOOL && (result->type == SPY_INSTANCE || metaclassed(result)) ?
+                              truth_function(c, result, &length) : NULL;
+            if (truth) {
+                SPYValue *state = parts_tuple(c, 3, (SPYValue *[]){job, spy_retain(result), spy_bool(c, !length)});
+                if (state) return callk(c, m, truth, 1, (SPYValue *[]){result}, split_truth, state);
+                spy_release(result);
+                return NULL;
+            }
             int matched = truthy(result);
             spy_release(result); result = NULL;
             status = c->error_type[0] ? -1 : split_place(c, job, x, matched);
