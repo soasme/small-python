@@ -47,6 +47,8 @@ SOURCES = {
     "reduce": "result = sentinel('X', repr='r').__reduce__()",
     "copy_self": "M = sentinel('X')\nresult = (M.__copy__() is M, M.__deepcopy__({}) is M)",
     "union_repr": "result = repr(sentinel('X', repr='<r>') | int)",
+    "union_explicit": "M = sentinel('M')\nclass R:\n    def __ror__(self, o):\n        for _ in (): pass\n        return ('ror', repr(o))\n"
+                      "result = (repr(M.__or__(int)), repr(type.__ror__(int, M)), repr(sentinel.__or__(M, 1)), repr(type.__or__(int, 2.5)), M | R())",
     "union_sentinels": "A, B = sentinel('A'), sentinel('B')\ntry: A | 1\nexcept TypeError as e: err = str(e)\n"
                        "result = (repr(A | B), repr(None | A), A | A is A, err)",
     "type_module": "result = (sentinel.__module__, sentinel.__qualname__)"

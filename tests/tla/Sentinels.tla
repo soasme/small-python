@@ -24,7 +24,7 @@ Cases == {"repr_default", "repr_custom", "str_form", "name_attr", "module_attr",
           "ordering", "builtin", "repr_none", "repr_str_form", "unknown_keyword", "too_many",
           "keyword_too_many", "name_keyword", "module_any", "module_delete", "module_delete_twice",
           "name_delete", "module_global", "module_function", "reduce", "copy_self", "union_repr",
-          "type_module", "union_sentinels"}
+          "type_module", "union_sentinels", "union_explicit"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -76,6 +76,7 @@ Run(p) ==
       [] p.case = "copy_self" -> "(True, True)"
       [] p.case = "union_repr" -> "'<r> | int'"
       [] p.case = "type_module" -> "('builtins', 'sentinel')"
+      [] p.case = "union_explicit" -> "('M | int', 'M | int', 'NotImplemented', 'NotImplemented', ('ror', 'M'))"
       [] p.case = "union_sentinels" -> "('A | B', 'None | A', True, \"unsupported operand type(s) for |: 'sentinel' and 'int'\")"
 
 Init == program \in Programs /\ outcome = Pending

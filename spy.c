@@ -45177,6 +45177,7 @@ static SPYValue *cell_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
 }
 enum { SENTINEL_COPY, SENTINEL_DEEPCOPY, SENTINEL_REDUCE, SENTINEL_OR, SENTINEL_ROR, SENTINEL_REPR };
 static const char *const sentinel_methods[] = {"__copy__", "__deepcopy__", "__reduce__", "__or__", "__ror__", "__repr__"};
+static SPYValue *union_slot(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *sentinel_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
     const char *name = sentinel_methods[op];
@@ -45200,8 +45201,7 @@ static SPYValue *sentinel_method(SPYContext *c, size_t argc, SPYValue *const *ar
     if (op == SENTINEL_REPR) return stringify(c, argv[0], 1);
     if (op == SENTINEL_REDUCE) return spy_retain(argv[0]->as.sentinel.name);
     if (op == SENTINEL_COPY || op == SENTINEL_DEEPCOPY) return spy_retain(argv[0]);
-    SPYValue *args[] = {op == SENTINEL_OR ? argv[0] : arg, op == SENTINEL_OR ? arg : argv[0]};
-    return call_intrinsic(c, "_union", 2, args);
+    return union_slot(c, op == SENTINEL_OR ? argv[0] : arg, op == SENTINEL_OR ? arg : argv[0], arg);
 }
 // bytes.__buffer__, bytearray.__buffer__ and bytearray.__release_buffer__ (data is the type, negated for release).
 static SPYValue *buffer_export(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -49543,6 +49543,20 @@ static SPYValue *union_loaded(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue
     spy_release(result);
     return union_go(c, m, ctx);
 }
+/* type's or a sentinel's __or__ or __ror__: the union of left and right,
+ * other the operand that is not self; NotImplemented at once for an other
+ * neither None, a class, a sentinel nor an instance, which no union
+ * takes (the intrinsic _unionable). On the step's machine the
+ * intrinsics' calls are its, their first use loading them there
+ * (intrinsics_k). */
+static SPYValue *union_slot(SPYContext *c, SPYValue *left, SPYValue *right, SPYValue *other) {
+    if (other->type != SPY_NONE && other->type != SPY_CLASS && other->type != SPY_SENTINEL && other->type != SPY_INSTANCE)
+        return spy_retain(c->not_implemented);
+    Machine *m = step_machine(c);
+    SPYValue *ctx = m ? tuple_of(c, 3, (SPYValue *[]){left, right, other}) : NULL;
+    if (ctx) return c->intrinsics ? union_go(c, m, ctx) : intrinsics_k(c, m, union_loaded, ctx);
+    return c->error_type[0] ? NULL : type_union(c, left, right, other);
+}
 static const char *const object_method_names[] = {"__dir__", "__sizeof__", "__dir__", "__instancecheck__", "__subclasscheck__", "__or__", "__ror__"};
 static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
@@ -49566,15 +49580,7 @@ static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv
         int result = op == TYPE_INSTANCECHECK ? object_isinstance(c, args[0], argv[0]) : recursive_issubclass(c, args[0], argv[0]);
         return result < 0 ? NULL : spy_bool(c, result);
     }
-    default: {
-        SPYValue *operands[] = {op == TYPE_OR ? argv[0] : args[0], op == TYPE_OR ? args[0] : argv[0]};
-        /* On the step's machine the intrinsics' calls are its, their first
-         * use loading them there (intrinsics_k). */
-        Machine *m = step_machine(c);
-        SPYValue *ctx = m ? tuple_of(c, 3, (SPYValue *[]){operands[0], operands[1], args[0]}) : NULL;
-        if (ctx) return c->intrinsics ? union_go(c, m, ctx) : intrinsics_k(c, m, union_loaded, ctx);
-        return c->error_type[0] ? NULL : type_union(c, operands[0], operands[1], args[0]);
-    }
+    default: return union_slot(c, op == TYPE_OR ? argv[0] : args[0], op == TYPE_OR ? args[0] : argv[0], args[0]);
     }
 }
 /* Descriptors for fields of builtin values, read through the value. */
@@ -49699,7 +49705,10 @@ static int register_core_methods(SPYContext *c) {
         register_method(c, SPY_COMPLEX, "from_number", from_number, SPY_COMPLEX, METHOD_CLASS) ? -1 :
         /* complex.from_number and int.from_bytes may call on their step's machine. */
         (name_local(c->types[SPY_COMPLEX], "from_number")->as.wrapper.function->as.native.host = 2,
-         name_local(c->types[SPY_INT], "from_bytes")->as.wrapper.function->as.native.host = 2, 0);
+         name_local(c->types[SPY_INT], "from_bytes")->as.wrapper.function->as.native.host = 2,
+         /* So do type's and a sentinel's __or__ and __ror__ (union_slot). */
+         name_local(type, "__or__")->as.native.host = name_local(type, "__ror__")->as.native.host = 2,
+         name_local(c->types[SPY_SENTINEL], "__or__")->as.native.host = name_local(c->types[SPY_SENTINEL], "__ror__")->as.native.host = 2, 0);
 }
 static int register_method(SPYContext *c, int type, const char *name, NativeMethod call, intptr_t data, int kind) {
     return class_method_set(c, c->types[type], name, call, data, kind);
