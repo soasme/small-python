@@ -30,6 +30,13 @@ SOURCES = {
     "eval_locals_mapping": "class M:\n    def __getitem__(self, k): return k * 2\n    def keys(self): return []\nresult = eval('ab', {}, M())",
     "eval_locals_keyword": "result = eval('y', locals={'y': 7})",
     "exec_closure": "def outer():\n    v = 'cell'\n    def inner(): return v\n    return inner\nf = outer()\nresult = exec(f.__code__, globals(), closure=f.__closure__)",
+    "function_code_calls": "log = []\ndef f():\n    for _ in (): pass\n    log.append('f')\n    return G\n"
+                           "def caught(g):\n    try: return eval(f.__code__, g)\n    except Exception as e: return type(e).__name__\n"
+                           "result = (eval(f.__code__, {'G': 7, 'log': log}), exec(f.__code__, {'G': 8, 'log': log}), caught({'log': log}), log)",
+    "compile_argument_order": "log = []\nclass P:\n    def __fspath__(self):\n        for _ in (): pass\n        log.append('fspath')\n        return 'p.py'\n"
+                              "class I:\n    def __init__(self, n): self.n = n\n    def __index__(self):\n        for _ in (): pass\n        log.append(self.n)\n        return 0\n"
+                              "class B:\n    def __bool__(self):\n        for _ in (): pass\n        log.append('bool')\n        return True\n"
+                              "try: compile('1', P(), 'bad', I('flags'), B(), I('optimize'))\nexcept ValueError as e: result = ('ValueError', log)",
     "exec_closure_mismatch": 'def outer():\n    v = 1\n    def inner(): return v\n    return inner\nexec(outer().__code__, {})',
     "builtins_injected": "g = {}\nexec('pass', g)\nresult = ('__builtins__' in g, type(g['__builtins__']).__name__ in ('dict', 'module'))",
     "compile_modes": "result = [type(compile(s, '<s>', m)).__name__ for s, m in (('x', 'eval'), ('x = 1', 'exec'), ('x', 'single'))]",

@@ -34,7 +34,7 @@ Show(r, g, l) == "(" \o r \o ", " \o g \o ", " \o l \o ")"
 
 Cases == {"eval_expression_only", "eval_code_object", "exec_returns_none", "eval_strips", "eval_bytes",
           "eval_bad_type", "eval_globals_type", "eval_locals_mapping", "eval_locals_keyword",
-          "exec_closure", "exec_closure_mismatch", "builtins_injected", "compile_modes", "compile_bad_mode",
+          "exec_closure", "exec_closure_mismatch", "function_code_calls", "compile_argument_order", "builtins_injected", "compile_modes", "compile_bad_mode",
           "compile_single_multi", "compile_eval_statement", "compile_filename", "compile_null",
           "compile_dont_inherit", "compile_bad_flags", "compile_optimize", "compile_optimize0",
           "compile_syntax_error", "single_prints_repr", "globals_is_namespace", "locals_snapshot",
@@ -72,6 +72,10 @@ Case(c) ==
       [] c = "eval_locals_mapping" -> "'abab'"
       [] c = "eval_locals_keyword" -> "7"
       [] c = "exec_closure" -> "None"
+      \* A function's code is called in the given globals: eval its value, exec None.
+      [] c = "function_code_calls" -> "(7, None, 'NameError', ['f', 'f', 'f'])"
+      \* The arguments convert once each in parameter order, then the mode's value is checked.
+      [] c = "compile_argument_order" -> "('ValueError', ['fspath', 'flags', 'bool', 'optimize'])"
       [] c = "exec_closure_mismatch" -> "TypeError: code object requires a closure of exactly length 1"
       [] c = "builtins_injected" -> "(True, True)"
       [] c = "compile_modes" -> "['code', 'code', 'code']"

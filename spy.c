@@ -29783,7 +29783,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     return result;
 }
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
-static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
+static SPYValue *source_unit(SPYContext *, Machine *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
 /* Whether callee is exec(), eval(), divmod(), pow(), sum(), any(), all(),
  * isinstance(), issubclass(), aiter(), anext(), repr(), dir(), property() or open(), whose call may run on the machine
@@ -30613,9 +30613,9 @@ static int unit_call(SPYContext *c, SPYValue *unit, SPYValue *env) {
  * then, with *env and c->entering_init the unit, borrowed from env, and
  * c->entering_kind CALL_EXEC, or CALL_EVAL for an expression's value. Else
  * the call's value, or NULL with an error. */
-static NO_INLINE SPYValue *source_call(SPYContext *c, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
+static NO_INLINE SPYValue *source_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
     int eval = callee->as.native.data == (void *)(intptr_t)B_EVAL;
-    SPYValue *unit = argc && argc <= 3 ? source_unit(c, eval ? B_EVAL : B_EXEC, argc, argv, env) : builtin(c, argc, argv, callee->as.native.data);
+    SPYValue *unit = argc && argc <= 3 ? source_unit(c, m, eval ? B_EVAL : B_EXEC, argc, argv, env) : builtin(c, argc, argv, callee->as.native.data);
     release_all(argc, argv);
     if (!*env) return unit;
     int expression = unit->as.unit.expression;
@@ -30703,7 +30703,7 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
         return intrinsics_k(c, m, open_loaded, ctx);
     }
     if (id == B_EXEC || id == B_EVAL) {
-        result = source_call(c, callee, argc, argv, env);
+        result = source_call(c, m, callee, argc, argv, env);
         spy_release(callee);
         return result;
     }
@@ -45885,13 +45885,21 @@ static SPYValue *number_result(SPYContext *c, SPYValue *a, int real, SPYValue *c
     else result = exact->type == SPY_BOOL ? spy_int(c, exact->as.integer_data.small) : spy_retain(exact);
     spy_release(converted); return result;
 }
+/* What a function's code, run by eval() if eval is true, else exec(),
+ * returned on m (source_unit). */
+static SPYValue *code_returned(SPYContext *c, Machine *m, SPYValue *eval, SPYValue *result) {
+    (void)m;
+    if (result && eval == c->booleans[0]) { spy_release(result); result = spy_none(c); }
+    spy_release(eval);
+    return result;
+}
 /* compile(), eval() or exec() given argc arguments argv: the unit to run
  * in *source_env, both owned, for eval() and exec() of source or of a
  * module's code; else NULL or the call's value, as compile()'s unit or
- * a function code's result. */
-static SPYValue *source_unit(SPYContext *c, int id, size_t argc, SPYValue *const *argv, SPYValue **source_env) {
+ * a function code's result, its call on machine m when given (callk,
+ * code_returned). */
+static SPYValue *source_unit(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv, SPYValue **source_env) {
     SPYValue *a = argc ? argv[0] : NULL;
-    if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, NULL);
     SPYValue *closure = id == B_EXEC_CLOSURE && argv[3]->type != SPY_NONE ? argv[3] : NULL;
     if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
     /* exec's fourth parameter, closure, is keyword-only. */
@@ -45901,15 +45909,10 @@ static SPYValue *source_unit(SPYContext *c, int id, size_t argc, SPYValue *const
     char filename_buffer[sizeof(c->filename)];
     int expression = id == B_EVAL;
     if (id == B_COMPILE) {
-        SPYValue *path = filesystem_path(c, argv[1]);
-        if (!path) return NULL;
-        int embedded_null = strlen(path->as.string.data) != path->as.string.len;
-        put_text(filename_buffer, sizeof(filename_buffer), path->as.string.data);
-        spy_release(path);
-        if (embedded_null) return spy_error(c, "ValueError", "embedded null character");
+        /* Its arguments converted already (compile_step). */
+        put_text(filename_buffer, sizeof(filename_buffer), argv[1]->as.string.data);
         filename = filename_buffer;
         SPYValue *mode_value = builtin_value(c, argv[2], SPY_STRING);
-        if (!mode_value) return errorf(c, "TypeError", "compile() argument 'mode' must be str, not %s", type_name(argv[2]));
         const char *mode = mode_value->as.string.data;
         if (strlen(mode) != mode_value->as.string.len) return spy_error(c, "ValueError", "invalid compilation mode");
         if (!strcmp(mode, "eval")) expression = 1;
@@ -45934,13 +45937,11 @@ static SPYValue *source_unit(SPYContext *c, int id, size_t argc, SPYValue *const
             else if (needed != given) errorf(c, "TypeError", "code object requires a closure of exactly length %zu", needed);
             else {
                 SPYValue *fn = function_from_code(c, a, env->as.map.parent->as.map.namespace, closure);
-                result = fn ? call(c, fn, 0, NULL) : NULL;
+                result = fn ? callk(c, m, fn, 0, NULL, code_returned, spy_bool(c, id == B_EVAL)) : NULL;
                 spy_release(fn);
             }
             spy_release(free); spy_release(env);
-            if (!result) return NULL;
-            if (id == B_EVAL) return result;
-            spy_release(result); return spy_none(c);
+            return result;
         }
         if (closure) { spy_error(c, "TypeError", "cannot use a closure with this code object"); goto execution_fail; }
         unit = spy_retain(a);
@@ -46256,8 +46257,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         return id == B_POW ? power_slots(c, a, b, modulus) : divmod_declined(c, a, b);
     }
-    case B_COMPILE: case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
-        SPYValue *env = NULL, *unit = source_unit(c, id, argc, argv, &env);
+    case B_COMPILE: return compile_builtin(c, argc, argv, NULL);
+    case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
+        SPYValue *env = NULL, *unit = source_unit(c, step_machine(c), id, argc, argv, &env);
         return env ? run_source(c, id == B_EVAL, env, unit) : unit;
     }
     case B_TYPE: {
@@ -47406,36 +47408,109 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
  * level (spy_set_optimize). */
 enum { CF_ONLY_AST = 0x400, CF_FUTURE_MASK = 0x20000 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000 | 0x800000 | 0x1000000,
        CF_ALLOWED = CF_FUTURE_MASK | 0x10 | CF_ONLY_AST | 0x1000 | 0x200 | 0x4000 | 0x8000 };
+/* compile()'s job state's arguments, its slots for the 8 parameters,
+ * an absent one c->unbound, then the stage converting them: */
+enum { COMPILE_PATH, COMPILE_MODE, COMPILE_FLAGS, COMPILE_INHERIT, COMPILE_OPTIMIZE, COMPILE_FEATURE, COMPILE_LENGTH, COMPILE_STAGE = 8 };
+static const int compile_slots[] = {1, 2, 3, 4, 5, 7, 4};
+static SPYValue *compile_step(SPYContext *, Machine *, SPYValue *);
+/* compile()'s file name path, which it takes, when it holds no U+0000. */
+static SPYValue *compile_path(SPYContext *c, SPYValue *path) {
+    if (!path || strlen(path->as.string.data) == path->as.string.len) return path;
+    spy_release(path);
+    return spy_error(c, "ValueError", "embedded null character");
+}
+/* compile()'s int argument index, which it takes, when it fits a C int. */
+static SPYValue *compile_int(SPYContext *c, SPYValue *index) {
+    int64_t value;
+    if (!index || (!index->as.integer_data.big && !spy_as_int(c, index, &value) && value >= INT_MIN && value <= INT_MAX)) return index;
+    spy_release(index);
+    if (!c->error_type[0]) spy_error(c, "OverflowError", "Python int too large to convert to C int");
+    return NULL;
+}
+/* What the Python method stage of compile() job state called on its
+ * argument returned, result (compile_step): its file name, flags,
+ * dont_inherit's truth by __bool__ or __len__ (COMPILE_LENGTH), or an
+ * optimization level; the job goes on at the next. */
+static SPYValue *compile_converted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items;
+    int stage = (int)items[COMPILE_STAGE]->as.integer_data.small, slot = compile_slots[stage];
+    SPYValue *v = items[slot], *converted = NULL;
+    if (!result) {}
+    else if (stage == COMPILE_PATH && (result->type == SPY_STRING || result->type == SPY_BYTES)) converted = compile_path(c, filesystem_path(c, result));
+    else if (stage == COMPILE_PATH) errorf(c, "TypeError", "expected %s.__fspath__() to return str or bytes, not %s", type_name(v), type_name(result));
+    else if (stage == COMPILE_INHERIT || stage == COMPILE_LENGTH) {
+        int truth = truth_result(c, v, stage == COMPILE_INHERIT, result);
+        result = NULL;
+        if (!c->error_type[0]) converted = spy_bool(c, truth);
+    } else { converted = compile_int(c, index_result(c, v, result)); result = NULL; }
+    if (stage == COMPILE_PATH) spy_release(result);
+    SPYValue *next = converted ? spy_int(c, stage == COMPILE_LENGTH ? COMPILE_OPTIMIZE : stage + 1) : NULL;
+    if (!next) { spy_release(converted); spy_release(state); return NULL; }
+    spy_release(items[slot]); items[slot] = converted;
+    spy_release(items[COMPILE_STAGE]); items[COMPILE_STAGE] = next;
+    return compile_step(c, m, state);
+}
+/* compile() of job state, which it takes, from its stage: its arguments
+ * convert in parameter order (19.3.10), the file name, the mode's type,
+ * flags, dont_inherit's truth, optimize and _feature_version, a Python
+ * __fspath__, __index__, __bool__ or __len__ among them called on m when
+ * given (callk, compile_converted); then the source compiles here. */
+static SPYValue *compile_step(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items, *result = NULL;
+    for (int stage = (int)items[COMPILE_STAGE]->as.integer_data.small; stage < COMPILE_LENGTH && !c->error_type[0]; stage++) {
+        int slot = compile_slots[stage], length = 0;
+        SPYValue *v = items[slot], *fn = NULL, *converted;
+        if (v == c->unbound || stage == COMPILE_MODE) {
+            if (stage == COMPILE_MODE && !builtin_value(c, v, SPY_STRING))
+                errorf(c, "TypeError", "compile() argument 'mode' must be str, not %s", type_name(v));
+            continue;
+        }
+        if (stage == COMPILE_PATH) fn = builtin_value(c, v, SPY_STRING) || builtin_value(c, v, SPY_BYTES) ? NULL : class_lookup(value_class(c, v), "__fspath__");
+        else fn = stage == COMPILE_INHERIT ? truth_function(c, v, &length) : index_function(c, v);
+        if (m && fn && machine_function(c, fn)) {
+            SPYValue *at = spy_int(c, stage == COMPILE_INHERIT && length ? COMPILE_LENGTH : stage);
+            if (!at) break;
+            spy_release(items[COMPILE_STAGE]); items[COMPILE_STAGE] = at;
+            return callk(c, m, fn, 1, (SPYValue *[]){spy_retain(v)}, compile_converted, state);
+        }
+        if (stage == COMPILE_PATH) converted = compile_path(c, filesystem_path(c, v));
+        else if (stage == COMPILE_INHERIT) { int truth = truthy(v); converted = c->error_type[0] ? NULL : spy_bool(c, truth); }
+        else converted = compile_int(c, index_object(c, v));
+        if (!converted) break;
+        spy_release(items[slot]); items[slot] = converted;
+    }
+    if (!c->error_type[0]) {
+        int64_t flags = 0, optimize = -1;
+        if (items[3] != c->unbound) spy_as_int(c, items[3], &flags);
+        if (items[5] != c->unbound) spy_as_int(c, items[5], &optimize);
+        if (flags & ~(int64_t)CF_ALLOWED) spy_error(c, "ValueError", "compile(): unrecognised flags");
+        else if (optimize < -1 || optimize > 2) spy_error(c, "ValueError", "compile(): invalid optimize value");
+        else if (items[6] != c->unbound && items[6]->type != SPY_NONE && !builtin_value(c, items[6], SPY_STRING))
+            errorf(c, "TypeError", "compile() argument 'module' must be str or None, not %s", type_name(items[6]));
+        else if (flags & CF_ONLY_AST) spy_error(c, "NotImplementedError", "compile() cannot produce an AST without the ast module");
+        else {
+            int saved = c->compile_flags, inherit = items[4] == c->unbound || items[4] == c->booleans[0];
+            c->compile_flags = (int)(flags & CF_FUTURE_MASK) | (inherit ? caller_future_flags(c) : 0);
+            int optimized = c->optimize;
+            if (optimize >= 0) c->optimize = (int)optimize;
+            SPYValue *env = NULL;
+            result = source_unit(c, NULL, B_COMPILE, 3, items, &env);
+            c->compile_flags = saved; c->optimize = optimized;
+        }
+    }
+    spy_release(state);
+    return result;
+}
 static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     static const char *const names[] = {"source", "filename", "mode", "flags", "dont_inherit", "optimize", "module", "_feature_version"};
-    SPYValue *args[8];
+    SPYValue *args[COMPILE_STAGE + 1];
     if (argc > 6) return errorf(c, "TypeError", "compile() takes at most 6 positional arguments (%zu given)", argc);
     if (parse_arguments(c, "compile", argc, argv, keywords, names, 8, 3, 0, args)) return NULL;
-    int64_t flags = 0, optimize = -1;
-    SPYValue *numbers[] = {args[3], args[5], args[7]};
-    int64_t *slots[] = {&flags, &optimize, NULL};
-    for (size_t i = 0; i < 3; i++) {
-        if (!numbers[i]) continue;
-        SPYValue *index = index_object(c, numbers[i]);
-        int64_t value = 0;
-        int fits = index && !index->as.integer_data.big && !spy_as_int(c, index, &value) && value >= INT_MIN && value <= INT_MAX;
-        spy_release(index);
-        if (!fits) { if (!c->error_type[0]) spy_error(c, "OverflowError", "Python int too large to convert to C int"); return NULL; }
-        if (slots[i]) *slots[i] = value;
-    }
-    if (args[4] && truthy(args[4]) < 0) return NULL;
-    if (flags & ~(int64_t)CF_ALLOWED) return spy_error(c, "ValueError", "compile(): unrecognised flags");
-    if (optimize < -1 || optimize > 2) return spy_error(c, "ValueError", "compile(): invalid optimize value");
-    if (args[6] && args[6]->type != SPY_NONE && !builtin_value(c, args[6], SPY_STRING))
-        return errorf(c, "TypeError", "compile() argument 'module' must be str or None, not %s", type_name(args[6]));
-    if (flags & CF_ONLY_AST) return spy_error(c, "NotImplementedError", "compile() cannot produce an AST without the ast module");
-    int saved = c->compile_flags, inherit = !args[4] || !truthy(args[4]);
-    c->compile_flags = (int)(flags & CF_FUTURE_MASK) | (inherit ? caller_future_flags(c) : 0);
-    int optimized = c->optimize;
-    if (optimize >= 0) c->optimize = (int)optimize;
-    SPYValue *code = builtin(c, 3, args, (void *)(intptr_t)B_COMPILE);
-    c->compile_flags = saved; c->optimize = optimized;
-    return code;
+    for (int i = 0; i < COMPILE_STAGE; i++) args[i] = spy_retain(args[i] ? args[i] : c->unbound);
+    args[COMPILE_STAGE] = spy_int(c, COMPILE_PATH);
+    SPYValue *state = args[COMPILE_STAGE] ? spy_tuple(c, COMPILE_STAGE + 1, args) : NULL;
+    release_all(COMPILE_STAGE + 1, args);
+    return state ? compile_step(c, step_machine(c), state) : NULL;
 }
 /* The function a definition's code object makes in a globals dict, as
  * PyFunction_New. spy closures share their defining environment rather than
@@ -49693,6 +49768,8 @@ SPYContext *spy_context_new(void) {
         SPYValue *v = value_new(c, SPY_NATIVE);
         if (!v) goto fail;
         v->as.native.call = builtin; v->as.native.data = (void *)(intptr_t)i;
+        /* compile() converts its arguments on its step's machine (compile_step). */
+        if (i == B_COMPILE) v->as.native.host = 2;
         if (i == B_REPR || i == B_FORMAT) c->field_calls[i == B_FORMAT] = spy_retain(v);
         if (i == B_SORTED) c->sorter = spy_retain(v);
         int status = name_set(c, c->builtins, names[i], v);
