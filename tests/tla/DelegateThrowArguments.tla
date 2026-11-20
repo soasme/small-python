@@ -22,7 +22,9 @@
 (* delegate is closed yet, or (Exit, (4, 5)), made of those arguments,     *)
 (* or GeneratorExit itself, made with no Python code. it is a generator   *)
 (* suspended at a yield, or in a yield from of                             *)
-(* one (a chain, both closed before Exit is made), an iterator whose throw *)
+(* one (a chain, both closed before Exit is made), a generator closed      *)
+(* before the throw (ended), which checks and raises as one at a yield     *)
+(* does, an iterator whose throw                                           *)
 (* returns "thrown" and whose close returns, one whose Python __getattr__  *)
 (* gives those methods (asked), or one whose __getattr__ raises            *)
 (* ZeroDivisionError (broken), or one with neither; or a generator that    *)
@@ -35,7 +37,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [delegate : {"generator", "chain", "throws", "asked", "broken", "bare", "stubborn", "failing"},
+Programs == [delegate : {"generator", "chain", "ended", "throws", "asked", "broken", "bare", "stubborn", "failing"},
              args : {"instance", "invalid", "exit", "made", "exit_made", "exit_value", "exit_class", "instance_value", "traceback"},
              handles : BOOLEAN]
 

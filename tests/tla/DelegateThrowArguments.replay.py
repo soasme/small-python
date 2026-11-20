@@ -62,7 +62,7 @@ def outcome(p):
     def chain(inner):
         yield from inner
     first = gen()
-    it = first if p["delegate"] == "generator" else chain(first) if p["delegate"] == "chain" else \
+    it = first if p["delegate"] in ("generator", "ended") else chain(first) if p["delegate"] == "chain" else \
         {"throws": Throws, "asked": Asked, "broken": Broken, "bare": Bare, "stubborn": stubborn, "failing": Failing}[p["delegate"]]()
 
     def handling():
@@ -75,9 +75,11 @@ def outcome(p):
         yield from it
     g = handling() if p["handles"] else plain()
     next(g)
+    if p["delegate"] == "ended":
+        first.close()
     args = {"instance": (KeyError("k"),), "invalid": (1,), "exit": (GeneratorExit, 1, 2), "made": (Made, 3), "exit_made": (Exit,), "exit_value": (Exit, (4, 5)), "exit_class": (GeneratorExit,),
             "instance_value": (KeyError("k"), 1), "traceback": (KeyError, None, 2)}[p["args"]]
-    closed[:] = [lambda: it.gi_frame is None and first.gi_frame is None if p["delegate"] in ("generator", "chain") else p["delegate"] in ("bare", "broken") or (it.inner if p["delegate"] == "asked" else it).closed]
+    closed[:] = [lambda: it.gi_frame is None and first.gi_frame is None if p["delegate"] in ("generator", "chain", "ended") else p["delegate"] in ("bare", "broken") or (it.inner if p["delegate"] == "asked" else it).closed]
     try:
         result = repr(g.throw(*args))
     except Exit as e:
