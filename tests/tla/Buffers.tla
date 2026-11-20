@@ -48,7 +48,10 @@
 (* and the result or the exception. An item program stores into item 0 of *)
 (* a view of format B, d or ? an instance whose Python __index__,          *)
 (* __float__ or __bool__ logs its name and returns 7, 2.5 or True, or a    *)
-(* bad 256, "x" or 1, and reads the item back.                             *)
+(* bad 256, "x" or 1, and reads the item back. A needle program tests    *)
+(* n in b"abcd" or bytearray(b"abcd"), n's __index__ logging "index" and  *)
+(* raising, returning "x" or 98, its __buffer__ logging "get" and giving   *)
+(* b"bc" or raising KeyError, its __release_buffer__ logging "rel".        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -61,6 +64,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"no
             \cup [part : {"several"}, op : {"replace", "join", "starred", "generator", "iterator", "dict", "first", "second", "compare"}]
             \cup [part : {"subclass"}, base : {"bytes", "bytearray"}, use : {"view", "concat", "compare", "decode", "twice"}]
             \cup [part : {"item"}, format : {"B", "d", "?"}, bad : BOOLEAN]
+            \cup [part : {"needle"}, index : {"raise", "str", "byte"}, buffer : {"view", "raise"}, array : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -107,7 +111,13 @@ Subclass(p) == CASE p.use = "view" -> "get rel b'BUF'"
                  [] p.base = "bytes" -> IF p.use = "compare" THEN "True" ELSE "'own'"
                  [] OTHER -> IF p.use = "compare" THEN "get rel False" ELSE "get rel 'BUF'"
 
+\* An in takes an int's byte; any __index__ failure is discarded for the buffer.
+Needle(p) == CASE p.index = "byte" -> "index True"
+               [] p.buffer = "raise" -> "index get KeyError"
+               [] OTHER -> "index get rel True"
+
 Run(p) == CASE p.part = "export" -> Export(p)
+            [] p.part = "needle" -> Needle(p)
             [] p.part = "subclass" -> Subclass(p)
             [] p.part = "several" -> Several(p)
             [] p.part = "index" -> Index(p)
@@ -154,6 +164,10 @@ ContentsRead == Done /\ program.part = "subclass" /\ program.base = "bytes" /\ p
 
 \* A join asks for the buffer of each item it reads, however often an object recurs.
 EachAsked == Done /\ program.part = "subclass" /\ program.use = "twice" => outcome = "get get rel rel b'BUF-BUF'"
+
+\* A needle whose __index__ fails is searched by its buffer, released after.
+BufferNeedle == Done /\ program.part = "needle" /\ program.index # "byte" =>
+    outcome \in {"index get rel True", "index get KeyError"}
 
 \* A dimension out of bounds stops the key before its next item's __index__.
 DimensionsInOrder == Done /\ program.part = "grid" /\ program.first = "out" => outcome = "a IndexError"

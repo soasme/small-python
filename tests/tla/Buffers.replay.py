@@ -137,6 +137,26 @@ def star(f, *args):
     return f(*args)
 
 
+def needle(p, log):
+    class N:
+        def __index__(self):
+            for _ in (): pass
+            log.append("index")
+            if p["index"] == "raise": raise ValueError
+            return "x" if p["index"] == "str" else 98
+        def __buffer__(self, flags):
+            for _ in (): pass
+            log.append("get")
+            if p["buffer"] == "raise": raise KeyError
+            return memoryview(b"bc")
+        def __release_buffer__(self, view):
+            log.append("rel")
+    try:
+        return repr(N() in (bytearray(b"abcd") if p["array"] else b"abcd"))
+    except KeyError:
+        return "KeyError"
+
+
 def several(p, log):
     a, b = Exporter(log, "A", b"XY"), Exporter(log, "B", b"Q")
     op = p["op"]
@@ -203,6 +223,8 @@ def outcome(p):
             result = grid(p, log)
         elif p["part"] == "several":
             result = several(p, log)
+        elif p["part"] == "needle":
+            result = needle(p, log)
         elif p["part"] == "subclass":
             result = subclass(p, log)
         elif p["part"] == "item":

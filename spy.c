@@ -29557,7 +29557,8 @@ static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, 
                     callee == c->types[SPY_INT] || callee == c->iterator_types[IT_ENUMERATE] ? argc == 2 ? 2 : 0 :
                     callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE ?
                     native_indices(c, callee->as.method.function, callee->as.method.self, argc, argv) :
-                    argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base && class_lookup(argv[0]->as.map.parent, "__index__") &&
+                    argc == 1 && argv[0]->type == SPY_INSTANCE && (!argv[0]->as.map.base || !is_int(argv[0]->as.map.base)) &&
+                    class_lookup(argv[0]->as.map.parent, "__index__") &&
                     (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
     for (size_t i = 0; i < argc; i++) if (index_marked(mask, i) && argv[i]->type == SPY_INSTANCE) return mask | buffers;
     return indices && slice_part(c, callee) ? mask | buffers : buffers;
@@ -42683,6 +42684,14 @@ static void error_unbox(SPYContext *c, SPYValue *box) {
  * operands; it runs on machine m, its exporters' views held in views. */
 static SPYValue *buffered_run(SPYContext *c, Machine *m, SPYValue *op) {
     SPYValue **o = op->as.seq.items;
+    if (o[0]->as.integer_data.small == BUFFERED_STEP && op->as.seq.len == 5) {
+        /* An in whose needle's __index__ failed searches by its buffer (byte_indexed). */
+        int in = 0;
+        step_operation(&m->code->items[o[1]->as.integer_data.small], &in);
+        SPYValue view = {.ctx = c, .type = SPY_BYTES, .as.string = o[3]->as.string};
+        int found = byte_found(c, &view, o[2], 0, NULL);
+        return found < 0 ? NULL : spy_bool(c, (in == O_IN) == found);
+    }
     if (o[0]->as.integer_data.small == BUFFERED_STEP) return operation(c, &m->code->items[o[1]->as.integer_data.small], o[2], o[3]);
     int method = (int)o[2]->as.integer_data.small;
     return method >= 0 ? call_native_method(c, o[1], method, o[3], o[4]->as.seq.len, o[4]->as.seq.items) :
@@ -42702,6 +42711,7 @@ static SPYValue *buffered_end(SPYContext *c, Machine *m, SPYValue *op, SPYValue 
         return buffered_choice(c, m, o[1], (int)o[2]->as.integer_data.small, o[3], o[5], at, next);
     }
     if (!stepped || o[0]->as.integer_data.small != BUFFERED_STEP) return value;
+    if (op->as.seq.len == 5 && o[3]->type == SPY_BYTEARRAY) o[3]->as.string.exports--;
     m->pc = operator_finish(c, m, &m->code->items[o[1]->as.integer_data.small], o[3], value, m->pc);
     return c->stepped;
 }
@@ -42847,6 +42857,18 @@ static SPYValue *byte_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     int op = 0;
     step_operation(ins, &op);
     SPYValue *integer = result ? index_result(c, x, result) : NULL;
+    if (!integer && !c->stopped && machine_exporter(c, x)) {
+        /* Its error discarded, x's Python __buffer__ is m's call
+         * (buffered_go), y exported until the step ends (buffered_end). */
+        spy_clear_error(c);
+        SPYValue *views = spy_list(c), *op = views ? spy_tuple(c, 5, (SPYValue *[]){c->stepped, s[0], x, y, c->booleans[1]}) : NULL;
+        SPYValue *kind = op ? int_value(c, BUFFERED_STEP) : NULL;
+        if (kind) { spy_release(op->as.seq.items[0]); op->as.seq.items[0] = kind; }
+        SPYValue *stepped = kind ? buffered_go(c, m, op, views, 1) : NULL;
+        if (!kind && y->type == SPY_BYTEARRAY) y->as.string.exports--;
+        release_all(3, (SPYValue *[]){views, op, state});
+        return stepped;
+    }
     SPYValue view = {.ctx = c, .type = SPY_BYTES, .as.string = y->as.string};
     int found = byte_found(c, &view, x, 1, integer);
     if (y->type == SPY_BYTEARRAY) y->as.string.exports--;

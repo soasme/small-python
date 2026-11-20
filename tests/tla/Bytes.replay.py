@@ -55,6 +55,10 @@ SOURCES = {
     "literal_non_ascii": 'compile("b\'\\u00e9\'", \'s\', \'eval\')',
     "ctor_forms": "result = (bytes(), bytes(3), bytes(range(3)), bytes(b'ab'), bytes(bytearray(b'c')), bytes(memoryview(b'm')), bytes(B()), bytes(I()))",
     "ctor_str_encoding": "result = (bytes('\xe9', 'utf-8'), bytes('\xe9', encoding='latin-1'), bytes('a', 'ascii', 'strict'))",
+    "ctor_subclass_index": "log = []\nclass C(bytes):\n    def __index__(self):\n        for _ in (): pass\n        log.append(3)\n        return 3\n"
+                           "class L(list):\n    def __index__(self):\n        for _ in (): pass\n        log.append(2)\n        return 2\n"
+                           "class N(int):\n    def __index__(self): return 4\n"
+                           "result = (bytearray(C(b'abcd')), bytes(L([9])), bytearray(N(1)), log)",
     "ctor_iter_calls": "class It:\n    def __init__(s, items, log): s.items, s.log = items, log\n"
                        "    def __iter__(s):\n        for _ in (): pass\n        s.log.append('iter')\n        return iter(s.items)\n"
                        "    def __len__(s): s.log.append('len'); return 2\n"
