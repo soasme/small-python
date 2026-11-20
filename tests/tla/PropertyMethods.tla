@@ -19,11 +19,16 @@
 (* docstring, the error, or None. For op get, the getter is an instance   *)
 (* whose Python __call__ returns "got" or raises LookupError, or absent,   *)
 (* read by c.x or __get__ as the method's how says: the value, the error,  *)
-(* or an AttributeError naming the getter, after its calls.                *)
+(* or an AttributeError naming the getter, after its calls. For op named,  *)
+(* a property added to C after its creation, with no setter or deleter,    *)
+(* has a getter instance whose __name__ is a Python property returning     *)
+(* "nm", raising LookupError, or raising AttributeError (absent): c.x = 1  *)
+(* (statement), setattr (method), del c.x (class) or delattr (bound) raise *)
+(* the AttributeError quoting that name, or none ("-"), or the error.      *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [op : {"set", "delete", "doc", "get"}, maker : {"property", "subclass"}, function : {"returns", "raises", "absent"},
+Programs == [op : {"set", "delete", "doc", "get", "named"}, maker : {"property", "subclass"}, function : {"returns", "raises", "absent"},
              how : {"method", "class", "bound", "statement"}]
 
 VARIABLES program, outcome
@@ -33,12 +38,17 @@ Pending == "pending"
 
 Call(p) == CASE p.op = "set" -> "set(c, 1)" [] p.op = "delete" -> "delete(c)" [] p.op = "get" -> "get(c)" [] OTHER -> "doc"
 
+Accessor(p) == IF p.how \in {"method", "statement"} THEN "setter" ELSE "deleter"
+
 Run(p) == CASE p.op = "doc" -> (CASE p.function = "absent" -> "None doc"
                                  [] p.function = "raises" -> "LookupError doc"
                                  [] OTHER -> "'documented' doc")
             [] p.op = "get" -> (CASE p.function = "absent" -> "AttributeError getter"
                                  [] p.function = "raises" -> "LookupError get(c)"
                                  [] OTHER -> "'got' get(c)")
+            [] p.op = "named" -> (CASE p.function = "raises" -> "LookupError name"
+                                   [] p.function = "absent" -> "AttributeError - " \o Accessor(p) \o " name"
+                                   [] OTHER -> "AttributeError 'nm' " \o Accessor(p) \o " name")
             [] p.function = "absent" -> IF p.op = "set" THEN "AttributeError setter" ELSE "AttributeError deleter"
             [] p.function = "raises" -> "LookupError " \o Call(p)
             [] OTHER -> "None " \o Call(p)
@@ -51,5 +61,5 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* The function's own result never comes back.
-ReturnsNone == Done /\ program.op \notin {"doc", "get"} /\ program.function = "returns" => outcome = "None " \o Call(program)
+ReturnsNone == Done /\ program.op \notin {"doc", "get", "named"} /\ program.function = "returns" => outcome = "None " \o Call(program)
 =============================================================================

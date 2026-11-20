@@ -56,7 +56,45 @@ def got(p):
     return " ".join([result] + calls)
 
 
+def named(p):
+    calls = []
+
+    class Getter:
+        def __call__(self, obj): return 0
+
+        @property
+        def __name__(self):
+            for _ in (): pass
+            calls.append("name")
+            if p["function"] == "raises": raise LookupError
+            if p["function"] == "absent": raise AttributeError
+            return "nm"
+
+    class C:
+        pass
+    C.x = (property if p["maker"] == "property" else Sub)(Getter())
+    c = C()
+
+    def run():
+        if p["how"] == "statement": c.x = 1
+        elif p["how"] == "method": setattr(c, "x", 1)
+        elif p["how"] == "class": del c.x
+        else: delattr(c, "x")
+    try:
+        run()
+        result = "None"
+    except LookupError:
+        result = "LookupError"
+    except AttributeError as e:
+        text = str(e)
+        quoted = text.split()[1] if text.startswith("property '") else "-"
+        result = "AttributeError " + quoted + " " + text.split()[-1]
+    return " ".join([result] + calls)
+
+
 def outcome(p):
+    if p["op"] == "named":
+        return named(p)
     if p["op"] == "doc":
         return documented(p)
     if p["op"] == "get":

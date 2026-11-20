@@ -11463,14 +11463,73 @@ static SPYValue *property_name(SPYContext *c, SPYValue *p) {
     if (!name && error_is(c, "AttributeError")) spy_clear_error(c);
     return name;
 }
-static SPYValue *property_missing(SPYContext *c, SPYValue *p, SPYValue *object, const char *accessor) {
-    SPYValue *name = property_name(c, p), *qualname = object ? name_text(value_class(c, object), "__qualname__") : NULL;
-    SPYValue *a = name && !c->error_type[0] ? spy_repr(c, name) : NULL, *b = qualname && !c->error_type[0] ? spy_repr(c, qualname) : NULL;
+static void release_all(size_t, SPYValue *const *);
+static SPYValue *attribute_step(SPYContext *, SPYValue *, const char *);
+static SPYValue *attribute_callk(SPYContext *, Machine *, SPYValue *, const char *, SPYValue *, Continuation, SPYValue *);
+/* The error of a property, named by a, its name's repr, or NULL, that has
+ * no accessor for object (property_missing). */
+static SPYValue *property_failed(SPYContext *c, SPYValue *a, SPYValue *object, const char *accessor) {
+    SPYValue *qualname = object ? name_text(value_class(c, object), "__qualname__") : NULL;
+    SPYValue *b = qualname && !c->error_type[0] ? spy_repr(c, qualname) : NULL;
     if (a && b) errorf(c, "AttributeError", "property %s of %s object has no %s", a->as.string.data, b->as.string.data, accessor);
     else if (b) errorf(c, "AttributeError", "property of %s object has no %s", b->as.string.data, accessor);
     else errorf(c, "AttributeError", "property has no %s", accessor);
-    spy_release(name); spy_release(a); spy_release(b);
+    spy_release(b);
     return NULL;
+}
+static SPYValue *property_missing(SPYContext *c, SPYValue *p, SPYValue *object, const char *accessor) {
+    SPYValue *name = property_name(c, p), *a = name && !c->error_type[0] ? spy_repr(c, name) : NULL;
+    if (!c->error_type[0]) property_failed(c, a, object, accessor);
+    spy_release(name); spy_release(a);
+    return NULL;
+}
+/* Whether property p's error for a missing accessor may call Python: its
+ * getter's __name__ read, or its name an instance with a __repr__. */
+static int property_hooked(SPYValue *p) {
+    return p->as.property.name ? p->as.property.name->type == SPY_INSTANCE : p->as.property.get->type != SPY_NONE;
+}
+static const char *const property_accessors[] = {"getter", "setter", "deleter"};
+/* What the repr of a missing accessor's property name returned in text,
+ * state that of property_missingk: the error raised. */
+static SPYValue *property_repred(SPYContext *c, Machine *m, SPYValue *state, SPYValue *text) {
+    (void)m;
+    SPYValue **items = state->as.seq.items, *a = NULL;
+    if (text) {
+        Buffer b = {.ctx = c};
+        a = buffer_text(&b, SPY_STRING, append_conversion(&b, items[2], text, "__repr__"));
+        spy_release(text);
+    }
+    if (!c->error_type[0]) property_failed(c, a, items[0] == c->none ? NULL : items[0], property_accessors[items[1]->as.integer_data.small]);
+    spy_release(a); spy_release(state);
+    return NULL;
+}
+static SPYValue *repr_method(SPYContext *, SPYValue *, int *);
+/* What the read of a missing accessor's property name gave, name: its
+ * Python __repr__ m's call (property_repred). */
+static SPYValue *property_named(SPYContext *c, Machine *m, SPYValue *state, SPYValue *name) {
+    if (!name && error_is(c, "AttributeError")) spy_clear_error(c);
+    if (!name) return property_repred(c, m, state, NULL);
+    spy_release(state->as.seq.items[2]); state->as.seq.items[2] = name;
+    int bound;
+    SPYValue *function = repr_method(c, name, &bound);
+    if (function && machine_function(c, function))
+        return callk(c, m, function, (size_t)bound, bound ? (SPYValue *[]){spy_retain(name)} : NULL, property_repred, state);
+    return property_repred(c, m, state, spy_repr(c, name));
+}
+/* property_missing on m for the accessor of index accessor: a Python read
+ * of p's getter's __name__ and the repr of the name m's calls
+ * (property_named); NULL. */
+static SPYValue *property_missingk(SPYContext *c, Machine *m, SPYValue *p, SPYValue *object, int accessor) {
+    SPYValue *items[] = {spy_retain(object), spy_int(c, accessor), spy_retain(c->none)};
+    SPYValue *state = items[1] ? spy_tuple(c, 3, items) : NULL, *get = p->as.property.get;
+    release_all(3, items);
+    if (!state) return NULL;
+    if (p->as.property.name || get->type == SPY_NONE) return property_named(c, m, state, spy_retain(p->as.property.name));
+    SPYValue *value = attribute_step(c, get, "__name__");
+    if (value || c->error_type[0] || !c->fallback) return property_named(c, m, state, value);
+    SPYValue *function = c->fallback;
+    c->fallback = NULL;
+    return attribute_callk(c, m, get, "__name__", function, property_named, state);
 }
 /* property.__get__ for the property storage p of descriptor self. */
 static SPYValue *property_get(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *object) {
@@ -13142,7 +13201,7 @@ static void getter_args(SPYContext *c, SPYValue *v, const char *name, SPYValue *
  * (PyObject_GenericGetAttr); else NULL, with *own that entry when the
  * search, which may compare keys, found it. */
 static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, const char *name, SPYValue **own) {
-    SPYValue *descriptor = UNLIKELY(v == c->searched) ? c->searched_class : class_lookup(owner, name);
+    SPYValue *descriptor = UNLIKELY(v == c->searched) ? c->searched_class : instance_lookup(owner, name);
     *own = NULL;
     if (descriptor && descriptor->type == SPY_PROPERTY) return property_enters(c, descriptor) ? spy_retain(descriptor) : NULL;
     SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c && plain_mro(c, owner) ? descriptor->as.map.parent : NULL;
@@ -20550,6 +20609,8 @@ static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, cons
         if (p && builtin_base(c, *descriptor, deleting ? "__delete__" : "__set__", NULL)) *descriptor = p;
         function = (*descriptor)->type == SPY_PROPERTY ? (deleting ? (*descriptor)->as.property.del : (*descriptor)->as.property.set) :
                    (*descriptor)->type == SPY_INSTANCE ? class_lookup((*descriptor)->as.map.parent, deleting ? "__delete__" : "__set__") : NULL;
+        /* A property missing it, whose error may call Python, itself (property_missingk). */
+        if (function && function->type == SPY_NONE && property_hooked(*descriptor)) return *descriptor;
     }
     return function && machine_function(c, function) ? function : NULL;
 }
@@ -34700,6 +34761,12 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         } else { function = c->entering_init; descriptor = c->fallback; c->fallback = NULL; }
         relocate(c, n);
         if (!function) { delete_attribute(c, object, n->b->text); spy_release(object); return NULL; }
+        if (function->type == SPY_PROPERTY) {
+            /* A missing setter or deleter (setter_function). */
+            property_missingk(c, m, function, object, deleting ? 2 : 1);
+            release_all(3, (SPYValue *[]){object, value, descriptor});
+            return NULL;
+        }
         if (function == c->unbound) {
             /* A class's __bases__ (setter_called). */
             SPYValue *state = bases_begin(c, object, value ? value : m->stack[m->len - 1]);
@@ -35215,6 +35282,14 @@ static NO_INLINE SPYValue *setattr_call(SPYContext *c, Machine *m, size_t argc, 
     const char *name = builtin_value(c, slots[2], SPY_STRING)->as.string.data;
     c->attribute_name = slots[2];
     SPYValue *function = setter_object(slots[1]) ? setter_function(c, slots[1], name, &descriptor, argc == 2) : NULL;
+    if (function && function->type == SPY_PROPERTY) {
+        /* A missing setter or deleter (setter_function). */
+        SPYValue *result = property_missingk(c, m, function, slots[1], argc == 2 ? 2 : 1);
+        c->attribute_name = saved;
+        m->len -= argc + 1;
+        release_all(argc + 1, slots);
+        return result;
+    }
     if (!function && argc == 3 && bases_named(slots[1], slots[2])) {
         /* A class's __bases__, rebuilt on m (bases_go). */
         SPYValue *state = bases_begin(c, slots[1], slots[3]);
