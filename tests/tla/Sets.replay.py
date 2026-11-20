@@ -59,6 +59,7 @@ def hashed(p):
             log.append("y%d" % v)
             yield item(v)
     source = generator() if p["source"] == "generator" else [item(v) for v in values]
+    if p["source"] == "values": source = dict(enumerate(source)).values()
     try:
         if p["form"] == "update":
             r = {0}

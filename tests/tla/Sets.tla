@@ -28,13 +28,13 @@
 (*     super().__init__(src), or SN(src) of SN one whose Python            *)
 (*     __new__ returns super().__new__(cls), its __init__ set's, of S      *)
 (*     and F a set's and a frozenset's subclasses of no methods, of a      *)
-(*     list or a generator of two objects whose Python __hash__ (which     *)
-(*     loops) logs "h" and its value, the second's returning, raising      *)
-(*     TypeError or raising ValueError, or both of value 1, the second     *)
-(*     found equal by the first's Python __eq__ (which loops), logging     *)
-(*     "e" and its value; a generator logs "y" and the value before        *)
-(*     each item; with tuple, each object is the first item of a pair      *)
-(*     (object, 0); or                                                     *)
+(*     list, a dict's values view or a generator of two objects whose      *)
+(*     Python __hash__ (which loops) logs "h" and its value, the second's  *)
+(*     returning, raising TypeError or raising ValueError, or both of      *)
+(*     value 1, the second found equal by the first's Python __eq__        *)
+(*     (which loops), logging "e" and its value; a generator logs "y" and  *)
+(*     the value before each item; with tuple, each object is the first    *)
+(*     item of a pair (object, 0); or                                      *)
 (*   - set(src), frozenset(src), {*src}, set().union(src), an empty set's  *)
 (*     update(src) or |= src, S(src) or F(src), of a set src of three      *)
 (*     objects of one hash                                                 *)
@@ -74,7 +74,7 @@ Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list
 Numbers == {"1", "1.0", "True", "2"}
 Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
             \cup [op : {"build"}, items : UNION {[1..n -> Numbers] : n \in 0..3}]
-            \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update", "S", "F", "init", "SI", "SN"}, source : {"list", "generator"},
+            \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update", "S", "F", "init", "SI", "SN"}, source : {"list", "values", "generator"},
                   fails : {"no", "TypeError", "ValueError", "equal"}, tuple : BOOLEAN]
             \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|=", "S", "F"}]
             \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset", "issubset",
@@ -107,14 +107,14 @@ Keep(s, seen) ==
 \* The type a build makes: a subclass's when it calls one.
 Built(form) == IF form \in {"frozenset", "S", "F", "SI", "SN"} THEN form ELSE "set"
 
-\* A list's items exist before the set hashes them; a generator gives each
-\* as the set takes it.
+\* A list's items, or a dict's values view's, exist before the set hashes
+\* them; a generator gives each as the set takes it.
 RunHashed(p) ==
     <<CASE p.fails = "TypeError" -> "TypeError: cannot use '" \o (IF p.tuple THEN "tuple" ELSE "K") \o "' as a set element (t)"
         [] p.fails = "ValueError" -> "ValueError"
         [] OTHER -> Built(p.form),
-      CASE p.fails = "equal" -> IF p.source = "list" THEN "h1 h1 e1" ELSE "y1 h1 y1 h1 e1"
-        [] p.source = "list" -> "h1 h2"
+      CASE p.fails = "equal" -> IF p.source # "generator" THEN "h1 h1 e1" ELSE "y1 h1 y1 h1 e1"
+        [] p.source # "generator" -> "h1 h2"
         [] OTHER -> "y1 h1 y2 h2",
       CASE p.fails \notin {"no", "equal"} -> {}
         [] p.fails = "equal" -> IF p.form = "update" THEN {0, 1} ELSE {1}

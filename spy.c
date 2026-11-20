@@ -27053,9 +27053,19 @@ static ALWAYS_INLINE int hashed_pair(SPYContext *c, SPYValue *pair) {
            ((key = pair->as.seq.items[0])->type == SPY_INSTANCE || hash_walked(key)) && hashed_item(c, key);
 }
 /* Whether a set takes v's items on the machine, a list or tuple, or a
- * forward iterator's next items of one, holding a hashed_item. */
+ * forward iterator's next items of one, holding a hashed_item, or a dict
+ * view whose keys, values or items are. */
 static int hashed_items(SPYContext *c, SPYValue *v) {
     size_t i = 0;
+    if (is_view(v)) {
+        SPYValue *map = view_map(v);
+        for (i = 0; i < map->as.map.len; i++) {
+            Entry *e = &map_items(map)[i];
+            if (!e->key) continue;
+            if ((v->type != SPY_DICT_VALUES && hashed_item(c, e->key)) || (v->type != SPY_DICT_KEYS && hashed_item(c, e->value))) return 1;
+        }
+        return 0;
+    }
     if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE && !v->as.iterator.done) { i = v->as.iterator.index; v = v->as.iterator.source; }
     if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
     for (; i < v->as.seq.len; i++)
@@ -27415,7 +27425,8 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
                      metaclassed(argv[0]) || (argv[0]->type == SPY_FUNCTION && argv[0]->as.function.attributes) || proxies_instance(argv[0]) ||
                      argv[0]->type == SPY_ASYNC_GENERATOR_ASEND || argv[0]->type == SPY_ASYNC_GENERATOR_ATHROW || argv[0]->type == SPY_ANEXT_AWAITABLE ||
-                     ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT) &&
+                     ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE || argv[0]->type == SPY_DICT || argv[0]->type == SPY_FROZENDICT ||
+                       is_view(argv[0])) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
                        callee->type == SPY_METHOD || callee->type == SPY_CLASS || (callee->type == SPY_NATIVE && argc == 2))) ||
                      ((argv[0]->type == SPY_BYTES || argv[0]->type == SPY_BYTEARRAY || argv[0]->type == SPY_SET) && callee->type == SPY_NATIVE && argc == 2))) ||
@@ -27431,7 +27442,7 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
  * iterator (iterator_base). The consumer's keyed. */
 static int consumer_source(SPYContext *c, SPYValue **v) {
     proxy_mapping(v);
-    if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && (*v)->type != SPY_DICT_VALUES && !is_dict(*v) &&
+    if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE && !is_view(*v) && !is_dict(*v) &&
         !metaclassed(*v)) return 0;
     SPYValue *iter = iterator_base(c, *v);
     if (iter) {
