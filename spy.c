@@ -12109,12 +12109,23 @@ static SPYValue *try_operator(SPYContext *c, SPYValue *self, const char *name, S
     if (result == c->not_implemented) { spy_release(result); return NULL; }
     return result;
 }
+static SPYValue *dict_union(SPYContext *, SPYValue *, SPYValue *);
+/* An exact set's or dict's operator op with right an instance of a set's
+ * or dict's subclass, as its own method comes before right's reflected
+ * one but a subclass's of its type: the result, or NULL. */
+static SPYValue *builtin_operand(SPYContext *c, const Operator *op, SPYValue *left, SPYValue *right) {
+    SPYValue *base = right->type == SPY_INSTANCE ? right->as.map.base : NULL;
+    int token = op->token;
+    if (!base || left->type == SPY_INSTANCE) return NULL;
+    if (is_set(left) && is_set(base) && (token == '|' || token == '&' || token == '-' || token == '^')) return binary(c, token, left, base);
+    return is_dict(left) && is_dict(base) && token == '|' ? dict_union(c, left, right) : NULL;
+}
 static SPYValue *binary_special(SPYContext *c, const Operator *op, SPYValue *left, SPYValue *right, SPYValue *modulus) {
     SPYValue *a = value_class(c, left), *b = value_class(c, right);
     int reflected_first = a != b && subclass(b, a) &&
         class_lookup(b, op->reflected) != class_lookup(a, op->reflected);
     SPYValue *result = reflected_first ? try_operator(c, right, op->reflected, left, modulus, 0) : NULL;
-    if (result || c->error_type[0]) return result;
+    if (result || c->error_type[0] || (result = builtin_operand(c, op, left, right))) return result;
     result = try_operator(c, left, op->direct, right, modulus, 0);
     if (result || c->error_type[0]) return result;
     if (a != b && !reflected_first && (modulus || !number_takes(c, op, 0, left, right)))
@@ -12141,6 +12152,7 @@ static SPYValue *special_from(SPYContext *c, Machine *m, SPYValue *state, int ph
     for (; phase < 3 && !result && !c->error_type[0]; phase++) {
         if (phase == 0 ? !reflected_first : phase == 2 && !(a != b && !reflected_first && (modulus || !number_takes(c, op, 0, left, right))))
             continue;
+        if (phase == 1 && (result = builtin_operand(c, op, left, right))) break;
         SPYValue *self = phase == 1 ? left : right, *other = phase == 1 ? right : left, *slot, *index;
         const char *name = phase == 1 ? op->direct : op->reflected;
         /* A descriptor's Python __get__ reads the method on m first
@@ -34422,8 +34434,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (kind == OPERATE_UNARY)
             function = op == O_NOT ? NULL : class_lookup(cls, op == '+' ? "__pos__" : op == '-' ? "__neg__" : "__invert__");
         else if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
-        /* An augmented assignment takes the in-place method, else the plain one's rule. */
+        /* An augmented assignment takes the in-place method, a builtin's
+         * its subclass inherits in C (inplace) but a sequence's repetition,
+         * else the plain one's rule. */
         else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
+        else if (kind == OPERATE_INPLACE && o->token != '*' && x->as.map.base && builtin_slot_before(c, cls, o->inplace)) return NULL;
         else if (first) {
             if ((function = o ? item_special(c, y, reflected) : rich_special(c, y, rich_reflected[rich], &negated))) {
                 self = y; other = x; phase = OPERATOR_REFLECTED;
@@ -34627,6 +34642,7 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
      * does: by their items, there (declined_bases). */
     if (!o && negated && declined_bases(c, op, x, y, name, self)) return c->unbound;
     *result = !name ? NULL : o ? try_operator(c, *self, name, other, NULL, 0) : rich_method(c, *self == y ? rich_reflected[rich] : rich, *self, other);
+    if (!*result && !c->error_type[0] && name && o && *self == x) *result = builtin_operand(c, o, x, y);
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
     return NULL;
 }

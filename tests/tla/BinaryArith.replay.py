@@ -92,6 +92,13 @@ SOURCES = {
                           "    __rmul__ = __radd__\n    def __iter__(self): return iter([7])\n    def __index__(self): return 2\n"
                           "a = [1]; a += R('r')\nb = [1]; c = b; b += R(NotImplemented)\nd = bytearray(b'x'); d *= R(NotImplemented)\n"
                           "result = (a, b, b is c, d)",
+    "inplace_inherited": "class SO(set):\n    def __or__(s, o):\n        for _ in (): pass\n        return 'or'\n"
+                         "class DO(dict):\n    def __or__(s, o):\n        for _ in (): pass\n        return 'or'\n"
+                         "x = SO({1})\nz = x\nx |= {2}\ny = DO(a=1)\nw = y\ny |= {'b': 2}\nresult = (sorted(x), x is z, y, y is w, SO() | {1})",
+    "set_dict_operand": "class S(set):\n    def __ror__(s, o): return 'r'\nclass D(dict):\n    def __ror__(s, o): return 'r'\n"
+                        "class Declined(set):\n    def __ror__(s, o): return NotImplemented\nx = frozenset({1})\nx |= S({2})\n"
+                        "result = (type(frozenset({1}) | S({2})).__name__, frozendict(a=1) | D(z=9), {1} | S({2}), {'a': 1} | D(z=9), "
+                        "sorted({1} | Declined({2})), sorted(x))",
     "sequence_declined": "class R:\n    def __radd__(self, o): return NotImplemented\n    __rmul__ = __radd__\n"
                          "    def __iter__(self):\n        for i in (7, 8): yield i\n    def __length_hint__(self): return 2\n"
                          "    def __index__(self): return 2\nclass Bad(R):\n    def __index__(self): raise KeyError('index')\n"
