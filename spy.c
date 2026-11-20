@@ -18598,6 +18598,8 @@ static SPYValue *callk_newed(SPYContext *c, Machine *m, SPYValue *state, SPYValu
  * (callk_inited), or its Python __new__ with it first (callk_newed),
  * then k; else NULL with c->k_fn unset, nothing taken. */
 static SPYValue *class_described(SPYContext *, Machine *, SPYValue *, int, size_t, SPYValue *const *, SPYValue *, Continuation, SPYValue *);
+static int group_sequence(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+static SPYValue *group_newk(SPYContext *, Machine *, SPYValue *, int);
 static SPYValue *class_callk(SPYContext *c, Machine *m, SPYValue *cls, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
     int plain, kind = c->entering_kind;
     SPYValue *init = class_init(c, cls, &plain), *allocate = !init && !c->error_type[0] ? new_method(c, cls) : NULL, *args[10];
@@ -18647,12 +18649,15 @@ static SPYValue *class_new_read(SPYContext *c, Machine *m, SPYValue *state, SPYV
 static NO_INLINE SPYValue *class_described(SPYContext *c, Machine *m, SPYValue *cls, int called, size_t argc, SPYValue *const *argv,
                                            SPYValue *keywords, Continuation k, SPYValue *ctx) {
     SPYValue *allocator = argc > 8 ? NULL : described_new(c, cls, called), *get = allocator ? descriptor_getter(c, allocator) : NULL;
-    if (!allocator) return NULL;
+    /* So is an exception group's of a custom sequence (group_newk). */
+    int group = !allocator && !keywords ? group_sequence(c, cls, called, argc, argv) : 0;
+    if (!allocator && group <= 0) return NULL;
     SPYValue *args = tuple_of(c, argc, argv);
     SPYValue *items[] = {spy_retain(cls), args, keywords ? spy_retain(keywords) : NULL, NULL, NULL};
     SPYValue *state = !args ? (release_all(3, items), spy_release(ctx), NULL) :
                       keywords ? k_state(c, 3, items, k, ctx) : k_state(c, 2, items, k, ctx);
     if (!state) return NULL;
+    if (group) return group_newk(c, m, state, 1);
     if (get) return callk(c, m, get, 3, (SPYValue *[]){spy_retain(allocator), spy_retain(c->none), spy_retain(cls)}, class_new_read, state);
     SPYValue *read = (allocator->as.wrapper.user ? plain_method : bind_method)(c, cls, allocator->as.wrapper.function);
     return read ? class_new_read(c, m, state, read) : k_resume(c, m, state, NULL);
@@ -23570,6 +23575,58 @@ static int split_condition(SPYContext *c, SPYValue *condition) {
     return condition->type == SPY_CLASS || condition->type == SPY_TUPLE ? valid_exception_types(c, condition) : callable_value(c, condition);
 }
 /* BaseExceptionGroup methods; data selects __new__, __str__, __repr__, derive, split, or subgroup. */
+/* Whether a call of class cls, called whether as type.__call__, on argc
+ * arguments argv makes an exception group (group_method's __new__) of a
+ * custom sequence whose Python __repr__ runs on the machine (group_newk):
+ * its message a str, the sequence an instance with __getitem__, neither a
+ * list nor a tuple; -1 on an error. */
+static SPYValue *group_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether given, a group's sequence, is an instance neither a list nor a
+ * tuple whose Python __repr__ runs on the machine. */
+static int group_custom(SPYContext *c, SPYValue *given) {
+    SPYValue *repr;
+    return given->type == SPY_INSTANCE && !builtin_value(c, given, SPY_LIST) && !builtin_value(c, given, SPY_TUPLE) &&
+           !builtin_base(c, given, "__repr__", NULL) && (repr = class_lookup(given->as.map.parent, "__repr__")) && machine_function(c, repr);
+}
+static int group_sequence(SPYContext *c, SPYValue *cls, int called, size_t argc, SPYValue *const *argv) {
+    SPYValue *meta = cls->as.map.meta, *allocator = argc == 2 && cls->as.map.mro ? native_slot_new(c, cls) : NULL;
+    if (!allocator || allocator->as.native.kwcall != group_method || allocator->as.native.data || !subclass(cls, group_class(c)) ||
+        (!called && meta && class_lookup(meta, "__call__") != name_local(c->types[SPY_CLASS], "__call__")) ||
+        !builtin_value(c, argv[0], SPY_STRING) || !group_custom(c, argv[1])) return 0;
+    return sequence_check(c, argv[1]) ? 1 : c->error_type[0] ? -1 : 0;
+}
+/* The tuple of the sequence (group_repred) is the group's exceptions:
+ * the group made, then initialized (callk_newed) for a class call. */
+static SPYValue *group_tupled(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *sequence) {
+    SPYValue *state = spy_retain(ctx->as.seq.items[0]), *args = state->as.seq.items[1];
+    SPYValue *group = sequence ? group_create(c, state->as.seq.items[0], args->as.seq.items[0], args->as.seq.items[1], sequence, ctx->as.seq.items[1]) : NULL;
+    int init = ctx->as.seq.items[2] == c->booleans[1];
+    spy_release(sequence); spy_release(ctx);
+    return init ? callk_newed(c, m, state, group) : k_resume(c, m, state, group);
+}
+/* The sequence's __repr__ returned repr, saved in case the sequence is
+ * mutated; then its tuple, a call step on m. */
+static SPYValue *group_repred_as(SPYContext *c, Machine *m, SPYValue *state, SPYValue *repr, int init) {
+    SPYValue *given = state->as.seq.items[1]->as.seq.items[1], *text = repr ? builtin_value(c, repr, SPY_STRING) : NULL;
+    SPYValue *saved = text ? spy_string(c, text->as.string.data, text->as.string.len) : NULL, *ctx = NULL, *args = NULL;
+    if (repr && !text) { char fq[256]; errorf(c, "TypeError", "%s.__repr__() must return a str, not %s", type_fqname(given, fq, sizeof(fq)), type_name(repr)); }
+    spy_release(repr);
+    if (saved && (ctx = tuple_of(c, 3, (SPYValue *[]){state, saved, c->booleans[init]}))) args = tuple_of(c, 1, &given);
+    spy_release(saved);
+    if (!args) { spy_release(ctx); return k_resume(c, m, state, NULL); }
+    spy_release(state);
+    return comparek(c, m, spy_retain(c->types[SPY_TUPLE]), args, COMPARE_CALL + 1, group_tupled, ctx);
+}
+static SPYValue *group_repred(SPYContext *c, Machine *m, SPYValue *state, SPYValue *repr) { return group_repred_as(c, m, state, repr, 1); }
+static SPYValue *group_made(SPYContext *c, Machine *m, SPYValue *state, SPYValue *repr) { return group_repred_as(c, m, state, repr, 0); }
+/* BaseExceptionGroup_new of a custom sequence (group_custom) on m, its
+ * state, the class and the (message, sequence) tuple, then a continuation
+ * (k_state), taken: the sequence's Python __repr__ first; for a class
+ * call (class_described), init, the group's __init__ after. */
+static SPYValue *group_newk(SPYContext *c, Machine *m, SPYValue *state, int init) {
+    SPYValue *given = state->as.seq.items[1]->as.seq.items[1];
+    return callk(c, m, class_lookup(given->as.map.parent, "__repr__"), 1, (SPYValue *[]){spy_retain(given)}, init ? group_repred : group_made, state);
+}
 static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int which = (int)(intptr_t)data;
     SPYValue *base = group_class(c);
@@ -23581,7 +23638,14 @@ static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv,
         if (cls->type != SPY_CLASS || !subclass(cls, base)) return spy_error(c, "TypeError", "BaseExceptionGroup.__new__(X): X is not a subtype of BaseExceptionGroup");
         if (!builtin_value(c, message, SPY_STRING)) return errorf(c, "TypeError", "BaseExceptionGroup.__new__() argument 1 must be str, not %s", type_name(message));
         if (!sequence_check(c, given)) return c->error_type[0] ? NULL : spy_error(c, "TypeError", "second argument (exceptions) must be a sequence");
-        /* The repr of a custom sequence is saved, in case it is mutated. */
+        /* The repr of a custom sequence is saved, in case it is mutated; a
+         * Python __repr__'s on the step's machine (group_newk). */
+        Machine *m = group_custom(c, given) ? step_machine(c) : NULL;
+        if (m) {
+            SPYValue *items[] = {spy_retain(cls), tuple_of(c, 2, argv + 1), NULL, NULL};
+            SPYValue *state = items[1] ? k_state(c, 2, items, unchanged, NULL) : (spy_release(cls), NULL);
+            return state ? group_newk(c, m, state, 0) : NULL;
+        }
         SPYValue *saved = NULL;
         if (!builtin_value(c, given, SPY_LIST) && !builtin_value(c, given, SPY_TUPLE)) {
             Buffer out = {.ctx = c};
@@ -29687,6 +29751,9 @@ static SPYValue *class_stack_call(SPYContext *c, Machine *m, SPYValue *callee, s
     SPYValue **argv = &m->stack[m->len - argc], *self;
     int plain = 0;
     SPYValue *init = called ? called_init(c, callee, &plain) : class_init(c, callee, &plain);
+    /* An exception group's of a custom sequence is class_described's. */
+    int group = init && !called && machine_function(c, init) ? group_sequence(c, callee, 0, argc, argv) : 0;
+    if (group) return NULL;
     if (init && machine_function(c, init)) {
         /* The new instance takes the class's place, as the call's value. */
         if (!(self = init_instance(c, callee, plain, argc, argv, NULL))) return NULL;
@@ -46929,6 +46996,8 @@ SPYContext *spy_context_new(void) {
             method->as.native.kwcall = group_method;
             method->as.native.data = (void *)(intptr_t)i;
             method->as.native.method = i != 0;
+            /* __new__ of a custom sequence may leave its __repr__ to the step (group_newk). */
+            method->as.native.host = i == 0 ? 2 : 0;
             status = name_set(c, group, methods[i], method);
             spy_release(method);
         }

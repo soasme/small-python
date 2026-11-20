@@ -5,7 +5,8 @@
 (* exceptions) takes a str and a non-empty sequence of exceptions, copied  *)
 (* to a tuple, becoming an ExceptionGroup when all are Exceptions, while   *)
 (* ExceptionGroup refuses BaseExceptions; message and exceptions are read- *)
-(* only; str() adds the count of sub-exceptions; subgroup() and split()    *)
+(* only; str() adds the count of sub-exceptions, and repr() a custom      *)
+(* sequence's repr, taken before its items; subgroup() and split()        *)
 (* take an exception type, a tuple of them, or a predicate, test the group *)
 (* itself first and then each leaf and nested group, keep the nesting of   *)
 (* what matches, drop emptied groups, and return None for nothing; the     *)
@@ -52,7 +53,7 @@ Cases == {"base_to_exception", "eg_rejects_base", "empty", "not_sequence", "not_
           "arity", "attributes", "readonly", "repr", "derive_custom", "derive_default_drops_subclass",
           "split_copies_metadata", "split_tuple_types", "split_all_returns_self", "split_group_type",
           "split_bad_arg", "subgroup_none", "str_count", "except_star_unwrap", "nested_traceback_kept",
-          "generic_alias", "list_copied"}
+          "generic_alias", "list_copied", "custom_repr_saved", "custom_repr_not_str"}
 Programs == [op : Ops, items : UNION {[1..n -> {"V", "T", "GVT", "GT"}] : n \in 1..3}]
             \cup [case : Cases]
 
@@ -77,6 +78,9 @@ Case(c) ==
       [] c = "attributes" -> "('m', 'tuple', 'm', 'list')"
       [] c = "readonly" -> "AttributeError: readonly attribute"
       [] c = "repr" -> "\"ExceptionGroup('m', [ValueError(1), TypeError(2)])\""
+      \* A custom sequence's Python __repr__ comes first, its text kept for the group's repr.
+      [] c = "custom_repr_saved" -> "(\"ExceptionGroup('m', S)\", ['repr', 0, 1])"
+      [] c = "custom_repr_not_str" -> "TypeError: S.__repr__() must return a str, not int"
       [] c = "derive_custom" -> "('MyEG', 'm!', 'm!')"
       [] c = "derive_default_drops_subclass" -> "('ExceptionGroup', 'ExceptionGroup')"
       [] c = "split_copies_metadata" -> "(['n'], 'KeyError', False)"

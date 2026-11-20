@@ -58,6 +58,12 @@ SOURCES = {
     "attributes": "g = ExceptionGroup('m', [ValueError(1)])\nresult = (g.message, type(g.exceptions).__name__, g.args[0], type(g.args[1]).__name__)",
     "readonly": "g = ExceptionGroup('m', [ValueError(1)])\ng.message = 'x'",
     "repr": "result = repr(ExceptionGroup('m', [ValueError(1), TypeError(2)]))",
+    "custom_repr_saved": "log = []\nclass S:\n    def __init__(s, r): s.r = r\n    def __getitem__(s, i):\n        for _ in (): pass\n"
+                         "        log.append(i)\n        if i: raise IndexError\n        return ValueError()\n"
+                         "    def __repr__(s):\n        for _ in (): pass\n        log.append('repr')\n        return s.r\n"
+                         "seq = S('S')\ng = ExceptionGroup('m', seq)\nseq.r = 'T'\nresult = (repr(g), log)",
+    "custom_repr_not_str": "class S:\n    def __getitem__(s, i): return ValueError()\n    def __repr__(s):\n        for _ in (): pass\n"
+                           "        return 1\nresult = ExceptionGroup('m', S())",
     "derive_custom": "g = MyEG('m', [ValueError(1), TypeError(2)])\nm, r = g.split(ValueError)\nresult = (type(m).__name__, m.message, r.message)",
     "derive_default_drops_subclass": "class E(ExceptionGroup): pass\nm, r = E('m', [ValueError(), TypeError()]).split(ValueError)\nresult = (type(m).__name__, type(r).__name__)",
     "split_copies_metadata": "g = ExceptionGroup('m', [ValueError(1), TypeError(2)])\ng.add_note('n')\ng.__cause__ = KeyError()\nm, r = g.split(ValueError)\nresult = (m.__notes__, type(m.__cause__).__name__, m.__notes__ is g.__notes__)",
