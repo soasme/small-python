@@ -125,6 +125,18 @@ SOURCES = {
                          "    try: complex(*a)\n"
                          "    except TypeError as e: return str(e)\n"
                          "result = (complex(F()), complex(I()), bad(F(), N()), bad(F(), '1'), complex(I(), F()), log)",
+    "complex_from_number": "log = []\n"
+                           "class F:\n"
+                           "    def __float__(self):\n"
+                           "        for _ in range(2): pass\n"
+                           "        log.append('float')\n"
+                           "        return 0.5\n"
+                           "class Made(complex):\n"
+                           "    def __new__(cls, v):\n"
+                           "        for _ in range(2): pass\n"
+                           "        log.append('new')\n"
+                           "        return complex.__new__(cls, v)\n"
+                           "result = (complex.from_number(F()), Made.from_number(F()), type(Made.from_number(1j)).__name__, log)",
     "complex_parts": "log = []\n"
                      "class C:\n"
                      "    def __complex__(self):\n"

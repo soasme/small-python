@@ -21757,6 +21757,18 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
     return cls;
 }
 static SPYValue *build_class_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static int machine_push_all(SPYContext *, Machine *, size_t, SPYValue *const *);
+/* The arguments a class statement n calls a __build_class__ other than
+ * the builtin one with: its body as a function, the name and the bases. */
+static SPYValue *builder_arguments(SPYContext *c, Frame *f, Node *n, SPYValue *name, SPYValue *bases, SPYValue *type_params) {
+    SPYValue *body = function_new(c, f, n), *args = body ? value_new(c, SPY_TUPLE) : NULL;
+    if (args && ((type_params && name_set(c, body->as.function.metadata, "__type_params__", type_params)) ||
+                 sequence_append(c, args, body) || sequence_append(c, args, name) || extend_display(c, args, bases))) {
+        spy_release(args); args = NULL;
+    }
+    spy_release(body);
+    return args;
+}
 /* The class statement calls __build_class__ from the built-in namespace
  * (19.3.38); the builtin one runs the body directly, any other gets the body
  * as a function. */
@@ -21769,12 +21781,17 @@ static SPYValue *class_statement(SPYContext *c, Frame *f, Node *n, SPYValue *nam
         spy_release(builder);
         return make_class(c, f, n, NULL, name, bases, arguments, type_params, m);
     }
-    SPYValue *body = function_new(c, f, n), *args = body ? value_new(c, SPY_TUPLE) : NULL, *cls = NULL;
-    if (args && type_params && name_set(c, body->as.function.metadata, "__type_params__", type_params)) goto done;
-    if (args && !sequence_append(c, args, body) && !sequence_append(c, args, name) && !extend_display(c, args, bases))
-        cls = call_keywords(c, builder, args->as.seq.len, args->as.seq.items, arguments);
-done:
-    spy_release(args); spy_release(body); spy_release(builder);
+    SPYValue *args = builder_arguments(c, f, n, name, bases, type_params), *cls = NULL;
+    if (args && m && args->as.seq.len <= 64) {
+        /* On m (class_step's arg 0), its call, the class the step's value
+         * (callk), above the two Nones arg 7 takes. */
+        SPYValue *argv[64];
+        if (!machine_push_all(c, m, 2, (SPYValue *[]){spy_none(c), spy_none(c)})) {
+            for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
+            cls = callk_keywords(c, m, builder, args->as.seq.len, argv, arguments->as.map.len ? arguments : NULL, unchanged, NULL);
+        }
+    } else if (args) cls = call_keywords(c, builder, args->as.seq.len, args->as.seq.items, arguments);
+    spy_release(args); spy_release(builder);
     return cls;
 }
 static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic_base, SPYValue *type_params, Machine *m) {
@@ -28575,7 +28592,7 @@ static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue
 static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, int, SPYValue **);
 static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static int buffer_argument(SPYContext *, SPYValue *);
-static SPYValue *complex_construct(SPYContext *, Machine *, SPYValue *, SPYValue *, int);
+static SPYValue *complex_construct(SPYContext *, Machine *, SPYValue *, SPYValue *, int, SPYValue *);
 static SPYValue *complex_keywords(SPYContext *, Machine *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *builtin_call(SPYContext *, Machine *, Node *, SPYValue *, size_t, SPYValue **, SPYValue **);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
@@ -28615,7 +28632,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     if (method < 0 && (argc == 1 || argc == 2) && callee == c->types[SPY_COMPLEX]) {
         /* complex(real[, imag]) converts its parts on m (complex_go). */
-        result = complex_construct(c, m, argv[0], argc == 2 ? argv[1] : NULL, argc == 2);
+        result = complex_construct(c, m, argv[0], argc == 2 ? argv[1] : NULL, argc == 2, NULL);
         release_all(argc, argv); spy_release(callee);
         return result;
     }
@@ -29959,7 +29976,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     if (calls && (argc == 1 || argc == 2) && callee == c->types[SPY_COMPLEX]) {
         /* So does complex(real[, imag]), the callee and arguments leaving the stack. */
-        result = complex_construct(c, m, argv[0], argc == 2 ? argv[1] : NULL, argc == 2);
+        result = complex_construct(c, m, argv[0], argc == 2 ? argv[1] : NULL, argc == 2, NULL);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
@@ -34831,6 +34848,14 @@ static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
     *env = function_env(c, allocate, 4, argv, keywords, 1);
     return *env ? spy_retain(meta) : NULL;
 }
+/* What a class statement's __build_class__ (class_part) returned, cls:
+ * the class alone on m's stack, and tuple() to call after it. */
+static SPYValue *class_built(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *cls) {
+    (void)ctx;
+    SPYValue *alone = cls ? tuple_of(c, 1, &cls) : NULL;
+    spy_release(cls);
+    return alone && !machine_push(c, m, alone) ? spy_retain(c->types[SPY_TUPLE]) : NULL;
+}
 /* BC_CLASS but arg 2 (class_part, build_class). Arg 0 and 5 leave the
  * class statement's state and __class__ cell, or two Nones, under the class
  * for arg 7, which checks the cell (class_made); a metaclass call they defer
@@ -35024,6 +35049,22 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     SPYValue *builtins = module_env(c, f->env)->as.map.parent;
     SPYValue *builder = builtins && !progress ? name_lookup(c, builtins, name_of("__build_class__")) : NULL;
     int builtin = progress || (builder && builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin);
+    if (!builtin && builder) {
+        /* Another __build_class__ is m's call, which pushes the class
+         * alone for the call tuple() after it (class_built). */
+        SPYValue *args = builder_arguments(c, f, n, name, bases, n->params ? m->stack[m->len - 1]->as.seq.items[1] : NULL);
+        if (args) {
+            SPYValue *argv[64], **items = args->as.seq.items;
+            size_t argc = args->as.seq.len;
+            if (argc <= 64) {
+                for (size_t i = 0; i < argc; i++) argv[i] = spy_retain(items[i]);
+                body = callk_keywords(c, m, builder, argc, argv, arguments->as.map.len ? arguments : NULL, class_built, NULL);
+                spy_release(args); spy_release(builder);
+                goto done;
+            }
+            spy_release(args);
+        }
+    }
     spy_release(builder);
     if (!builtin || !n->flat) {
         SPYValue *params = n->params ? m->stack[m->len - 1]->as.seq.items[1] : NULL;
@@ -39294,7 +39335,10 @@ static SPYValue *complex_go(SPYContext *c, Machine *m, SPYValue *job) {
                 if (items[3]->type == SPY_COMPLEX) im += cimag(x);
                 result = complex_new(c, complex_parts(re, im));
             }
+            SPYValue *cls = items[5] == c->none ? NULL : spy_retain(items[5]);
             spy_release(job);
+            if (cls && result) result = callk(c, m, cls, 1, &result, unchanged, NULL);
+            spy_release(cls);
             return result;
         }
         if ((phase == CX_START || phase == CX_IMAG) && !(bits & CX_IMAGINED)) next = phase == CX_START ? CX_REAL : CX_DONE;
@@ -39329,14 +39373,17 @@ static SPYValue *complex_go(SPYContext *c, Machine *m, SPYValue *job) {
     }
 }
 /* complex() of real and imag, which may be NULL, the parts named for pair
- * (complex_go). */
-static SPYValue *complex_construct(SPYContext *c, Machine *m, SPYValue *real_value, SPYValue *imag_value, int pair) {
+ * (complex_go), then given to cls, a subclass or NULL, as
+ * complex.from_number does (callk). */
+static SPYValue *complex_construct(SPYContext *c, Machine *m, SPYValue *real_value, SPYValue *imag_value, int pair, SPYValue *cls) {
     SPYValue *text = pair ? NULL : builtin_value(c, real_value, SPY_STRING);
     if (text) return parse_complex(c, text);
-    if (!pair && real_value->type == SPY_COMPLEX) return spy_retain(real_value);
+    if (!pair && real_value->type == SPY_COMPLEX)
+        return cls ? callk(c, m, cls, 1, (SPYValue *[]){spy_retain(real_value)}, unchanged, NULL) : spy_retain(real_value);
     SPYValue *job = spy_list(c), *bits = spy_int(c, (pair ? CX_PAIR : 0) | (imag_value ? CX_IMAGINED : 0));
     int failed = !job || !bits || sequence_append(c, job, real_value) || sequence_append(c, job, imag_value ? imag_value : c->none) ||
-                 sequence_append(c, job, bits) || sequence_append(c, job, c->none) || sequence_append(c, job, c->none);
+                 sequence_append(c, job, bits) || sequence_append(c, job, c->none) || sequence_append(c, job, c->none) ||
+                 sequence_append(c, job, cls ? cls : c->none);
     spy_release(bits);
     if (failed) { spy_release(job); return NULL; }
     return complex_go(c, m, job);
@@ -39350,7 +39397,7 @@ static SPYValue *complex_keywords(SPYContext *c, Machine *m, size_t argc, SPYVal
     if (!args[0] && !args[1]) return complex_new(c, complex_parts(0, 0));
     SPYValue *zero = args[0] ? NULL : spy_int(c, 0);
     if (!args[0] && !zero) return NULL;
-    SPYValue *result = complex_construct(c, m, args[0] ? args[0] : zero, args[1], 1);
+    SPYValue *result = complex_construct(c, m, args[0] ? args[0] : zero, args[1], 1, NULL);
     spy_release(zero);
     return result;
 }
@@ -44100,7 +44147,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     case B_COMPLEX: {
         if (argc > 2) goto arity;
         if (!argc) return complex_new(c, complex_parts(0, 0));
-        return complex_construct(c, NULL, a, argc == 2 ? argv[1] : NULL, argc == 2);
+        return complex_construct(c, NULL, a, argc == 2 ? argv[1] : NULL, argc == 2, NULL);
     }
     case B_ASCII: {
         if (argc != 1) goto arity;
@@ -46763,7 +46810,9 @@ done:
     spy_release(copy[0]); spy_release(copy[1]);
     return result;
 }
-/* float.from_number and complex.from_number: numbers only, never strings. */
+/* float.from_number and complex.from_number: numbers only, never strings;
+ * complex's converts, and calls a subclass, on its step's machine
+ * (complex_construct). */
 static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     SPYValue *args[1];
@@ -46772,6 +46821,8 @@ static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, 
     if (builtin_value(c, number, SPY_STRING) || builtin_value(c, number, SPY_BYTES) || builtin_value(c, number, SPY_BYTEARRAY) ||
         (type == SPY_FLOAT && builtin_value(c, number, SPY_COMPLEX)))
         return errorf(c, "TypeError", "must be real number, not %s", type_name(number));
+    Machine *m = type == SPY_COMPLEX ? step_machine(c) : NULL;
+    if (m) return complex_construct(c, m, number, NULL, 0, argv[0] == c->types[type] ? NULL : argv[0]);
     SPYValue *result = builtin(c, 1, &number, (void *)(intptr_t)(type == SPY_FLOAT ? B_FLOAT : B_COMPLEX));
     if (!result || argv[0] == c->types[type]) return result;
     SPYValue *instance = call(c, argv[0], 1, &result);
@@ -46995,7 +47046,9 @@ static int register_core_methods(SPYContext *c) {
         register_method(c, SPY_BYTES, "maketrans", bytes_maketrans, 0, METHOD_STATIC) ||
         register_method(c, SPY_BYTEARRAY, "maketrans", bytes_maketrans, 0, METHOD_STATIC) ||
         register_method(c, SPY_FLOAT, "from_number", from_number, SPY_FLOAT, METHOD_CLASS) ||
-        register_method(c, SPY_COMPLEX, "from_number", from_number, SPY_COMPLEX, METHOD_CLASS) ? -1 : 0;
+        register_method(c, SPY_COMPLEX, "from_number", from_number, SPY_COMPLEX, METHOD_CLASS) ? -1 :
+        /* complex.from_number may convert on its step's machine (from_number). */
+        (name_local(c->types[SPY_COMPLEX], "from_number")->as.wrapper.function->as.native.host = 2, 0);
 }
 static int register_method(SPYContext *c, int type, const char *name, NativeMethod call, intptr_t data, int kind) {
     return class_method_set(c, c->types[type], name, call, data, kind);

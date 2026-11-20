@@ -59,7 +59,7 @@ Cases == {"round_half_even", "round_float_digits", "round_none", "round_keyword_
           "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
           "min_first_of_equal", "max_mixed", "minmax_sources", "bin_index", "index_calls", "int_index_calls", "round_index_calls", "round_index_bad", "bin_float", "hex_float_method", "complex_forms",
           "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "text_repr", "text_index", "int_forms",
-          "int_bad_base", "int_base_first", "complex_fallbacks", "complex_parts", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
+          "int_bad_base", "int_base_first", "complex_fallbacks", "complex_parts", "complex_from_number", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
 Programs == [op : Ops, a : {-25, -15, -7, -1, 0, 3, 8, 25, 35}, b : {-3, -1, 0, 2, 5}]
             \cup [case : Cases]
 
@@ -147,6 +147,8 @@ Case(c) ==
       [] c = "complex_fallbacks" -> "((1.5+0j), (2+0j), \"complex() argument 'imag' must be a real number, not N\", \"complex() argument 'imag' must be a real number, not str\", (2+1.5j), ['float', 'index', 'index', 'float'])"
       \* Given two parts, the real part's __complex__ runs first, the imaginary part converting by __float__.
       [] c = "complex_parts" -> "([(1+5j), (1+5j)], ['complex', 'float', 'complex', 'float'])"
+      \* complex.from_number converts as complex() does, then calls a subclass with the complex.
+      [] c = "complex_from_number" -> "((0.5+0j), (0.5+0j), 'Made', ['float', 'float', 'new', 'new'])"
       [] c = "int_leading_zero" -> "ValueError: invalid literal for int() with base 0: '010'"
       [] c = "int_float_inf" -> "OverflowError: cannot convert float infinity to integer"
       [] c = "int_float_nan" -> "ValueError: cannot convert float NaN to integer"

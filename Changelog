@@ -597,6 +597,8 @@ Unreleased (0.10.0):
 - `property()` reads its getter's `__doc__` through a Python descriptor without nesting on the C stack
 - assigning to or deleting a class's subscript calls its metaclass's Python `__setitem__` or `__delitem__` without nesting on the C stack
 - a class statement calls a metaclass that is a function, or a class with a metaclass's Python `__call__`, without nesting on the C stack
+- a class statement calls a Python `__build_class__` its builtins hold without nesting on the C stack
+- `complex.from_number` calls a Python `__complex__`, `__float__` or `__index__`, and a subclass, without nesting on the C stack
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
 - `for`, `async for`, `await`, `yield from`, comprehensions and tests read an `__iter__`, `__aiter__`, `__anext__`, `__await__` or `__bool__` from a descriptor's Python `__get__` without nesting on the C stack
 - a `dict`'s `|=` of a mapping or iterable instance, and a `str` subclass's `%`, call their Python methods without nesting on the C stack

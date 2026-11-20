@@ -23,7 +23,11 @@
 (* A call program's metaclass is a function, which may loop, called once   *)
 (* with the name, bases, namespace and keyword flag=1: it returns "f",     *)
 (* raises KeyError, or returns type(name, bases, namespace), whose method *)
-(* returning __class__ gives that class.                                   *)
+(* returning __class__ gives that class. A builder program runs class X   *)
+(* (flag=1) in source whose builtins hold a Python __build_class__, which *)
+(* may loop, called once with the body, name and keyword: it builds the   *)
+(* class without the keyword, raises KeyError, or returns "f", the body    *)
+(* only assigning or looping.                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -32,6 +36,7 @@ Metas == {"none", "type", "MA", "MB", "MC", "func"}
 Programs == [part : {"derive"}, bases : BaseSets, meta : Metas]
             \cup [part : {"cell"}, cell : {"kept", "dropped", "unused"}]
             \cup [part : {"call"}, made : {"marker", "raises", "real"}]
+            \cup [part : {"builder"}, made : {"marker", "raises", "real"}, loops : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -63,7 +68,11 @@ Called(p) == CASE p.made = "marker" -> "f X flag 1"
                 [] p.made = "raises" -> "KeyError"
                 [] OTHER -> "X X flag 1"
 
-Run(p) == CASE p.part = "derive" -> Derive(p) [] p.part = "cell" -> Cell(p) [] OTHER -> Called(p)
+Built(p) == CASE p.made = "marker" -> "f build X flag"
+               [] p.made = "raises" -> "KeyError"
+               [] OTHER -> "X build X flag"
+
+Run(p) == CASE p.part = "derive" -> Derive(p) [] p.part = "cell" -> Cell(p) [] p.part = "builder" -> Built(p) [] OTHER -> Called(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

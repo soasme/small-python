@@ -90,8 +90,27 @@ def called(p):
     return " ".join([X if X == "f" else X().get().__name__] + log)
 
 
+def built(p):
+    log = []
+
+    def builder(func, name, *bases, **kw):
+        for _ in (): pass
+        log.append("build %s %s" % (name, " ".join(sorted(kw))))
+        if p["made"] == "raises":
+            raise KeyError(name)
+        return "f" if p["made"] == "marker" else __build_class__(func, name, *bases)
+
+    body = "    for i in range(2): pass\n" if p["loops"] else "    x = 1\n"
+    namespace = {"__name__": "replay", "__builtins__": dict(vars(__build_class__.__self__), __build_class__=builder)}
+    exec("class X(flag=1):\n" + body, namespace)
+    X = namespace["X"]
+    return " ".join([X if X == "f" else X.__name__] + log)
+
+
 def outcome(p):
     try:
+        if p["part"] == "builder":
+            return built(p)
         if p["part"] == "call":
             return called(p)
         return derive(p) if p["part"] == "derive" else cell(p)
