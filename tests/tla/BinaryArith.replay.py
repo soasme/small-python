@@ -74,6 +74,9 @@ SOURCES = {
                         "    def r(self, o):\n        for _ in (): pass\n        calls.append(1)\n        return ('r', type(o).__name__) if self.a else NotImplemented\n"
                         "class SubList(list): pass\ndef no():\n    s = {1}\n    try: s |= R(0)\n    except TypeError as e: return str(e)\n"
                         "x = SubList()\nx -= R(1)\nresult = ({1} | R(1), x, no(), calls)",
+    "divmod_slot_declines": "log = []\nclass R:\n    def __rdivmod__(self, o):\n        for _ in (): pass\n        log.append(o)\n        return ('r', o)\n"
+                            "class I(int): pass\nclass F(float): pass\n"
+                            "result = (int.__divmod__(7, R()), float.__divmod__(7.5, R()), divmod(I(7), R()), divmod(F(7.5), R()), log)",
     "divmod_descriptor": "log = []\nclass G:\n    def __get__(self, o, t):\n        for _ in (): pass\n        log.append('get')\n"
                          "        def m(other):\n            log.append('m')\n            return ('m', other)\n        return m\n"
                          "class A:\n    __divmod__ = G()\nresult = (divmod(A(), 1), log)",

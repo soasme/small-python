@@ -44,7 +44,7 @@ Cases == {"int_float", "true_div", "floor_div", "mod_sign", "divmod", "complex_m
           "unary_str", "unary_neg_list", "unary_invert_float", "unary_ops", "str_mul", "str_mul_float", "seq_mul_overflow", "pow_modulus_method", "pow_complex_declines",
           "str_add_int", "list_add_tuple", "subclass_concat", "bytes_subclass_concat", "int_add_str", "matmul_int", "float_floor_big", "nan_inf", "shift_neg",
           "shift_float", "bitwise_float", "big_mul", "complex_zero_power", "complex_overflow", "complex_matmul",
-          "bool_matmul", "complex_shift", "divmod_complex", "complex_zero_div", "pow3_instance", "pow3_methods", "divmod_methods", "builtin_declines", "divmod_descriptor",
+          "bool_matmul", "complex_shift", "divmod_complex", "complex_zero_div", "pow3_instance", "pow3_methods", "divmod_methods", "builtin_declines", "divmod_descriptor", "divmod_slot_declines",
           "pow3_float", "pow3_complex", "pow3_zero", "pow3_inverse", "inplace_messages", "inplace_pow_message",
           "sequence_reflected", "sequence_declined", "set_dict_operand", "inplace_inherited"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}]
@@ -153,6 +153,7 @@ Case(c) ==
       [] c = "pow3_methods" -> "(('P', 2, 3), ('rP', 2, 3))"               \* __rpow__ takes a modulus too
       [] c = "builtin_declines" -> "(('r', 'set'), ('r', 'SubList'), \"unsupported operand type(s) for |=: 'set' and 'R'\", [1, 1, 1])"  \* the reflected method once
       [] c = "divmod_descriptor" -> "(('m', 1), ['get', 'm'])"  \* __get__ reads the method, then it is called
+      [] c = "divmod_slot_declines" -> "(NotImplemented, NotImplemented, ('r', 7), ('r', 7.5), [7, 7.5])"  \* a number's own __divmod__ declines an instance
       [] c = "divmod_methods" -> "(('D', 1), ('rE', 2), ('rS', 3), [('D', 1), ('D', 'ni'), ('rE', 2), ('rS', 3)])"  \* a subclass's __rdivmod__ first
       [] c = "pow3_float" -> "TypeError: pow() 3rd argument not allowed unless all arguments are integers"
       [] c = "pow3_complex" -> "ValueError: complex modulo"

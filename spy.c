@@ -48863,7 +48863,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     case SLOT_UNARY: return unary(c, op, value);
     case SLOT_BUILTIN: {
         SPYValue *args[] = {value, argc ? argv[0] : NULL, argc > 1 ? argv[1] : NULL};
-        if (op == B_POW && !slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
+        if ((op == B_POW || op == B_DIVMOD) && !slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
         if (op == B_POW) args[1] = other;
         SPYValue *result = builtin(c, 1 + argc, args, (void *)(intptr_t)op);
         return op == B_POW || op == B_DIVMOD ? slot_result(c, result) : result;
