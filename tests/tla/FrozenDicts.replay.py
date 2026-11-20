@@ -67,6 +67,15 @@ def outcome(p):
         return (type(x).__name__, alias, tuple(x.items()))
     if op == "copy":
         return ("bool", repr(x.copy() is x), ())
+    if op == "getitem missing":
+        class M(kinds[p["kx"]]):
+            def __missing__(self, key):
+                for _ in range(2): pass
+                return "missing"
+        try:
+            return ("value", str(kinds[p["ky"]].__getitem__(M(x), "b")), ())
+        except TypeError as error:
+            return (type(error).__name__, "", ())
     if op == "isdict":
         return ("bool", repr(isinstance(x, dict)), ())
     try:

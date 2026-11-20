@@ -21,18 +21,20 @@
 (*     x.update(), x.setdefault(k), x.clear(), x.popitem(), x.copy() is x, *)
 (*     isinstance(x, dict), two hashes of x whose values have a Python    *)
 (*     __hash__ (which runs once a value), or x == y by the values', or   *)
-(*     the keys', Python __eq__.                                           *)
+(*     the keys', Python __eq__, or y's type's __getitem__ called with an *)
+(*     instance of x's items of a subclass of x's type whose Python       *)
+(*     __missing__ (which loops) gives "missing", and the key b.           *)
 (*                                                                         *)
 (* The outcome is the result's type and items in order, or the exception.  *)
 (***************************************************************************)
-EXTENDS Integers, Sequences, FiniteSets
+EXTENDS Integers, Sequences, FiniteSets, TLC
 
 Pairs(keys, values) == UNION {[1..n -> keys \X values] : n \in 0..2}
 Distinct(s) == \A i, j \in DOMAIN s : i # j => s[i][1] # s[j][1]
 Mappings == {s \in Pairs({"a", "b"}, {1, 2}) : Distinct(s)}
 Kinds == {"dict", "frozendict"}
 Ops == {"|", "==", "|=", "hash", "hash list", "setitem", "delitem", "pop", "update", "setdefault", "clear",
-        "popitem", "copy", "isdict", "hash once", "== python", "== python keys"}
+        "popitem", "copy", "isdict", "hash once", "== python", "== python keys", "getitem missing"}
 Programs == [op : {"build"}, positional : {<<"none", <<>>>>} \cup
                                          {<<kind, s>> : kind \in {"pairs", "mapping", "generator"}, s \in Pairs({"a", "b"}, {1, 2})},
              keywords : {s \in Pairs({"a", "c"}, {3, 4}) : Distinct(s)}]
@@ -71,6 +73,12 @@ Run(p) ==
                [] p.op \in {"pop", "update", "setdefault", "clear", "popitem"} -> Error("AttributeError")
                [] p.op = "copy" -> Bool(frozen)                  \* a frozendict's copy is itself
                [] p.op = "isdict" -> Bool(~frozen)
+               \* Another type's method refuses the instance; an absent key
+               \* is the subclass's __missing__'s, as subscription's.
+               [] p.op = "getitem missing" ->
+                      IF p.kx # p.ky THEN Error("TypeError")
+                      ELSE LET at == {i \in DOMAIN x : x[i][1] = "b"}
+                           IN  <<"value", IF at = {} THEN "missing" ELSE ToString(x[CHOOSE i \in at : TRUE][2]), <<>>>>
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

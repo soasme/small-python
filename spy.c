@@ -48131,8 +48131,10 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         return NULL;
     }
     if (callee->as.native.kwcall == slot_call) {
-        SPYValue *base = self->type == SPY_INSTANCE && argc == 1 && callee->as.native.owner == c->types[SPY_DICT] &&
-                         !strcmp(callee->as.native.name->as.string.data, "__getitem__") ? builtin_value(c, self, SPY_DICT) : NULL;
+        /* dict's or frozendict's __getitem__ of a subclass's absent key. */
+        int type = callee->as.native.owner == c->types[SPY_DICT] ? SPY_DICT : callee->as.native.owner == c->types[SPY_FROZENDICT] ? SPY_FROZENDICT : -1;
+        SPYValue *base = self->type == SPY_INSTANCE && argc == 1 && type >= 0 &&
+                         !strcmp(callee->as.native.name->as.string.data, "__getitem__") ? builtin_value(c, self, type) : NULL;
         if (!base || !(function = class_lookup(self->as.map.parent, "__missing__")) || !machine_missing(c, function) ||
             !native_absent(c, base, argv[0])) return NULL;
         return missing_env(c, function, self, argv[0], env);
