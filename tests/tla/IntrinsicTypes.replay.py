@@ -128,6 +128,10 @@ SOURCES = {
                      "result = (types.MappingProxyType(M()) == {}, types.MappingProxyType({'a': 1}) == O(), types.MappingProxyType({}) != {})",
     "class_dict_proxy": "class A:\n    x = 1\nA.__dict__['x'] = 2",
     "function_ctor": "def f(): return x\ng = types.FunctionType(f.__code__, {'x': 5}, 'g')\nresult = (g(), g.__name__)",
+    "function_module_code": "g = {'x': 5, 'log': []}\nm = types.FunctionType(compile('def f(): return x\\nlog.append(f())\\nz = x', '<m>', 'exec'), g)\n"
+                            "e = types.FunctionType(compile('x * 4', '<e>', 'eval'), g)\nresult = (m(), e(), [m() for _ in (0,)] and g['log'], g['z'])",
+    "function_genexp_code": "log = []\nclass It:\n    def __iter__(self):\n        for _ in (): pass\n        log.append('iter')\n        return iter(range(2))\n"
+                            "g = types.FunctionType((x * 10 for x in ()).gi_code, {})(It())\nresult = (list(g), log, g.__qualname__)",
     "code_replace": "def f(): pass\nresult = f.__code__.replace(co_name='g').co_name",
     "notimplemented_ctor": 'result = type(NotImplemented)() is NotImplemented',
     "none_ctor": 'result = type(None)() is None',

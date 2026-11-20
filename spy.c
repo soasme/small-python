@@ -19646,8 +19646,12 @@ static NO_INLINE SPYValue *step_native(SPYContext *, Machine *, SPYValue *, int,
 static ALWAYS_INLINE SPYValue *step_call(SPYContext *c, Machine *m, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv) {
     if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host))
         return fn->as.native.host == 1 ? host_call(c, m, fn, argc, argv, NULL) : step_native(c, m, fn, method, n, argc, argv, NULL);
-    /* A module's TypeError may ask its __getattr__ (not_callable). */
-    if (UNLIKELY(fn->type == SPY_MODULE)) return step_native(c, m, fn, method, n, argc, argv, NULL);
+    /* A module's TypeError may ask its __getattr__ (not_callable); a
+     * function of a module's code runs it on m, one of a generator
+     * expression's calls its iterable's __iter__ there (call_module_code). */
+    if (UNLIKELY(fn->type == SPY_MODULE || (fn->type == SPY_FUNCTION && (!fn->as.function.def ||
+                                                                         fn->as.function.def->kind == N_COMPREHENSION))))
+        return step_native(c, m, fn, method, n, argc, argv, NULL);
     return call_plain(c, fn, method, n, argc, argv);
 }
 /* call_plain of fn and method, or call_keywords of fn with keywords, as
@@ -47678,6 +47682,33 @@ static int body_arguments(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *ke
     else if (key) errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key->type == SPY_STRING ? key->as.string.data : "");
     return argc || key ? -1 : 0;
 }
+/* Generator expression function fn's generator, which it takes, named
+ * after the function, as CPython's are. */
+static SPYValue *comprehension_named(SPYContext *c, SPYValue *fn, SPYValue *generator) {
+    (void)c;
+    SPYValue *qualname = generator ? name_local(fn->as.function.metadata, "__qualname__") : NULL;
+    SPYValue *short_name = generator ? name_local(fn->as.function.metadata, "__name__") : NULL;
+    if (qualname && short_name) {
+        spy_release(generator->as.generator.name); generator->as.generator.name = spy_retain(short_name);
+        spy_release(generator->as.generator.qualname); generator->as.generator.qualname = spy_retain(qualname);
+    }
+    return generator;
+}
+/* What the Python __iter__ or __aiter__ of state[1], the iterable given
+ * generator expression function state[0], returned (call_module_code):
+ * the generator over it. */
+static SPYValue *comprehension_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *iterator) {
+    (void)m;
+    SPYValue *fn = state->as.seq.items[0], *source = state->as.seq.items[1], *generator = NULL;
+    Node *def = fn->as.function.def;
+    if (iterator) iterator = def->a->op ? async_returned(c, source, iterator, 1) : iterator_returned(c, source, iterator, "__iter__");
+    if (iterator) {
+        Frame frame = {fn->as.function.env, fn->as.function.unit, 0};
+        generator = comprehension_named(c, fn, comprehension_of(c, &frame, def, iterator));
+    }
+    spy_release(state);
+    return generator;
+}
 static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
     Node *def = fn->as.function.def;
@@ -47688,16 +47719,20 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
         }
         if (argc > 1) return errorf(c, "TypeError", "%s() takes 1 positional argument but %zu were given", name, argc);
         if (!argc) return errorf(c, "TypeError", "%s() missing 1 required positional argument: '.0'", name);
-        Frame frame = {fn->as.function.env, fn->as.function.unit, 0};
-        SPYValue *generator = comprehension_from(c, &frame, def, argv[0]);
-        /* The generator is named after the function, as CPython's are. */
-        SPYValue *qualname = generator ? name_local(fn->as.function.metadata, "__qualname__") : NULL;
-        SPYValue *short_name = generator ? name_local(fn->as.function.metadata, "__name__") : NULL;
-        if (qualname && short_name) {
-            spy_release(generator->as.generator.name); generator->as.generator.name = spy_retain(short_name);
-            spy_release(generator->as.generator.qualname); generator->as.generator.qualname = spy_retain(qualname);
+        /* On the step's machine an instance's Python __iter__ or
+         * __aiter__ is its call (comprehension_iterated). */
+        Machine *m = argv[0]->type == SPY_INSTANCE && !eager_comprehension(def) ? step_machine(c) : NULL;
+        SPYValue *method = m ? special_method(c, argv[0], def->a->op ? "__aiter__" : "__iter__") : NULL;
+        SPYValue *state = method ? spy_tuple(c, 2, (SPYValue *[]){fn, argv[0]}) : NULL;
+        if (state) {
+            SPYValue *generator = callk(c, m, method, 0, NULL, comprehension_iterated, state);
+            spy_release(method);
+            return generator;
         }
-        return generator;
+        spy_release(method);
+        if (c->error_type[0]) return NULL;
+        Frame frame = {fn->as.function.env, fn->as.function.unit, 0};
+        return comprehension_named(c, fn, comprehension_from(c, &frame, def, argv[0]));
     }
     if (body_arguments(c, fn, argc, keywords && keywords->as.map.len ? map_items(keywords)[0].key : NULL)) return NULL;
     SPYValue *global = module_env(c, fn->as.function.env), *unit = fn->as.function.unit, *env;
@@ -47717,6 +47752,14 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
     env->as.map.flags = 1; /* Definitions capture globals. */
     env->as.map.scope = unit->as.unit.scope;
     env->as.map.unit = spy_retain(unit);
+    /* On the step's machine the body is its call (unit_enter), its value
+     * an expression's or None (code_returned). */
+    Machine *m = unit->as.unit.body ? step_machine(c) : NULL;
+    if (m) {
+        if (unit_call(c, unit, env)) { spy_release(env); return NULL; }
+        c->k_fn = spy_retain(unit); c->k_env = env; c->k = code_returned; c->k_ctx = spy_bool(c, unit->as.unit.expression == 1); c->k_unit = 1;
+        return NULL;
+    }
     Frame frame = {env, unit, unit->as.unit.expression == 2};
     Result r = execute_module(c, &frame);
     spy_release(env);
