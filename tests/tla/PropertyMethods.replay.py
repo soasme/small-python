@@ -54,6 +54,12 @@ def outcome(p):
         call = lambda: getattr(C.__dict__["x"], name)(*args)
     elif p["how"] == "class":
         call = lambda: getattr(maker, name)(C.__dict__["x"], *args)
+    elif p["how"] == "statement":
+        def call():
+            if p["op"] == "set":
+                c.x = 1
+            else:
+                del c.x
     else:
         bound = getattr(C.__dict__["x"], name)
         call = lambda: bound(*args)

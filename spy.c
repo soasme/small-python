@@ -19206,6 +19206,13 @@ static NO_INLINE SPYValue *step_native(SPYContext *c, Machine *m, SPYValue *fn, 
 }
 static ALWAYS_INLINE SPYValue *step_keywords(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host == 1)) return host_call(c, m, fn, argc, argv, keywords);
+    /* A bound native that may leave a call is given its self first, so
+     * that it runs as the step (step_machine). */
+    if (fn->type == SPY_METHOD && fn->as.method.function->type == SPY_NATIVE && fn->as.method.function->as.native.host == 2 && argc < 9) {
+        SPYValue *args[9] = {fn->as.method.self};
+        memcpy(args + 1, argv, argc * sizeof(*argv));
+        return step_native(c, m, fn->as.method.function, -1, NULL, argc + 1, args, keywords);
+    }
     return step_native(c, m, fn, -1, NULL, argc, argv, keywords);
 }
 /* A spy_callk's call returned result on m: its continuation, in
@@ -20390,9 +20397,13 @@ static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, cons
     *descriptor = NULL;
     if (hook && !(deleting ? default_hook(hook, B_OBJECT_DELATTR, B_TYPE_DELATTR) : default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR)))
         function = hook;
-    else if (data_descriptor(*descriptor = instance_lookup(owner, name)))
+    else if (data_descriptor(*descriptor = instance_lookup(owner, name))) {
+        /* A property subclass's inherited __set__ or __delete__ is its property's. */
+        SPYValue *p = (*descriptor)->type == SPY_INSTANCE ? builtin_value(c, *descriptor, SPY_PROPERTY) : NULL;
+        if (p && builtin_base(c, *descriptor, deleting ? "__delete__" : "__set__", NULL)) *descriptor = p;
         function = (*descriptor)->type == SPY_PROPERTY ? (deleting ? (*descriptor)->as.property.del : (*descriptor)->as.property.set) :
                    (*descriptor)->type == SPY_INSTANCE ? class_lookup((*descriptor)->as.map.parent, deleting ? "__delete__" : "__set__") : NULL;
+    }
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether a store to attribute n of object, which node_set_attribute
@@ -41019,6 +41030,15 @@ static SPYValue *int_to_bytes(SPYContext *c, size_t argc, SPYValue *const *argv,
     mem_free(out);
     return result;
 }
+/* What a's __bytes__ returned, result, which it takes: bytes only. */
+static SPYValue *bytes_result(SPYContext *c, SPYValue *a, SPYValue *result) {
+    if (result && !builtin_value(c, result, SPY_BYTES)) {
+        char fq[256];
+        errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_fqname(a, fq, sizeof(fq)), type_name(result));
+        spy_release(result); return NULL;
+    }
+    return result;
+}
 /* PyBytes_FromObject: the bytes of a bytes-like object, a __bytes__ result
  * (bytes only), or an iterable of byte values; target names the type made. */
 static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *target) {
@@ -41029,11 +41049,7 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
     if (method) {
         SPYValue *result = call(c, method, 0, NULL);
         spy_release(method);
-        if (result && !builtin_value(c, result, SPY_BYTES)) {
-            { char fq[256]; errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_fqname(a, fq, sizeof(fq)), type_name(result)); }
-            spy_release(result); return NULL;
-        }
-        return result;
+        return bytes_result(c, a, result);
     }
     if (c->error_type[0]) return NULL;
     if (buffer_exporter(a)) {
@@ -41095,28 +41111,15 @@ static SPYValue *sized_bytes(SPYContext *c, SPYValue *a, const char *target) {
     if (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))) return index_bytes(c, a, index_object(c, a), target);
     return bytes_from_object(c, a, target);
 }
-static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
-    (void)data;
-    static const char *const names[] = {"bytes", "byteorder", "signed"};
-    SPYValue *args[3];
-    if (parse_arguments(c, "from_bytes", argc - 1, argv + 1, keywords, names, 3, 1, 0, args)) return NULL;
-    if (argc - 1 > 2) return errorf(c, "TypeError", "from_bytes() takes at most 2 positional arguments (%zu given)", argc - 1);
-    int little, is_signed = args[2] && truthy(args[2]);
-    if (byteorder_argument(c, "from_bytes", args[1], &little)) return NULL;
-    /* A buffer comes before __bytes__. */
-    SPYValue *owned, *source = buffer_bytes(c, args[0], &owned);
-    if (!source && c->error_type[0]) return NULL;
-    if (!source) {
-        owned = bytes_from_object(c, args[0], "bytes");
-        if (!owned) return NULL;
-        source = builtin_value(c, owned, SPY_BYTES);
-    }
+/* int.from_bytes's int of source, a bytes value, little-endian for
+ * little, two's complement for is_signed, made an instance of cls, int or
+ * a subclass, on m when given (callk). */
+static SPYValue *from_bytes_made(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *source, int little, int is_signed) {
     size_t len = source->as.string.len;
     BigInt *big = integer_alloc(c, len / 4 + 1);
     unsigned char *bytes = big ? allocate(c, len + 1) : NULL;
-    if (!bytes) { mem_free(big); spy_release(owned); return NULL; }
+    if (!bytes) { mem_free(big); return NULL; }
     for (size_t i = 0; i < len; i++) bytes[i] = (unsigned char)source->as.string.data[little ? i : len - 1 - i];
-    spy_release(owned);
     big->sign = 1;
     if (is_signed && len && (bytes[len - 1] & 128)) {
         /* Magnitude of a two's-complement value: invert, then add one. */
@@ -41127,11 +41130,48 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
     for (size_t i = 0; i < len; i++) big->digits[i / 4] |= (uint32_t)bytes[i] << ((i % 4) * 8);
     mem_free(bytes);
     SPYValue *result = integer_finish(c, big);
-    SPYValue *cls = argv[0];
-    if (result && cls != c->types[SPY_INT]) {
-        SPYValue *converted = call(c, cls, 1, &result);
-        spy_release(result); result = converted;
+    return result && cls != c->types[SPY_INT] ? callk(c, m, cls, 1, &result, unchanged, NULL) : result;
+}
+/* What int.from_bytes's argument's __bytes__ returned, result, ctx its
+ * class, the argument, and 1 for little-endian or'd with 2 for signed
+ * (from_bytes_made). */
+static SPYValue *from_bytes_called(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue **items = ctx->as.seq.items;
+    SPYValue *made = (result = bytes_result(c, items[1], result)) ?
+        from_bytes_made(c, m, items[0], builtin_value(c, result, SPY_BYTES), items[2]->as.integer_data.small & 1, items[2]->as.integer_data.small >> 1) : NULL;
+    spy_release(result); spy_release(ctx);
+    return made;
+}
+/* int.from_bytes(bytes, byteorder='big', *, signed=False); a Python
+ * __bytes__ and a subclass's call run on the step's machine. */
+static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    static const char *const names[] = {"bytes", "byteorder", "signed"};
+    SPYValue *args[3];
+    if (parse_arguments(c, "from_bytes", argc - 1, argv + 1, keywords, names, 3, 1, 0, args)) return NULL;
+    if (argc - 1 > 2) return errorf(c, "TypeError", "from_bytes() takes at most 2 positional arguments (%zu given)", argc - 1);
+    int little, is_signed = args[2] && truthy(args[2]);
+    if (c->error_type[0] || byteorder_argument(c, "from_bytes", args[1], &little)) return NULL;
+    Machine *m = step_machine(c);
+    /* A buffer comes before __bytes__. */
+    SPYValue *owned, *source = buffer_bytes(c, args[0], &owned);
+    if (!source && c->error_type[0]) return NULL;
+    SPYValue *method = !source && m && !builtin_value(c, args[0], SPY_BYTES) && args[0]->type != SPY_BYTEARRAY && args[0]->type != SPY_MEMORYVIEW ?
+                       special_method(c, args[0], "__bytes__") : NULL;
+    if (method) {
+        SPYValue *bits = spy_int(c, little | is_signed << 1), *ctx = bits ? tuple_of(c, 3, (SPYValue *[]){argv[0], args[0], bits}) : NULL;
+        SPYValue *result = ctx ? callk(c, m, method, 0, NULL, from_bytes_called, ctx) : NULL;
+        spy_release(bits); spy_release(method);
+        return result;
     }
+    if (c->error_type[0]) return NULL;
+    if (!source) {
+        owned = bytes_from_object(c, args[0], "bytes");
+        if (!owned) return NULL;
+        source = builtin_value(c, owned, SPY_BYTES);
+    }
+    SPYValue *result = from_bytes_made(c, m, argv[0], source, little, is_signed);
+    spy_release(owned);
     return result;
 }
 static SPYValue *int_simple(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -47047,8 +47087,9 @@ static int register_core_methods(SPYContext *c) {
         register_method(c, SPY_BYTEARRAY, "maketrans", bytes_maketrans, 0, METHOD_STATIC) ||
         register_method(c, SPY_FLOAT, "from_number", from_number, SPY_FLOAT, METHOD_CLASS) ||
         register_method(c, SPY_COMPLEX, "from_number", from_number, SPY_COMPLEX, METHOD_CLASS) ? -1 :
-        /* complex.from_number may convert on its step's machine (from_number). */
-        (name_local(c->types[SPY_COMPLEX], "from_number")->as.wrapper.function->as.native.host = 2, 0);
+        /* complex.from_number and int.from_bytes may call on their step's machine. */
+        (name_local(c->types[SPY_COMPLEX], "from_number")->as.wrapper.function->as.native.host = 2,
+         name_local(c->types[SPY_INT], "from_bytes")->as.wrapper.function->as.native.host = 2, 0);
 }
 static int register_method(SPYContext *c, int type, const char *name, NativeMethod call, intptr_t data, int kind) {
     return class_method_set(c, c->types[type], name, call, data, kind);

@@ -10,7 +10,8 @@
 (* holds x = property(get, fset, fdel) on class C, made by property or a   *)
 (* subclass of it, its function returning "ignored", raising LookupError,  *)
 (* or absent (None), and calls the method from the property, from the      *)
-(* property class with the property first, or bound and called later. The  *)
+(* property class with the property first, or bound and called later, or   *)
+(* runs the statement c.x = 1 or del c.x, which gives None as they do. The *)
 (* outcome is what the call returns, or the exception, and the function's  *)
 (* calls. For op doc, the property is made of a getter whose __doc__ is a  *)
 (* Python property returning "documented", raising LookupError, or raising *)
@@ -20,7 +21,7 @@
 EXTENDS Naturals, Sequences
 
 Programs == [op : {"set", "delete", "doc"}, maker : {"property", "subclass"}, function : {"returns", "raises", "absent"},
-             how : {"method", "class", "bound"}]
+             how : {"method", "class", "bound", "statement"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

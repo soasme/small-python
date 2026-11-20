@@ -125,6 +125,18 @@ SOURCES = {
                          "    try: complex(*a)\n"
                          "    except TypeError as e: return str(e)\n"
                          "result = (complex(F()), complex(I()), bad(F(), N()), bad(F(), '1'), complex(I(), F()), log)",
+    "int_from_bytes": 'log = []\n'
+                      'class B:\n'
+                      '    def __bytes__(self):\n'
+                      '        for _ in range(2): pass\n'
+                      "        log.append('bytes')\n"
+                      "        return b'\\x01\\x00'\n"
+                      'class Made(int):\n'
+                      '    def __new__(cls, v):\n'
+                      '        for _ in range(2): pass\n'
+                      "        log.append('new')\n"
+                      '        return int.__new__(cls, v)\n'
+                      "result = (int.from_bytes(B()), int.from_bytes(B(), 'little', signed=True), Made.from_bytes(B()), type(Made.from_bytes(B())).__name__, log)",
     "complex_from_number": "log = []\n"
                            "class F:\n"
                            "    def __float__(self):\n"
