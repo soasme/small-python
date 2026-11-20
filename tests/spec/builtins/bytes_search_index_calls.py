@@ -44,3 +44,17 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(results(), expected)
+
+# With instance bounds, the bounds convert first, then the needle, bound,
+# through the class, or of a bytearray.
+def bounded():
+    b = b"abcb"
+    return [t(lambda: bytes.find(b, X(98), X(2))), t(lambda: b.count(X(98), X(0), X(4))),
+            t(lambda: bytearray(b).rfind(X(98), 0, X(3))), t(lambda: bytearray.index(bytearray(b), X(99), X(1))),
+            t(lambda: b.find(X(300), X(1))), t(lambda: b.find(X("raise"), X(1))), t(lambda: b.find(X(98), X("raise"))),
+            t(lambda: b.find(X(98), None, X(3)))]
+expected_bounded = [(3, [2, 98]), (2, [0, 4, 98]), (1, [3, 98]), (2, [1, 99]),
+                    ("ValueError: byte must be in range(0, 256)", [1, 300]), ("LookupError: x", [1, "raise"]),
+                    ("LookupError: x", ["raise"]), (1, [3, 98])]
+assert_eq(bounded(), expected_bounded)
+assert_eq((lambda: bounded())(), expected_bounded)

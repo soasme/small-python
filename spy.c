@@ -12236,10 +12236,20 @@ static int class_hooked(SPYValue *);
 static int type_answers(SPYContext *c, SPYValue *v, const char *name) {
     return !v->as.map.meta || class_lookup(v->as.map.meta, name) == class_lookup(c->types[SPY_CLASS], name);
 }
+/* Whether v is of a type whose __annotations__ an __annotate__ makes. */
+static int annotated_type(SPYValue *v) {
+    return UINT64_C(1) << v->type & (UINT64_C(1) << SPY_FUNCTION | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_MODULE |
+                                     UINT64_C(1) << SPY_STATICMETHOD | UINT64_C(1) << SPY_CLASSMETHOD);
+}
 /* The Python __annotate__, a machine function, that a read of the
- * __annotations__ of v, a function, plain class or module, calls first,
- * none being kept yet (annotation_dict); borrowed, else NULL. */
+ * __annotations__ of v, a function, plain class or module, or a
+ * staticmethod's or classmethod's such callable, calls first, none being kept
+ * yet (annotation_dict); borrowed, else NULL. */
 static NO_INLINE SPYValue *annotate_pending(SPYContext *c, SPYValue *v) {
+    if (v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD)
+        return name_local(v->as.wrapper.attributes, "__annotations__") || !annotated_type(v->as.wrapper.function) ||
+               v->as.wrapper.function->type == SPY_STATICMETHOD || v->as.wrapper.function->type == SPY_CLASSMETHOD ? NULL :
+               annotate_pending(c, v->as.wrapper.function);
     SPYValue *own = v->type == SPY_FUNCTION ? v->as.function.metadata : v, *kept, *annotate;
     /* A metaclass's lookup hook, or its own __annotations__ or
      * __annotate__, answers instead. */
@@ -12251,17 +12261,30 @@ static NO_INLINE SPYValue *annotate_pending(SPYContext *c, SPYValue *v) {
     if (v->type == SPY_CLASS && !annotate) annotate = name_local(own, "__annotate_func__");
     return annotate && machine_function(c, annotate) ? annotate : NULL;
 }
+static int attribute_named(SPYContext *, SPYValue *);
+/* Whether getattr() or hasattr() of v, by name, reads on the machine
+ * (getattr_call): an instance, class, super object or module, or an
+ * __annotations__ its Python __annotate__ makes (annotate_pending). */
+static int getattr_subject(SPYContext *c, SPYValue *v, SPYValue *name) {
+    return (v->type == SPY_INSTANCE || v->type == SPY_CLASS || v->type == SPY_SUPER || v->type == SPY_MODULE ||
+            (UNLIKELY(annotated_type(v)) && builtin_value(c, name, SPY_STRING) &&
+             !strcmp(builtin_value(c, name, SPY_STRING)->as.string.data, "__annotations__") && annotate_pending(c, v))) &&
+           attribute_named(c, name);
+}
 /* What the __annotate__ of owner, which it takes, returned in result for
  * a read of its __annotations__ (annotate_pending): the dict, kept as
- * annotation_dict's caller keeps it. */
+ * annotation_dict's caller keeps it, a wrapper's by its function and in
+ * its own __dict__ too. */
 static SPYValue *annotations_made(SPYContext *c, Machine *m, SPYValue *owner, SPYValue *result) {
     (void)m;
     if (result && !builtin_value(c, result, SPY_DICT)) {
         errorf(c, "TypeError", "__annotate__() must return a dict, not %s", type_name(result));
         spy_release(result); result = NULL;
     }
-    SPYValue *own = owner->type == SPY_FUNCTION ? owner->as.function.metadata : owner;
-    if (result && name_set(c, own, owner->type == SPY_CLASS ? "__annotations_cache__" : "__annotations__", result)) {
+    int wrapper = owner->type == SPY_STATICMETHOD || owner->type == SPY_CLASSMETHOD;
+    SPYValue *target = wrapper ? owner->as.wrapper.function : owner, *own = target->type == SPY_FUNCTION ? target->as.function.metadata : target;
+    if (result && (name_set(c, own, target->type == SPY_CLASS ? "__annotations_cache__" : "__annotations__", result) ||
+                   (wrapper && name_set(c, owner->as.wrapper.attributes, "__annotations__", result)))) {
         spy_release(result); result = NULL;
     }
     spy_release(owner);
@@ -13343,8 +13366,7 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
     }
     if (calls && kind == ATTR_PROPERTY && property_enters(c, n->attr_method)) return NULL;
     /* A function's, class's or module's __annotations__ its Python __annotate__ makes (getter_call). */
-    if (calls && UNLIKELY(v->type == SPY_FUNCTION || v->type == SPY_CLASS || v->type == SPY_MODULE) &&
-        !strcmp(n->b->text, "__annotations__") && annotate_pending(c, v)) {
+    if (calls && UNLIKELY(annotated_type(v)) && !strcmp(n->b->text, "__annotations__") && annotate_pending(c, v)) {
         c->annotating = 1;
         return NULL;
     }
@@ -29010,7 +29032,7 @@ static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const
 static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
 static int keys_set_call(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
-enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_LENGTH = 1u << 10, INDEX_MOST = 4 };
+enum { INDEX_PARTS = 1u << 8, INDEX_BUFFERS = 1u << 9, INDEX_LENGTH = 1u << 10, INDEX_NEEDLE = 1u << 11, INDEX_MOST = 4 };
 static int hex_separator(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static int hex_viewing(SPYValue *);
 /* Whether mask marks argument i: marks are the bits below INDEX_PARTS,
@@ -29099,9 +29121,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return next_builtin_call(c, m, n, callee, argc, argv, env);
     /* getattr() of an instance, class, super object or module and a str,
      * and a default, or hasattr() of them, as a stack call's (getattr_call). */
-    int getter = method < 0 && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER ||
-                                                            argv[0]->type == SPY_MODULE) &&
-        attribute_named(c, argv[1]) ? builtin_id(callee) : -1;
+    int getter = method < 0 && (argc == 2 || argc == 3) && getattr_subject(c, argv[0], argv[1]) ? builtin_id(callee) : -1;
     if (getter == B_GETATTR || (getter == B_HASATTR && argc == 2)) {
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
         m->stack[m->len++] = callee; m->stack[m->len++] = argv[0]; m->stack[m->len++] = argv[1];
@@ -29553,12 +29573,13 @@ static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
  * of seq with argc arguments argv: a str's or bytes' start and end, a str's
  * needle a str unless it is startswith() or endswith(), or a list's or
  * tuple's index(); and a bytes search's needle, a byte by its __index__
- * when it exports no buffer, unless a bound's __index__ comes first; else 0. */
+ * when it exports no buffer, after an instance bound's __index__
+ * (INDEX_NEEDLE); else 0. */
 static unsigned search_bounds(SPYContext *c, SPYValue *seq, int method, size_t argc, SPYValue *const *argv) {
     if (argc < 1 || argc > 3) return 0;
+    int bounded = (argc > 1 && argv[1]->type == SPY_INSTANCE) || (argc > 2 && argv[2]->type == SPY_INSTANCE);
     unsigned needle = seq->type == SPY_BYTES && method >= M_FIND && method <= M_STRING_COUNT && argv[0]->type == SPY_INSTANCE &&
-                      !class_lookup(argv[0]->as.map.parent, "__buffer__") && (argc < 2 || argv[1]->type != SPY_INSTANCE) &&
-                      (argc < 3 || argv[2]->type != SPY_INSTANCE);
+                      !class_lookup(argv[0]->as.map.parent, "__buffer__") ? bounded ? INDEX_NEEDLE : 1 : 0;
     int text = method >= M_STARTSWITH && method <= M_STRING_COUNT && (seq->type == SPY_BYTES ||
         (seq->type == SPY_STRING && (method <= M_ENDSWITH || builtin_value(c, argv[0], SPY_STRING))));
     int items = method == M_INDEX && (seq->type == SPY_LIST || seq->type == SPY_TUPLE);
@@ -29698,6 +29719,9 @@ static ALWAYS_INLINE unsigned buffer_arguments(SPYContext *c, SPYValue *callee, 
     return argc && (method == M_JOIN || (method < 0 && callee->type != SPY_FUNCTION)) && join_listable(argv[argc - 1]) ?
            buffer_arguments_rest(c, callee, method, argc, argv) : 0;
 }
+/* Mask, an unbound method's (native_indices), its arguments' marks one
+ * place on for the self the call takes first. */
+static unsigned index_shifted(unsigned mask) { return (mask & 0xffu) << 1 | (mask & ~0xffu); }
 static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     unsigned buffers = buffer_arguments(c, callee, method, argc, argv);
@@ -29705,7 +29729,7 @@ static NO_INLINE unsigned index_arguments_rest(SPYContext *c, SPYValue *callee, 
     unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ?
                                   1 : indices ? 1 | INDEX_PARTS : search_bounds(c, callee, method, argc, argv) :
                     callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
-                    callee->type == SPY_NATIVE ? argc ? native_indices(c, callee, argv[0], argc - 1, argv + 1) << 1 : 0 :
+                    callee->type == SPY_NATIVE ? argc ? index_shifted(native_indices(c, callee, argv[0], argc - 1, argv + 1)) : 0 :
                     callee == c->types[SPY_INT] || callee == c->iterator_types[IT_ENUMERATE] ? argc == 2 ? 2 : 0 :
                     callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE ?
                     native_indices(c, callee->as.method.function, callee->as.method.self, argc, argv) :
@@ -29776,6 +29800,17 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         }
         /* A search bound may be None. */
         if (index_marked(mask, i) && !builtin_value(c, item, SPY_INT) && (item->type != SPY_NONE || !searches(callee))) break;
+    }
+    if (i == args->as.seq.len && mask & INDEX_NEEDLE) {
+        /* A bytes search's needle, before its bounds (search_bounds), last. */
+        size_t at = 0;
+        while (!index_marked(mask, at + 1)) at++;
+        SPYValue *item = args->as.seq.items[at], *function = index_special(c, item);
+        SPYValue *parts[] = {callee, int_value(c, method), name, args, int_value(c, (int64_t)at), int_value(c, mask & ~(unsigned)INDEX_NEEDLE)};
+        SPYValue *state = function && parts[1] && parts[4] && parts[5] ? spy_tuple(c, 6, parts) : NULL;
+        release_all(3, (SPYValue *[]){parts[1], parts[4], parts[5]});
+        if (state) return special_callk(c, m, function, item, 0, NULL, NULL, index_argued, state);
+        if (function) return NULL;
     }
     SPYValue *part = i == args->as.seq.len && mask & INDEX_PARTS && integer_sign(builtin_value(c, args->as.seq.items[0], SPY_INT)) >= 0 ?
                      slice_part(c, callee) : NULL;
@@ -30039,10 +30074,12 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
  * function with *env), stepped (operand_call_rest, builtin_call), or
  * called here; NULL with no error when a consumer of a generator began
  * on m. */
-/* Whether v is an instance, class or module, whose attribute getattr()
- * may read by calling Python (getattr_call). */
+/* Whether v is an instance, class or module, or a function, staticmethod
+ * or classmethod, whose attribute getattr() may read by calling Python
+ * (getattr_call; an __annotate__, annotate_pending). */
 static ALWAYS_INLINE int attribute_owner(SPYValue *v) {
-    return !!(UINT64_C(1) << v->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_MODULE));
+    return !!(UINT64_C(1) << v->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_MODULE |
+                                        UINT64_C(1) << SPY_FUNCTION | UINT64_C(1) << SPY_STATICMETHOD | UINT64_C(1) << SPY_CLASSMETHOD));
 }
 static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
                                                 SPYValue **argv, SPYValue **env) {
@@ -30567,10 +30604,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return result;
     }
-    if (calls && (argc == 2 || argc == 3) && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS || argv[0]->type == SPY_SUPER ||
-                  argv[0]->type == SPY_MODULE) &&
-        attribute_named(c, argv[1]) &&
-        callee->type == SPY_NATIVE && callee->as.native.call == builtin) {
+    if (calls && (argc == 2 || argc == 3) && getattr_subject(c, argv[0], argv[1]) && callee->type == SPY_NATIVE && callee->as.native.call == builtin) {
         if (callee->as.native.data == (void *)(intptr_t)B_GETATTR) return getattr_call(c, m, argc == 3, env);
         if (argc == 2 && callee->as.native.data == (void *)(intptr_t)B_HASATTR)
             return machine_push(c, m, spy_retain(c->defaulting)) ? NULL : getattr_call(c, m, 1, env);
@@ -35364,6 +35398,14 @@ static SPYValue *getattr_searched(SPYContext *c, Machine *m, SPYValue *state, SP
     spy_release(state);
     return value;
 }
+/* What getattr()'s __annotations__ read's __annotate__ returned (getattr_named),
+ * ctx the owner and the default, c->unbound for none. */
+static SPYValue *getattr_annotated(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue *value = annotations_made(c, m, spy_retain(ctx->as.seq.items[0]), result);
+    value = getattr_returned(c, ctx->as.seq.items[1] == c->unbound ? NULL : ctx->as.seq.items[1], value);
+    spy_release(ctx);
+    return value;
+}
 static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulted, SPYValue **env, const char *text) {
     size_t n = 3 + (size_t)defaulted;
     SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, NULL, NULL}, *fallback = NULL;
@@ -35375,6 +35417,18 @@ static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulte
     /* A __dict__ search by a Python __eq__ is m's call, the read going on after it (getattr_searched). */
     if (!own && kind != ATTR_PROPERTY && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, text))
         return search_begin(c, m, v, text, c->booleans[defaulted], getattr_searched);
+    SPYValue *annotate = UNLIKELY(annotated_type(v)) && !strcmp(text, "__annotations__") ? annotate_pending(c, v) : NULL;
+    if (annotate) {
+        /* __annotate__(1), its dict kept (annotations_made), m's call (getattr_annotated). */
+        SPYValue *ctx = tuple_of(c, 2, (SPYValue *[]){v, defaulted ? slots[3] : c->unbound}), *format = ctx ? spy_int(c, 1) : NULL;
+        spy_retain(annotate);
+        m->len -= n;
+        release_all(n, slots);
+        SPYValue *result = format ? callk(c, m, annotate, 1, &format, getattr_annotated, ctx) : NULL;
+        if (!format) spy_release(ctx);
+        spy_release(annotate);
+        return result;
+    }
     if (kind == ATTR_PROPERTY && property_enters(c, method)) { spy_retain(v); function = getter_bound(c, spy_retain(method->as.property.get), argv, &argc); }
     else {
         /* An own entry, or its miss with a default, is read without an

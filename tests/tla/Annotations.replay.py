@@ -174,9 +174,12 @@ def calls(p):
     elif p["annotate"] == "list":
         target.__annotate__ = lambda format: [note(format)]
     out = None
+    wrapper = staticmethod(target)
+    read = {"attribute": lambda: target.__annotations__, "getattr": lambda: getattr(target, "__annotations__"),
+            "wrapper": lambda: wrapper.__annotations__}[p["read"]]
     for _ in range(2):
         try:
-            out = render(target.__annotations__)
+            out = render(read())
         except TypeError as error:
             out = type(error).__name__
     return "%s;%d" % (out, len(log))

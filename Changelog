@@ -626,6 +626,8 @@ Unreleased (0.10.0):
 - a view that dies or is collected unreleased calls its exporter's Python `__release_buffer__` without nesting on the C stack
 - a range's `index()`, `count()` and `in` call an instance's Python `__eq__`, and the `__bool__` of what it returns, without nesting on the C stack
 - `list.index(l, x)`, `list.count`, `list.remove`, `tuple.index`, `tuple.count`, `range.index` and `range.count` called through the class search without nesting on the C stack
+- a bytes or bytearray search with instance bounds converts its int needle's Python `__index__` after them without nesting on the C stack
+- `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
 - a view a bytearray subclass's own `__buffer__` returns is released without bytearray's `__release_buffer__`, which reported an error
 - A generator, coroutine or async generator function's call binds str-subclass keyword names by Python `__eq__` without nesting on the C stack
