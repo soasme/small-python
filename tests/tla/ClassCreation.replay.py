@@ -8,6 +8,9 @@ class D:
     def __set_name__(self, owner, name):
         log.append("set_name " + name)
 
+class S:
+    __set_name__ = staticmethod(lambda owner, name: log.append("set_name " + name))
+
 class Meta(type):
     def __new__(mcls, name, bases, ns, **kw):
         log.append("new")
@@ -65,6 +68,9 @@ class Plain:
 class Entries:
     def __init__(self, base):
         self.base = base
+    def __getattribute__(self, name):
+        for _ in (): pass
+        return object.__getattribute__(self, name)
     def __mro_entries__(self, bases):
         log.append("mro_entries")
         return (self.base,)
@@ -80,7 +86,7 @@ def source(p):
     if p["call"]:
         meta = {"none": "type", "meta": "Meta", "prepare": "Prepare", "init": "InitOnly", "mro": "MroOnly"}[p["meta"]]
         lines = ["def body():", "    log.append('body')" if p["calls"] else "    pass",
-                 "    return {'n': 1%s}" % "".join(", %r: D()" % name for name in "ab"[:p["set_names"]])]
+                 "    return {'n': 1%s}" % "".join(", %r: %s()" % (name, kind) for name, kind in list(zip("ab", "DS"))[:p["set_names"]])]
         made = "%s('C', (%s,), body()%s)" % (meta, base, ", flag=1" if p["flag"] else "")
         lines.append("C = %s" % ("deco(%s)" % made if p["deco"] else made))
         return "\n".join(lines) + "\n"
@@ -94,7 +100,7 @@ def source(p):
     if p["annotated"]:
         lines.append("    x: int = 0")
     lines.append("    log.append('body')" if p["calls"] else "    n = 1")
-    lines += ["    %s = D()" % name for name in "ab"[:p["set_names"]]]
+    lines += ["    %s = %s()" % (name, kind) for name, kind in list(zip("ab", "DS"))[:p["set_names"]]]
     if p["logged"]:
         lines += ["    def m(self): pass", "    m", "    del m", "    k = j = 1", "    del k, j",
                   "    try: 1/0", "    except ZeroDivisionError as e: pass",
@@ -106,6 +112,14 @@ def outcome(p):
     namespace = {"log": [], "logged": p["logged"]}
     exec(HOOKS, namespace)
     namespace["log"].clear()
+    if p["builder"]:
+        # The statement's __build_class__ is Python, calling the builtin one.
+        builtin = __build_class__
+        def builder(func, name, *bases, **kwds):
+            for _ in (): pass
+            return builtin(func, name, *bases, **kwds)
+        table = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+        namespace["__builtins__"] = dict(table, __build_class__=builder)
     try:
         exec(source(p), namespace)
     except TypeError:

@@ -684,6 +684,9 @@ Unreleased (0.10.0):
 - A descriptor whose `__get__` is a callable instance calls its Python `__call__` without nesting on the C stack
 - Comparing a function, class or other builtin value with an instance calls the instance's Python reflected method without nesting on the C stack
 - `hash()` of a mappingproxy calls its mapping's Python `__hash__` without nesting on the C stack
+- A class whose metaclass defines only a Python `__init__`, or whose attribute has a staticmethod `__set_name__`, runs its class callbacks without nesting on the C stack
+- A class statement reads a base's `__mro_entries__` through its Python `__getattribute__`, `__getattr__` or property without nesting on the C stack
+- An explicit `__build_class__` call, a Python builder's among them, makes its class without nesting on the C stack
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

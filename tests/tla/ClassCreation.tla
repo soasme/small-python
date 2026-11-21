@@ -7,10 +7,12 @@
 (*     @deco                       # optional                              *)
 (*     class C(B, metaclass=Meta, flag=1):   # Meta and flag optional      *)
 (*         a = D()                 # 0, 1, or 2 attributes whose class     *)
-(*         b = D()                 #   defines __set_name__                *)
+(*         b = S()                 #   defines __set_name__, S's a         *)
+(*                                 #   staticmethod of (owner, name)       *)
 (*                                                                         *)
 (* where B may define __init_subclass__(cls, **kw), or be given by an      *)
-(* object whose __mro_entries__ returns (B,), and Meta (a subclass of      *)
+(* object whose __mro_entries__, which its Python __getattribute__         *)
+(* reads, returns (B,), and Meta (a subclass of                            *)
 (* type) defines __new__ and __init__, and possibly __prepare__, each      *)
 (* passing flag on to type.__new__ but not to type.__init__, or            *)
 (* __init__ alone, type.__new__ then receiving flag itself, or mro         *)
@@ -18,8 +20,10 @@
 (* before the other hooks. Every hook logs its name; the class body        *)
 (* logs "body" when it calls, else it only assigns, and may begin with     *)
 (* an annotated assignment; C may take a type parameter, class             *)
-(* C[T](...), which adds the base Generic[T]. Neither changes an           *)
-(* outcome. The outcome is the log and whether the statement raised.       *)
+(* C[T](...), which adds the base Generic[T]; and the statement's          *)
+(* __build_class__ may be a Python function calling the builtin one.       *)
+(* None of these changes an outcome. The outcome is the log and whether    *)
+(* the statement raised.                                                   *)
 (* The class may instead be a call, C = deco(Meta("C", (B,), ns,           *)
 (* flag=1)), Meta type when none, of a namespace the body's statements     *)
 (* fill, with no __mro_entries__, __prepare__ or type parameter. A         *)
@@ -36,7 +40,7 @@
 EXTENDS Naturals, Sequences
 
 Metas == {"none", "meta", "prepare", "init", "mro"}
-Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN, annotated : BOOLEAN, generic : BOOLEAN, call : BOOLEAN, logged : BOOLEAN]
+Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN, annotated : BOOLEAN, generic : BOOLEAN, call : BOOLEAN, logged : BOOLEAN, builder : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
