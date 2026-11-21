@@ -25188,6 +25188,12 @@ static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
             relocate(c, h->a);
             SPYValue *type = eval(c, f, h->a), *match = NULL, *remaining = NULL;
             int status = type ? star_match(c, rest, type, &match, &remaining) : -1;
+            if (status == 1) {
+                /* The group splits itself, through its own split method. */
+                SPYValue *split = attribute(c, rest, "split"), *pair = split ? call(c, split, 1, &type) : NULL;
+                status = pair ? star_pair(c, rest, pair, &match, &remaining) : -1;
+                spy_release(split); spy_release(pair);
+            }
             spy_release(type);
             if (status) break;
             /* What the split left goes on to the next clause, matched or not. */

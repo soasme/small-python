@@ -2912,12 +2912,14 @@ int main(int argc, char **argv) {
     assert(!spy_set_limit(c, SPY_LIMIT_INT_DIGITS, 4300));
     size_t stack = spy_get_limit(c, SPY_LIMIT_STACK);
     assert(stack == 4 << 20 && !spy_set_limit(c, SPY_LIMIT_STACK, 64 << 10) && !spy_set_limit(c, SPY_LIMIT_RECURSION, 100000));
-    /* A Python function calling Python functions uses no C stack per call;
-     * a recursion through an operator's method, which C calls, does. */
+    /* A Python function calling Python functions uses no C stack per call,
+     * nor does a recursion through an operator's method: each meets the
+     * recursion limit. */
     execute(c, "def depth(n): return depth(n - 1) + 1 if n else 0\nassert depth(50000) == 50000");
     assert(spy_exec(c, "class Down:\n def __add__(self, n): return self + n\nDown() + 1", "stack.py") == -1 &&
-           !strcmp(spy_error_type(c), "RecursionError") && !strncmp(spy_error_message(c), "Stack overflow", 14));
-    /* So does one through a host function's spy_call, but not its spy_callk. */
+           !strcmp(spy_error_type(c), "RecursionError") && !strncmp(spy_error_message(c), "maximum recursion depth exceeded", 32));
+    /* One through a host function's spy_call does use C stack, but not
+     * one through its spy_callk. */
     execute(c, "def down_k(n): return call_k(down_k, n - 1) + 1 if n else 0\nassert down_k(20000) == 20000");
     assert(spy_exec(c, "def down_back(n): return call_back(lambda: down_back(n - 1)) + 1 if n else 0\ndown_back(20000)", "stack.py") == -1 &&
            !strcmp(spy_error_type(c), "RecursionError") && !strncmp(spy_error_message(c), "Stack overflow", 14));
