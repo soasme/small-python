@@ -40251,10 +40251,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE ||
-                ((a->type == SPY_DICT || a->type == SPY_FROZENDICT) && UNLIKELY(eq_keyed(a))) ||
-                (b->type == SPY_TUPLE ? key_reaches(c, b) || a->type == SPY_MEMORYVIEW : walk_reaches(c, b)) ||
-                (b->type == SPY_SLICE && index_special(c, slice_part(c, b))) || UNLIKELY(proxies_instance(a))) { x = a; y = b; goto operator_step; }
+            /* Only these types of container or key may call Python. */
+            if ((UINT64_C(1) << a->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_DICT |
+                                           UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_MAPPINGPROXY) ||
+                 UINT64_C(1) << b->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_FROZENDICT |
+                                           UINT64_C(1) << SPY_SLICE)) &&
+                (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE ||
+                 ((a->type == SPY_DICT || a->type == SPY_FROZENDICT) && UNLIKELY(eq_keyed(a))) ||
+                 (b->type == SPY_TUPLE ? key_reaches(c, b) || a->type == SPY_MEMORYVIEW : walk_reaches(c, b)) ||
+                 (b->type == SPY_SLICE && index_special(c, slice_part(c, b))) || UNLIKELY(proxies_instance(a)))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
