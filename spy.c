@@ -36971,6 +36971,8 @@ static SPYValue *byte_function(SPYContext *c, SPYValue *object, SPYValue *key, S
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
     SPYValue *map;
     const char *kind;
+    /* An exact dict's store calls only to hash or compare the key. */
+    if (object->type == SPY_DICT) return hash_calls(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key));
     return setitem_function(c, object) ||
            (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(map = store_storage(c, object, "__setitem__"), key, 0) &&
                                                                         store_collides(c, map, key)))) ||
