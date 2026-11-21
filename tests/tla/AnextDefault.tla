@@ -20,12 +20,13 @@
 (* None after it. Or the program resumes the awaitable itself, by its     *)
 (* __await__()'s send, throw or close, which acts as through the await,   *)
 (* awaiting then whether it is suspended; its first step a send, or a     *)
-(* next() of it (via next).                                               *)
+(* next() of it (via next); or by the methods of its type, given it       *)
+(* first (via type).                                                      *)
 (***************************************************************************)
 EXTENDS Naturals
 
 Programs == [source : {"coroutine", "generator", "agen", "instance"}, after : {"return", "stop", "await", "raise"}, resume : {"send", "instance", "class", "other", "close"},
-             via : {"await", "direct", "next"}]
+             via : {"await", "direct", "next", "type"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

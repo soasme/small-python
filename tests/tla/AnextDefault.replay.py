@@ -84,19 +84,22 @@ def outcome(p):
         co = driver(source)
     else:
         co = anext(source, "d").__await__()
-    next(co) if p["via"] == "next" else co.send(None)
+    # Via type, each step is a method of the awaitable's type, given it.
+    send, throw, close = (co.send, co.throw, co.close) if p["via"] != "type" else \
+        (lambda v: type(co).send(co, v), lambda e: type(co).throw(co, e), lambda: type(co).close(co))
+    next(co) if p["via"] == "next" else send(None)
     if p["via"] == "await":
         assert type(co.cr_await).__name__ == "anext_awaitable"
     resume = p["resume"]
     try:
         if resume == "close":
-            co.close()
+            close()
             result = "closed"
         elif resume == "send":
-            co.send("sent")
+            send("sent")
             result = "suspended"
         else:
-            co.throw({"instance": KeyError("k"), "class": KeyError, "other": IndexError("i")}[resume])
+            throw({"instance": KeyError("k"), "class": KeyError, "other": IndexError("i")}[resume])
             result = "suspended"
     except StopIteration as e:
         result = "value " + e.value

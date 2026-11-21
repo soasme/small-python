@@ -28299,9 +28299,10 @@ static int ior_consume(SPYContext *c, Machine *m, SPYValue *own, SPYValue *x, SP
     m->blocks[m->block_len - 1].consumer->instance = spy_retain(x);
     return 0;
 }
-/* Whether callee is a generator's or coroutine's method from its type,
- * send, throw, close or __next__, given v, one of them, first: the
- * machine resumes it as v's bound method (slot_call binds it in C). */
+/* Whether callee is a generator's, coroutine's or asend, athrow or
+ * anext() awaitable's method from its type, send, throw, close or
+ * __next__, given v, one of them, first: the machine resumes it as v's
+ * bound method (slot_call binds it in C). */
 static NO_INLINE int generator_method_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
     if (callee->type != SPY_NATIVE || callee->as.native.kwcall != slot_call || callee->as.native.owner != c->types[v->type]) return 0;
     const char *name = callee->as.native.name->as.string.data;
@@ -28309,7 +28310,7 @@ static NO_INLINE int generator_method_slot(SPYContext *c, SPYValue *callee, SPYV
 }
 static ALWAYS_INLINE int generator_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
     return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR_ASEND ||
-            v->type == SPY_ASYNC_GENERATOR_ATHROW) && generator_method_slot(c, callee, v);
+            v->type == SPY_ASYNC_GENERATOR_ATHROW || v->type == SPY_ANEXT_AWAITABLE) && generator_method_slot(c, callee, v);
 }
 /* Generator method callee, which it takes, from its type, bound to g,
  * which it takes too: the bound method; else NULL. */
