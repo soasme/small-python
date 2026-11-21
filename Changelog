@@ -722,6 +722,7 @@ Unreleased (0.10.0):
 - `str.__mod__` and `bytes.__mod__` called by name convert their arguments by Python methods without nesting the C stack.
 - `map()` of a slot wrapper such as `frozendict.__getitem__` given instances calls their Python methods without nesting the C stack.
 - A set's or dict's operator with another builtin's subclass instance on the right calls its Python reflected method without nesting the C stack.
+- `getattr()`, `hasattr()` and method calls on a wrapper's `__isabstractmethod__` or a property's `__name__` call Python methods without nesting the C stack.
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

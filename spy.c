@@ -11775,10 +11775,12 @@ static int wrapper_computes(SPYValue *v, const char *name) {
 }
 static SPYValue *abstract_next(SPYContext *, Machine *, SPYValue *, size_t);
 static SPYValue *parts_tuple(SPYContext *, size_t, SPYValue **);
+static SPYValue *k_state(SPYContext *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *k_resume(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* What bool() of state[0][state[1]]'s flag gave, result: True ends the
  * walk (abstract_next). */
 static SPYValue *abstract_truth(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    if (!result || result == c->booleans[1]) { spy_release(state); return result; }
+    if (!result || result == c->booleans[1]) return k_resume(c, m, state, result);
     spy_release(result);
     return abstract_next(c, m, state, (size_t)state->as.seq.items[1]->as.integer_data.small + 1);
 }
@@ -11791,45 +11793,58 @@ static SPYValue *abstract_flagged(SPYContext *c, Machine *m, SPYValue *state, SP
         return abstract_next(c, m, state, (size_t)state->as.seq.items[1]->as.integer_data.small + 1);
     }
     SPYValue *args = flag ? parts_tuple(c, 1, &flag) : NULL;
-    if (!args) { spy_release(state); return NULL; }
+    if (!args) return k_resume(c, m, state, NULL);
     return step_callk(c, m, spy_retain(c->types[SPY_BOOL]), args, abstract_truth, state);
 }
-/* abstract_flag on m from the callable at, state holding the callables. */
+/* abstract_flag on m from the callable at, state holding the callables,
+ * then the continuation (k_state) that takes the flag. */
 static SPYValue *abstract_next(SPYContext *c, Machine *m, SPYValue *state, size_t at) {
-    SPYValue *callables = state->as.seq.items[0], *index = at < callables->as.seq.len ? spy_int(c, (int64_t)at) : NULL, *next;
-    if (!index) { spy_release(state); return c->error_type[0] ? NULL : spy_bool(c, 0); }
-    next = spy_tuple(c, 2, (SPYValue *[]){callables, index});
-    spy_release(index); spy_release(state);
-    if (!next) return NULL;
+    SPYValue **items = state->as.seq.items, *callables = items[0], *index = at < callables->as.seq.len ? spy_int(c, (int64_t)at) : NULL, *next;
+    if (!index) return k_resume(c, m, state, c->error_type[0] ? NULL : spy_bool(c, 0));
+    next = spy_tuple(c, 4, (SPYValue *[]){callables, index, items[2], items[3]});
+    spy_release(index);
+    if (!next) return k_resume(c, m, state, NULL);
+    spy_release(state);
     SPYValue *item = callables->as.seq.items[at], *flag = attribute_step(c, item, "__isabstractmethod__"), *function = c->fallback;
     if (flag || c->error_type[0] || !function) return abstract_flagged(c, m, next, flag);
     c->fallback = NULL;
     return attribute_callk(c, m, item, "__isabstractmethod__", function, abstract_flagged, next);
 }
-/* What a property's getter's __name__ read gave, name, for property v. */
-static SPYValue *property_named_read(SPYContext *c, Machine *m, SPYValue *v, SPYValue *name) {
-    (void)m;
-    spy_release(v);
+/* What a property's getter's __name__ read gave, name, state the
+ * property and the continuation (k_state) that takes the name. */
+static SPYValue *property_named_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *name) {
     if (!name && error_is(c, "AttributeError")) {
         spy_clear_error(c);
-        return spy_error(c, "AttributeError", "'property' object has no attribute '__name__'");
+        spy_error(c, "AttributeError", "'property' object has no attribute '__name__'");
     }
-    return name;
+    return k_resume(c, m, state, name);
 }
 /* The read of attribute name of v, which it takes, that wrapper_computes
- * says may call Python: on m, its value, or NULL with a call left. */
-static SPYValue *wrapper_computed(SPYContext *c, Machine *m, SPYValue *v, const char *name) {
+ * says may call Python, on m: continuation k's with ctx, which it takes,
+ * of the value, now or once a call left returns. */
+static SPYValue *wrapper_computed(SPYContext *c, Machine *m, SPYValue *v, const char *name, Continuation k, SPYValue *ctx) {
+    SPYValue *items[4] = {v}, *state;
     if (name[2] == 'n') {
+        if (!(state = k_state(c, 1, items, k, spy_retain(ctx)))) return k(c, m, ctx, NULL);
+        spy_release(ctx);
         SPYValue *get = v->as.property.get, *value = attribute_step(c, get, "__name__"), *function = c->fallback;
-        if (value || c->error_type[0] || !function) return property_named_read(c, m, v, value);
+        if (value || c->error_type[0] || !function) return property_named_read(c, m, state, value);
         c->fallback = NULL;
-        return attribute_callk(c, m, get, "__name__", function, property_named_read, v);
+        return attribute_callk(c, m, get, "__name__", function, property_named_read, state);
     }
-    SPYValue *items[3] = {v->as.property.get, v->as.property.set, v->as.property.del}, *callables, *state;
-    callables = v->type == SPY_PROPERTY ? spy_tuple(c, 3, items) : spy_tuple(c, 1, &v->as.wrapper.function);
-    state = callables ? spy_tuple(c, 2, (SPYValue *[]){callables, c->none}) : NULL;
-    spy_release(callables); spy_release(v);
-    return state ? abstract_next(c, m, state, 0) : NULL;
+    SPYValue *callables = v->type == SPY_PROPERTY ? spy_tuple(c, 3, (SPYValue *[]){v->as.property.get, v->as.property.set, v->as.property.del})
+                                                  : spy_tuple(c, 1, &v->as.wrapper.function);
+    spy_release(v);
+    if (!callables) return k(c, m, ctx, NULL);
+    items[0] = callables; items[1] = spy_retain(c->none);
+    if (!(state = k_state(c, 2, items, k, spy_retain(ctx)))) return k(c, m, ctx, NULL);
+    spy_release(ctx);
+    return abstract_next(c, m, state, 0);
+}
+/* A computed attribute's value (wrapper_computed), for its read. */
+static SPYValue *wrapper_value(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *value) {
+    (void)c; (void)m; (void)ctx;
+    return value;
 }
 /* The truth of callable.__isabstractmethod__, absent meaning false. */
 static SPYValue *abstract_flag(SPYContext *c, SPYValue *const *callables, size_t n) {
@@ -12453,12 +12468,14 @@ static NO_INLINE SPYValue *annotate_pending(SPYContext *c, SPYValue *v) {
 }
 static int attribute_named(SPYContext *, SPYValue *);
 /* Whether getattr() or hasattr() of v, by name, reads on the machine
- * (getattr_call): an instance, class, super object or module, or an
- * __annotations__ its Python __annotate__ makes (annotate_pending). */
+ * (getattr_call): an instance, class, super object or module, an
+ * __annotations__ its Python __annotate__ makes (annotate_pending), or a
+ * wrapper's computed attribute (wrapper_computes). */
 static int getattr_subject(SPYContext *c, SPYValue *v, SPYValue *name) {
-    return (v->type == SPY_INSTANCE || v->type == SPY_CLASS || v->type == SPY_SUPER || v->type == SPY_MODULE ||
-            (UNLIKELY(annotated_type(v)) && builtin_value(c, name, SPY_STRING) &&
-             !strcmp(builtin_value(c, name, SPY_STRING)->as.string.data, "__annotations__") && annotate_pending(c, v))) &&
+    SPYValue *text = v->type == SPY_INSTANCE || v->type == SPY_CLASS || v->type == SPY_SUPER || v->type == SPY_MODULE ? NULL : builtin_value(c, name, SPY_STRING);
+    return (!text ? v->type == SPY_INSTANCE || v->type == SPY_CLASS || v->type == SPY_SUPER || v->type == SPY_MODULE :
+            UNLIKELY(annotated_type(v)) && !strcmp(text->as.string.data, "__annotations__") ? annotate_pending(c, v) != NULL :
+            (v->type == SPY_PROPERTY || v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && wrapper_computes(v, text->as.string.data)) &&
            attribute_named(c, name);
 }
 /* What the __annotate__ of owner, which it takes, returned in result for
@@ -17582,8 +17599,6 @@ static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **
         return object;
     }
     SPYValue *callee = node_attribute(c, object, n, calls);
-    /* A computed attribute called is read natively (wrapper_computes). */
-    if (UNLIKELY(c->annotating == 3)) { c->annotating = 0; callee = attribute(c, object, n->b->text); }
     if (!callee && calls && !c->error_type[0]) { *self = object; return NULL; }
     int dunder = n->b->text[0] == '_' && n->b->text[1] == '_';
     if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
@@ -31871,6 +31886,15 @@ static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, 
         if (!result && !c->k_fn) method_drop(m, stacked);
         return result;
     }
+    if (UNLIKELY(c->annotating == 3)) {
+        /* A computed attribute (wrapper_computes) read on m, then called (method_got). */
+        c->annotating = 0;
+        SPYValue *count = int_value(c, stacked), *key = spy_string(c, attr->b->text, strlen(attr->b->text));
+        SPYValue *state = count && key ? spy_tuple(c, 4, (SPYValue *[]){object, c->none, key, count}) : NULL;
+        spy_release(count); spy_release(key);
+        if (!state) { spy_release(object); method_drop(m, stacked); return NULL; }
+        return wrapper_computed(c, m, object, attr->b->text, method_got, state);
+    }
     return method_getter_of(c, m, attr->b->text, c->fallback ? c->fallback : spy_retain(attr->attr_method), object, stacked);
 }
 /* method_getter's call of function, which it takes, the getter for name
@@ -37626,7 +37650,7 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     }
     if (UNLIKELY(c->annotating == 3)) {
         c->annotating = 0;
-        SPYValue *result = wrapper_computed(c, m, v, n->b->text);
+        SPYValue *result = wrapper_computed(c, m, v, n->b->text, wrapper_value, NULL);
         if (result) machine_push(c, m, result);
         return NULL;
     }
@@ -37730,6 +37754,16 @@ static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulte
         SPYValue *result = format ? callk(c, m, annotate, 1, &format, getattr_annotated, ctx) : NULL;
         if (!format) spy_release(ctx);
         spy_release(annotate);
+        return result;
+    }
+    if (UNLIKELY(v->type == SPY_PROPERTY || v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && wrapper_computes(v, text)) {
+        /* Read on m (wrapper_computed), the default given after it (getattr_bound). */
+        SPYValue *ctx = spy_retain(defaulted ? slots[3] : c->unbound);
+        spy_retain(v); spy_retain(name);
+        m->len -= n;
+        release_all(n, slots);
+        SPYValue *result = wrapper_computed(c, m, v, text, getattr_bound, ctx);
+        spy_release(name);
         return result;
     }
     if (kind == ATTR_PROPERTY && property_enters(c, method)) { spy_retain(v); function = getter_bound(c, spy_retain(method->as.property.get), argv, &argc); }

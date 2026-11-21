@@ -62,6 +62,7 @@ SOURCES = {
                                    "result = (staticmethod(F())(1, 2), log)"),
     "wrapper_name_copy": ("log = []\nclass F:\n    def __getattr__(s, n):\n        log.append(n)\n        return 'n_' + n\n"
                           "w = staticmethod(F())\nresult = (w.__name__, log)"),
+    "wrapper_computed_reads": "log = []\nclass Flag:\n    def __init__(self, v): self.v = v\n    def __bool__(self):\n        for _ in (): pass\n        log.append(self.v); return self.v\nclass Odd:\n    def __getattr__(self, name):\n        for _ in (): pass\n        log.append(name)\n        return Flag(True) if name == '__isabstractmethod__' else 'odd'\n    def __call__(self, *a): return 1\ndef f(self): pass\nf.__isabstractmethod__ = Flag(False)\nresult = (getattr(property(f, Odd()), '__isabstractmethod__'), hasattr(property(Odd()), '__name__'), property(Odd()).__name__.upper(), log)",
     "property_abstract_truth": ("log = []\nclass B:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        log.append(s.v)\n        return bool(s.v)\n"
                                 "def a(s): pass\ndef b(s, v): pass\ndef d(s): pass\n"
                                 "a.__isabstractmethod__ = B(0)\nb.__isabstractmethod__ = B(1)\nd.__isabstractmethod__ = B(2)\n"

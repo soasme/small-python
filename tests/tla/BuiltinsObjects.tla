@@ -54,7 +54,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
              ELSE "AttributeError: 'int' object has no attribute '" \o n \o "' and no __dict__ for setting new attributes"
 
 
-Cases == {"getattr_nonstr", "property_get_calls", "property_copy_calls", "property_subclass_doc", "property_abstract_truth", "wrapper_name_copy", "staticmethod_instance_call", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
+Cases == {"getattr_nonstr", "property_get_calls", "property_copy_calls", "property_subclass_doc", "property_abstract_truth", "wrapper_computed_reads", "wrapper_name_copy", "staticmethod_instance_call", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_locals_keys", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
           "dir_hook_bad", "dir_module_property", "callable_forms", "callable_unread", "id_identity", "hash_big", "hash_bad", "hash_eq_only", "hash_method_object",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
@@ -92,6 +92,8 @@ Case(c) ==
       [] c = "property_subclass_doc" -> "('d', ['doc'])"
       \* __isabstractmethod__ takes each flag's truth in order, to the first true
       [] c = "property_abstract_truth" -> "(True, [0, 1])"
+      \* getattr(), hasattr() and a method call read those flags and a property's __name__ alike
+      [] c = "wrapper_computed_reads" -> "(True, True, 'ODD', [False, '__isabstractmethod__', True, '__name__', '__name__'])"
       \* staticmethod() copies the names its function's __getattr__ gives
       \* a staticmethod object calls its callable instance's __call__
       [] c = "staticmethod_instance_call" -> "(3, [(1, 2)])"
