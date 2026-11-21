@@ -34893,8 +34893,15 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* An augmented assignment takes the in-place method, a builtin's
          * its subclass inherits in C (inplace) but a sequence's repetition,
          * else the plain one's rule. */
-        else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
-        else if (kind == OPERATE_INPLACE && o->token != '*' && x->as.map.base && builtin_slot_before(c, cls, o->inplace)) return NULL;
+        else if (kind == OPERATE_INPLACE && o->token == '*' && x->type == SPY_INSTANCE && x->as.map.base &&
+                 (x->as.map.base->type == SPY_LIST || x->as.map.base->type == SPY_BYTEARRAY) && builtin_base(c, x, o->inplace, NULL) &&
+                 (function = item_special(c, y, reflected))) {
+            /* A list's or bytearray's subclass repeats in place after y's
+             * reflected method (augmented). */
+            self = y; other = x; phase = OPERATOR_REFLECTED;
+        } else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
+        else if (kind == OPERATE_INPLACE && o->token != '*' && x->as.map.base && builtin_slot_before(c, cls, o->inplace) &&
+                 !operator_declines(c, cls, x->as.map.base->type, o, 1, y)) return NULL;
         else if (first) {
             if ((function = o ? item_special(c, y, reflected) : rich_special(c, y, rich_reflected[rich], &negated))) {
                 self = y; other = x; phase = OPERATOR_REFLECTED;
