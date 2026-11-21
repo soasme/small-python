@@ -30528,9 +30528,27 @@ static int anext_steps(SPYValue *callee, int method) {
     SPYValue *self = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module ? callee->as.bound.self : method >= 0 ? callee : NULL;
     return self && self->type == SPY_ANEXT_AWAITABLE && self->as.iterator.source->type == SPY_INSTANCE;
 }
+/* A class call enters its __init__ (CALL_INIT) with the new instance,
+ * which is the call's value on the stack, in the slot before argv:
+ * callee, which the call step then takes, or NULL. */
+static SPYValue *init_enter(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *init, int plain, size_t argc, SPYValue **argv, SPYValue **env) {
+    SPYValue *self = init_instance(c, callee, plain, argc, argv, NULL);
+    if (!self) release_all(argc, argv);
+    else if (machine_push(c, m, spy_retain(self))) { spy_release(self); release_all(argc, argv); }
+    else {
+        argv[-1] = self;
+        c->entering_init = init; c->entering_kind = CALL_INIT;
+        if ((*env = function_env(c, init, argc + 1, argv - 1, NULL, 1))) return callee;
+    }
+    spy_release(callee);
+    return NULL;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
-    SPYValue *result, *self;
+    SPYValue *result, *self, *first;
+    /* A plain class makes its instance at once (plain_init). */
+    if (method < 0 && callee->type == SPY_CLASS && (first = plain_init(c, callee)) && machine_function(c, first))
+        return init_enter(c, m, callee, first, 1, argc, argv, env);
     if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && plain_arguments(argc, argv) && callee != c->types[SPY_COMPLEX] &&
         callee != c->types[SPY_SUPER] && callee != c->types[SPY_CLASS] && !class_steps(c, callee, argc, argv)) {
         /* A builtin class of plain arguments constructs at once. */
@@ -30645,20 +30663,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     int plain = 0;
     SPYValue *init = method < 0 && callee->type == SPY_CLASS ? class_init(c, callee, &plain) : NULL;
-    if (init && machine_function(c, init)) {
-        /* A class call enters its __init__ (CALL_INIT) with the new instance,
-         * which is the call's value on the stack. */
-        if (!(self = init_instance(c, callee, plain, argc, argv, NULL))) release_all(argc, argv);
-        else if (machine_push(c, m, spy_retain(self))) { spy_release(self); release_all(argc, argv); }
-        else {
-            memmove(argv + 1, argv, argc * sizeof(*argv));
-            argv[0] = self;
-            c->entering_init = init; c->entering_kind = CALL_INIT;
-            if ((*env = function_env(c, init, argc + 1, argv, NULL, 1))) return callee;
-        }
-        spy_release(callee);
-        return NULL;
-    }
+    if (init && machine_function(c, init)) return init_enter(c, m, callee, init, plain, argc, argv, env);
     SPYValue *allocate = !init && method < 0 && callee->type == SPY_CLASS && argc < 8 ? new_method(c, callee) : NULL;
     if (allocate) {
         /* A class call enters its Python __new__ (CALL_CHECKED) with the
@@ -31765,6 +31770,8 @@ static ALWAYS_INLINE int attribute_owner(SPYValue *v) {
     return !!(UINT64_C(1) << v->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_CLASS | UINT64_C(1) << SPY_MODULE |
                                         UINT64_C(1) << SPY_FUNCTION | UINT64_C(1) << SPY_STATICMETHOD | UINT64_C(1) << SPY_CLASSMETHOD));
 }
+/* Call callee on argc arguments argv, which have a free slot before
+ * them for a self (init_enter) and room for one more after. */
 static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
                                                 SPYValue **argv, SPYValue **env) {
     /* A call on the machine takes the arguments and the callee. */
@@ -32119,7 +32126,7 @@ static NO_INLINE SPYValue *name_rewalk(SPYContext *c, SPYValue *env, SPYValue *f
 /* BC_CALLF: plain call node n, whose operands need no steps of their own;
  * or NULL with no error when a consumer of a generator began on m. */
 static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
-    SPYValue *argv[9], *callee;
+    SPYValue *slots[10], **argv = slots + 1, *callee;
     size_t argc;
     int method;
     argv[0] = NULL;
@@ -33231,7 +33238,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
     else if (calls && !keywords->as.map.len && args->as.seq.len <= 9 &&
                (callee->type == SPY_NATIVE || callee->type == SPY_CLASS || callee->type == SPY_METHOD || callee->type == SPY_BOUND_METHOD) &&
                !c->error_type[0]) {
-        SPYValue *argv[9];
+        SPYValue *slots[10], **argv = slots + 1;
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = operand_dispatch(c, m, n, spy_retain(callee), -1, args->as.seq.len, argv, env);
     } else if (calls && class_maker(c, callee, args->as.seq.len, args->as.seq.items) && string_keys(c, keywords) && !c->error_type[0])
@@ -38857,8 +38864,8 @@ static NO_INLINE void increment_step(SPYContext *c, Frame *f, Node *n) {
 #define THREADED 1
 /* The label comes first: after case, it leaves the brace past a break uncounted by clang coverage. */
 #define CASE(op) op_##op: case op:
-#define NEXT { if (code[pc].node && quiet(c, &f)) { \
-        ins = &code[pc++]; n = ins->node; relocate(c, n); \
+#define NEXT { if (quiet(c, &f)) { \
+        ins = &code[pc++]; n = ins->node; if (n) relocate(c, n); \
         truth_known = known; known = 0; a = b = value = NULL; goto *ins->step; } } continue
 #define NEXT_RELEASE { if (a) spy_release(a); if (b) spy_release(b); } NEXT
 #else
