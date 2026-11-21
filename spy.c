@@ -11601,20 +11601,23 @@ static int property_documented(SPYContext *c, SPYValue *self, SPYValue *p, SPYVa
     if (status && !p->as.property.getter_doc && error_is(c, "AttributeError")) { spy_clear_error(c); status = 0; }
     return status;
 }
-/* What the Python read of property state[1]'s getter's __doc__ gave, doc,
- * for property() (property_init): the property, or NULL with an error. */
+/* What the Python read of the getter's __doc__ gave, doc, for property
+ * storage state[0]'s initialization (property_init): by property() the
+ * property, else (__init__) of state[1], None; NULL with an error. */
 static SPYValue *property_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *doc) {
     (void)m;
-    SPYValue *p = spy_retain(state->as.seq.items[0]);
+    SPYValue *p = state->as.seq.items[0], *self = state->as.seq.items[state->as.seq.len - 1];
+    SPYValue *result = property_documented(c, self, p, doc, 1) ? NULL : spy_retain(state->as.seq.len == 1 ? p : c->none);
     spy_release(state);
-    if (property_documented(c, p, p, doc, 1)) { spy_release(p); return NULL; }
-    return p;
+    return result;
 }
-/* Property p's initialization of self with args (getter, setter, deleter,
- * doc): 0, or -1 with an error; property() of a getter whose __doc__ a
- * Python read gives, on the step's machine (property_read), 1, the
- * property its value. */
+/* Property p's initialization of self, NULL for property() making p, with
+ * args (getter, setter, deleter, doc): 0, or -1 with an error; of a
+ * getter whose __doc__ a Python read gives, on the step's machine
+ * (property_read), 1, the property or None its value. */
 static int property_init(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *const args[4]) {
+    int made = !self;
+    if (made) self = p;
     SPYValue **fields[] = {&p->as.property.get, &p->as.property.set, &p->as.property.del};
     for (int i = 0; i < 3; i++) { spy_retain(args[i]); spy_release(*fields[i]); *fields[i] = args[i]; }
     spy_release(p->as.property.doc); p->as.property.doc = spy_none(c);
@@ -11623,9 +11626,9 @@ static int property_init(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *c
     if (args[3]->type != SPY_NONE) return property_documented(c, self, p, spy_retain(args[3]), 0);
     if (args[0]->type == SPY_NONE) return property_documented(c, self, p, NULL, 0);
     SPYValue *doc = attribute_step(c, args[0], "__doc__");
-    Machine *m = !doc && !c->error_type[0] && c->fallback && self == p ? step_machine(c) : NULL;
+    Machine *m = !doc && !c->error_type[0] && c->fallback ? step_machine(c) : NULL;
     if (m) {
-        SPYValue *function = c->fallback, *state = tuple_of(c, 1, &p);
+        SPYValue *function = c->fallback, *state = tuple_of(c, 2 - (size_t)made, (SPYValue *[]){p, self});
         c->fallback = NULL;
         if (!state) { spy_release(function); return -1; }
         attribute_callk(c, m, args[0], "__doc__", function, property_read, state);
@@ -11716,14 +11719,30 @@ static int property_arguments(SPYContext *c, size_t argc, SPYValue *const *argv,
 }
 /* A copy of property storage p with one accessor replaced, made by calling
  * the type of descriptor self, as getter(), setter(), and deleter() do. */
-static SPYValue *property_copy(SPYContext *c, SPYValue *self, SPYValue *p, int which, SPYValue *function) {
-    SPYValue *args[4] = {p->as.property.get, p->as.property.set, p->as.property.del, NULL};
-    if (function->type != SPY_NONE) args[which] = function;
-    args[3] = p->as.property.getter_doc && args[0]->type != SPY_NONE ? c->none : p->as.property.doc;
-    SPYValue *result = call(c, value_class(c, self), 4, args);
+static Machine *step_machine(SPYContext *);
+static SPYValue *step_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, Continuation, SPYValue *);
+static SPYValue *tuple_of(SPYContext *, size_t, SPYValue *const *);
+/* The copy property_copy's call returned, result: it takes the name of
+ * the property storage p. */
+static SPYValue *property_copied(SPYContext *c, Machine *m, SPYValue *p, SPYValue *result) {
+    (void)m;
     SPYValue *copy = result ? builtin_value(c, result, SPY_PROPERTY) : NULL;
     if (copy) { spy_retain(p->as.property.name); spy_release(copy->as.property.name); copy->as.property.name = p->as.property.name; }
+    spy_release(p);
     return result;
+}
+/* A copy of property storage p with one accessor replaced, made by calling
+ * the type of descriptor self, as getter(), setter(), and deleter() do: a
+ * subclass's call a call step on the step's machine (comparek). */
+static SPYValue *property_copy(SPYContext *c, SPYValue *self, SPYValue *p, int which, SPYValue *function) {
+    SPYValue *args[4] = {p->as.property.get, p->as.property.set, p->as.property.del, NULL}, *cls = value_class(c, self);
+    if (function->type != SPY_NONE) args[which] = function;
+    args[3] = p->as.property.getter_doc && args[0]->type != SPY_NONE ? c->none : p->as.property.doc;
+    Machine *m = cls != c->types[SPY_PROPERTY] ? step_machine(c) : NULL;
+    SPYValue *tuple = m ? tuple_of(c, 4, args) : NULL;
+    if (tuple) return step_callk(c, m, spy_retain(cls), tuple, property_copied, spy_retain(p));
+    if (m) return NULL;
+    return property_copied(c, NULL, spy_retain(p), call(c, cls, 4, args));
 }
 /* The truth of callable.__isabstractmethod__, absent meaning false. */
 static SPYValue *abstract_flag(SPYContext *c, SPYValue *const *callables, size_t n) {
@@ -31513,6 +31532,24 @@ static ALWAYS_INLINE SPYValue *searched(SPYValue *, int, size_t, SPYValue *const
 static SPYValue *range_search(SPYContext *, Machine *, int, SPYValue *, SPYValue *);
 static void search_span(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, size_t *, int64_t *);
 static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, int64_t, SPYValue **, SPYValue **);
+/* The native __init__ that may call on the step's machine (host 2) of a
+ * subclass cls of its builtin, called whether as type.__call__, when its
+ * builtin's __new__ makes the instance; else NULL. Borrowed. */
+static SPYValue *stepping_init(SPYContext *c, SPYValue *cls, int called) {
+    SPYValue *init = class_lookup(cls, "__init__"), *meta = cls->as.map.meta;
+    return init && init->type == SPY_NATIVE && init->as.native.host == 2 && !cls->as.map.native && cls->as.map.mro &&
+           (called || !meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) &&
+           slot_new(c, cls) == native_slot_new(c, cls) ? init : NULL;
+}
+/* What a native __init__ of self, which it takes, returned, result: self,
+ * or NULL with an error, a TypeError for a value but None. */
+static SPYValue *native_inited(SPYContext *c, Machine *m, SPYValue *self, SPYValue *result) {
+    (void)m;
+    if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
+    if (!result || c->error_type[0]) { spy_release(result); spy_release(self); return NULL; }
+    spy_release(result);
+    return self;
+}
 /* The call of class callee in m's stack below its argc arguments, called
  * whether as type.__call__ (type_called), on the machine: its Python
  * __init__, the new instance in its place as the call's value
@@ -31543,6 +31580,18 @@ static SPYValue *class_stack_call(SPYContext *c, Machine *m, SPYValue *callee, s
         if ((*env = function_env(c, init, argc + 1, argv - 1, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
+    }
+    if (!init && !c->error_type[0] && (init = stepping_init(c, callee, called))) {
+        /* A native __init__ that may call on the machine (property's) is a
+         * call step of the new instance and the arguments (native_inited);
+         * they and the class leave m's stack. */
+        SPYValue *args = NULL;
+        if ((self = init_instance(c, callee, plain, argc, argv, NULL))) {
+            argv[-1] = self; args = tuple_of(c, argc + 1, argv - 1); argv[-1] = callee;
+        }
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        if (!args) { spy_release(self); return NULL; }
+        return step_callk(c, m, spy_retain(init), args, native_inited, self);
     }
     SPYValue *allocate = !init && !c->error_type[0] ? new_called(c, callee, called) : NULL;
     if (!allocate) return NULL;
@@ -47311,7 +47360,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *args[4];
         if (property_arguments(c, argc, argv, NULL, args)) return NULL;
         SPYValue *v = property_new(c, c->none, c->none, c->none, c->none);
-        if (v && property_init(c, v, v, args)) { spy_release(v); return NULL; }
+        if (v && property_init(c, NULL, v, args)) { spy_release(v); return NULL; }
         return v;  /* NULL, its __doc__ read queued (property_read), too */
     }
     case B_STATICMETHOD: case B_CLASSMETHOD: {
@@ -49178,6 +49227,7 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
     if (op == DESCR_INIT) {
         if (type == SPY_PROPERTY) {
             SPYValue *args[4];
+            /* NULL, its __doc__ read queued (property_read), too */
             return property_arguments(c, n, argv + 1, keywords, args) || property_init(c, self, storage, args) ? NULL : spy_none(c);
         }
         if (wrapper_callable(c, type, n, keywords)) return NULL;
@@ -50074,6 +50124,9 @@ static int register_descriptor_methods(SPYContext *c) {
             if ((op == DESCR_SET || op == DESCR_DELETE || op >= DESCR_GETTER) && !property) continue;
             if ((op == DESCR_REPR && property) || (op == DESCR_CALL && types[t] != SPY_STATICMETHOD)) continue;
             if (register_method(c, types[t], descriptor_methods[op], descriptor_method, (intptr_t)types[t] << 8 | op, METHOD_INSTANCE)) return -1;
+            /* A subclass's copy is made on the step's machine (property_copy). */
+            if (property && ((op >= DESCR_GETTER && op <= DESCR_DELETER) || op == DESCR_INIT))
+                name_local(c->types[SPY_PROPERTY], descriptor_methods[op])->as.native.host = 2;
         }
     return 0;
 }

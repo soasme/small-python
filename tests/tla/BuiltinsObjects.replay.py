@@ -58,6 +58,10 @@ SOURCES = {
                           "    def __delete__(self, i): log.append('delete')\nclass Q:\n    d = D()\n"
                           "def bad():\n    try: delattr(H(), 'bad')\n    except LookupError as e: return type(e).__name__\n"
                           "result = (delattr(H(), 'x'), delattr(P(), 'p'), delattr(Q(), 'd'), bad(), log)",
+    "property_subclass_doc": ("log = []\nclass G:\n    @property\n    def __doc__(self):\n        log.append('doc')\n        return 'd'\n"
+                              "class R(property): pass\nresult = (R(G()).__doc__, log)"),
+    "property_copy_calls": ("log = []\nclass Q(property):\n    def __init__(self, *a):\n        log.append(len(a))\n        super().__init__(*a)\n"
+                            "p = Q(lambda s: 1)\nq = p.setter(lambda s, v: None)\nresult = (type(q).__name__, log, q.fget is p.fget)"),
     "property_get_calls": "log = []\nclass Q(property):\n    def __get__(self, obj, owner=None):\n        log.append('own')\n        return ('q', super().__get__(obj, owner))\n"
                           "class K:\n    @Q\n    def q(self):\n        for _ in (): pass\n        log.append('get')\n        return 2\n"
                           "k = K()\nd = K.__dict__['q']\n"

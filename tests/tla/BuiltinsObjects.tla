@@ -54,7 +54,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
              ELSE "AttributeError: 'int' object has no attribute '" \o n \o "' and no __dict__ for setting new attributes"
 
 
-Cases == {"getattr_nonstr", "property_get_calls", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
+Cases == {"getattr_nonstr", "property_get_calls", "property_copy_calls", "property_subclass_doc", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
           "dir_hook_bad", "dir_module_property", "callable_forms", "callable_unread", "id_identity", "hash_big", "hash_bad", "hash_eq_only", "hash_method_object",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
@@ -86,6 +86,10 @@ Case(c) ==
       \* property.__get__ of an object, bound or through super(), calls its getter
       \* delattr() calls a Python __delattr__, deleter or __delete__, their errors propagating.
       [] c = "delattr_hook_calls" -> "(None, None, None, 'LookupError', ['x', 'deleter', 'delete', 'bad'])"
+      \* setter() of a property subclass calls it with the four values
+      [] c = "property_copy_calls" -> "('Q', [1, 4], True)"
+      \* a property subclass's call reads the getter's Python __doc__ once
+      [] c = "property_subclass_doc" -> "('d', ['doc'])"
       [] c = "property_get_calls" -> "(('q', 2), 2, 2, False, ['own', 'get', 'get', 'get', 'own'])"
       [] c = "slots_setattr" -> "AttributeError: 'P' object has no attribute 't' and no __dict__ for setting new attributes"
       [] c = "slots_vars" -> "TypeError: vars() argument must have __dict__ attribute"
