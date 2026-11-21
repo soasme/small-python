@@ -108,6 +108,7 @@ SOURCES = {
     "inplace_inherited": "class SO(set):\n    def __or__(s, o):\n        for _ in (): pass\n        return 'or'\n"
                          "class DO(dict):\n    def __or__(s, o):\n        for _ in (): pass\n        return 'or'\n"
                          "x = SO({1})\nz = x\nx |= {2}\ny = DO(a=1)\nw = y\ny |= {'b': 2}\nresult = (sorted(x), x is z, y, y is w, SO() | {1})",
+    "cross_builtin_operand": "log = []\nclass D(dict):\n    def __ror__(s, o):\n        for _ in (): pass\n        log.append('D'); return 'd'\nclass S(set):\n    def __rand__(s, o):\n        for _ in (): pass\n        log.append('S'); return 's'\nclass I(int):\n    def __rxor__(s, o):\n        for _ in (): pass\n        log.append('I'); return 'i'\nresult = ({1} | D(), frozenset() | D(), {'a': 1} & S(), {1} ^ I(2), log)",
     "set_dict_operand": "class S(set):\n    def __ror__(s, o): return 'r'\nclass D(dict):\n    def __ror__(s, o): return 'r'\n"
                         "class Declined(set):\n    def __ror__(s, o): return NotImplemented\nx = frozenset({1})\nx |= S({2})\n"
                         "result = (type(frozenset({1}) | S({2})).__name__, frozendict(a=1) | D(z=9), {1} | S({2}), {'a': 1} | D(z=9), "

@@ -35397,14 +35397,17 @@ static SPYValue *special_callk(SPYContext *c, Machine *m, SPYValue *function, SP
     return special_callk_keywords(c, m, function, self, argc, argv, NULL, absent, k, ctx);
 }
 /* Whether a builtin value of type and class cls declines operator o, in
- * place if inplace, with y: it has neither method, or y is a plain
- * instance and o a set's operator on a set or a dict's | on a dict, not
- * in place, or on a frozendict. */
+ * place if inplace, with y: it has neither method, or y is an instance,
+ * not of a set's subclass, and o a set's operator on a set, or not of a
+ * dict's subclass and o a dict's | on a dict, not in place, or on a
+ * frozendict. */
 static int operator_declines(SPYContext *c, SPYValue *cls, int type, const Operator *o, int inplace, SPYValue *y) {
     if (!builtin_slot_before(c, cls, o->direct) && (!inplace || !builtin_slot_before(c, cls, o->inplace))) return !c->error_type[0];
-    if (y->type != SPY_INSTANCE || y->as.map.base) return 0;
-    if (type == SPY_SET || type == SPY_FROZENSET) return o->token == '|' || o->token == '&' || o->token == '-' || o->token == '^';
-    return (type == SPY_FROZENDICT || (type == SPY_DICT && !inplace)) && o->token == '|';
+    if (y->type != SPY_INSTANCE) return 0;
+    SPYValue *base = y->as.map.base;
+    if (type == SPY_SET || type == SPY_FROZENSET)
+        return (o->token == '|' || o->token == '&' || o->token == '-' || o->token == '^') && !(base && is_set(base));
+    return (type == SPY_FROZENDICT || (type == SPY_DICT && !inplace)) && o->token == '|' && !(base && is_dict(base));
 }
 static int declined_step(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *);
 static int frame_key_calls(SPYContext *, SPYValue *);
