@@ -15839,6 +15839,9 @@ struct Machine {
     /* An await's async generator asend or __anext__ whose generator, the
      * delegate, the machine resumes in its place (operation_entered). */
     SPYValue *operation;
+    /* The coroutine wrapper an await's __await__ gave, its coroutine the
+     * delegate the machine resumes (wrapper_entered). */
+    SPYValue *awaited;
 };
 enum { CLOSING = 1, THROWING };
 /* What a call on the machine returns into: its caller's machine; C; or
@@ -15855,7 +15858,8 @@ struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_e
                SPYContinuation host; /* A spy_callk's continuation. */ };
 static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     Machine *m = value->as.generator.machine;
-    return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->operation ? m->operation : m->delegate) : spy_none(c);
+    return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ?
+           spy_retain(m->operation ? m->operation : m->awaited ? m->awaited : m->delegate) : spy_none(c);
 }
 static void free_program(Program *code) {
     if (code) { mem_free(code->items); mem_free(code); }
@@ -15865,6 +15869,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
     if (m->handled) visit(m->handled, data);
     if (m->delegate) visit(m->delegate, data);
     if (m->operation) visit(m->operation, data);
+    if (m->awaited) visit(m->awaited, data);
     for (size_t i = 0; i < m->block_len; i++) {
         Block *b = &m->blocks[i];
         if (b->value) visit(b->value, data);
@@ -27146,6 +27151,7 @@ static void finish_delegate(SPYContext *c, Machine *m) {
         spy_release(m->operation); m->operation = NULL;
     }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE; m->throwing = 0; m->await_target = 0;
+    spy_release(m->awaited); m->awaited = NULL;
 }
 /* Whether athrow or aclose awaitable op throws one exception, a class or
  * an instance, which resumed_with raises at its generator's yield. */
@@ -27308,6 +27314,15 @@ static ALWAYS_INLINE int suspended(SPYValue *v) {
 static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATOR && suspended(v); }
 /* Whether a yield from or await of v resumes it on the machine. */
 static NO_INLINE int delegable(SPYValue *v) { return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) && suspended(v); }
+/* An await of coroutine wrapper m->delegate, which coroutine.__await__
+ * gives, whose coroutine is suspended: that coroutine is the delegate the
+ * machine resumes, as the wrapper's methods are its own, the wrapper
+ * awaited (cr_await). */
+static NO_INLINE void wrapper_entered(Machine *m) {
+    SPYValue *coroutine = m->delegate->as.iterator.source;
+    if (!delegable(coroutine)) return;
+    m->awaited = m->delegate; m->delegate = spy_retain(coroutine);
+}
 /* Whether generator machine m's yield from waits on a generator that
  * ended, which takes a send, throw or close in C as an iterator does,
  * running nothing (iterator_send). */
@@ -27396,7 +27411,7 @@ static SPYValue *exit_closed(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue 
         Machine *gm = g->as.generator.machine;
         SPYValue *d = gm->delegate;
         gm->delegate = NULL; gm->awaiting = AWAIT_YIELD; gm->drop = 0;
-        spy_release(d);
+        spy_release(d); spy_release(gm->awaited); gm->awaited = NULL;
         consume(c, m, B_THROW, g, M_THROW, NULL, error.value, NULL);
     }
     spy_release(ctx);
@@ -27469,7 +27484,7 @@ static SPYValue *throw_returned(SPYContext *c, Machine *m, SPYValue *ctx, SPYVal
         ErrorState error = take_error(c);
         SPYValue *d = inner->delegate;
         inner->delegate = NULL; inner->awaiting = AWAIT_YIELD; inner->drop = 0;
-        spy_release(d);
+        spy_release(d); spy_release(inner->awaited); inner->awaited = NULL;
         consume(c, m, B_THROW, ctx, M_THROW, NULL, error.value, NULL);
     }
     spy_release(ctx);
@@ -27503,7 +27518,7 @@ static NO_INLINE SPYValue *thrown_dropped(SPYContext *c, SPYValue *g) {
     if (!error.value) { restore_error(c, &error); return NULL; }
     SPYValue *d = m->delegate;
     m->delegate = NULL; m->awaiting = AWAIT_YIELD; m->drop = 0;
-    spy_release(d);
+    spy_release(d); spy_release(m->awaited); m->awaited = NULL;
     return error.value;
 }
 /* Whether a close of, or a throw of exception into, a generator or
@@ -40466,6 +40481,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 spy_error(c, "TypeError", "cannot 'yield from' a coroutine object in a non-coroutine generator");
             if (m->delegate) {
                 m->awaiting = AWAIT_DELEGATE; m->drop = 0;
+                if (UNLIKELY(m->delegate->type == SPY_COROUTINE_ITERATOR)) wrapper_entered(m);
                 /* A generator this yield from may resume yields or ends
                  * into this machine (generator_left). */
                 if (delegable(m->delegate) ||
@@ -41232,6 +41248,7 @@ static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     SPYValue *d = m->delegate;
     int ignored = flow.flow == FLOW_YIELD;
     m->delegate = NULL; m->awaiting = AWAIT_NONE;
+    spy_release(m->awaited); m->awaited = NULL;
     if (UNLIKELY(m->operation)) { operation_closed(c, m, d, flow); ignored = 0; flow.value = NULL; }
     else if (flow.flow == FLOW_RETURN) { d->as.generator.returned = 1; generator_close(d); }
     else if (!ignored) { generator_end(c, d, flow); flow.value = NULL; }
@@ -41356,7 +41373,7 @@ static NO_INLINE Machine *delegate_left(SPYContext *c, Machine *m, SPYValue **g,
                 if (m->await_target && error_is(c, "StopAsyncIteration")) { spy_clear_error(c); m->pc = m->await_target; }
             }
             m->delegate = NULL; m->awaiting = AWAIT_NONE; m->await_target = 0;
-            spy_release(d);
+            spy_release(d); spy_release(m->awaited); m->awaited = NULL;
             *flow = (Result){FLOW_NORMAL, NULL};
             return m;
         }

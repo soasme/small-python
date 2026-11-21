@@ -57,6 +57,11 @@ class Bad:
         return 5
 
 
+class Wrapped:
+    def __await__(self):
+        return chain().__await__()  # the coroutine's wrapper
+
+
 def generator():
     yield 1
 
@@ -72,7 +77,8 @@ def awaited():
 def await_program(x):
     if x == "reused":
         return drive(awaited())
-    target = {"coroutine": inner, "iter": Iter, "gen": Gen, "chain": chain, "bad": Bad, "next": Counted, "int": lambda: 5, "generator": generator}[x]
+    target = {"coroutine": inner, "iter": Iter, "gen": Gen, "chain": chain, "bad": Bad, "next": Counted, "int": lambda: 5, "generator": generator,
+              "wrapped": Wrapped}[x]
 
     async def main():
         return await target()

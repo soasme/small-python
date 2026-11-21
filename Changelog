@@ -730,6 +730,7 @@ Unreleased (0.10.0):
 - An exception class thrown into a `yield from`, or by an async generator's `athrow()`, runs its Python `__new__` and `__init__` without nesting the C stack.
 - An `anext()` awaitable's methods called through its type resume the async generator without nesting the C stack.
 - `close()` of a coroutine awaiting `anext()` of an async generator returns None when the generator yields or returns, and runs without nesting the C stack.
+- An `await` of the wrapper `coroutine.__await__()` returns resumes the coroutine without nesting the C stack.
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

@@ -22,7 +22,8 @@
 (* plus 1, one whose __await__ returns 5, the int 5, a generator, a        *)
 (* coroutine awaited once already, or an object whose __await__ returns an *)
 (* instance with a Python __next__ giving 1 and 2 and then raising         *)
-(* StopIteration(300). An object program, on a fresh                       *)
+(* StopIteration(300), or one whose __await__ returns the chain            *)
+(* coroutine's __await__() wrapper. An object program, on a fresh          *)
 (* coroutine, calls iter(), sends 1, closes it and sends None, or throws   *)
 (* ValueError and then sends None; or, suspended in await Gen() catching   *)
 (* GeneratorExit, closes it as it returns 3 or awaits Gen() again; or,     *)
@@ -40,7 +41,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "chain", "bad", "int", "generator", "reused", "next"}]
+Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "chain", "bad", "int", "generator", "reused", "next", "wrapped"}]
             \cup [part : {"object"}, op : {"iter", "send1", "close", "throw", "closed", "ignored", "iterthrow"}]
             \cup [part : {"wrapper"}, op : {"drive", "throw", "dropped"}]
             \cup [part : {"agen"}, op : {"send", "throw"}]
@@ -54,6 +55,7 @@ Await(p) == CASE p.x = "coroutine" -> "[] 7"
               [] p.x = "iter" -> "[1, 2] None"
               [] p.x = "gen" -> "[1] 5"
               [] p.x = "chain" -> "[1] 6"   \* the inner await's value passes out
+              [] p.x = "wrapped" -> "[1] 6"  \* as through the chain's __await__() wrapper
               [] p.x = "reused" -> "[] RuntimeError"
               [] p.x = "next" -> "[1, 2] 300"
               [] OTHER -> "[] TypeError"
