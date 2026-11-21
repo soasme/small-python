@@ -131,6 +131,8 @@ SOURCES = {
                      "result = (types.MappingProxyType(M()) == {}, types.MappingProxyType({'a': 1}) == O(), types.MappingProxyType({}) != {})",
     "class_dict_proxy": "class A:\n    x = 1\nA.__dict__['x'] = 2",
     "function_ctor": "def f(): return x\ng = types.FunctionType(f.__code__, {'x': 5}, 'g')\nresult = (g(), g.__name__)",
+    "proxy_hash": ("log = []\nclass HD(dict):\n    def __hash__(self):\n        for _ in (): pass\n        log.append('h')\n        return 77\n"
+                   "result = (hash(type(type.__dict__)(HD())), log)"),
     "function_call_wrapper": "log = []\ndef add(a, b=1):\n    for _ in (): pass\n    log.append((a, b))\n    return a + b\n"
                              "result = (add.__call__(1), add.__call__.__call__(1, b=5), type(add).__call__(add, 2), len.__call__('abcd'), log)",
     "function_module_code": "g = {'x': 5, 'log': []}\nm = types.FunctionType(compile('def f(): return x\\nlog.append(f())\\nz = x', '<m>', 'exec'), g)\n"

@@ -40,7 +40,7 @@ Module(n) == CASE n = "GenericAlias" -> "types" [] n = "UnionType" -> "typing" [
 
 Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name", "cell_empty", "cell_set",
           "cell_shared", "proxy_readonly", "proxy_live", "proxy_bad", "proxy_or", "proxy_copy", "proxy_compare", "proxy_forward", "proxy_reflected", "proxy_declined_calls", "proxy_contains_calls", "proxy_machine_calls", "proxy_reversed_read",
-          "class_dict_proxy", "function_ctor", "function_module_code", "function_call_wrapper", "function_genexp_code",
+          "class_dict_proxy", "function_ctor", "function_module_code", "function_call_wrapper", "proxy_hash", "function_genexp_code",
           "code_replace", "notimplemented_ctor", "none_ctor",
           "classmethod_descr_repr", "classmethod_descr_call", "classmethod_descr_get",
           "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg",
@@ -86,6 +86,8 @@ Case(c) ==
       [] c = "class_dict_proxy" -> "TypeError: 'mappingproxy' object does not support item assignment"
       [] c = "function_ctor" -> "(5, 'g')"
       [] c = "function_call_wrapper" -> "(2, 6, 3, 4, [(1, 1), (1, 5), (2, 1)])"
+      \* hash() of a mappingproxy is its mapping's, by the mapping's __hash__
+      [] c = "proxy_hash" -> "(77, ['h'])"
       [] c = "function_module_code" -> "(None, 20, [5, 5], 5)"
       [] c = "function_genexp_code" -> "([0, 10], ['iter'], '<genexpr>')"
       [] c = "code_replace" -> "'g'"

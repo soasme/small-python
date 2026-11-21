@@ -16560,12 +16560,13 @@ static ALWAYS_INLINE int proxies_instance(SPYValue *v) {
 static ALWAYS_INLINE int class_steps(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     return callee->type == SPY_CLASS && (callee == c->types[SPY_PROPERTY] || (argc == 1 && callee == c->iterator_types[IT_REVERSED] && proxies_instance(argv[0])));
 }
-/* Whether len() of a mappingproxy of an instance, in argv, is that of
- * its mapping (mappingproxy_len), put in its place. */
+/* Whether len() or hash() of a mappingproxy of an instance, in argv, is
+ * that of its mapping (mappingproxy_len, mappingproxy_hash), put in its
+ * place. */
 static int is_builtin(SPYValue *, int);
 static NO_INLINE int proxy_unwrapped(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue **argv) {
     (void)c;
-    if (argc != 1 || method >= 0 || !proxies_instance(argv[0]) || !is_builtin(callee, B_LEN)) return 0;
+    if (argc != 1 || method >= 0 || !proxies_instance(argv[0]) || !(is_builtin(callee, B_LEN) || is_builtin(callee, B_HASH))) return 0;
     SPYValue *mapping = spy_retain(argv[0]->as.bound.self);
     spy_release(argv[0]); argv[0] = mapping;
     return 1;
