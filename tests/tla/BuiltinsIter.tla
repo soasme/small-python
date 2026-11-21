@@ -68,7 +68,7 @@ Cases == {"iter_sequence_protocol", "filter_nested_generator", "enumerate_start_
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
           "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_list_ties", "sort_tuple_lt_only", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "sort_truth", "sort_reverse_truth", "max_key_truth", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
-          "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
+          "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state", "range_state_index"}
 Programs == [op : Ops, l : Lists]
             \cup [case : Cases]
 
@@ -256,6 +256,8 @@ Case(c) ==
       [] c = "iter_sentinel_reentrant" -> "([], 2, ((),))"
       [] c = "iter_sentinel_reduce" -> "(<class 'int'>, 1)"
       [] c = "iter_sequence_state" -> "(1, 0, [3], ((),))"
+      \* A range iterator's state converts by its Python __index__ once
+      [] c = "range_state_index" -> "([3, 4], ['i'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

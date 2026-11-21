@@ -30333,7 +30333,8 @@ static int subscript_slot(SPYContext *c, SPYValue *fn, SPYValue *self, size_t ar
  * size, split's and rsplit's maxsplit, hex's bytes_per_sep, int.to_bytes'
  * length, a bytearray's pop() and insert() index, the byte of its
  * insert(), append() and remove() and the size of its resize() and
- * take_bytes(), a search's bounds (search_bounds) and
+ * take_bytes(), a range iterator's __setstate__() state, a search's
+ * bounds (search_bounds) and
  * an unbound list's pop() and insert() index, the arguments converted
  * before the method looks at the others; else 0. */
 static SPYValue *bytearray_resize_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -30346,6 +30347,10 @@ static unsigned native_indices(SPYContext *c, SPYValue *fn, SPYValue *self, size
     if (call == bytearray_method)
         return which == BA_INSERT ? argc == 2 ? 3 : 0 : (which == BA_POP || which == BA_APPEND || which == BA_REMOVE) && argc == 1;
     if (call == bytearray_resize_method) return argc == 1;
+    if (fn->as.native.call == iterator_state_call) {
+        SPYValue *it = builtin_value(c, self, SPY_ITERATOR);
+        return argc == 1 && which == (1 << 8 | IT_RANGE) && it && iterator_class_id(it) == IT_RANGE;
+    }
     if (call == text_split || call == bytearray_split || call == bytes_hex || call == bytearray_hex || hex_viewing(fn)) return argc == 2 ? 2 : 0;
     if (fn->as.native.call == string_search_method) {
         /* A bytearray's search is a bytes one. */

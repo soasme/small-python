@@ -318,6 +318,8 @@ SOURCES = {
                                 "it = iter(f, 'stop')\n"
                                 "result = (list(it), len(calls), it.__reduce__()[1])"),
     "iter_sentinel_reduce": "it = iter(int, 1)\nresult = it.__reduce__()[1]",
+    "range_state_index": "log = []\nclass Two:\n    def __index__(self):\n        for _ in (): pass\n        log.append('i')\n        return 2\n"
+                         "it = iter(range(5))\nnext(it)\nit.__setstate__(Two())\nresult = (list(it), log)",
     "iter_sequence_state": ("class S:\n"
                             "    def __getitem__(self, i):\n"
                             "        if i < 4: return i\n"
