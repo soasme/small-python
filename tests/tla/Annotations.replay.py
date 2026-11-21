@@ -165,9 +165,16 @@ def calls(p):
     elif p["owner"] == "class":
         class target:
             x: note(str)
-    else:
+    elif p["owner"] == "metaclassed":
         class Meta(type): pass
         class target(metaclass=Meta):
+            x: note(str)
+    else:
+        class Hooked(type):
+            def __getattribute__(cls, name):
+                for _ in (): pass
+                return super().__getattribute__(name)
+        class target(metaclass=Hooked):
             x: note(str)
     if p["annotate"] == "dict":
         target.__annotate__ = lambda format: {"w": note(format)}

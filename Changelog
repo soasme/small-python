@@ -710,6 +710,7 @@ Unreleased (0.10.0):
 - A class whose `__init__` is a property or another descriptor is called without nesting the C stack.
 - A `__getattr__` that is also the class's `__getattribute__` is now called after that one raises `AttributeError`.
 - `type()` of a base whose `__mro_entries__` lookup runs Python code no longer nests the C stack.
+- Reading `__annotations__` through a metaclass's `__getattribute__` no longer nests the C stack.
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

@@ -49890,6 +49890,41 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
 }
 static int native_absent(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* What the __annotate__ of state's class returned, result: the dict it
+ * keeps (annotations_made), to state's continuation. */
+static SPYValue *annotate_called(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    return k_resume(c, m, state, annotations_made(c, m, spy_retain(state->as.seq.items[0]), result));
+}
+/* The __annotate__ that state's class's __annotations__ getter read,
+ * owned, or NULL with an error: called on m with the VALUE format, or {}
+ * kept when it is None or not callable (annotation_dict). */
+static SPYValue *annotate_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *annotate) {
+    if (!annotate) return k_resume(c, m, state, NULL);
+    if (callable_value(c, annotate) && annotate->type != SPY_NONE) {
+        SPYValue *format = spy_int(c, 1), *result = format ? callk(c, m, annotate, 1, &format, annotate_called, state) : k_resume(c, m, state, NULL);
+        spy_release(annotate);
+        return result;
+    }
+    spy_release(annotate);
+    return annotate_called(c, m, state, value_new(c, SPY_DICT));
+}
+/* type.__getattribute__(cls, "__annotations__") on m when type's getter
+ * answers it (class_annotations): the dict kept, or the __annotate__ that
+ * a metaclass hook may answer read on m (attribute_callk), then called
+ * there (annotate_read). */
+static SPYValue *annotations_get(SPYContext *c, Machine *m, SPYValue *cls) {
+    SPYValue *kept = name_local(cls, "__annotations__"), *annotate, *state;
+    if (!kept) kept = name_local(cls, "__annotations_cache__");
+    if (kept) return spy_retain(kept);
+    if (!class_hooked(cls) && type_answers(c, cls, "__annotate__")) return class_annotations(c, cls, "__annotations__");
+    if (!(state = k_state(c, 1, (SPYValue *[]){spy_retain(cls), NULL, NULL}, unchanged, NULL))) return NULL;
+    if (!(annotate = attribute_step(c, cls, "__annotate__")) && c->fallback) {
+        SPYValue *read = c->fallback;
+        c->fallback = NULL;
+        return attribute_callk(c, m, cls, "__annotate__", read, annotate_read, state);
+    }
+    return annotate_read(c, m, state, annotate);
+}
 /* object.__getattribute__ of instance v, or type.__getattribute__ of
  * class v (type), and name, whose default lookup calls a Python getter
  * (instance_getter, class_getter): that getter, owned, with *env, to enter
@@ -50029,6 +50064,9 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         if (argc < 2) object_reduce(c, m, (int)reduce, argc + 1, args);
         return NULL;
     }
+    if (argc == 1 && is_builtin(callee, B_TYPE_GETATTRIBUTE) && self->type == SPY_CLASS && builtin_value(c, argv[0], SPY_STRING) &&
+        !strcmp(builtin_value(c, argv[0], SPY_STRING)->as.string.data, "__annotations__") && type_answers(c, self, "__annotations__"))
+        return annotations_get(c, m, self);
     if (argc == 1 && (is_builtin(callee, B_OBJECT_GETATTRIBUTE) || is_builtin(callee, B_TYPE_GETATTRIBUTE)))
         return getattribute_entered(c, self, argv[0], is_builtin(callee, B_TYPE_GETATTRIBUTE), env);
     if (callee->as.native.kwcall != descriptor_method) return NULL;

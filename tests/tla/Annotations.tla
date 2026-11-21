@@ -33,7 +33,8 @@
 (* a module that stops, or not, between two annotations: every module      *)
 (* annotation is conditional, so only executed ones are reported. A calls  *)
 (* program reads the __annotations__ of a function, a class, or a class    *)
-(* with a metaclass twice, its __annotate__ the compiler's, whose          *)
+(* with a metaclass, plain or with a Python __getattribute__ passing the   *)
+(* read to type's (hooked), twice, its __annotate__ the compiler's, whose  *)
 (* annotation calls a Python function, or one assigned that returns a dict *)
 (* or a list, by the attribute, getattr(), or a staticmethod of it, which  *)
 (* keeps the dict too. The outcome is the annotations, value, names, or    *)
@@ -50,7 +51,7 @@ Programs == [part : {"function"}, ann : Anns, op : {"annotations", "format1", "f
             \cup [part : {"replace"}, target : {"function", "class"}, op : {"annotations", "annotate", "bad", "delete"}]
             \cup [part : {"order"}, where : {"class", "module", "conditional"}]
             \cup [part : {"partial"}, stop : BOOLEAN]
-            \cup [part : {"calls"}, owner : {"function", "class", "metaclassed"}, annotate : {"compiled", "dict", "list"},
+            \cup [part : {"calls"}, owner : {"function", "class", "metaclassed", "hooked"}, annotate : {"compiled", "dict", "list"},
                   read : {"attribute", "getattr", "wrapper"}]
 
 VARIABLES program, outcome
