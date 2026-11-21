@@ -13471,7 +13471,9 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
     SPYValue *definition = owner && !searched ? class_lookup(owner, "__getattribute__") : NULL;
     if (!owner || (fallback && !special_function(c, fallback))) return attribute(c, v, name);
     if (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
-        if (!machine_function(c, definition)) return attribute(c, v, name);
+        /* A descriptor's Python __get__ binds it first (fallback_described),
+         * unless it is the __getattr__ too, which the call would not then follow. */
+        if (!machine_function(c, definition) && (!descriptor_getter(c, definition) || definition == fallback)) return attribute(c, v, name);
         c->fallback = spy_retain(definition);
         return NULL;
     }
@@ -37166,10 +37168,13 @@ static SPYValue *getter_fallback(SPYValue *v, SPYValue *function) {
     return fallback == function ? NULL : fallback;
 }
 /* Whether function, the call c->fallback gave for a read of v, is v's
- * __getattr__ descriptor itself (attribute_step): read, then what that
- * gives called on the name (special_env, special_callk). */
+ * __getattribute__ or __getattr__ descriptor itself (attribute_step):
+ * read, then what that gives called on the name (special_env,
+ * special_callk). */
 static int fallback_described(SPYContext *c, SPYValue *v, SPYValue *function) {
-    return getter_fallback(v, NULL) == function && !machine_function(c, function);
+    if (machine_function(c, function)) return 0;
+    SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : v->type == SPY_CLASS ? v->as.map.meta : NULL;
+    return getter_fallback(v, NULL) == function || (owner && class_lookup(owner, "__getattribute__") == function);
 }
 /* Pushes fallback, the __getattr__ that follows a read's call on m
  * (checked_returned), a descriptor's above c->descripting; 1 on an error. */
@@ -37242,7 +37247,8 @@ static SPYValue *getter_enter(SPYContext *c, Machine *m, SPYValue *v, const char
     size_t argc = 1;
     c->entering_kind = CALL_CHECKED;
     if (fallback_described(c, v, function)) {
-        SPYValue *text = machine_push(c, m, v) ? NULL : spy_string(c, name, strlen(name)), *get;
+        /* A __getattribute__'s AttributeError calls the __getattr__ after it. */
+        SPYValue *text = machine_push(c, m, v) || (fallback && fallback_push(c, m, fallback)) ? NULL : spy_string(c, name, strlen(name)), *get;
         get = text ? special_env(c, m, function, v, text, NULL, env) : NULL;
         spy_release(text); spy_release(function);
         return get;

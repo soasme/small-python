@@ -70,6 +70,17 @@ def refusing(self, n):
     raise AttributeError(str(n) if given(n) else "wrong name")
 
 
+# A __getattribute__ descriptor whose Python __get__ binds f (bound, boundrefuse).
+class Bound:
+    def __init__(self, f):
+        self.f = f
+
+    def __get__(self, obj, owner=None):
+        for _ in ():
+            pass
+        return lambda n: self.f(obj, n)
+
+
 def make(kind, getattr, hook):
     namespace = {}
     if kind == "value":
@@ -94,7 +105,8 @@ def make(kind, getattr, hook):
     elif getattr == "descriptor":
         namespace["__getattr__"] = property(lambda self: lambda n: answer(self, n))
     if hook != "none":
-        namespace["__getattribute__"] = passing if hook == "pass" else supering if hook == "super" else refusing
+        namespace["__getattribute__"] = {"pass": passing, "super": supering, "refuse": refusing,
+                                         "bound": Bound(passing), "boundrefuse": Bound(refusing)}[hook]
     return type("C", (), namespace)()
 
 
