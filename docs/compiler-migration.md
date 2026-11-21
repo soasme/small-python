@@ -86,9 +86,15 @@ used it.
 
 A separate Clang coverage build ran the new lifetime test: the instruction
 constant branch ran 23 times and its name branch ran 119 times. This is
-targeted coverage, not complete engine coverage. Full sanitizer targets,
-fuzzing, MemorySanitizer replay, ThreadSanitizer and full engine coverage
-are separate checks; a passing specification run does not establish them.
+targeted coverage, not complete engine coverage.
+
+On the same Linux arm64 copy, `make fuzz FUZZ_SECONDS=600` passed all four
+targets: eval, compile and spyc ran for 620 seconds each, and allocation
+failure ran for 602 seconds. `make fuzz-replay` then passed all four targets
+under MemorySanitizer against the 4,090 retained corpus files. Both runs
+used the source fingerprint recorded in the benchmark report. Full
+`make sanitize` targets, ThreadSanitizer and full engine coverage have not
+been completed for this checkpoint; the checks above do not establish them.
 
 `bench/compiler.c` and `bench/compiler.py` measure compilation separately
 from repeated execution. See [benchmark.md](benchmark.md) for the method
