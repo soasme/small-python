@@ -20,6 +20,13 @@ class Made(Exception):
         super().__init__(*args)
 
 
+class Swapped(Exception):
+    def __new__(cls, *args):
+        for _ in ():
+            pass
+        return Made(*args) if not isinstance(args[0], Made) else super().__new__(cls, *args)
+
+
 closed = []
 
 
@@ -77,7 +84,7 @@ def outcome(p):
     next(g)
     if p["delegate"] == "ended":
         first.close()
-    args = {"instance": (KeyError("k"),), "invalid": (1,), "exit": (GeneratorExit, 1, 2), "made": (Made, 3), "exit_made": (Exit,), "exit_value": (Exit, (4, 5)), "exit_class": (GeneratorExit,),
+    args = {"instance": (KeyError("k"),), "invalid": (1,), "exit": (GeneratorExit, 1, 2), "made": (Made, 3), "swapped": (Swapped, 3), "exit_made": (Exit,), "exit_value": (Exit, (4, 5)), "exit_class": (GeneratorExit,),
             "instance_value": (KeyError("k"), 1), "traceback": (KeyError, None, 2)}[p["args"]]
     closed[:] = [lambda: it.gi_frame is None and first.gi_frame is None if p["delegate"] in ("generator", "chain", "ended") else p["delegate"] in ("bare", "broken") or (it.inner if p["delegate"] == "asked" else it).closed]
     try:

@@ -17,7 +17,9 @@
 (* "caught " + type(e).__name__, after one next(), then throw()s           *)
 (* KeyError("k"), 1, (GeneratorExit, 1, 2), whose third argument is no     *)
 (* traceback, as is (KeyError, None, 2)'s, (KeyError("k"), 1), an instance *)
-(* given a value, (Made, 3), Made's Python __init__ making the exception, or *)
+(* given a value, (Made, 3), Made's Python __init__ making the exception,  *)
+(* (Swapped, 3), whose Python __new__ gives a Made, so that Swapped is     *)
+(* called again with it, or                                                *)
 (* Exit, a GeneratorExit class whose Python __init__ notes whether the     *)
 (* delegate is closed yet, or (Exit, (4, 5)), made of those arguments,     *)
 (* or GeneratorExit itself, made with no Python code. it is a generator   *)
@@ -38,7 +40,7 @@
 EXTENDS Naturals, Sequences
 
 Programs == [delegate : {"generator", "chain", "ended", "throws", "asked", "broken", "bare", "stubborn", "failing"},
-             args : {"instance", "invalid", "exit", "made", "exit_made", "exit_value", "exit_class", "instance_value", "traceback"},
+             args : {"instance", "invalid", "exit", "made", "swapped", "exit_made", "exit_value", "exit_class", "instance_value", "traceback"},
              handles : BOOLEAN]
 
 \* The arguments every generator refuses before calling any class.
@@ -59,11 +61,12 @@ Raised(p) ==
       [] p.delegate \in {"bare", "broken"} /\ p.args \in Refused -> ""
       [] p.args = "instance" -> "KeyError"
       [] p.args = "made" -> "Made"
+      [] p.args = "swapped" -> "Swapped"
       [] OTHER -> "TypeError"
 
 Run(p) ==
     LET e == Raised(p)
-    IN CASE p.delegate = "broken" /\ p.args \in {"instance", "made"} \cup Refused ->
+    IN CASE p.delegate = "broken" /\ p.args \in {"instance", "made", "swapped"} \cup Refused ->
                 \* Looking up throw failed before g resumed.
                 [result |-> "ZeroDivisionError", suspended |-> TRUE]
          [] e # "" /\ p.handles -> [result |-> "'caught " \o e \o "'", suspended |-> TRUE]
