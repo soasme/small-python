@@ -11744,6 +11744,74 @@ static SPYValue *property_copy(SPYContext *c, SPYValue *self, SPYValue *p, int w
     if (m) return NULL;
     return property_copied(c, NULL, spy_retain(p), call(c, cls, 4, args));
 }
+/* Whether the read of attribute name of v, a property, staticmethod or
+ * classmethod, may call Python, computed on the machine
+ * (wrapper_computed): __isabstractmethod__ but a classmethod_descriptor's,
+ * or a property's __name__ that
+ * its getter's own __name__ gives. */
+static int wrapper_computes(SPYValue *v, const char *name) {
+    if (!strcmp(name, "__isabstractmethod__")) return !builtin_classmethod(v);
+    return v->type == SPY_PROPERTY && !strcmp(name, "__name__") && !v->as.property.name &&
+           v->as.property.get->type != SPY_NONE && v->as.property.get->type != SPY_FUNCTION;
+}
+static SPYValue *abstract_next(SPYContext *, Machine *, SPYValue *, size_t);
+static SPYValue *parts_tuple(SPYContext *, size_t, SPYValue **);
+/* What bool() of state[0][state[1]]'s flag gave, result: True ends the
+ * walk (abstract_next). */
+static SPYValue *abstract_truth(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (!result || result == c->booleans[1]) { spy_release(state); return result; }
+    spy_release(result);
+    return abstract_next(c, m, state, (size_t)state->as.seq.items[1]->as.integer_data.small + 1);
+}
+/* What the read of a callable's __isabstractmethod__ gave, flag, state
+ * the callables and its index: its truth as a call step of bool
+ * (abstract_truth); absent, the next callable's. */
+static SPYValue *abstract_flagged(SPYContext *c, Machine *m, SPYValue *state, SPYValue *flag) {
+    if (!flag && error_is(c, "AttributeError")) {
+        spy_clear_error(c);
+        return abstract_next(c, m, state, (size_t)state->as.seq.items[1]->as.integer_data.small + 1);
+    }
+    SPYValue *args = flag ? parts_tuple(c, 1, &flag) : NULL;
+    if (!args) { spy_release(state); return NULL; }
+    return step_callk(c, m, spy_retain(c->types[SPY_BOOL]), args, abstract_truth, state);
+}
+/* abstract_flag on m from the callable at, state holding the callables. */
+static SPYValue *abstract_next(SPYContext *c, Machine *m, SPYValue *state, size_t at) {
+    SPYValue *callables = state->as.seq.items[0], *index = at < callables->as.seq.len ? spy_int(c, (int64_t)at) : NULL, *next;
+    if (!index) { spy_release(state); return c->error_type[0] ? NULL : spy_bool(c, 0); }
+    next = spy_tuple(c, 2, (SPYValue *[]){callables, index});
+    spy_release(index); spy_release(state);
+    if (!next) return NULL;
+    SPYValue *item = callables->as.seq.items[at], *flag = attribute_step(c, item, "__isabstractmethod__"), *function = c->fallback;
+    if (flag || c->error_type[0] || !function) return abstract_flagged(c, m, next, flag);
+    c->fallback = NULL;
+    return attribute_callk(c, m, item, "__isabstractmethod__", function, abstract_flagged, next);
+}
+/* What a property's getter's __name__ read gave, name, for property v. */
+static SPYValue *property_named_read(SPYContext *c, Machine *m, SPYValue *v, SPYValue *name) {
+    (void)m;
+    spy_release(v);
+    if (!name && error_is(c, "AttributeError")) {
+        spy_clear_error(c);
+        return spy_error(c, "AttributeError", "'property' object has no attribute '__name__'");
+    }
+    return name;
+}
+/* The read of attribute name of v, which it takes, that wrapper_computes
+ * says may call Python: on m, its value, or NULL with a call left. */
+static SPYValue *wrapper_computed(SPYContext *c, Machine *m, SPYValue *v, const char *name) {
+    if (name[2] == 'n') {
+        SPYValue *get = v->as.property.get, *value = attribute_step(c, get, "__name__"), *function = c->fallback;
+        if (value || c->error_type[0] || !function) return property_named_read(c, m, v, value);
+        c->fallback = NULL;
+        return attribute_callk(c, m, get, "__name__", function, property_named_read, v);
+    }
+    SPYValue *items[3] = {v->as.property.get, v->as.property.set, v->as.property.del}, *callables, *state;
+    callables = v->type == SPY_PROPERTY ? spy_tuple(c, 3, items) : spy_tuple(c, 1, &v->as.wrapper.function);
+    state = callables ? spy_tuple(c, 2, (SPYValue *[]){callables, c->none}) : NULL;
+    spy_release(callables); spy_release(v);
+    return state ? abstract_next(c, m, state, 0) : NULL;
+}
 /* The truth of callable.__isabstractmethod__, absent meaning false. */
 static SPYValue *abstract_flag(SPYContext *c, SPYValue *const *callables, size_t n) {
     for (size_t i = 0; i < n; i++) {
@@ -13443,6 +13511,11 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
     /* A function's, class's or module's __annotations__ its Python __annotate__ makes (getter_call). */
     if (calls && UNLIKELY(annotated_type(v)) && !strcmp(n->b->text, "__annotations__") && annotate_pending(c, v)) {
         c->annotating = 1;
+        return NULL;
+    }
+    /* A wrapper's __isabstractmethod__ or a property's __name__ read on the machine (getter_call). */
+    if (calls && UNLIKELY(v->type == SPY_PROPERTY || v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && wrapper_computes(v, n->b->text)) {
+        c->annotating = 3;
         return NULL;
     }
     if (calls && v->type == SPY_CLASS) {
@@ -17404,6 +17477,8 @@ static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **
         return object;
     }
     SPYValue *callee = node_attribute(c, object, n, calls);
+    /* A computed attribute called is read natively (wrapper_computes). */
+    if (UNLIKELY(c->annotating == 3)) { c->annotating = 0; callee = attribute(c, object, n->b->text); }
     if (!callee && calls && !c->error_type[0]) { *self = object; return NULL; }
     int dunder = n->b->text[0] == '_' && n->b->text[1] == '_';
     if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
@@ -37058,6 +37133,12 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
         c->annotating = 0;
         SPYValue *result = search_begin(c, m, v, n->b->text, c->none, attribute_searched);
         spy_release(v);
+        if (result) machine_push(c, m, result);
+        return NULL;
+    }
+    if (UNLIKELY(c->annotating == 3)) {
+        c->annotating = 0;
+        SPYValue *result = wrapper_computed(c, m, v, n->b->text);
         if (result) machine_push(c, m, result);
         return NULL;
     }

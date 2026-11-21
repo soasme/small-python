@@ -58,6 +58,10 @@ SOURCES = {
                           "    def __delete__(self, i): log.append('delete')\nclass Q:\n    d = D()\n"
                           "def bad():\n    try: delattr(H(), 'bad')\n    except LookupError as e: return type(e).__name__\n"
                           "result = (delattr(H(), 'x'), delattr(P(), 'p'), delattr(Q(), 'd'), bad(), log)",
+    "property_abstract_truth": ("log = []\nclass B:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        log.append(s.v)\n        return bool(s.v)\n"
+                                "def a(s): pass\ndef b(s, v): pass\ndef d(s): pass\n"
+                                "a.__isabstractmethod__ = B(0)\nb.__isabstractmethod__ = B(1)\nd.__isabstractmethod__ = B(2)\n"
+                                "result = (property(a, b, d).__isabstractmethod__, log)"),
     "property_subclass_doc": ("log = []\nclass G:\n    @property\n    def __doc__(self):\n        log.append('doc')\n        return 'd'\n"
                               "class R(property): pass\nresult = (R(G()).__doc__, log)"),
     "property_copy_calls": ("log = []\nclass Q(property):\n    def __init__(self, *a):\n        log.append(len(a))\n        super().__init__(*a)\n"
