@@ -39345,6 +39345,16 @@ static NO_INLINE int init_convert(SPYContext *c, Machine *m, SPYValue *cls, SPYV
     *fn = spy_retain(init);
     return 1;
 }
+/* Whether callee is a slot wrapper, unbound or bound, given an instance
+ * among its arguments items, whose method a call step may call on the
+ * machine (stack_call). */
+static NO_INLINE int slot_steps(SPYValue *callee, SPYValue *items) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    if (function->type != SPY_NATIVE || function->as.native.kwcall != slot_call) return 0;
+    for (size_t i = 0; i < items->as.seq.len; i++)
+        if (items->as.seq.items[i]->type == SPY_INSTANCE || metaclassed(items->as.seq.items[i])) return 1;
+    return callee != function && (callee->as.method.self->type == SPY_INSTANCE || metaclassed(callee->as.method.self));
+}
 static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *callee = v->as.iterator.source->as.seq.items[0], *items = zip_items(c, v), *item;
     if (!items) return -1;
@@ -39364,7 +39374,7 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
          (callee->type == SPY_CLASS && (described_new(c, callee, 0) || built_call(c, callee, 0, items->as.seq.len, items->as.seq.items))) ||
          index_arguments(c, callee, -1, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 2 && is_builtin(callee, B_ROUND) && is_number(items->as.seq.items[0]) && index_function(c, items->as.seq.items[1])) ||
-         (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) ||
+         (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) || slot_steps(callee, items) ||
          (items->as.seq.len == 1 && repr_job(c, is_builtin(callee, B_ASCII) ? c->field_calls[0] : callee, items->as.seq.items[0])))) {
         /* A builtin whose call may go on on the machine, an argument's
          * __index__ among them (index_arguments), or a staticmethod, is a call step of

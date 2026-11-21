@@ -165,6 +165,7 @@ SOURCES = {
                          "try:\n    a, b = map(B, [1, 2, 3, 4])\nexcept ValueError as e:\n    result = (type(e).__name__, log)"),
     "map_bound": "class K:\n    def __init__(s, k): s.k = k\n    def add(s, v): return s.k + v\n    def __call__(s, v, w): return s.k * v + w\n"
                  "result = (list(map(K(2).add, [1, 3])), list(map(K(10), [1, 2], [2])))",
+    "map_slot": "log = []\nclass M(frozendict):\n    def __missing__(self, key):\n        for _ in (): pass\n        log.append(key)\n        return -key\nclass S(str):\n    def __str__(self):\n        for _ in (): pass\n        log.append('s'); return 'S'\nm = M(a=1)\nresult = (list(map(frozendict.__getitem__, [m, m], [2, 'a'])), list(map(m.__getitem__, [3])), list(map(str.__mod__, ['<%s>'], [S()])), log)",
     "map_convert": "log = []\nclass K:\n    def __init__(s, v): s.v = v\n    def __str__(s):\n        for _ in (): pass\n"
                    "        log.append('s%d' % s.v)\n        return 'k%d' % s.v\n"
                    "    def __repr__(s):\n        for _ in (): pass\n        log.append('r%d' % s.v)\n        return 'K%d' % s.v\n"
