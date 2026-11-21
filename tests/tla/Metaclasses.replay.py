@@ -127,8 +127,30 @@ def delegated(p):
     return " ".join([type(X).__name__] + log)
 
 
+def entries(p):
+    log = []
+
+    class G:
+        def __getattr__(self, name):
+            for _ in (): pass
+            log.append(name)
+            if p["hook"] == "found":
+                return lambda bases: ()
+            raise (AttributeError if p["hook"] == "missing" else KeyError)(name)
+
+    try:
+        type("X", (G(),), {}) if p["via"] == "type" else type.__new__(type, "X", (G(),), {})
+    except TypeError as error:
+        return ("entries" if "MRO entry" in str(error) else "conflict" if "metaclass conflict" in str(error) else "other") + " %d" % len(log)
+    except KeyError:
+        return "KeyError %d" % len(log)
+    return "made"
+
+
 def outcome(p):
     try:
+        if p["part"] == "entries":
+            return entries(p)
         if p["part"] == "delegate":
             return delegated(p)
         if p["part"] == "builder":

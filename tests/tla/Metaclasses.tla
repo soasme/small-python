@@ -31,7 +31,12 @@
 (* {}), or type.__new__(type, ...), where D's metaclass is more derived    *)
 (* than type with a Python __new__ that makes the class or raises KeyError *)
 (* and a Python __init__: that __new__ makes the class, and only the call  *)
-(* of type initializes it.                                                 *)
+(* of type initializes it. An entries program calls type(name, (G,), {})  *)
+(* or type.__new__(type, ...), where G is an instance whose Python        *)
+(* __getattr__, which loops, answers __mro_entries__ with a function,     *)
+(* raises AttributeError, or raises KeyError: a found one is type()'s     *)
+(* TypeError, a missing one leaves G a base whose metaclass conflicts,    *)
+(* and the hook runs once.                                                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -42,6 +47,7 @@ Programs == [part : {"derive"}, bases : BaseSets, meta : Metas]
             \cup [part : {"call"}, made : {"marker", "raises", "real"}]
             \cup [part : {"builder"}, made : {"marker", "raises", "real"}, loops : BOOLEAN]
             \cup [part : {"delegate"}, via : {"type", "new"}, raises : BOOLEAN]
+            \cup [part : {"entries"}, via : {"type", "new"}, hook : {"found", "missing", "raises"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -80,8 +86,10 @@ Built(p) == CASE p.made = "marker" -> "f build X flag"
 Delegated(p) == IF p.raises THEN "KeyError"
                 ELSE IF p.via = "type" THEN "MD new init" ELSE "MD new"
 
+Entries(p) == CASE p.hook = "found" -> "entries 1" [] p.hook = "missing" -> "conflict 1" [] OTHER -> "KeyError 1"
+
 Run(p) == CASE p.part = "derive" -> Derive(p) [] p.part = "cell" -> Cell(p) [] p.part = "builder" -> Built(p)
-            [] p.part = "delegate" -> Delegated(p) [] OTHER -> Called(p)
+            [] p.part = "delegate" -> Delegated(p) [] p.part = "entries" -> Entries(p) [] OTHER -> Called(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

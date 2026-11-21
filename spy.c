@@ -22066,20 +22066,25 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     spy_release(list); spy_release(names);
     return status;
 }
+/* type()'s error for a base's __mro_entries__, entries, which it takes. */
+static SPYValue *entries_found(SPYContext *c, SPYValue *entries) {
+    spy_release(entries);
+    return spy_error(c, "TypeError", "type() doesn't support MRO entry resolution; use types.new_class()");
+}
 /* type.__new__(meta, name, bases, namespace, **keywords); given state, the
- * class's callbacks are left in *state (finish_class). */
+ * class's callbacks are left in *state (finish_class); checked, the bases'
+ * MRO entries were looked for (class_make). */
 static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPYValue *given, SPYValue *namespace, SPYValue *keywords,
-                              SPYValue **state) {
+                              SPYValue **state, int checked) {
     SPYValue *storage = dictionary_value(c, namespace), *text = builtin_value(c, name, SPY_STRING);
     SPYValue *bases = builtin_value(c, given, SPY_TUPLE);
     if (!text) return errorf(c, "TypeError", "type.__new__() argument 1 must be str, not %s", type_name(name));
     if (!bases) return errorf(c, "TypeError", "type.__new__() argument 2 must be tuple, not %s", type_name(given));
     if (!storage) return errorf(c, "TypeError", "type.__new__() argument 3 must be dict or frozendict, not %s", type_name(namespace));
     /* Bases are taken as they are: a class statement resolves MRO entries. */
-    for (size_t i = 0; i < bases->as.seq.len; i++) {
+    for (size_t i = 0; !checked && i < bases->as.seq.len; i++) {
         SPYValue *entries = bases->as.seq.items[i]->type == SPY_CLASS ? NULL : optional_attribute(c, bases->as.seq.items[i], "__mro_entries__");
-        spy_release(entries);
-        if (entries) return spy_error(c, "TypeError", "type() doesn't support MRO entry resolution; use types.new_class()");
+        if (entries) return entries_found(c, entries);
         if (c->error_type[0]) return NULL;
     }
     if (strlen(text->as.string.data) != text->as.string.len)
@@ -22470,7 +22475,7 @@ static SPYValue *class_create(SPYContext *c, SPYValue *name, ClassState *s, SPYV
     SPYValue *cls = NULL, *state = NULL;
     if (s->original && name_set(c, s->env, "__orig_bases__", s->original)) goto done;
     if (s->meta == c->types[SPY_CLASS] || (m && type_made(c, s->meta))) {
-        cls = create_class(c, s->meta, name, s->tuple, s->namespace, s->keywords, m ? &state : NULL);
+        cls = create_class(c, s->meta, name, s->tuple, s->namespace, s->keywords, m ? &state : NULL, 0);
         if (state) {
             spy_release(state->as.seq.items[0]); spy_release(state->as.seq.items[1]);
             state->as.seq.items[0] = spy_retain(name); state->as.seq.items[1] = spy_retain(s->env);
@@ -24030,6 +24035,9 @@ static SPYValue *delegated_new(SPYContext *c, SPYValue *callee, SPYValue *const 
 static NO_INLINE int class_maker_rest(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_NATIVE) return argc == 4 && callee->as.native.kwcall == type_method && !callee->as.native.data;
     if (argc != 3 || argv[1]->type != SPY_TUPLE || !type_made(c, callee)) return 0;
+    /* An instance's __mro_entries__ may be read by a Python call (class_make). */
+    for (size_t i = 0; i < argv[1]->as.seq.len; i++)
+        if (argv[1]->as.seq.items[i]->type == SPY_INSTANCE) return 1;
     for (size_t i = 0; i < argv[1]->as.seq.len; i++)
         if (argv[1]->as.seq.items[i]->type != SPY_CLASS || !subclass(callee, value_class(c, argv[1]->as.seq.items[i])))
             return delegated_new(c, callee, argv, &(SPYValue *){NULL}) != NULL;
@@ -24170,7 +24178,7 @@ static SPYValue *build_go(SPYContext *c, Machine *m, SPYValue *state) {
             if (keywords) return callk_keywords(c, m, spy_retain(meta), 3, args, keywords, build_made, state);
             return comparek(c, m, spy_retain(meta), parts_tuple(c, 3, args), COMPARE_CALL + 3, build_made, state);
         }
-        SPYValue *callbacks = NULL, *cls = create_class(c, meta, name, items[BUILD_TUPLE], items[BUILD_NAMESPACE], keywords, &callbacks);
+        SPYValue *callbacks = NULL, *cls = create_class(c, meta, name, items[BUILD_TUPLE], items[BUILD_NAMESPACE], keywords, &callbacks, 0);
         if (!cls) { spy_release(callbacks); spy_release(state); return NULL; }
         if (!callbacks) return build_made(c, m, state, cls);
         spy_release(callbacks->as.seq.items[0]); callbacks->as.seq.items[0] = cls;
@@ -24213,10 +24221,49 @@ static SPYValue *type_delegated(SPYContext *c, Machine *m, SPYValue *ctx, SPYVal
     spy_release(init); spy_release(ctx);
     return result;
 }
-static SPYValue *class_make(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    SPYValue *meta = callee, *state = NULL, *winner = NULL, *function;
+static SPYValue *class_make(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue *, size_t);
+/* What the read of a base's __mro_entries__ gave, for the class_make of
+ * ctx's callee, index, keywords or None, and arguments: an error, or the
+ * class made, its check going on from the next base. */
+static SPYValue *entries_read(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *entries) {
+    SPYValue **items = ctx->as.seq.items, *result = NULL;
+    if (entries) entries_found(c, entries);
+    else if (error_is(c, "AttributeError")) {
+        spy_clear_error(c);
+        result = class_make(c, m, items[0], ctx->as.seq.len - 3, items + 3, items[2] == c->none ? NULL : items[2],
+                            (size_t)items[1]->as.integer_data.small + 1);
+    }
+    spy_release(ctx);
+    return result;
+}
+/* A call of callee, type or type.__new__, on m, with argc arguments argv
+ * and keywords: as create_class, a base not a class from index from on
+ * with __mro_entries__ is an error, a Python read of it m's call
+ * (attribute_callk), going on in entries_read. */
+static SPYValue *class_make(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue *keywords, size_t from) {
+    SPYValue *meta = callee, *state = NULL, *winner = NULL, *function, *const *given = argv;
     if (argc == 4 && new_check(c, c->types[SPY_CLASS], argc, argv)) return NULL;
     if (argc == 4) meta = *argv++;
+    SPYValue *bases = builtin_value(c, argv[1], SPY_TUPLE);
+    for (size_t i = from; bases && builtin_value(c, argv[0], SPY_STRING) && dictionary_value(c, argv[2]) && i < bases->as.seq.len; i++) {
+        SPYValue *base = bases->as.seq.items[i], *entries, *index;
+        if (base->type == SPY_CLASS) continue;
+        if (!(entries = attribute_step(c, base, "__mro_entries__")) && c->fallback) {
+            SPYValue *read = c->fallback, *ctx = NULL;
+            c->fallback = NULL;
+            if ((index = spy_int(c, (int64_t)i))) {
+                SPYValue *items[7] = {callee, index, keywords ? keywords : c->none};
+                memcpy(items + 3, given, argc * sizeof(*given));
+                ctx = tuple_of(c, argc + 3, items);
+                spy_release(index);
+            }
+            if (!ctx) { spy_release(read); return NULL; }
+            return attribute_callk(c, m, base, "__mro_entries__", read, entries_read, ctx);
+        }
+        if (entries) return entries_found(c, entries);
+        if (!error_is(c, "AttributeError")) return NULL;
+        spy_clear_error(c);
+    }
     if ((function = delegated_new(c, meta, argv, &winner))) {
         /* A more derived metaclass's Python __new__ creates the class, the
          * calling step's call; a call of callee, not type.__new__, then
@@ -24228,7 +24275,7 @@ static SPYValue *class_make(SPYContext *c, SPYValue *callee, size_t argc, SPYVal
         c->k_fn = spy_retain(function); c->k = type_delegated; c->k_ctx = ctx;
         return NULL;
     }
-    SPYValue *cls = create_class(c, meta, argv[0], argv[1], argv[2], keywords, &state);
+    SPYValue *cls = create_class(c, meta, argv[0], argv[1], argv[2], keywords, &state, 1);
     /* A more derived metaclass's native __new__ made the class (create_class). */
     if (!cls || !state) { spy_release(state); return cls; }
     spy_release(state->as.seq.items[0]);
@@ -30302,7 +30349,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     }
     if (method < 0 && class_maker(c, callee, argc, argv)) {
         /* type() or type.__new__ runs its class's callbacks on m. */
-        result = class_make(c, callee, argc, argv, NULL);
+        result = class_make(c, m, callee, argc, argv, NULL, 0);
         release_all(argc, argv); spy_release(callee);
         return result;
     }
@@ -32178,7 +32225,7 @@ again:
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
     if (callee->type == SPY_CLASS && calls && id < 0 && !getter && !init && !c->error_type[0])
         getter = class_described(c, m, callee, 0, argc, argv, NULL, unchanged, NULL);
-    result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, callee, argc, argv, NULL) :
+    result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, m, callee, argc, argv, NULL, 0) :
              init ? plain_construct(c, callee, init, argc, argv, NULL) :
              /* next() of an anext() awaitable runs as the step (anext_steps). */
              calls && argc == 1 && UNLIKELY(anext_steps(argv[0], M_NEXT)) && is_builtin(callee, B_NEXT) ?
@@ -32439,7 +32486,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     }
     if (callee && id < 0 && !(result = calls && method < 0 ? native_entered(c, m, callee, argc + !skip, argv + skip, env) : NULL) &&
         !c->error_type[0] && !c->k_fn)
-        result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, callee, argc + !skip, argv + skip, NULL) :
+        result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, m, callee, argc + !skip, argv + skip, NULL, 0) :
                  /* An anext() awaitable's methods run as the step (anext_steps). */
                  calls && UNLIKELY(anext_steps(callee, method)) ? step_native(c, m, callee, method, n, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
@@ -32704,7 +32751,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         if (c->error_type[0]) { spy_release(result); result = NULL; }
     } else {
         SPYValue *keywords = entries_dict(c, kw, kwc);
-        if (keywords) result = calls && class_maker(c, callee, positional, argv) ? class_make(c, callee, positional, argv, keywords) :
+        if (keywords) result = calls && class_maker(c, callee, positional, argv) ? class_make(c, m, callee, positional, argv, keywords, 0) :
                                calls && callee->type == SPY_INSTANCE && ((result = call_described(c, m, callee, positional, argv, keywords)) || c->k_fn) ? result :
                                calls && callee->type == SPY_CLASS &&
                                ((result = class_described(c, m, callee, 0, positional, argv, keywords, unchanged, NULL)) || c->k_fn || c->error_type[0]) ? result :
@@ -32847,7 +32894,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = operand_dispatch(c, m, n, spy_retain(callee), -1, args->as.seq.len, argv, env);
     } else if (calls && class_maker(c, callee, args->as.seq.len, args->as.seq.items) && string_keys(c, keywords) && !c->error_type[0])
-        result = class_make(c, callee, args->as.seq.len, args->as.seq.items, keywords);
+        result = class_make(c, m, callee, args->as.seq.len, args->as.seq.items, keywords, 0);
     else if (!c->error_type[0]) result = step_keywords(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
     if (self) {
         SPYValue *all = spy_list(c);
@@ -37656,7 +37703,7 @@ static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
          * running on m (class_inited), and its Python __init__ is entered
          * (CALL_INIT) as a class call's (constructed). */
         SPYValue *state = NULL, *args = tuple_of(c, 3, argv + 1), *slot = native_slot_new(c, meta);
-        SPYValue *cls = !args ? NULL : slot == name_local(c->types[SPY_CLASS], "__new__") ? create_class(c, meta, argv[1], argv[2], argv[3], keywords, &state) :
+        SPYValue *cls = !args ? NULL : slot == name_local(c->types[SPY_CLASS], "__new__") ? create_class(c, meta, argv[1], argv[2], argv[3], keywords, &state, 0) :
                         class_allocate(c, meta, slot, 3, argv + 1, keywords);
         release_all(4, argv);
         if (!cls) { spy_release(args); spy_release(state); return NULL; }
@@ -49377,7 +49424,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         /* Only type(object) refuses keywords; other counts but 3 are wrong first. */
         if (argc == 1) break;
         if (argc != 3) return builtin(c, argc, argv, (void *)(intptr_t)id);
-        SPYValue *cls = create_class(c, c->types[SPY_CLASS], argv[0], argv[1], argv[2], keywords, NULL);
+        SPYValue *cls = create_class(c, c->types[SPY_CLASS], argv[0], argv[1], argv[2], keywords, NULL, 0);
         /* type.__call__ initializes the result with its own metaclass. */
         SPYValue *init = cls && cls->type == SPY_CLASS && cls->as.map.meta ? special_method(c, cls, "__init__") : NULL;
         if (init) {
@@ -50008,7 +50055,7 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
     case 0: /* __new__ */
         if (new_check(c, type, argc, argv)) return NULL;
         if (argc != 4) return errorf(c, "TypeError", "type.__new__() takes exactly 3 arguments (%zu given)", argc - 1);
-        return create_class(c, argv[0], argv[1], argv[2], argv[3], keywords, NULL);
+        return create_class(c, argv[0], argv[1], argv[2], argv[3], keywords, NULL, 0);
     case 1: /* __init__ */
         if (argc != 2 && argc != 4) return spy_error(c, "TypeError", "type.__init__() takes 1 or 3 arguments");
         if (argc == 2 && keywords && keywords->as.map.len) return spy_error(c, "TypeError", "type.__init__() takes no keyword arguments");
