@@ -16,8 +16,9 @@
 (* dictionary; assigning through the class replaces the descriptor.        *)
 (*                                                                         *)
 (* A program defines a descriptor class D with the methods in METHODS,     *)
-(* each recording its arguments, its __get__ a staticmethod when static,   *)
-(* called unbound as a plain function is, then                             *)
+(* each recording its arguments, its __get__ a function, a staticmethod   *)
+(* or a callable instance, the last two called unbound as a plain function *)
+(* is, then                                                                *)
 (*                                                                         *)
 (*     class B(base): x = D()    class A(B): pass  (or x = 999, for super) *)
 (*     a = A()                   and, if dict, a.__dict__["x"] = "inst"    *)
@@ -40,10 +41,10 @@ EXTENDS Naturals, Sequences
 Names == {"get", "set", "delete"}
 Ops == {"get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "set", "del", "classset", "metaget"}
 Programs == {p \in [methods : SUBSET Names, dict : BOOLEAN, op : Ops, base : {"object", "list"}, raises : {"no", "yes", "fallback"},
-                    static : BOOLEAN] :
+                    get : {"function", "static", "callable"}] :
                 /\ p.raises # "no" => p.op \in {"get", "getattr", "getattrd", "hasattr"}
-                \* A staticmethod __get__ called directly is not bound to the descriptor.
-                /\ p.static => p.op # "direct"}
+                \* A staticmethod or callable __get__ called directly is not bound to the descriptor.
+                /\ p.get # "function" => p.op # "direct"}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

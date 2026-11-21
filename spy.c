@@ -13210,13 +13210,24 @@ static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
     return n->attr_kind;
 }
 static int machine_function(SPYContext *, SPYValue *);
-/* The function on the machine that a descriptor of class kind calls as
- * its __get__, unbound as the descriptor slot calls it: a Python function,
- * or the one a staticmethod wraps; borrowed, or NULL. */
+/* What a descriptor of class kind calls on the machine as its __get__,
+ * unbound as the descriptor slot calls it: a Python function, the one a
+ * staticmethod wraps, or an instance, unbound too, whose class's __call__
+ * is one (getter_called); borrowed, or NULL. */
 static SPYValue *get_function(SPYContext *c, SPYValue *kind) {
-    SPYValue *get = class_lookup(kind, "__get__");
+    SPYValue *get = class_lookup(kind, "__get__"), *call;
     if (get && get->type == SPY_STATICMETHOD) get = get->as.wrapper.function;
+    if (get && get->type == SPY_INSTANCE && get->ctx == c && (call = class_lookup(get->as.map.parent, "__call__")) && machine_function(c, call))
+        return get;
     return get && machine_function(c, get) ? get : NULL;
+}
+/* The function to enter for get_function's get, a new reference: an
+ * instance's __call__, the instance put before the argc arguments argv. */
+static SPYValue *getter_called(SPYValue *get, SPYValue **argv, size_t *argc) {
+    if (get->type != SPY_INSTANCE) return spy_retain(get);
+    memmove(argv + 1, argv, *argc * sizeof(*argv));
+    argv[0] = spy_retain(get); ++*argc;
+    return spy_retain(class_lookup(get->as.map.parent, "__call__"));
 }
 /* Whether descriptor's getter is a Python function: a property's, or the
  * __get__ of an instance's class (get_function). */
@@ -30174,7 +30185,7 @@ static SPYValue *attribute_called(SPYContext *c, Machine *m, SPYValue *state, SP
  * __getattr__ called on m, then continuation k with ctx, which it takes,
  * and the value, as callk calls (attribute_called). */
 static SPYValue *attribute_callk(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *function, Continuation k, SPYValue *ctx) {
-    SPYValue *fallback = getter_fallback(v, function), *text = spy_string(c, name, strlen(name)), *argv[3] = {NULL, NULL, NULL}, *get, *state;
+    SPYValue *fallback = getter_fallback(v, function), *text = spy_string(c, name, strlen(name)), *argv[4] = {NULL, NULL, NULL}, *get, *state;
     size_t argc;
     if (!text) { spy_release(function); return k(c, m, ctx, NULL); }
     if (!(state = k_state(c, 3, (SPYValue *[]){spy_retain(v), text, spy_retain(fallback ? fallback : c->none), NULL, NULL}, k, ctx))) {
@@ -31236,7 +31247,7 @@ static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, 
 /* method_getter's call of function, which it takes, the getter for name
  * of object, which it owns. */
 static SPYValue *method_getter_of(SPYContext *c, Machine *m, const char *name, SPYValue *function, SPYValue *object, int stacked) {
-    SPYValue *argv[3] = {object, NULL, NULL}, *fallback = getter_fallback(object, function);
+    SPYValue *argv[4] = {object, NULL, NULL}, *fallback = getter_fallback(object, function);
     size_t argc = 1;
     c->fallback = NULL;
     SPYValue *items[4] = {object, fallback ? fallback : c->none, spy_string(c, name, strlen(name)), int_value(c, stacked)};
@@ -36749,7 +36760,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
             get = getter_bound(c, spy_retain(function->as.property.get), argv, argc);
         } else {
             argv[0] = function; argv[1] = spy_retain(self); argv[2] = spy_retain(v->as.super.owner); *argc = 3;
-            get = spy_retain(get_function(c, function->as.map.parent));
+            get = getter_called(get_function(c, function->as.map.parent), argv, argc);
         }
         return get;
     }
@@ -36757,7 +36768,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
     else if (function->type == SPY_INSTANCE) {
         argv[0] = function; *argc = 3;
         getter_args(c, v, name, argv);
-        return spy_retain(get_function(c, function->as.map.parent));
+        return getter_called(get_function(c, function->as.map.parent), argv, argc);
     } else if (!(argv[1] = attribute_key(c, name, strlen(name)))) { spy_release(function); return NULL; }
     else { *argc = 2; get = function; function = NULL; }
     argv[0] = spy_retain(v);
@@ -36770,7 +36781,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
  * the call (getter_fallback) pushed on m's stack (CALL_CHECKED), the
  * function to enter with *env (getter_function); else NULL. */
 static SPYValue *getter_enter(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *function, SPYValue **env) {
-    SPYValue *argv[3] = {v, NULL, NULL}, *fallback = getter_fallback(v, function);
+    SPYValue *argv[4] = {v, NULL, NULL}, *fallback = getter_fallback(v, function);
     size_t argc = 1;
     c->entering_kind = CALL_CHECKED;
     if (fallback_described(c, v, function)) {
@@ -36900,7 +36911,7 @@ static SPYValue *getattr_annotated(SPYContext *c, Machine *m, SPYValue *ctx, SPY
 }
 static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulted, SPYValue **env, const char *text) {
     size_t n = 3 + (size_t)defaulted;
-    SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, NULL, NULL}, *fallback = NULL;
+    SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[4] = {v, NULL, NULL}, *fallback = NULL;
     SPYValue *described = NULL;
     size_t argc = 1;
     /* Past its __dict__ search, the read takes what the class had before (attribute_step). */
@@ -49095,7 +49106,7 @@ static SPYValue *memory_method(SPYContext *, size_t, SPYValue *const *, SPYValue
  * as the call; else NULL. An instance __dict__ holding keys other than
  * str, whose search may call Python, is left to the native call. */
 static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYValue *name, int type, SPYValue **env) {
-    SPYValue *text = builtin_value(c, name, SPY_STRING), *own = NULL, *descriptor, *argv[3] = {v, NULL, NULL}, *dict;
+    SPYValue *text = builtin_value(c, name, SPY_STRING), *own = NULL, *descriptor, *argv[4] = {v, NULL, NULL}, *dict;
     size_t argc = 1;
     if (!text || v->type != (type ? SPY_CLASS : SPY_INSTANCE)) return NULL;
     if (type) descriptor = spy_retain(class_getter(c, v, text->as.string.data));

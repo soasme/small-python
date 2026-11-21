@@ -45,7 +45,9 @@ def outcome(p):
     body = {}
     methods = p["methods"]
     if "get" in methods:
-        body["__get__"] = staticmethod(__get__) if p["static"] else __get__
+        body["__get__"] = (staticmethod(__get__) if p["get"] == "static" else
+                           type("G", (), {"__call__": lambda g, d, instance, owner=None: __get__(d, instance, owner)})()
+                           if p["get"] == "callable" else __get__)
     if "set" in methods:
         body["__set__"] = __set__
     if "delete" in methods:
