@@ -19253,7 +19253,7 @@ static SPYValue *class_callk(SPYContext *c, Machine *m, SPYValue *cls, size_t ar
         if (!self) { release_all(argc, argv); return k(c, m, ctx, NULL); }
         if (!(state = k_state(c, 1, (SPYValue *[]){spy_retain(self), NULL, NULL}, k, ctx))) { spy_release(self); release_all(argc, argv); return NULL; }
         args[0] = self;
-        memcpy(args + 1, argv, argc * sizeof(*argv));
+        if (argc) memcpy(args + 1, argv, argc * sizeof(*argv));
         return callk(c, m, init, argc + 1, args, callk_inited, state);
     }
     if (!allocate && !init && !c->error_type[0]) {
@@ -19266,7 +19266,7 @@ static SPYValue *class_callk(SPYContext *c, Machine *m, SPYValue *cls, size_t ar
     SPYValue *state = tuple ? k_state(c, 2, (SPYValue *[]){spy_retain(cls), tuple, NULL, NULL}, k, ctx) : (spy_release(ctx), NULL);
     if (!state) { release_all(argc, argv); return NULL; }
     args[0] = spy_retain(cls);
-    memcpy(args + 1, argv, argc * sizeof(*argv));
+    if (argc) memcpy(args + 1, argv, argc * sizeof(*argv));
     return callk(c, m, allocate, argc + 1, args, callk_newed, state);
 }
 /* What a Python __get__ read of a class's __new__ gave, read, then called
@@ -19432,7 +19432,7 @@ static SPYValue *class_converted(SPYContext *c, Machine *m, SPYValue *cls, int c
     /* A bytearray subclass's empty instance, which bytearray.__init__ fills (array_init). */
     SPYValue *args[COMPARE_ARGS + 1], *self;
     args[0] = cls;
-    memcpy(args + 1, argv, argc * sizeof(*argv));
+    if (argc) memcpy(args + 1, argv, argc * sizeof(*argv));
     if (!(self = type_new(c, argc + 1, args, NULL, (void *)(intptr_t)SPY_BYTEARRAY))) { spy_release(ctx); return NULL; }
     return array_init(c, m, self, argc, argv, self, k, ctx);
 }
@@ -19999,7 +19999,7 @@ static ALWAYS_INLINE SPYValue *step_keywords(SPYContext *c, Machine *m, SPYValue
      * that it runs as the step (step_machine). */
     if (fn->type == SPY_METHOD && fn->as.method.function->type == SPY_NATIVE && fn->as.method.function->as.native.host == 2 && argc < 9) {
         SPYValue *args[9] = {fn->as.method.self};
-        memcpy(args + 1, argv, argc * sizeof(*argv));
+        if (argc) memcpy(args + 1, argv, argc * sizeof(*argv));
         return step_native(c, m, fn->as.method.function, -1, NULL, argc + 1, args, keywords);
     }
     return step_native(c, m, fn, -1, NULL, argc, argv, keywords);
@@ -30347,7 +30347,7 @@ static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *c
                                           SPYValue *key, SPYValue **env) {
     SPYValue *operands[11] = {callee}, *function, *map;
     size_t at = 0;
-    memcpy(operands + 1, argv, argc * sizeof(*argv));
+    if (argc) memcpy(operands + 1, argv, argc * sizeof(*argv));
     operands[argc + 1] = int_value(c, method); operands[argc + 2] = int_value(c, (int64_t)argc);
     if ((function = hash_call(c, m, key, argc + 3, operands, env))) { c->entering_init = function; c->entering_kind = CALL_HASH; }
     else if (!c->error_type[0] && (map = hashed_map(callee, method, argc, argv, &at)) &&
@@ -50658,7 +50658,7 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         SPYValue *args[9];
         if (native == callee || argc > 8) return step_native(c, m, callee, -1, NULL, argc, argv, NULL);
         args[0] = callee->as.method.self;
-        memcpy(args + 1, argv, argc * sizeof(*argv));
+        if (argc) memcpy(args + 1, argv, argc * sizeof(*argv));
         return step_native(c, m, native, -1, NULL, argc + 1, args, NULL);
     }
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
