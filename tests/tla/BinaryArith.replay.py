@@ -95,6 +95,11 @@ SOURCES = {
                           "    __rmul__ = __radd__\n    def __iter__(self): return iter([7])\n    def __index__(self): return 2\n"
                           "a = [1]; a += R('r')\nb = [1]; c = b; b += R(NotImplemented)\nd = bytearray(b'x'); d *= R(NotImplemented)\n"
                           "result = (a, b, b is c, d)",
+    "plain_body_operator": ("log = []\nclass V:\n    def __init__(self, v): self.v = v\n"
+                            "    def __add__(self, o):\n        for _ in (): pass\n        log.append('add')\n        return self.v + o\n"
+                            "    def __isub__(self, o):\n        for _ in (): pass\n        log.append('isub')\n        return self.v\n"
+                            "def plus(x, y): return x + y\ndef sub(x, y):\n    x -= y\n    return x\n"
+                            "result = (plus(V(1), 2), sub(V(1), 2), log)"),
     "inplace_subclass_reflected": ("log = []\nclass R:\n"
                                    "    def __rmul__(self, o):\n        for _ in (): pass\n        log.append('rmul')\n        return 'rmul'\n"
                                    "    def __rsub__(self, o):\n        for _ in (): pass\n        log.append('rsub')\n        return 'rsub'\n"

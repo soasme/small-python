@@ -47,7 +47,7 @@ Cases == {"int_float", "true_div", "floor_div", "mod_sign", "divmod", "complex_m
           "bool_matmul", "complex_shift", "divmod_complex", "complex_zero_div", "pow3_instance", "pow3_methods", "divmod_methods", "builtin_declines", "divmod_descriptor", "divmod_slot_declines",
           "pow3_float", "pow3_complex", "pow3_zero", "pow3_inverse", "inplace_messages", "inplace_pow_message",
           "sequence_reflected", "sequence_declined", "set_dict_operand", "inplace_inherited",
-          "inplace_subclass_reflected"}
+          "inplace_subclass_reflected", "plain_body_operator"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}]
             \cup [op : Ops, left : Kinds, right : {"same"}, relation : {"same"}]
             \cup [case : Cases]
@@ -176,6 +176,7 @@ Case(c) ==
       \* A list subclass's *= and a set subclass's -= call R's reflected method
       [] c = "inplace_subclass_reflected" -> "('rmul', 'rsub', ['rmul', 'rsub'])"
       \* A call-free function body calls V's Python __add__ and __isub__
+      [] c = "plain_body_operator" -> "(3, 1, ['add', 'isub'])"
       [] c = "set_dict_operand" -> "('frozenset', frozendict({'a': 1, 'z': 9}), 'r', 'r', [1, 2], [1, 2])"
 
 Run(p) == IF "case" \in DOMAIN p THEN <<Case(p.case), <<>>>> ELSE Arith(p)

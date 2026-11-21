@@ -16374,14 +16374,11 @@ static void namespace_bindings(Node *n) {
         namespace_bindings(n->a); namespace_bindings(n->b); namespace_bindings(n->c); namespace_bindings(n->args);
     }
 }
-/* A generator's body, or a function or class body that holds a call or a loop, on
- * the machine: a body of neither always ends, so it may run on the walker. */
+/* A generator's, function's or class's body, on the machine: even a body
+ * without a call may call Python through an operator or attribute. */
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
-    /* While calls can pause, every body runs on the machine; so does an
-     * annotation function's that unpacks a starred annotation. */
-    if (!generator && (!n->b || (n->kind != N_CLASS && mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b) ||
-                                                                        unpacks_annotation(n->b))))) return 0;
+    if (!generator && !n->b) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
