@@ -11,7 +11,9 @@ NEW = {"none": "", "self": "    def __new__(cls, *args, **kw):\n" + LOOP + "    
        "classmethod": "    @classmethod\n    def __new__(owner, cls, *args, **kw):\n" + LOOP + "        return super(owner, cls).__new__(cls)\n",
        "descriptor": "    __new__ = type('Get', (), {'__get__': lambda self, inst, owner: lambda cls, *a, **k: super(owner, cls).__new__(cls)})()\n"}
 INIT = {"none": "", "records": "    def __init__(self, *args, **kw):\n" + LOOP + "        self.args = args + tuple(kw.items())\n",
-        "returns": "    def __init__(self, *args, **kw):\n" + LOOP + "        return 1\n"}
+        "returns": "    def __init__(self, *args, **kw):\n" + LOOP + "        return 1\n",
+        "descriptor": "    __init__ = type('Init', (), {'__get__': lambda self, inst, owner: lambda *args, **kw:"
+                      " setattr(inst, 'args', args + tuple(kw.items()))})()\n"}
 CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": "", "super": "", "unbound": ""}
 META = {"meta": "class M(type):\n    def __call__(cls, *a):\n        return a\n",
         "super": "class M(type):\n    def __call__(cls, *a, **k):\n" + LOOP + "        return super().__call__(*a, **k)\n",

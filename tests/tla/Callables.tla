@@ -17,6 +17,8 @@
 (*           | classmethod (one doing the same, the class bound first)     *)
 (*           | descriptor (an instance whose Python __get__ gives one)     *)
 (*     init  none | records (self.args = args) | returns (returns 1)       *)
+(*           | descriptor (an instance whose Python __get__ gives a        *)
+(*             function recording them so)                                 *)
 (*     call  none | class (def __call__(self, *a): return a)               *)
 (*                | instance (c.__call__ = a function, after creation)     *)
 (*                | meta (a metaclass's def __call__(cls, *a): return a)   *)
@@ -34,7 +36,7 @@
 EXTENDS Naturals, Sequences
 
 Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other", "classmethod", "descriptor"},
-             init : {"none", "records", "returns"}, call : {"none", "class", "instance", "meta", "super", "unbound"},
+             init : {"none", "records", "returns", "descriptor"}, call : {"none", "class", "instance", "meta", "super", "unbound"},
              op : {"C()", "C(1)", "C(k=1)", "C()(2)"}]
 
 VARIABLES program, outcome
@@ -48,7 +50,7 @@ Create(p, args) ==
       [] p.init = "returns" -> "TypeError"                                       \* __init__ should return None
       \* BaseException's __init__ takes no keywords, nor list's unless __new__ is overridden.
       [] args = "(('k', 1),)" /\ p.init = "none" /\ (p.new = "none" \/ p.base = "Exception") -> "TypeError"
-      [] p.init = "records" \/ p.base = "Exception" -> "C args=" \o args
+      [] p.init \in {"records", "descriptor"} \/ p.base = "Exception" -> "C args=" \o args
       [] args = "(1,)" /\ (p.new = "none" \/ p.base = "list") -> "TypeError"    \* C() takes no arguments; list(1)
       [] OTHER -> "C"
 

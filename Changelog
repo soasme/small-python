@@ -707,6 +707,7 @@ Unreleased (0.10.0):
 - A class statement reads a metaclass's `__prepare__` through a Python descriptor without nesting on the C stack
 - A decorator that is a class or callable object runs without nesting on the C stack
 - An error a decorator raises names the decorator's line in its traceback
+- A class whose `__init__` is a property or another descriptor is called without nesting the C stack.
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

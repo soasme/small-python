@@ -19142,6 +19142,8 @@ static SPYValue *descriptor_readk(SPYContext *, Machine *, SPYValue *, SPYValue 
 static SPYValue *item_special(SPYContext *, SPYValue *, const char *);
 static SPYValue *rich_special(SPYContext *, SPYValue *, int, int *);
 static SPYValue *index_special(SPYContext *, SPYValue *);
+static SPYValue *special_callk_keywords(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, SPYValue *,
+                                        Continuation, SPYValue *);
 static SPYValue *special_callk(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue *, Continuation, SPYValue *);
 static SPYValue *conversion_absent(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *special_env(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **);
@@ -19374,11 +19376,32 @@ static SPYValue *class_converted(SPYContext *c, Machine *m, SPYValue *cls, int c
     if (!(self = type_new(c, argc + 1, args, NULL, (void *)(intptr_t)SPY_BYTEARRAY))) { spy_release(ctx); return NULL; }
     return array_init(c, m, self, argc, argv, self, k, ctx);
 }
+/* The descriptor whose Python getter gives class cls's __init__
+ * (descriptor_getter), called whether as type.__call__, when a native
+ * __new__ makes the instance (stepping_init); else NULL. Borrowed. */
+static SPYValue *described_init(SPYContext *c, SPYValue *cls, int called) {
+    SPYValue *init = cls->as.map.native || !cls->as.map.mro ? NULL : class_lookup(cls, "__init__"), *meta = cls->as.map.meta;
+    return init && descriptor_getter(c, init) &&
+           (called || !meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) &&
+           slot_new(c, cls) == native_slot_new(c, cls) ? init : NULL;
+}
 static NO_INLINE SPYValue *class_described(SPYContext *c, Machine *m, SPYValue *cls, int called, size_t argc, SPYValue *const *argv,
                                            SPYValue *keywords, Continuation k, SPYValue *ctx) {
     /* So is a builtin subclass's that may run Python code (subclass_new). */
     SPYValue *converted = keywords ? c->unbound : class_converted(c, m, cls, called, argc, argv, k, ctx);
     if (converted != c->unbound) return converted;
+    /* So is an __init__ a descriptor's Python getter gives, read on the
+     * new instance (special_callk), which goes on (callk_inited). */
+    SPYValue *init = argc > 8 ? NULL : described_init(c, cls, called), *self, *copies[8];
+    if (init) {
+        if (!(self = init_instance(c, cls, 0, argc, argv, NULL))) { spy_release(ctx); return NULL; }
+        SPYValue *state = k_state(c, 1, (SPYValue *[]){spy_retain(self), NULL, NULL}, k, ctx);
+        for (size_t i = 0; i < argc; i++) copies[i] = spy_retain(argv[i]);
+        SPYValue *result = state ? special_callk_keywords(c, m, init, self, argc, copies, keywords, NULL, callk_inited, state) : NULL;
+        if (!state) release_all(argc, copies);
+        spy_release(self);
+        return result;
+    }
     SPYValue *allocator = argc > 8 ? NULL : described_new(c, cls, called), *get = allocator ? descriptor_getter(c, allocator) : NULL;
     /* So is an exception group's of a custom sequence (group_newk). */
     int group = !allocator && !keywords ? group_sequence(c, cls, called, argc, argv) : 0;
@@ -19770,6 +19793,7 @@ static ALWAYS_INLINE SPYValue *new_called(SPYContext *c, SPYValue *callee, int c
     return callee->as.map.flags == 2 || callee->as.map.native || !callee->as.map.mro ? NULL : new_called_rest(c, callee, called);
 }
 static int called_machine(SPYContext *, SPYValue *, size_t, SPYValue *const *);
+static SPYValue *described_init(SPYContext *, SPYValue *, int);
 /* class_init of a call of type.__call__ on cls (type_called), uncached. */
 static SPYValue *called_init(SPYContext *c, SPYValue *cls, int *plain) {
     SPYValue *native = NULL, *init = cls->as.map.native || cls->as.map.flags == 2 ? NULL : plain_of(c, cls, 1, &native);
@@ -19782,7 +19806,7 @@ static SPYValue *called_init(SPYContext *c, SPYValue *cls, int *plain) {
 static int called_machine(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv) {
     int plain;
     SPYValue *init = called_init(c, cls, &plain);
-    return init ? machine_function(c, init) : new_called(c, cls, 1) != NULL || class_based(c, cls, argc, argv);
+    return init ? machine_function(c, init) : new_called(c, cls, 1) != NULL || class_based(c, cls, argc, argv) || described_init(c, cls, 1);
 }
 static NO_INLINE SPYValue *class_init(SPYContext *c, SPYValue *cls, int *plain) {
     SPYValue *init = plain_init(c, cls);
@@ -31836,6 +31860,9 @@ static SPYValue *class_stack_call(SPYContext *c, Machine *m, SPYValue *callee, s
     /* A builtin subclass's that may run Python code, the call's value
      * (subclass_new), its arguments and itself off m's stack. */
     SPYValue *converted = class_converted(c, m, callee, called, argc, argv, unchanged, NULL);
+    /* So is a descriptor __init__'s (class_described). */
+    if (converted == c->unbound && described_init(c, callee, called))
+        converted = class_described(c, m, callee, called, argc, argv, NULL, unchanged, NULL);
     if (converted != c->unbound) {
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return converted;
@@ -32774,8 +32801,9 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
             tuple = NULL;
         }
         spy_release(all); spy_release(tuple);
-    } else if (calls && keywords->as.map.len && callee->type == SPY_CLASS && !function && !c->error_type[0] && string_keys(c, keywords) &&
-               ((result = class_described(c, m, callee, called, args->as.seq.len, args->as.seq.items, keywords, unchanged, NULL)) || c->k_fn ||
+    } else if (calls && callee->type == SPY_CLASS && !function && !c->error_type[0] && string_keys(c, keywords) &&
+               ((result = class_described(c, m, callee, called, args->as.seq.len, args->as.seq.items,
+                                          keywords->as.map.len ? keywords : NULL, unchanged, NULL)) || c->k_fn ||
                 c->error_type[0])) ;
     else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
