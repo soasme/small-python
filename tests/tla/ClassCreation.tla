@@ -11,14 +11,16 @@
 (*                                 #   staticmethod of (owner, name)       *)
 (*                                                                         *)
 (* where B may define __init_subclass__(cls, **kw), or be given by an      *)
-(* object whose __mro_entries__, which its Python __getattribute__         *)
-(* reads, returns (B,), and Meta (a subclass of                            *)
-(* type) defines __new__ and __init__, and possibly __prepare__, each      *)
+(* object, made by a call logging "base", whose __mro_entries__, which     *)
+(* its Python __getattribute__ reads, returns (B,), and Meta (a subclass   *)
+(* of type) defines __new__ and __init__, and possibly __prepare__, read   *)
+(* by a descriptor's Python __get__ logging "prepare_get", each            *)
 (* passing flag on to type.__new__ but not to type.__init__, or            *)
 (* __init__ alone, type.__new__ then receiving flag itself, or mro         *)
 (* alone, returning type.mro's order and called after any __new__,         *)
 (* before the other hooks. Every hook logs its name; the class body        *)
-(* logs "body" when it calls, else it only assigns, and may begin with     *)
+(* logs "body" when it calls, else "add" by an operator's Python method    *)
+(* (a type() call's body function only assigns), and may begin with        *)
 (* an annotated assignment; C may take a type parameter, class             *)
 (* C[T](...), which adds the base Generic[T]; and the statement's          *)
 (* __build_class__ may be a Python function calling the builtin one.       *)
@@ -35,7 +37,8 @@
 (* Python __delitem__, then k = j = 1, logging "chain" for j, and del      *)
 (* k, j, logging "del" for each, then a handler's except ... as e,         *)
 (* logging "caught" for its store, "handler" for its store of None,        *)
-(* and "del", then the same of a handler that raises.                      *)
+(* and "del", then the same of a handler that raises, then two plain      *)
+(* stores, logging "plain" each.                                           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -57,8 +60,8 @@ Create(p) ==
         typeNew == SubSeq(names, 1, p.set_names)
                    \o (IF p.subclass_hook THEN <<IF p.flag THEN "init_subclass flag" ELSE "init_subclass">> ELSE <<>>)
         logged == p.logged /\ p.meta = "prepare" /\ ~p.call
-        before == (IF p.entries /\ ~p.call THEN <<"mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" /\ ~p.call THEN <<"prepare">> ELSE <<>>)
-                  \o (IF logged THEN <<"module">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>) \o (IF logged THEN <<"def", "load", "del", "chain", "del", "del", "caught", "handler", "del", "caught", "handler", "del", "static">> ELSE <<>>)
+        before == (IF p.entries /\ ~p.call THEN <<"base", "mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" /\ ~p.call THEN <<"prepare_get", "prepare">> ELSE <<>>)
+                  \o (IF logged THEN <<"module">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE IF p.call THEN <<>> ELSE <<"add">>) \o (IF logged THEN <<"def", "load", "del", "chain", "del", "del", "caught", "handler", "del", "caught", "handler", "del", "plain", "plain", "static">> ELSE <<>>)
                   \o (IF p.meta \in {"meta", "prepare"} THEN <<"new">> ELSE <<>>)
                   \o (IF p.meta = "mro" THEN <<"mro">> ELSE <<>>) \o typeNew
     IN  IF fails THEN <<before, "TypeError">>
@@ -88,8 +91,8 @@ BindsInBody == Done /\ Logged("def") => Index("module") < Index("def") /\ Index(
 \* The body loads a name through the namespace between its binding and deletion.
 LoadsInBody == Done /\ Logged("load") => Index("def") < Index("load") /\ Index("load") < Index("del")
 
-\* The bases are resolved before anything else runs.
-EntriesFirst == Done /\ Logged("mro_entries") => Index("mro_entries") = 1
+\* The bases are evaluated, then resolved, before anything else runs.
+EntriesFirst == Done /\ Logged("mro_entries") => Index("base") = 1 /\ Index("mro_entries") = 2
 
 \* __set_name__ runs before __init_subclass__, and both before Meta.__init__.
 HooksInOrder == Done /\ Logged("set_name a") /\ Logged("init") => Index("set_name a") < Index("init")

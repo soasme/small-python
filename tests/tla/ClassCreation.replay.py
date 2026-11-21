@@ -41,6 +41,8 @@ class Logged(dict):
             log.append("chain")
         if key == "e":
             log.append("handler" if value is None else "caught")
+        if key in ("s", "t"):
+            log.append("plain")
         super().__setitem__(key, value)
     def __getitem__(self, key):
         for _ in (): pass
@@ -52,11 +54,18 @@ class Logged(dict):
         log.append("del")
         super().__delitem__(key)
 
+def prepare(name, bases, **kw):
+    log.append("prepare")
+    return Logged() if logged else {}
+
+class PrepareGet:
+    def __get__(self, instance, owner):
+        for _ in (): pass
+        log.append("prepare_get")
+        return prepare
+
 class Prepare(Meta):
-    @classmethod
-    def __prepare__(mcls, name, bases, **kw):
-        log.append("prepare")
-        return Logged() if logged else {}
+    __prepare__ = PrepareGet()
 
 class Hook:
     def __init_subclass__(cls, **kw):
@@ -65,8 +74,16 @@ class Hook:
 class Plain:
     pass
 
+class Adds:
+    def __add__(self, other):
+        for _ in (): pass
+        log.append("add")
+        return other
+
 class Entries:
     def __init__(self, base):
+        for _ in (): pass
+        log.append("base")
         self.base = base
     def __getattribute__(self, name):
         for _ in (): pass
@@ -99,12 +116,13 @@ def source(p):
     lines.append("class C%s(%s):" % ("[T]" if p["generic"] else "", ", ".join(arguments)))
     if p["annotated"]:
         lines.append("    x: int = 0")
-    lines.append("    log.append('body')" if p["calls"] else "    n = 1")
+    lines.append("    log.append('body')" if p["calls"] else "    n = Adds() + 1")
     lines += ["    %s = %s()" % (name, kind) for name, kind in list(zip("ab", "DS"))[:p["set_names"]]]
     if p["logged"]:
         lines += ["    def m(self): pass", "    m", "    del m", "    k = j = 1", "    del k, j",
                   "    try: 1/0", "    except ZeroDivisionError as e: pass",
-                  "    try:", "        try: 1/0", "        except ZeroDivisionError as e: raise KeyError", "    except KeyError: pass"]
+                  "    try:", "        try: 1/0", "        except ZeroDivisionError as e: raise KeyError", "    except KeyError: pass",
+                  "    s = 1", "    t = 2"]
     return "\n".join(lines) + "\n"
 
 
