@@ -29,7 +29,7 @@ Cases == {"unused", "used", "from_unused", "from_used", "placeholder", "from_pla
           "missing_used", "broken", "as", "not_cached", "in_function_use", "registry", "submodule",
           "in_function", "in_try", "in_class", "star", "future",
           "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function",
-          "compat_getitem", "hook_used"}
+          "compat_getitem", "hook_used", "hook_dotted"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -66,6 +66,7 @@ Run(p) ==
       [] p.case = "compat_getitem" -> "('lazy_import', 2) []"           \* read once per module
       \* a Python __import__ hook reifies each name once, its modules run then
       [] p.case = "hook_used" -> "(1, 'sub', ['pkg', 'pkg']) ['pkg', 'sub']"
+      \* such a hook is given a dotted lazy import's whole name, so the submodule runs too
       [] p.case = "hook_dotted" -> "([('pkg.sub', None)], ['pkg', 'sub']) ['pkg', 'sub']"
 
 Init == program \in Programs /\ outcome = Pending

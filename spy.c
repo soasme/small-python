@@ -20907,9 +20907,11 @@ static int lazy_import_call(SPYContext *c, SPYValue *lazy, SPYValue **function, 
     /* `from a import b, c` imports only the name being resolved. */
     SPYValue *fromlist = first && root->as.lazy.attr->type == SPY_TUPLE && root->as.lazy.attr->as.seq.len ?
         spy_tuple(c, 1, &first->as.lazy.attr) : spy_retain(root->as.lazy.attr);
-    /* A bare `lazy import a.b` resolves to a alone; a.b loads on attribute access. */
+    /* A bare `lazy import a.b` resolves by the builtin __import__ to a
+     * alone, a.b loading on attribute access; another __import__ is given a.b. */
     const char *full = root->as.lazy.from->as.string.data, *dot = strchr(full, '.');
-    SPYValue *target = lazy == root && dot && !lazy_from_import(root) ? spy_string(c, full, (size_t)(dot - full)) : spy_retain(root->as.lazy.from);
+    SPYValue *target = lazy == root && dot && !lazy_from_import(root) && is_builtin(*function, B_IMPORT) ?
+                       spy_string(c, full, (size_t)(dot - full)) : spy_retain(root->as.lazy.from);
     /* The globals of the frame that touched the name, as both mappings. */
     SPYValue *globals = namespace_map(module_env(c, c->eval_env ? c->eval_env : c->globals));
     args[0] = target; args[1] = spy_retain(globals); args[2] = spy_retain(globals); args[3] = fromlist; args[4] = spy_int(c, 0);
