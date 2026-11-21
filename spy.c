@@ -49982,7 +49982,7 @@ static SPYValue *exception_text_method(SPYContext *c, SPYValue *fn, size_t argc,
         for (int i = 0; i < 2 && !status; i++) if (field[i]) status = sequence_append(c, values, field[i]);
         release_all(2, (SPYValue *[]){head, open});
         if (status) { spy_release(values); spy_release(start); return NULL; }
-        return exception_repr_next(c, m, start, values, 0, shown, !!field[0] | !!field[1] << 1);
+        return exception_repr_next(c, m, start, values, 0, shown, (field[0] ? 1 : 0) | (field[1] ? 2 : 0));
     }
     Buffer out = {.ctx = c};
     SPYValue *result = exception_text(&out, argv[0], repr, cls) ? NULL : spy_string(c, out.data ? out.data : "", out.len);
