@@ -22649,20 +22649,52 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
 static int exception_add_note(SPYContext *, SPYValue *, SPYValue *);
 /* Note on the error the call of class cls with value raised that it could
  * not make the exception (get_normalization_failure_note). */
+/* Add to exception, when one, the note of normalization_failed of class
+ * cls whose argument's repr is args, or NULL when it raised. */
+static void normalization_note(SPYContext *c, SPYValue *cls, SPYValue *exception, SPYValue *args) {
+    Buffer message = {.ctx = c};
+    if (!puts_buffer(&message, "Normalization failed: type=") && !puts_buffer(&message, name_text(cls, "__name__")->as.string.data) &&
+        !puts_buffer(&message, " args=") && !puts_buffer(&message, args ? args->as.string.data : "<unknown>")) {
+        SPYValue *note = spy_string(c, message.data, message.len);
+        if (note && exception) exception_add_note(c, exception, note);
+        spy_release(note);
+    }
+    mem_free(message.data);
+}
 static void normalization_failed(SPYContext *c, SPYValue *cls, SPYValue *value) {
     materialize_error(c);
     ErrorState error = take_error(c);
     SPYValue *args = conversion(c, value, 1);
     if (!args) spy_clear_error(c);
-    Buffer message = {.ctx = c};
-    if (!puts_buffer(&message, "Normalization failed: type=") && !puts_buffer(&message, name_text(cls, "__name__")->as.string.data) &&
-        !puts_buffer(&message, " args=") && !puts_buffer(&message, args ? args->as.string.data : "<unknown>")) {
-        SPYValue *note = spy_string(c, message.data, message.len);
-        if (note && error.value) exception_add_note(c, error.value, note);
-        spy_release(note);
-    }
-    mem_free(message.data); spy_release(args);
+    normalization_note(c, cls, error.value, args);
+    spy_release(args);
     restore_error(c, &error);
+}
+static SPYValue *error_box(SPYContext *);
+static void error_unbox(SPYContext *, SPYValue *);
+/* What the repr normalization_failedk asked for gave, result, its state
+ * the class and the held error (error_box): the note added, the error
+ * raised again. */
+static SPYValue *normalization_noted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    SPYValue *box = state->as.seq.items[1], *exception = box->as.seq.items[1];
+    if (!result) spy_clear_error(c);
+    SPYValue *text = result ? builtin_value(c, result, SPY_STRING) : NULL;
+    normalization_note(c, state->as.seq.items[0], exception->type == SPY_NONE ? NULL : exception, text);
+    spy_clear_error(c);
+    error_unbox(c, box);
+    spy_release(result); spy_release(state);
+    return NULL;
+}
+/* normalization_failed on m: the repr of an instance value runs on m
+ * (comparek, repr), the error held meanwhile. */
+static SPYValue *normalization_failedk(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *value) {
+    if (!m || value->type != SPY_INSTANCE) { normalization_failed(c, cls, value); return NULL; }
+    materialize_error(c);
+    SPYValue *box = error_box(c), *state = box ? spy_tuple(c, 2, (SPYValue *[]){cls, box}) : NULL, *args = state ? tuple_of(c, 1, &value) : NULL;
+    spy_release(box);
+    if (!args) { if (state) error_unbox(c, state->as.seq.items[1]); spy_release(state); return NULL; }
+    return comparek(c, m, spy_retain(c->field_calls[0]), args, COMPARE_CALL + 1, normalization_noted, state);
 }
 /* Raise exception, which it takes, that raising class raised, or NULL for
  * an instance, made, from cause: the cause is set on it; then, as
@@ -22770,9 +22802,9 @@ static SPYValue *raise_fixed(SPYContext *c, Machine *m, SPYValue *state, SPYValu
     }
     SPYValue *fixed = made ? exception_made(c, raised, made, 0) : NULL;
     if (fixed) raise_exception(c, NULL, fixed, NULL);
-    else normalization_failed(c, raised, items[1]);
+    SPYValue *noted = fixed ? NULL : normalization_failedk(c, m, raised, items[1]);
     spy_release(state);
-    return NULL;
+    return noted;
 }
 /* The raise of exception class cls: its metaclass's Python __call__,
  * *init with *called set, or its Python __new__, *init, called with cls,

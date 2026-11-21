@@ -33,6 +33,9 @@ class Shown:
     def __str__(self): self.log.append("s%d" % self.n); return "S%d" % self.n
 
 SOURCES = {
+    "normalization_note_repr": "log = []\nclass Shown(KeyError):\n    def __repr__(self):\n        for _ in (): pass\n        log.append('repr')\n        return 'SHOWN'\n"
+                               "class Strict(Exception):\n    def __new__(cls):\n        return Shown('s')\n"
+                               "try:\n    raise Strict\nexcept TypeError as e:\n    result = (e.__notes__, log)",
     "args_set_by_new": 'e = NoSuper(5)\nresult = (e.args, e.x, str(e))',
     "args_assign_tuple": 'e = Exception()\ne.args = [1, 2]\nresult = (e.args, type(e.args).__name__)',
     "args_assign_bad": 'e = Exception()\ne.args = 1',

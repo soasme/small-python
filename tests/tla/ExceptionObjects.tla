@@ -58,7 +58,7 @@ Text(cls, a) == CASE Len(a) = 0 -> ""
                   [] OTHER -> Tuple(a)
 
 
-Cases == {"args_set_by_new", "args_assign_tuple", "args_assign_bad", "with_traceback_self", "traceback_bad",
+Cases == {"args_set_by_new", "normalization_note_repr", "args_assign_tuple", "args_assign_bad", "with_traceback_self", "traceback_bad",
           "with_traceback_bad", "add_note", "add_note_bad", "notes_absent", "notes_replaced_bad",
           "context_defaults", "cause_assign_bad", "context_assign_bad", "cause_sets_suppress", "custom_str",
           "kwargs_refused", "kwargs_subclass_init", "reduce", "reduce_dict", "setstate", "setstate_bad",
@@ -81,6 +81,8 @@ Generated(p) ==
 
 Case(c) ==
     CASE c = "args_set_by_new" -> "((5,), 5, '5')"
+      \* A failed normalization's note shows the made exception by its Python __repr__ (NormalizeException)
+      [] c = "normalization_note_repr" -> "(['Normalization failed: type=Strict args=SHOWN'], ['repr'])"
       [] c = "args_assign_tuple" -> "((1, 2), 'tuple')"
       [] c = "args_assign_bad" -> "TypeError: 'int' object is not iterable"
       [] c = "with_traceback_self" -> "(True, None)"
