@@ -59,7 +59,7 @@ Zero(s) == [i \in DOMAIN s |-> s[i] - 1]
 Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 
-Cases == {"iter_sequence_protocol", "filter_nested_generator", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
+Cases == {"iter_sequence_protocol", "filter_nested_generator", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_subclass", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_strict_mixed", "adapter_zip_generator", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_class_unpack", "map_generator", "map_repr", "map_metaclass", "callable_generator", "iterator_subclass", "iterator_subclass_next", "adapter_subclass_iter", "adapter_subclass_init", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "map_index", "map_index_bad", "callable_bound", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next", "filter_adapted", "filter_next_truth",
@@ -105,6 +105,9 @@ Case(c) ==
       \* reversed() of a sequence calls its Python __len__, which must give a
       \* length and must exist
       [] c = "reversed_len" -> "([2, 1, 0], [-1, 'neg', 'nolen', 3])"
+      \* A reversed subclass's call reverses by the sequence's Python
+      \* __len__, and gives a Python __reversed__'s result as it is.
+      [] c = "reversed_subclass" -> "('R', 1, 0, 'list_iterator', ['len', 'rev'])"
       [] c = "reversed_bad" -> "TypeError: 'set' object is not reversible"
       [] c = "reversed_dict" -> "[3, 1]"
       [] c = "next_default" -> "(1, 'end', None)"

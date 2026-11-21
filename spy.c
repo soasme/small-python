@@ -19322,6 +19322,12 @@ static SPYValue *subclass_built(SPYContext *c, Machine *m, SPYValue *state, SPYV
     SPYValue *cls = state->as.seq.items[0], *newed = spy_retain(state->as.seq.items[1]);
     /* A strict zip's or map's adapter (adapter_named). */
     if (result && state->as.seq.len == 3 && result->type == SPY_ITERATOR) result->as.iterator.size = 1;
+    /* A reversed subclass's call gives what a __reversed__ returned as it is (native_new). */
+    SPYValue *reversed = c->iterator_types[IT_REVERSED];
+    if (result && subclass(cls, reversed) && value_class(c, result) != reversed) {
+        spy_release(state);
+        return k_resume(c, m, newed, result);
+    }
     SPYValue *instance = result ? subclass_instance(c, cls, built_base(c, cls), result) : NULL;
     spy_release(state);
     return newed->as.seq.len == 2 ? k_resume(c, m, newed, instance) : callk_newed(c, m, newed, instance);
@@ -19343,14 +19349,23 @@ static SPYValue *subclass_new(SPYContext *c, Machine *m, SPYValue *cls, SPYValue
 }
 static SPYValue *native_new(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int adapter_iterates(SPYContext *, SPYValue *, size_t, SPYValue *const *);
-/* The zip, map, enumerate or filter class whose __new__ (native_new) a
- * call of its subclass cls, called whether as type.__call__, of argc
- * arguments argv reaches, when one of them has a Python __iter__ on the
- * machine (adapter_iterates); else NULL. */
+/* Whether reversed() of v calls a Python __reversed__, or a sequence's
+ * __len__ (named_special). */
+static int reversed_calls(SPYContext *c, SPYValue *v) {
+    SPYValue *cls = v->type == SPY_INSTANCE ? v->as.map.parent : NULL, *function = cls ? class_lookup(cls, "__reversed__") : NULL;
+    if (cls && !function && class_lookup(cls, "__getitem__") && !subclass(cls, c->types[SPY_DICT])) function = class_lookup(cls, "__len__");
+    return function && machine_function(c, function);
+}
+/* The zip, map, enumerate, filter or reversed class whose __new__
+ * (native_new) a call of its subclass cls, called whether as
+ * type.__call__, of argc arguments argv reaches, when one of them has a
+ * Python __iter__ on the machine (adapter_iterates), or reversed's a
+ * Python method (reversed_calls); else NULL. */
 static SPYValue *adapter_owner(SPYContext *c, SPYValue *cls, int called, size_t argc, SPYValue *const *argv) {
     SPYValue *new = argc <= COMPARE_ARGS ? class_lookup(cls, "__new__") : NULL, *meta = cls->as.map.meta;
     SPYValue *owner = new && new->type == SPY_NATIVE && new->as.native.kwcall == native_new ? new->as.native.data : NULL;
-    return owner && owner != cls && owner->type == SPY_CLASS && adapter_iterates(c, owner, argc, argv) &&
+    return owner && owner != cls && owner->type == SPY_CLASS &&
+           (adapter_iterates(c, owner, argc, argv) || (owner == c->iterator_types[IT_REVERSED] && argc == 1 && reversed_calls(c, argv[0]))) &&
            (called || !meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) ? owner : NULL;
 }
 /* Whether type.__call__ of class cls of argc arguments argv is a builtin

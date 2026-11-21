@@ -84,6 +84,10 @@ SOURCES = {
                     "try: reversed(S(-1))\nexcept ValueError: log.append('neg')\n"
                     "try: reversed(N())\nexcept TypeError: log.append('nolen')\n"
                     "result = ([x for x in reversed(S(3))], log)",
+    "reversed_subclass": "log = []\nclass R(reversed): pass\nclass S:\n    def __len__(s):\n        for _ in (): pass\n"
+                         "        log.append('len')\n        return 2\n    def __getitem__(s, i): return i\n"
+                         "class V:\n    def __reversed__(s):\n        for _ in (): pass\n        log.append('rev')\n        return iter([1])\n"
+                         "r = R(S())\nresult = (type(r).__name__, next(r), next(r), type(R(V())).__name__, log)",
     "reversed_bad": 'result = reversed({1, 2})',
     "reversed_dict": 'result = list(reversed({1: 2, 3: 4}))',
     "next_default": "it = iter([1])\nresult = (next(it), next(it, 'end'), next(it, None))",
