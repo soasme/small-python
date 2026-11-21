@@ -32,7 +32,7 @@ EXTENDS Naturals, Sequences
 Cases == {"import_sub", "binds", "import_as", "from_submodule", "from_missing", "from_star", "relative",
           "broken", "beyond", "no_parent", "namespace", "twice", "none_cached", "replaced", "cycle",
           "attributes", "plain_attributes", "missing_module", "missing_sub", "from_inner_missing",
-          "hook_calls", "as_unnamed"}
+          "hook_calls", "as_unnamed", "import_call"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -64,6 +64,8 @@ Run(p) ==
       \* A Python __import__, a module's __getattr__ and a namespace's __setitem__, in order
       [] p.case = "hook_calls" -> "(['W', 'Z'], ['import', '__all__', 'z', 'set', 'import', 'q', 'set']) []"
       [] p.case = "as_unnamed" -> "(None, 'q', \"cannot import name 'q' from '<unknown module name>' (unknown location)\") []"
+      \* __import__ called runs packages, then the fromlist's submodules, once each
+      [] p.case = "import_call" -> "('pkg', 'sub', 'pkg') ['pkg', 'sub', 'inner', 'leaf']"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -74,6 +76,6 @@ Done == outcome # Pending
 
 \* Every log is one of these run orders, in which no module runs twice.
 Logs == {"['pkg', 'sub']", "['pkg']", "['pkg', 'inner', 'sub', 'leaf']", "['pkg', 'broken']", "['pkg', 'beyond']",
-         "['plain']", "['nsmod']", "[]", "['cycle_a', 'cycle_b']", "['cycle_b', 'cycle_a']"}
+         "['plain']", "['nsmod']", "[]", "['cycle_a', 'cycle_b']", "['cycle_b', 'cycle_a']", "['pkg', 'sub', 'inner', 'leaf']"}
 OnceEach == Done => \E log \in Logs : \E i \in 1..Len(outcome) : SubSeq(outcome, i, Len(outcome)) = log
 =============================================================================

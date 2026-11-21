@@ -19478,6 +19478,8 @@ static NO_INLINE SPYValue *class_described(SPYContext *c, Machine *m, SPYValue *
  * returns NULL with no error, and the step that called enters it
  * (CALL_K), calling k when it returns, so that no Python code runs on
  * the C stack. Otherwise fn runs here and callk returns what k does. */
+static int import_plain(size_t, SPYValue *const *);
+static SPYValue *importk(SPYContext *, Machine *, size_t, SPYValue **, Continuation, SPYValue *);
 static NO_INLINE SPYValue *callk_keywords(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, SPYValue *keywords,
                                           Continuation k, SPYValue *ctx) {
     SPYValue *function = machine_function(c, fn) || !m ? fn : bound_function(c, fn);
@@ -19495,6 +19497,8 @@ static NO_INLINE SPYValue *callk_keywords(SPYContext *c, Machine *m, SPYValue *f
         c->k_fn = spy_retain(function); c->k = k; c->k_ctx = ctx;
         return NULL;
     }
+    /* A builtin __import__'s modules run on m (importk). */
+    if (m && !keywords && is_builtin(fn, B_IMPORT) && import_plain(argc, argv)) return importk(c, m, argc, argv, k, ctx);
     SPYValue *result = keywords ? call_keywords(c, fn, argc, argv, keywords) : call(c, fn, argc, argv);
     release_all(argc, argv);
     return k(c, m, ctx, result);
@@ -32497,6 +32501,7 @@ again:
         spy_release(text); spy_release(y);
         return result ? NULL : c->error_type[0] ? NULL : looked(c);
     }
+
     id = consumer_of(c, bound ? bound : callee, -1, given, argv + from);
     SPYValue *consumer = id < 0 ? NULL : bound ? bound : spy_retain(callee);
     if (id < 0) spy_release(bound);
@@ -37355,8 +37360,8 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
             spy_release(module); spy_release(all); spy_release(value); spy_release(key);
             return special_callk(c, m, function, object, 1, args, NULL, import_resumed, state);
         }
-        if (function && function->type == SPY_NATIVE) {
-            /* The builtin __import__ runs here. */
+        if (function && function->type == SPY_NATIVE && !(is_builtin(function, B_IMPORT) && import_plain(5, args))) {
+            /* Another native __import__ runs here; the builtin's modules on m (callk, importk). */
             spy_release(state);
             spy_release(value);
             value = call(c, function, 5, args);
@@ -43223,6 +43228,163 @@ static int import_fromlist(SPYContext *c, SPYValue *module, SPYValue *names, int
     }
     spy_release(iterator); return c->error_type[0] ? -1 : 0;
 }
+/* What the body of a module module_loadk began returned, result, or
+ * NULL when it raised, state the module's name, the module and its
+ * package or None: the import ended (module_finish), then state's
+ * continuation. */
+static SPYValue *module_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *parent = items[2] == c->none ? NULL : spy_retain(items[2]);
+    spy_release(result);
+    return k_resume(c, m, state, module_finish(c, items[0]->as.string.data, spy_retain(items[1]), parent, !result));
+}
+/* load_source_module of name on m, given to k with ctx, which it takes:
+ * a new module's body m's call (k_enter of the unit, module_loaded); one
+ * of no statements runs nothing (module_body). */
+static SPYValue *module_loadk(SPYContext *c, Machine *m, const char *name, Continuation k, SPYValue *ctx) {
+    SPYValue *unit = NULL, *parent = NULL, *module = module_begin(c, name, &unit, &parent), *key = NULL, *state = NULL;
+    if (!unit) return k(c, m, ctx, module);
+    if (!unit->as.unit.body) { spy_release(unit); return k(c, m, ctx, module_finish(c, name, module, parent, 0)); }
+    if (!unit_call(c, unit, module) && (key = spy_string(c, name, strlen(name))))
+        state = k_state(c, 3, (SPYValue *[5]){key, spy_retain(module), parent ? spy_retain(parent) : spy_none(c)}, k, spy_retain(ctx));
+    if (!state) {
+        spy_release(unit);
+        spy_release(module_finish(c, name, module, parent, 1));
+        return k(c, m, ctx, NULL);
+    }
+    spy_release(ctx); spy_release(parent);
+    c->k_fn = unit; c->k_env = module; c->k = module_loaded; c->k_ctx = state; c->k_unit = 1;
+    return NULL;
+}
+/* Whether builtin __import__ of argc arguments argv reads them without
+ * calling Python, so that it runs on the machine (importk): a str name,
+ * a level that is an int a C int holds, and a fromlist None, a list or a
+ * tuple. */
+static int import_plain(size_t argc, SPYValue *const *argv) {
+    return argc && argc <= 5 && argv[0]->type == SPY_STRING && strlen(argv[0]->as.string.data) == argv[0]->as.string.len &&
+           (argc < 4 || argv[3]->type == SPY_NONE || argv[3]->type == SPY_LIST || argv[3]->type == SPY_TUPLE) &&
+           (argc < 5 || (argv[4]->type == SPY_INT && !argv[4]->as.integer_data.big &&
+                         argv[4]->as.integer_data.small >= INT_MIN && argv[4]->as.integer_data.small <= INT_MAX));
+}
+enum { IMPORTING_AT, IMPORTING_ALL, IMPORTING_ALL_AT, IMPORTING_FULL };
+static SPYValue *import_next(SPYContext *, Machine *, SPYValue *);
+/* What importk's load of a package's module returned, module: the
+ * import goes on (import_next). */
+static SPYValue *import_package_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValue *module) {
+    if (!module) return k_resume(c, m, state, NULL);
+    spy_release(module);
+    return import_next(c, m, state);
+}
+/* Move importk's fromlist walk, its progress list state[1], past the
+ * item at its index, in __all__ when it walks that. */
+static int import_advance(SPYContext *c, SPYValue *state) {
+    SPYValue **progress = state->as.seq.items[1]->as.seq.items;
+    int slot = progress[IMPORTING_ALL] != c->none ? IMPORTING_ALL_AT : IMPORTING_AT;
+    SPYValue *next = int_value(c, progress[slot]->as.integer_data.small + 1);
+    if (!next) return -1;
+    spy_release(progress[slot]); progress[slot] = next;
+    return 0;
+}
+/* What importk's load of a fromlist's submodule returned, module: an
+ * absent one is no error (import_missing); the walk goes on. */
+static SPYValue *import_item_loaded(SPYContext *c, Machine *m, SPYValue *state, SPYValue *module) {
+    SPYValue *full = state->as.seq.items[1]->as.seq.items[IMPORTING_FULL];
+    char missing[sizeof(c->error_message)];
+    snprintf(missing, sizeof(missing), "No module named '%s'", full->as.string.data);
+    if (!module && error_is(c, "ModuleNotFoundError") && !strcmp(c->error_message, missing)) spy_clear_error(c);
+    spy_release(module);
+    return c->error_type[0] || import_advance(c, state) ? k_resume(c, m, state, NULL) : import_next(c, m, state);
+}
+/* importk's next stage, state the arguments and the progress of the
+ * fromlist walk: the first package of the name not in sys.modules
+ * loaded (module_loadk, import_package_loaded), then each fromlist item's
+ * submodule a read of it misses, or each of __all__'s for "*"
+ * (import_item_loaded); an item read otherwise, as import_fromlist
+ * does, in C; then the result, as builtin's. */
+static SPYValue *import_next(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items, **argv = items[0]->as.seq.items, *a = argv[0];
+    SPYValue **progress = items[1]->as.seq.items, *fromlist = items[0]->as.seq.len > 3 ? argv[3] : c->none, *result;
+    size_t argc = items[0]->as.seq.len;
+    char *absolute = absolute_name(c, a->as.string.data, argc > 1 ? argv[1] : NULL, argc == 5 ? argv[4]->as.integer_data.small : 0);
+    if (!absolute) return k_resume(c, m, state, NULL);
+    for (char *end = absolute; end;) {
+        if ((end = strchr(end, '.'))) *end = 0;
+        if (!name_local(c->modules, absolute)) {
+            result = module_loadk(c, m, absolute, import_package_loaded, state);
+            mem_free(absolute);
+            return result;
+        }
+        if (end) *end++ = '.';
+    }
+    SPYValue *module = import_module(c, absolute), *names = fromlist;
+    int listed = fromlist->type != SPY_NONE && fromlist->as.seq.len;
+    if (module && listed && name_local(module, "__path__")) {
+        for (;;) {
+            int recursive = progress[IMPORTING_ALL] != c->none;
+            if (recursive) names = progress[IMPORTING_ALL];
+            size_t at = (size_t)progress[recursive ? IMPORTING_ALL_AT : IMPORTING_AT]->as.integer_data.small;
+            if (at >= names->as.seq.len) {
+                if (!recursive) break;
+                spy_release(progress[IMPORTING_ALL]); progress[IMPORTING_ALL] = spy_retain(c->none);
+                if (import_advance(c, state)) break;
+                continue;
+            }
+            SPYValue *item = names->as.seq.items[at], *text = builtin_value(c, item, SPY_STRING), *all, *value, *name;
+            if (text && !recursive && !strcmp(text->as.string.data, "*") && (all = name_local(module, "__all__")) &&
+                (all->type == SPY_LIST || all->type == SPY_TUPLE)) {
+                /* "*" walks __all__'s names. */
+                SPYValue *zero = int_value(c, 0);
+                if (!zero) break;
+                spy_release(progress[IMPORTING_ALL]); progress[IMPORTING_ALL] = spy_retain(all);
+                spy_release(progress[IMPORTING_ALL_AT]); progress[IMPORTING_ALL_AT] = zero;
+                continue;
+            }
+            if (text && strcmp(text->as.string.data, "*") && module->type == SPY_MODULE && !name_local(module, "__getattr__") &&
+                (name = name_local(module, "__name__")) && name->type == SPY_STRING) {
+                /* A read that misses, of a module with no __getattr__, imports the package's submodule. */
+                if ((value = attribute(c, module, text->as.string.data)) || !error_is(c, "AttributeError")) {
+                    spy_release(value);
+                    if (c->error_type[0] || import_advance(c, state)) break;
+                    continue;
+                }
+                spy_clear_error(c);
+                Buffer full = {.ctx = c};
+                SPYValue *key = puts_buffer(&full, name->as.string.data) || puts_buffer(&full, ".") || puts_buffer(&full, text->as.string.data) ? NULL :
+                                spy_string(c, full.data, full.len);
+                if (key) { spy_release(progress[IMPORTING_FULL]); progress[IMPORTING_FULL] = key; }
+                result = key ? module_loadk(c, m, full.data, import_item_loaded, state) : NULL;
+                mem_free(full.data); mem_free(absolute); spy_release(module);
+                return key ? result : k_resume(c, m, state, NULL);
+            }
+            /* Any other item is read as import_fromlist reads it. */
+            SPYValue *one = spy_tuple(c, 1, &item);
+            if (!one || import_fromlist(c, module, one, recursive) || import_advance(c, state)) { spy_release(one); break; }
+            spy_release(one);
+        }
+    } else if (module && !listed && a->as.string.len) {
+        /* Without a fromlist, the module the first part of name resolved to. */
+        const char *dot = strchr(a->as.string.data, '.');
+        size_t tail = dot ? a->as.string.len - (size_t)(dot - a->as.string.data) : 0;
+        char *root = copy_text(c, absolute, strlen(absolute) - tail);
+        SPYValue *first = root ? import_module(c, root) : NULL;
+        mem_free(root); spy_release(module); module = first;
+    }
+    mem_free(absolute);
+    if (c->error_type[0]) { spy_release(module); module = NULL; }
+    return k_resume(c, m, state, module);
+}
+/* Builtin __import__ of argc arguments argv, which it takes, plain
+ * (import_plain), on m, given to k with ctx, which it takes: each module
+ * whose body it runs is m's call (import_next). */
+static NO_INLINE SPYValue *importk(SPYContext *c, Machine *m, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+    SPYValue *args = spy_tuple(c, argc, argv), *zero = int_value(c, 0);
+    SPYValue *progress = args && zero ? spy_list(c) : NULL;
+    int failed = !progress;
+    for (int i = 0; !failed && i <= IMPORTING_FULL; i++) failed = sequence_append(c, progress, i == IMPORTING_ALL || i == IMPORTING_FULL ? c->none : zero);
+    release_all(argc, argv); spy_release(zero);
+    SPYValue *state = !failed ? k_state(c, 2, (SPYValue *[4]){args, progress}, k, ctx) : NULL;
+    if (failed) { spy_release(args); spy_release(progress); return k(c, m, ctx, NULL); }
+    return state ? import_next(c, m, state) : NULL;
+}
 /* Methods of builtin types live in their type dictionaries, so attribute
  * lookup, unbound access such as str.split, and inheritance share one path.
  * Each method receives its instance as argv[0]. */
@@ -45095,7 +45257,9 @@ static SPYValue *lazy_import_resolve(SPYContext *c, size_t argc, SPYValue *const
     (void)data;
     if (parse_arguments(c, "resolve", argc - 1, argv + 1, keywords, NULL, 0, 0, 0, NULL)) return NULL;
     if (argv[0]->type != SPY_LAZY_IMPORT) return spy_error(c, "TypeError", "descriptor 'resolve' requires a 'lazy_import' object");
-    return lazy_resolve(c, argv[0]);
+    /* Its __import__ is a call on its step's machine (lazy_resolvek). */
+    Machine *m = step_machine(c);
+    return m ? lazy_resolvek(c, m, argv[0], unchanged, NULL) : lazy_resolve(c, argv[0]);
 }
 /* float.__getformat__: doubles are IEEE 754 binary64 in host byte order. */
 static SPYValue *float_getformat(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -47911,6 +48075,13 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     case B_IMPORT: {
         if (!argc || argc > 5) goto arity;
+        /* Its modules run on its step's machine (importk). */
+        Machine *m = import_plain(argc, argv) ? step_machine(c) : NULL;
+        if (m) {
+            SPYValue *args[5];
+            for (size_t i = 0; i < argc; i++) args[i] = spy_retain(argv[i]);
+            return importk(c, m, argc, args, unchanged, NULL);
+        }
         if (a->type != SPY_STRING) return spy_error(c, "TypeError", "module name must be a string");
         if (strlen(a->as.string.data) != a->as.string.len) return spy_error(c, "ValueError", "module name contains a null character");
         int64_t level = 0;
@@ -51570,7 +51741,9 @@ static int register_type_methods(SPYContext *c) {
         register_method(c, SPY_FROZENDICT, "copy", frozendict_method, 0, METHOD_INSTANCE) ||
         register_method(c, SPY_FROZENDICT, "__getnewargs__", frozendict_method, 1, METHOD_INSTANCE) ? -1 :
         /* float.fromhex calls a subclass on its step's machine. */
-        (name_local(c->types[SPY_FLOAT], "fromhex")->as.wrapper.function->as.native.host = 2, 0);
+        (name_local(c->types[SPY_FLOAT], "fromhex")->as.wrapper.function->as.native.host = 2,
+         /* A lazy import's resolve() calls __import__ on its step's machine (lazy_resolvek). */
+         name_local(c->types[SPY_LAZY_IMPORT], "resolve")->as.native.host = 2, 0);
 }
 /* Builtin functions and methods take their names from where they are stored. */
 static int name_natives(SPYContext *c, SPYValue *namespace, SPYValue *owner) {
@@ -51634,8 +51807,9 @@ SPYContext *spy_context_new(void) {
         SPYValue *v = value_new(c, SPY_NATIVE);
         if (!v) goto fail;
         v->as.native.call = builtin; v->as.native.data = (void *)(intptr_t)i;
-        /* compile() converts its arguments on its step's machine (compile_step). */
-        if (i == B_COMPILE) v->as.native.host = 2;
+        /* compile() converts its arguments on its step's machine
+         * (compile_step); __import__ runs its modules there (importk). */
+        if (i == B_COMPILE || i == B_IMPORT) v->as.native.host = 2;
         if (i == B_REPR || i == B_FORMAT) c->field_calls[i == B_FORMAT] = spy_retain(v);
         if (i == B_SORTED) c->sorter = spy_retain(v);
         int status = name_set(c, c->builtins, names[i], v);

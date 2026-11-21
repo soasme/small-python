@@ -35,6 +35,7 @@ SOURCES = {
                   "class Up(dict):\n    def __setitem__(self, k, v):\n        for _ in (): pass\n        log.append('set')\n        super().__setitem__(k.upper(), v)\n"
                   "def hook(*a):\n    for _ in (): pass\n    log.append('import')\n    return Dyn('d')\n"
                   "t = Up()\nexec('from x import *\\nimport y.q as w', {'__builtins__': {'__import__': hook}}, t)\nresult = (sorted(t), log)",
+    "import_call": "m = __import__('pkg', None, None, ['sub'])\nresult = (m.__name__, m.sub.x, __import__('pkg.inner.leaf').__name__)",
     "as_unnamed": "try:\n    exec('import y.q as w', {'__builtins__': {'__import__': lambda *a: object()}})\n"
                   "except ImportError as e:\n    result = (e.name, e.name_from, str(e))",
 }
