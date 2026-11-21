@@ -35858,6 +35858,12 @@ static int slice_plain(SPYValue *key) {
 static int array_copies(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
     return slice_plain(key) && builtin_value(c, object, SPY_BYTEARRAY) && machine_source(c, value);
 }
+/* The Python __index__ of value, a byte to store at int key of object, a
+ * bytearray or its subclass's instance, which the store calls on the
+ * machine (bytearray_stored), the index converted already; else NULL. */
+static SPYValue *byte_function(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
+    return is_int(key) && builtin_value(c, object, SPY_BYTEARRAY) ? index_function(c, value) : NULL;
+}
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
     SPYValue *map;
     const char *kind;
@@ -35865,7 +35871,7 @@ static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key
            (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(map = store_storage(c, object, "__setitem__"), key, 0) &&
                                                                         store_collides(c, map, key)))) ||
            list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1) || memory_converter(c, object, key, value, &kind) ||
-           array_copies(c, object, key, value) ||
+           array_copies(c, object, key, value) || byte_function(c, object, key, value) ||
            (object->type == SPY_FRAME_LOCALS && frame_key_calls(c, key));
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
@@ -35943,6 +35949,15 @@ static SPYValue *store_ended(SPYContext *c, Machine *m, Instruction *ins) {
     if (!ins) ins = &m->code->items[m->pc - 1];
     if (ins->op == BC_EXEC || ins->op == BC_NEXT || (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
     return c->stepped;
+}
+/* What the Python __index__ of the byte state[2] to store at index state[1]
+ * of state[0], a bytearray or its subclass's instance, returned: the
+ * store, the step ended. */
+static SPYValue *bytearray_stored(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *byte = result ? index_result(c, state->as.seq.items[2], result) : NULL;
+    int status = byte ? bytearray_set(c, builtin_value(c, state->as.seq.items[0], SPY_BYTEARRAY), state->as.seq.items[1], byte) : -1;
+    spy_release(byte); spy_release(state);
+    return status ? NULL : store_ended(c, m, NULL);
 }
 static SPYValue *bases_mro_returned(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* A __bases__ assignment's MROs rebuilt on m from its state, which it
@@ -36081,6 +36096,14 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
             release_all(3, args); return function;
         }
         relocate(c, n);
+        /* A bytearray's byte by its Python __index__, on m (bytearray_stored). */
+        if ((function = byte_function(c, args[0], args[1], args[2]))) {
+            SPYValue *state = tuple_of(c, 3, args);
+            /* A descriptor's read first (special_callk). */
+            SPYValue *result = state ? special_callk(c, m, function, args[2], 0, NULL, NULL, bytearray_stored, state) : NULL;
+            release_all(3, args);
+            return result == c->stepped ? NULL : result;
+        }
         if (array_copies(c, args[0], args[1], args[2])) {
             array_copy(c, m, args[0], args[1], args[2]);
             release_all(3, args);
