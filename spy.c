@@ -47157,12 +47157,19 @@ static SPYValue *operator_declined_k(SPYContext *c, Machine *m, SPYValue *args, 
     spy_release(args);
     return result;
 }
-/* The repr of staticmethod or classmethod wrapper, whose object's Python
- * __repr__ returned text, as format_object shows it. */
+/* The repr of staticmethod or classmethod wrapper, or of a Python
+ * function's bound method, whose object's Python __repr__ returned text,
+ * as format_object shows it. */
 static SPYValue *wrapper_repred(SPYContext *c, Machine *m, SPYValue *wrapper, SPYValue *text) {
     (void)m;
     Buffer b = {.ctx = c};
-    int status = puts_buffer(&b, wrapper->type == SPY_STATICMETHOD ? "<staticmethod(" : "<classmethod(") ||
+    int status;
+    if (wrapper->type == SPY_METHOD) {
+        SPYValue *qualname = name_text(wrapper->as.method.function->as.function.metadata, "__qualname__");
+        status = puts_buffer(&b, "<bound method ") || puts_buffer(&b, qualname && qualname->type == SPY_STRING ? qualname->as.string.data : "?") ||
+                 puts_buffer(&b, " of ") || append_conversion(&b, wrapper->as.method.self, text, "__repr__") || puts_buffer(&b, ">");
+    } else
+        status = puts_buffer(&b, wrapper->type == SPY_STATICMETHOD ? "<staticmethod(" : "<classmethod(") ||
                  append_conversion(&b, wrapper->as.wrapper.function, text, "__repr__") || puts_buffer(&b, ")>");
     spy_release(text); spy_release(wrapper);
     return buffer_text(&b, SPY_STRING, status);
@@ -47709,10 +47716,13 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     default: break;
     }
     if (argc != 1) goto arity;
-    if (id == B_REPR && UNLIKELY(a->type == SPY_STATICMETHOD || a->type == SPY_CLASSMETHOD)) {
-        /* A wrapper's object's Python __repr__ goes on on the step's machine (wrapper_repred). */
-        SPYValue *object = a->as.wrapper.function, *function;
-        Machine *m = !builtin_classmethod(a) && object->type == SPY_INSTANCE && !builtin_base(c, object, "__repr__", NULL) &&
+    if (id == B_REPR && UNLIKELY(a->type == SPY_STATICMETHOD || a->type == SPY_CLASSMETHOD ||
+                                 (a->type == SPY_METHOD && a->as.method.function->type == SPY_FUNCTION))) {
+        /* A wrapper's or bound method's object's Python __repr__ goes on
+         * on the step's machine (wrapper_repred). */
+        int bound = a->type == SPY_METHOD;
+        SPYValue *object = bound ? a->as.method.self : a->as.wrapper.function, *function;
+        Machine *m = (bound || !builtin_classmethod(a)) && object->type == SPY_INSTANCE && !builtin_base(c, object, "__repr__", NULL) &&
                      (function = class_lookup(object->as.map.parent, "__repr__")) && machine_function(c, function) ? step_machine(c) : NULL;
         if (m) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(object)}, wrapper_repred, spy_retain(a));
     }
@@ -50065,7 +50075,16 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (type == 63) return object_repr(c, self);
         if (type == SPY_INT && value->type == SPY_BOOL) return spy_string(c, value == c->booleans[1] ? "1" : "0", 1);
         return spy_repr(c, value);
-    case SLOT_STR: return type == 63 ? spy_repr(c, self) : type == SPY_STRING ? spy_retain(value) : spy_repr(c, value);
+    case SLOT_STR:
+        if (type == 63) {
+            /* object.__str__ returns what self's __repr__ does, a call step on the machine (step_callk). */
+            SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, "__repr__") : NULL;
+            if (!function || function->type != SPY_FUNCTION) return spy_repr(c, self);
+            if (machine_function(c, function) && step_machine(c))
+                return callk(c, step_machine(c), function, 1, (SPYValue *[]){spy_retain(self)}, unchanged, NULL);
+            return call(c, function, 1, &self);
+        }
+        return type == SPY_STRING ? spy_retain(value) : spy_repr(c, value);
     case SLOT_FORMAT:
         if (argv[0]->type != SPY_STRING) return errorf(c, "TypeError", "%s.__format__() argument must be str, not %s", owner_name, type_name(argv[0]));
         if (type == 63) {
@@ -50162,9 +50181,10 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
         descriptor->as.native.data = descriptor;
         descriptor->as.native.method = 1;
         descriptor->as.native.owner = spy_retain(cls);
-        /* A lookup or comparison may leave a call to the step (comparek,
-         * view_containsk, view_comparek, map_lookupk), as __call__ does. */
-        descriptor->as.native.host = index >= 0 && ((slots[index].kind == SLOT_OTHER && slots[index].op == SLOT_CONTAINS) ||
+        /* A lookup, comparison or object.__str__'s repr may leave a call to
+         * the step (comparek, view_containsk, view_comparek, map_lookupk), as
+         * __call__ does. */
+        descriptor->as.native.host = index >= 0 && ((slots[index].kind == SLOT_OTHER && (slots[index].op == SLOT_CONTAINS || slots[index].op == SLOT_STR)) ||
                                                     slots[index].kind == SLOT_COMPARE || slots[index].kind == SLOT_CALL) ? 2 : 0;
         if (!(descriptor->as.native.name = spy_string(c, name, strlen(name)))) { spy_release(descriptor); return NULL; }
     }

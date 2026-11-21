@@ -100,6 +100,7 @@ SOURCES = {
     "repr_items_own": "class I(int):\n    def __repr__(self): return 'I!'\n"
                       "class M(type):\n    def __repr__(cls): return 'M:' + cls.__name__\nclass C(metaclass=M): pass\n"
                       "result = (repr([I(1), C]), str({I(2): (C,)}), f'{[C]}')",
+    "object_str_unchecked": "class R:\n    def __init__(s, r): s.r = r\n    def __repr__(s):\n        for _ in (): pass\n        return s.r\n    def __str__(s): return object.__str__(s)\n    def m(s): pass\ntry:\n    str(R(3))\nexcept TypeError as e:\n    error = str(e)\nresult = (object.__str__(R(3)), error, str(R('r')), repr(R('r').m))",
 }
 
 

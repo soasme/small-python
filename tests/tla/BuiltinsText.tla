@@ -76,7 +76,7 @@ Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "or
           "print_str_calls", "print_write_each", "print_str_sep", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
           "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
           "repr_own_slot", "repr_nested_items", "repr_map_items", "repr_subclass_own", "repr_metaclass",
-          "repr_items_own"}
+          "repr_items_own", "object_str_unchecked"}
 Programs == [op : {"ascii", "repr_len", "ord"}, s : Strings]
             \cup [case : Cases]
 
@@ -151,6 +151,9 @@ Case(c) ==
       [] c = "repr_metaclass" -> "('M:C', 'M:C', 'M:C', 'M:C')"
       \* So are their reprs as items of a container's.
       [] c = "repr_items_own" -> "('[I!, M:C]', '{I!: (M:C,)}', '[M:C]')"
+      \* object.__str__ returns a Python __repr__'s value unchecked; str()
+      \* then refuses a non-str, and a bound method shows that repr.
+      [] c = "object_str_unchecked" -> "(3, 'R.__str__() must return a str, not int', 'r', '<bound method R.m of r>')"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

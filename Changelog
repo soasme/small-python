@@ -695,6 +695,7 @@ Unreleased (0.10.0):
 - `staticmethod()` and `classmethod()` of an instance or class call its Python `__getattr__` without nesting on the C stack
 - Calling a staticmethod object of a callable instance, a builtin or another staticmethod calls it without nesting on the C stack
 - `type(name, bases, ns)` whose bases' metaclass has a Python `__new__` calls it without nesting on the C stack; `type.__new__(type, ...)` of such bases no longer crashes
+- `object.__str__` returns a Python `__repr__`'s value unchecked; it and a bound method's repr call that `__repr__` without nesting on the C stack
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
