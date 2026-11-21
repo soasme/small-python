@@ -19315,12 +19315,17 @@ static int built_base(SPYContext *c, SPYValue *cls) {
     int type = base ? builtin_layout(c, base) : -1;
     return type >= 0 && base == c->types[type] && built_layout(type) ? type : 0;
 }
-/* Whether T() of argc arguments argv may run Python code. */
-static int built_calls(size_t argc, SPYValue *const *argv) {
+/* Whether argc arguments argv are all ints, floats, strs, bytes, bools
+ * or None, whose conversions run no Python code. */
+static int plain_arguments(size_t argc, SPYValue *const *argv) {
     size_t i = 0;
     while (i < argc && UINT64_C(1) << argv[i]->type & (UINT64_C(1) << SPY_INT | UINT64_C(1) << SPY_FLOAT | UINT64_C(1) << SPY_STRING |
                                                      UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BOOL | UINT64_C(1) << SPY_NONE)) i++;
-    return i < argc && argc <= COMPARE_ARGS;
+    return i == argc;
+}
+/* Whether T() of argc arguments argv may run Python code. */
+static int built_calls(size_t argc, SPYValue *const *argv) {
+    return argc <= COMPARE_ARGS && !plain_arguments(argc, argv);
 }
 /* built_base of class cls for a call of cls of argc arguments argv that
  * may run Python code (built_calls), when the call is type.__call__, as
@@ -19408,7 +19413,7 @@ static int reversed_calls(SPYContext *c, SPYValue *v) {
  * Python __iter__ on the machine (adapter_iterates), or reversed's a
  * Python method (reversed_calls); else NULL. */
 static SPYValue *adapter_owner(SPYContext *c, SPYValue *cls, int called, size_t argc, SPYValue *const *argv) {
-    SPYValue *new = argc <= COMPARE_ARGS ? class_lookup(cls, "__new__") : NULL, *meta = cls->as.map.meta;
+    SPYValue *new = argc <= COMPARE_ARGS && !cls->as.map.native ? class_lookup(cls, "__new__") : NULL, *meta = cls->as.map.meta;
     SPYValue *owner = new && new->type == SPY_NATIVE && new->as.native.kwcall == native_new ? new->as.native.data : NULL;
     return owner && owner != cls && owner->type == SPY_CLASS &&
            (adapter_iterates(c, owner, argc, argv) || (owner == c->iterator_types[IT_REVERSED] && argc == 1 && reversed_calls(c, argv[0]))) &&
@@ -19447,6 +19452,8 @@ static SPYValue *described_init(SPYContext *c, SPYValue *cls, int called) {
 }
 static NO_INLINE SPYValue *class_described(SPYContext *c, Machine *m, SPYValue *cls, int called, size_t argc, SPYValue *const *argv,
                                            SPYValue *keywords, Continuation k, SPYValue *ctx) {
+    /* A builtin class's own call runs none of these unless its arguments may call Python. */
+    if (cls->as.map.native && plain_arguments(argc, argv)) return NULL;
     /* So is a builtin subclass's that may run Python code (subclass_new). */
     SPYValue *converted = keywords ? c->unbound : class_converted(c, m, cls, called, argc, argv, k, ctx);
     if (converted != c->unbound) return converted;
@@ -24970,8 +24977,8 @@ static int group_custom(SPYContext *c, SPYValue *given) {
            !builtin_base(c, given, "__repr__", NULL) && (repr = class_lookup(given->as.map.parent, "__repr__")) && machine_function(c, repr);
 }
 static int group_sequence(SPYContext *c, SPYValue *cls, int called, size_t argc, SPYValue *const *argv) {
-    SPYValue *meta = cls->as.map.meta, *allocator = argc == 2 && cls->as.map.mro ? native_slot_new(c, cls) : NULL;
-    if (!allocator || allocator->as.native.kwcall != group_method || allocator->as.native.data || !subclass(cls, group_class(c)) ||
+    SPYValue *meta = cls->as.map.meta, *allocator = argc == 2 && cls->as.map.mro && subclass(cls, group_class(c)) ? native_slot_new(c, cls) : NULL;
+    if (!allocator || allocator->as.native.kwcall != group_method || allocator->as.native.data ||
         (!called && meta && class_lookup(meta, "__call__") != name_local(c->types[SPY_CLASS], "__call__")) ||
         !builtin_value(c, argv[0], SPY_STRING) || !group_custom(c, argv[1])) return 0;
     return sequence_check(c, argv[1]) ? 1 : c->error_type[0] ? -1 : 0;
@@ -30020,6 +30027,7 @@ static SPYValue *getter_bound(SPYContext *c, SPYValue *get, SPYValue **argv, siz
  * one (super().__call__); borrowed, or NULL. */
 static SPYValue *static_called(SPYContext *c, SPYValue *v) {
     if (v->type == SPY_STATICMETHOD) return v->as.wrapper.function;
+    if (v->type != SPY_METHOD && (v->type != SPY_INSTANCE || !v->as.map.base)) return NULL;
     SPYValue *call = name_local(c->types[SPY_STATICMETHOD], "__call__"), *base;
     if (v->type == SPY_METHOD && v->as.method.function == call) return (base = builtin_value(c, v->as.method.self, SPY_STATICMETHOD)) ? base->as.wrapper.function : NULL;
     base = v->type == SPY_INSTANCE && v->as.map.base ? builtin_value_base(c, v, SPY_STATICMETHOD) : NULL;
@@ -30523,6 +30531,14 @@ static int anext_steps(SPYValue *callee, int method) {
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && plain_arguments(argc, argv) && callee != c->types[SPY_COMPLEX] &&
+        callee != c->types[SPY_SUPER] && callee != c->types[SPY_CLASS] && !class_steps(c, callee, argc, argv)) {
+        /* A builtin class of plain arguments constructs at once. */
+        result = step_call(c, m, callee, method, n, argc, argv);
+        release_all(argc, argv);
+        spy_release(callee);
+        return result;
+    }
     while (method < 0 && (result = static_called(c, callee))) {
         /* A staticmethod calls its function, which takes its place. */
         spy_retain(result);
@@ -30698,14 +30714,14 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         callee = bound; argv++; argc--;
     }
     /* dict.__ior__ merges as |= does (ior_merges). */
-    SPYValue *x, *own = method < 0 && argc && argc <= 2 ? ior_merges(c, callee, argc, argv, &x) : NULL;
+    SPYValue *x, *own = method < 0 && argc && argc <= 2 && callee->type != SPY_CLASS ? ior_merges(c, callee, argc, argv, &x) : NULL;
     if (UNLIKELY(own != NULL)) {
         ior_consume(c, m, own, x, argv[argc - 1]);
         release_all(argc, argv); spy_release(callee);
         return NULL;
     }
     /* str.__mod__ formats as % does (percent_slot), its text now or later. */
-    SPYValue *text = method < 0 && argc && argc <= 2 ? percent_slot(c, callee, argc, argv) : NULL;
+    SPYValue *text = method < 0 && argc && argc <= 2 && callee->type != SPY_CLASS ? percent_slot(c, callee, argc, argv) : NULL;
     if (UNLIKELY(text != NULL)) {
         result = percent_begin(c, m, text, argv[argc - 1]);
         release_all(argc, argv); spy_release(callee);
