@@ -161,6 +161,22 @@ def eval_key_eq():
     return eval("v", {Key(log): 5}), log
 
 
+def load_v():
+    x = v
+    return x
+
+
+def global_key_eq():
+    log = []
+    key = Key(log)
+    namespace = globals()
+    namespace[key] = 7
+    try:
+        return load_v(), log
+    finally:
+        del namespace[key]
+
+
 class Marking(dict):
     def __getitem__(self, key):
         for _ in ():  # a loop: the method runs on the machine

@@ -40,7 +40,7 @@ EXTENDS Naturals, Sequences
 
 Cases == {"exec_rebind", "exec_new", "exec_mapping", "eval_local", "eval_free", "eval_free_referenced",
           "locals_write", "locals_snapshot", "frame_locals", "eval_mappings", "class_eval", "exec_custom_hit",
-          "exec_custom_miss", "exec_custom_error", "exec_custom_loop", "exec_globals_storage", "eval_key_eq",
+          "exec_custom_miss", "exec_custom_error", "exec_custom_loop", "exec_globals_storage", "eval_key_eq", "global_key_eq",
           "class_annotation_future"}
 Programs == [case : Cases]
 
@@ -68,6 +68,7 @@ Run(p) == CASE p.case = "exec_rebind" -> "1"                   \* the snapshot c
             \* The module body's misses (z, len) and the class body read the storage.
             [] p.case = "exec_globals_storage" -> "((2, 4, 2), 2, 2, ['q', 'z', 'len', 'C', 'f', 'q'])"
             [] p.case = "eval_key_eq" -> "(5, ['v'])"         \* a key that is not a str compares by __eq__
+            [] p.case = "global_key_eq" -> "(7, ['v'])"       \* so does a function's global load
             \* The body sets up its __annotations__, then records the text in it.
             [] p.case = "class_annotation_future" -> "['__name__', '__annotations__', '__annotations__']"
 

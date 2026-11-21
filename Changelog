@@ -680,6 +680,7 @@ Unreleased (0.10.0):
 - `*=` on a list or bytearray subclass and an in-place set operator on a set subclass call the right operand's Python reflected method without nesting on the C stack
 - Every function body runs on the machine, so a body without a call or loop no longer nests a Python method its operators call on the C stack
 - A Python `__del__` due when an assignment stores runs without nesting on the C stack
+- Under a pause limit, a name load compares a namespace key's Python `__eq__` without nesting on the C stack
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

@@ -15813,14 +15813,19 @@ static void compile_arguments(SPYContext *c, Program *p, Node *args) {
         emit(c, p, BC_ARG, a, a->kind);
     }
 }
+static int loads_name(Node *);
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
     /* What cannot suspend is evaluated whole, a leaf or an operator on
      * leaves in one step; a comparison of other operands costs less as
      * machine steps. */
-    if (!expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n))) {
-        emit(c, p, n->kind == N_NAME || n->constant ? BC_LOAD : operator_right(n) ? BC_OPERATE : BC_EVAL, n, 0);
+    /* While calls can pause, a name's dictionary may hold a key with a
+     * Python __eq__ (name_load): an expression loading one takes steps. */
+    if (!expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
+        !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
+        emit(c, p, n->kind == N_NAME && p->calls == PAUSING ? BC_CLASS : n->kind == N_NAME || n->constant ? BC_LOAD :
+                   operator_right(n) ? BC_OPERATE : BC_EVAL, n, n->kind == N_NAME && p->calls == PAUSING ? 10 : 0);
         return;
     }
     size_t branch, end, parts;
@@ -16116,10 +16121,28 @@ static int unpacks_annotation(Node *n) {
     if (n->kind == N_ANNOTATIONS) for (Node *entry = n->args; entry; entry = entry->next) if (entry->a->kind == N_STAR) return 1;
     return 0;
 }
+/* Whether expression n loads a name, outside the functions in it. */
+static int loads_name(Node *n) {
+    if (!n || n->kind == N_LAMBDA || n->kind == N_COMPREHENSION) return 0;
+    if (n->kind == N_NAME) return 1;
+    for (Node *a = n->args; a; a = a->next) if (loads_name(a)) return 1;
+    return loads_name(n->a) || loads_name(n->b) || loads_name(n->c);
+}
+/* Whether statement n, while calls can pause, loads a name through its
+ * dictionary on the machine (name_load): an assignment's value or a
+ * target's container, or an expression statement's. */
+static int pausing_loads(Program *p, Node *n) {
+    if (p->calls != PAUSING) return 0;
+    if (n->kind == N_EXPR) return loads_name(n->a);
+    if (n->kind != N_ASSIGN || n->op != '=') return 0;
+    if (loads_name(n->b) || (n->a->kind != N_NAME && loads_name(n->a))) return 1;
+    for (Node *t = n->args; t; t = t->next) if (t->kind != N_NAME && loads_name(t)) return 1;
+    return 0;
+}
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end, start, loop;
     /* A starred annotation unpacks on the machine (annotation_step). */
-    if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR)) {
+    if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR) && !pausing_loads(p, n)) {
         emit(c, p, increment(n) && !p->namespace ? BC_INCREMENT : BC_EXEC, n, 0);
         return;
     }
