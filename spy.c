@@ -13487,9 +13487,8 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
     SPYValue *definition = owner && !searched ? class_lookup(owner, "__getattribute__") : NULL;
     if (!owner || (fallback && !special_function(c, fallback))) return attribute(c, v, name);
     if (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
-        /* A descriptor's Python __get__ binds it first (fallback_described),
-         * unless it is the __getattr__ too, which the call would not then follow. */
-        if (!machine_function(c, definition) && (!descriptor_getter(c, definition) || definition == fallback)) return attribute(c, v, name);
+        /* A descriptor's Python __get__ binds it first (fallback_described). */
+        if (!machine_function(c, definition) && !descriptor_getter(c, definition)) return attribute(c, v, name);
         c->fallback = spy_retain(definition);
         return NULL;
     }
@@ -37240,11 +37239,13 @@ static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue 
     return function;
 }
 /* The __getattr__ that an AttributeError from function, the call a read
- * of v's attribute makes (attribute_step), calls, or NULL. */
+ * of v's attribute makes (attribute_step), calls, or NULL: none follows
+ * the __getattr__'s own call, but one follows the __getattribute__'s,
+ * even when they are the same object. */
 static SPYValue *getter_fallback(SPYValue *v, SPYValue *function) {
     SPYValue *owner = v->type == SPY_SUPER || v->type == SPY_MODULE ? NULL : v->type == SPY_CLASS ? v->as.map.meta : v->as.map.parent;
     SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
-    return fallback == function ? NULL : fallback;
+    return fallback == function && class_lookup(owner, "__getattribute__") != function ? NULL : fallback;
 }
 /* Whether function, the call c->fallback gave for a read of v, is v's
  * __getattribute__ or __getattr__ descriptor itself (attribute_step):

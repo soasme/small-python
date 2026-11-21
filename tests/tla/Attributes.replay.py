@@ -70,6 +70,19 @@ def refusing(self, n):
     raise AttributeError(str(n) if given(n) else "wrong name")
 
 
+# A hook that is its class's __getattr__ too: each read's first call
+# refuses, the second answers (twice, boundtwice).
+calls = 0
+
+
+def twice(self, n):
+    global calls
+    calls += 1
+    if calls % 2:
+        raise AttributeError(str(n) if given(n) else "wrong name")
+    return Value("ga" if given(n) else "wrong name")
+
+
 # A __getattribute__ descriptor whose Python __get__ binds f (bound, boundrefuse).
 class Bound:
     def __init__(self, f):
@@ -105,8 +118,10 @@ def make(kind, getattr, hook):
     elif getattr == "descriptor":
         namespace["__getattr__"] = property(lambda self: lambda n: answer(self, n))
     if hook != "none":
-        namespace["__getattribute__"] = {"pass": passing, "super": supering, "refuse": refusing,
-                                         "bound": Bound(passing), "boundrefuse": Bound(refusing)}[hook]
+        namespace["__getattribute__"] = {"pass": passing, "super": supering, "refuse": refusing, "bound": Bound(passing),
+                                         "boundrefuse": Bound(refusing), "twice": twice, "boundtwice": Bound(twice)}[hook]
+    if hook in ("twice", "boundtwice"):
+        namespace["__getattr__"] = namespace["__getattribute__"]
     return type("C", (), namespace)()
 
 

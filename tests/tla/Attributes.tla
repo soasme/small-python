@@ -22,8 +22,10 @@
 (* __getattribute__ (hook none), one passing the name to object's (pass), *)
 (* or to super()'s (super), or one raising AttributeError (refuse), the  *)
 (* first and last also as a descriptor whose Python __get__ binds them    *)
-(* (bound, boundrefuse). The                                               *)
-(* steps are o.a,                                                          *)
+(* (bound, boundrefuse), or one that is the class's __getattr__ too,     *)
+(* refusing its first call of a read and answering 'ga' to the second     *)
+(* (twice, boundtwice: __getattr__ follows the hook even when it is the   *)
+(* hook itself). The steps are o.a,                                        *)
 (* o.a() (each value is callable, returning itself), o.a = v (v is 'v1'   *)
 (* or 'v2'), and del o.a; `stored` is what o's                             *)
 (* __dict__ or slot holds for a. Each is spelled with the attribute        *)
@@ -43,7 +45,7 @@ Getters == {"property", "raising", "subproperty", "subraising"}
 Values == {"v1", "v2"}
 Missing == "missing"
 
-Hooks == {"none", "pass", "super", "refuse", "bound", "boundrefuse"}
+Hooks == {"none", "pass", "super", "refuse", "bound", "boundrefuse", "twice", "boundtwice"}
 \* The class's __getattr__: none, a function, or a property giving one.
 Getattrs == {"none", "function", "descriptor"}
 
@@ -66,7 +68,8 @@ Lookup ==
       [] kind = "value" -> "cls"
       [] OTHER -> Missing
 Refuses == hook \in {"refuse", "boundrefuse"}
-Read == IF ~Refuses /\ Lookup # Missing THEN Lookup ELSE IF getattr # "none" THEN "ga" ELSE "AttributeError"
+Twice == hook \in {"twice", "boundtwice"}
+Read == IF Twice THEN "ga" ELSE IF ~Refuses /\ Lookup # Missing THEN Lookup ELSE IF getattr # "none" THEN "ga" ELSE "AttributeError"
 Get == /\ op' = "get"
        /\ result' = Read
        /\ UNCHANGED <<kind, getattr, hook, spelling, keyed, stored>>
@@ -100,10 +103,10 @@ TypeOK == kind \in Kinds /\ getattr \in Getattrs /\ hook \in Hooks /\ spelling \
 
 \* A data descriptor's __get__ answers whatever the instance holds, unless
 \* __getattribute__ refuses before it.
-DescriptorWins == op = "get" /\ kind \in {"data", "property", "subproperty"} /\ ~Refuses => result \in {"dget", "pget"}
+DescriptorWins == op = "get" /\ kind \in {"data", "property", "subproperty"} /\ ~Refuses /\ ~Twice => result \in {"dget", "pget"}
 
 \* What is set is what is got, unless a data descriptor intervenes.
-SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data"} \cup Getters) /\ ~Refuses /\ op' = "get"
+SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data"} \cup Getters) /\ ~Refuses /\ ~Twice /\ op' = "get"
                  => result' = stored]_vars
 
 \* __getattr__ is only consulted when lookup fails, so o.a never fails with it.
