@@ -21,7 +21,8 @@
 (* bytes.join and dict pairs take the iterator once and list it as list()  *)
 (* would: its own __iter__ again, then its length hint. A list's or        *)
 (* tuple's subclass with its own __iter__ gives that method's items to     *)
-(* every consumer, not its storage; a map's, zip's, filter's or            *)
+(* every consumer, not its storage, as does an int's subclass, whose `in` *)
+(* searches those items too; a map's, zip's, filter's or                   *)
 (* enumerate's subclass keeping its __iter__ gives its own __next__'s, to  *)
 (* dict() as pairs too. A map's or filter's __next__, bound, given it by   *)
 (* its type, stored or reached by super(), is next() of it; another type's *)
@@ -86,7 +87,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
-          "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
+          "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter", "int_subclass_iter",
           "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem",
           "adapter_nested", "adapter_delegate",
           "next_generator_value", "zip_strict_generators", "released_items_finalized"}
@@ -160,6 +161,7 @@ Case(c) ==
       [] c = "pair_iterates_once" -> "({'a': 'b'}, ['iter'])"
       \* a list's or tuple's subclass gives the items of its own __iter__
       [] c = "subclass_iter" -> "([7, 8], [7, 8], (1,), [1], ['iter', 'len', 'iter', 'len', 'titer', 'titer'])"
+      [] c = "int_subclass_iter" -> "(True, False, [1, 2], [1, 2], (1, 2), ['iter', 'iter', 'iter', 'iter', 'iter'])"
       [] c = "iterator_subclass_next" -> "([('M', 1), ('M', 2)], [-2, -1], (2, 1), ['', 'b'], [1, 2, 1, 2], {'k': 1})"
       [] c = "next_method" -> "(1, 4, 9, 3, 'TypeError', [1, 2, 3, 3, 2, 3, 4, 9])"
       \* A class iterates and reverses by its metaclass's __getitem__ and __len__.

@@ -191,6 +191,9 @@ SOURCES = {
                      "    def __len__(self): log.append('len'); return 1\n"
                      "class T(tuple):\n    def __iter__(self): log.append('titer'); return iter((1,))\n"
                      "result = (list(L([1, 2])), sorted(L()), tuple(T((5,))), [*T()], log)",
+    "int_subclass_iter": "log = []\nclass I(int):\n    def __iter__(self):\n        for _ in (): pass\n"
+                         "        log.append('iter')\n        return iter([1, 2])\n"
+                         "i = I(5)\nresult = (1 in i, 3 in i, list(i), sorted(i), (*i,), log)",
     "iterator_subclass_next": "log = []\nclass M(map):\n    def __next__(self): v = super().__next__(); log.append(v); return ('M', v)\n"
                               "class F(filter):\n    def __next__(self): return -super().__next__()\n"
                               "class Z(zip):\n    def __next__(self): return super().__next__()[::-1]\n"

@@ -27514,12 +27514,14 @@ static int generator_function(SPYContext *c, SPYValue *fn) {
     return def && def->kind == N_DEF && !def->op && def->code && !def->flat;
 }
 /* The Python __iter__ of plain instance v's class, or of a list's,
- * tuple's or dict's subclass, which every consumer iterates by it,
- * borrowed: one on the machine, or a generator function
- * (generator_function); else NULL. */
+ * tuple's or dict's subclass, or of a builtin's that has none (an int's),
+ * which every consumer iterates by it, borrowed: one on the machine, or a
+ * generator function (generator_function); else NULL. */
 static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
     SPYValue *base = v->type == SPY_INSTANCE ? v->as.map.base : NULL;
-    SPYValue *cls = v->type != SPY_INSTANCE || (base && base->type != SPY_LIST && base->type != SPY_TUPLE && !is_dict(base)) ||
+    SPYValue *cls = v->type != SPY_INSTANCE ||
+                    (base && base->type != SPY_LIST && base->type != SPY_TUPLE && !is_dict(base) &&
+                     class_lookup(value_class(c, base), "__iter__")) ||
                     builtin_base(c, v, "__iter__", NULL) ? NULL : v->as.map.parent;
     SPYValue *function = cls ? class_lookup(cls, "__iter__") : NULL;
     return function && (machine_function(c, function) || generator_function(c, function)) ? function : NULL;
