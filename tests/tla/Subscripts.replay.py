@@ -77,6 +77,7 @@ SOURCES = {
     "slot_big_index": IDX + "[1].__getitem__(I(2**100))",
     "range_slot_index": IDX + "result = (range(10).__getitem__(I(4)), range(10)[I(6)])",
     "range_big_index": IDX + "range(10).__getitem__(I(2**100))",
+    "temporary_slot_index": IDX + "n = I(3)\nresult = (range(10).__getitem__(n), [5, 6, 7, 8].__getitem__(n), 'abcd'.__getitem__(n))",
     "array_slice_iterable": "class J:\n    def __init__(s, v): s.v = v\n    def __index__(s):\n        for _ in (): pass\n"
                             "        log.append(str(s.v))\n        return s.v\nclass V:\n    def __iter__(s):\n        for _ in (): pass\n"
                             "        log.append('iter'); return iter([65, 66])\ndef g():\n    log.append('gen'); yield 70\n"

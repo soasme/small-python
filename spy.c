@@ -32296,10 +32296,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         return update_call(c, m, callee, source, env);
     }
     /* A list's pop() or insert() of an index with a Python __index__, and the others
-     * of index_arguments, bound too, and a bytes join's of a list or tuple
+     * of index_arguments, bound too, a native method bound to a value made
+     * in the call too, and a bytes join's of a list or tuple
      * of exporters (indexed_call). */
     if (callee && calls && skip &&
-        (((method >= 0 || callee->type == SPY_BOUND_METHOD) && index_arguments(c, callee, method, argc, argv + 1)) ||
+        (((method >= 0 || callee->type == SPY_BOUND_METHOD || (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE)) &&
+          index_arguments(c, callee, method, argc, argv + 1)) ||
          (argc <= INDEX_MOST && buffer_arguments(c, callee, method, argc, argv + 1)))) {
         SPYValue *args[INDEX_MOST];
         memcpy(args, argv + 1, argc * sizeof(*argv));
