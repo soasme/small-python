@@ -69,7 +69,7 @@ Cases == {"to_bytes_default", "to_bytes_default_overflow", "to_bytes_bad_order",
           "from_bytes_bad_item", "from_bytes_not_iterable", "from_bytes_str", "from_bytes_bad_order",
           "from_bytes_subclass", "from_bytes_bool", "as_integer_ratio_int", "is_integer_int",
           "bit_length_huge", "bit_count_huge", "bool_bit_length", "float_from_number_int",
-          "float_from_number_big", "float_from_number_dunder", "float_from_number_index",
+          "float_from_number_big", "float_from_number_dunder", "float_from_number_index", "float_subclass_made",
           "float_from_number_both", "float_from_number_str", "float_from_number_bool", "float_ratio",
           "float_ratio_negative", "float_ratio_inf", "float_ratio_nan", "float_ratio_zero",
           "float_is_integer", "float_hex", "float_hex_special", "float_hex_subnormal", "float_hex_max",
@@ -129,6 +129,8 @@ Case(c) ==
       [] c = "float_from_number_big" -> "OverflowError: int too large to convert to float"
       [] c = "float_from_number_dunder" -> "2.5"
       [] c = "float_from_number_index" -> "7.0"
+      \* on a subclass, from_number and fromhex call it with the float made
+      [] c = "float_subclass_made" -> "(['new', 7.0, 'new', 1.5], 8.0, 2.5)"
       [] c = "float_from_number_both" -> "1.5"
       [] c = "float_from_number_str" -> "TypeError: must be real number, not str"
       [] c = "float_from_number_bool" -> "1.0"

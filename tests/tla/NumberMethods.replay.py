@@ -46,6 +46,9 @@ SOURCES = {
     "float_from_number_int": "result = float.from_number(3)",
     "float_from_number_big": "result = float.from_number(10 ** 400)",
     "float_from_number_dunder": "result = float.from_number(F())",
+    "float_subclass_made": ("log = []\nclass S(float):\n    def __new__(cls, v):\n        log.extend(['new', v])\n        return float.__new__(cls, v + 1)\n"
+                            "class J:\n    def __index__(self): return 7\n"
+                            "a = S.from_number(J())\nb = S.fromhex((1.5).hex())\nresult = (log, a, b)"),
     "float_from_number_index": "result = float.from_number(I())",
     "float_from_number_both": "result = float.from_number(FI())",
     "float_from_number_str": "result = float.from_number('1.5')",

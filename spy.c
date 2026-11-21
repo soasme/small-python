@@ -19256,6 +19256,12 @@ static NO_INLINE SPYValue *comparek(SPYContext *c, Machine *m, SPYValue *x, SPYV
     spy_release(x); spy_release(y);
     return k(c, m, ctx, result);
 }
+/* The call of callee with the items of tuple args, at most COMPARE_ARGS,
+ * which it takes, as a call step on m (comparek), then continuation k
+ * with ctx, which it takes. */
+static SPYValue *step_callk(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *args, Continuation k, SPYValue *ctx) {
+    return comparek(c, m, callee, args, COMPARE_CALL + (int)args->as.seq.len, k, ctx);
+}
 /* The call callk left on m, its continuation's (CALL_K), or a repr job's
  * first left with none (CALL_CHECKED): the machine to run on. */
 static void finalize_close(SPYContext *, Machine *);
@@ -44221,6 +44227,7 @@ static SPYValue *float_getformat(SPYContext *c, size_t argc, SPYValue *const *ar
     const char *format = *(unsigned char *)&probe ? "IEEE, little-endian" : "IEEE, big-endian";
     return spy_string(c, format, strlen(format));
 }
+static SPYValue *subclass_called(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     if (positional_only(c, class_tname(argv[0]), "fromhex", 1, 1, argc - 1, keywords)) return NULL;
@@ -44280,6 +44287,9 @@ static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
         if (isinf(value)) return spy_error(c, "OverflowError", "hexadecimal value too large to represent as a float");
     }
     SPYValue *result = spy_float(c, negative ? -value : value);
+    Machine *m = result && argv[0] != c->types[SPY_FLOAT] ? step_machine(c) : NULL;
+    /* A subclass is called with the float, on the machine when it is the step's. */
+    if (m) return subclass_called(c, m, spy_retain(argv[0]), result);
     if (result && argv[0] != c->types[SPY_FLOAT]) {
         SPYValue *converted = call(c, argv[0], 1, &result);
         spy_release(result); result = converted;
@@ -50242,6 +50252,20 @@ done:
 /* float.from_number and complex.from_number: numbers only, never strings;
  * complex's converts, and calls a subclass, on its step's machine
  * (complex_construct). */
+/* cls called with value, which it takes, as a call step on m (comparek),
+ * whose value is the call's (method_called). */
+static SPYValue *method_called(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *subclass_called(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *value) {
+    SPYValue *args = parts_tuple(c, 1, &value);
+    if (!args) { spy_release(cls); return NULL; }
+    return step_callk(c, m, cls, args, method_called, NULL);
+}
+/* What float.from_number's float() returned, result, its subclass cls in
+ * ctx or NULL: the subclass called with it (subclass_called). */
+static SPYValue *from_floated(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *result) {
+    if (!result || !cls) { spy_release(cls); return result; }
+    return subclass_called(c, m, cls, result);
+}
 static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     SPYValue *args[1];
@@ -50250,8 +50274,13 @@ static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, 
     if (builtin_value(c, number, SPY_STRING) || builtin_value(c, number, SPY_BYTES) || builtin_value(c, number, SPY_BYTEARRAY) ||
         (type == SPY_FLOAT && builtin_value(c, number, SPY_COMPLEX)))
         return errorf(c, "TypeError", "must be real number, not %s", type_name(number));
-    Machine *m = type == SPY_COMPLEX ? step_machine(c) : NULL;
-    if (m) return complex_construct(c, m, number, NULL, 0, argv[0] == c->types[type] ? NULL : argv[0]);
+    Machine *m = step_machine(c);
+    if (m && type == SPY_COMPLEX) return complex_construct(c, m, number, NULL, 0, argv[0] == c->types[type] ? NULL : argv[0]);
+    SPYValue *call_args = m ? tuple_of(c, 1, &number) : NULL;
+    /* float() of the number is a call step, a subclass called after it (from_floated). */
+    if (call_args) return comparek(c, m, spy_retain(c->types[SPY_FLOAT]), call_args, COMPARE_CALL + 1, from_floated,
+                                   argv[0] == c->types[type] ? NULL : spy_retain(argv[0]));
+    if (m) return NULL;
     SPYValue *result = builtin(c, 1, &number, (void *)(intptr_t)(type == SPY_FLOAT ? B_FLOAT : B_COMPLEX));
     if (!result || argv[0] == c->types[type]) return result;
     SPYValue *instance = call(c, argv[0], 1, &result);
@@ -50482,8 +50511,9 @@ static int register_core_methods(SPYContext *c) {
         register_method(c, SPY_BYTEARRAY, "maketrans", bytes_maketrans, 0, METHOD_STATIC) ||
         register_method(c, SPY_FLOAT, "from_number", from_number, SPY_FLOAT, METHOD_CLASS) ||
         register_method(c, SPY_COMPLEX, "from_number", from_number, SPY_COMPLEX, METHOD_CLASS) ? -1 :
-        /* complex.from_number and int.from_bytes may call on their step's machine. */
+        /* from_number and int.from_bytes may call on their step's machine. */
         (name_local(c->types[SPY_COMPLEX], "from_number")->as.wrapper.function->as.native.host = 2,
+         name_local(c->types[SPY_FLOAT], "from_number")->as.wrapper.function->as.native.host = 2,
          name_local(c->types[SPY_INT], "from_bytes")->as.wrapper.function->as.native.host = 2,
          /* So do type's and a sentinel's __or__ and __ror__ (union_slot). */
          name_local(type, "__or__")->as.native.host = name_local(type, "__ror__")->as.native.host = 2,
@@ -50574,7 +50604,9 @@ static int register_type_methods(SPYContext *c) {
         register_method(c, SPY_DICT, "fromkeys", dict_fromkeys, 0, METHOD_CLASS) ||
         register_method(c, SPY_FROZENDICT, "fromkeys", dict_fromkeys, 0, METHOD_CLASS) ||
         register_method(c, SPY_FROZENDICT, "copy", frozendict_method, 0, METHOD_INSTANCE) ||
-        register_method(c, SPY_FROZENDICT, "__getnewargs__", frozendict_method, 1, METHOD_INSTANCE) ? -1 : 0;
+        register_method(c, SPY_FROZENDICT, "__getnewargs__", frozendict_method, 1, METHOD_INSTANCE) ? -1 :
+        /* float.fromhex calls a subclass on its step's machine. */
+        (name_local(c->types[SPY_FLOAT], "fromhex")->as.wrapper.function->as.native.host = 2, 0);
 }
 /* Builtin functions and methods take their names from where they are stored. */
 static int name_natives(SPYContext *c, SPYValue *namespace, SPYValue *owner) {
