@@ -28692,13 +28692,17 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
     int keyed = method || id == B_SORTED ? KEY_SORT : id == B_MIN ? KEY_MIN : id == B_MAX ? KEY_MAX : 0;
     if (!keyed || (method ? positional != 0 : id == B_SORTED ? positional != 1 : !positional)) return 0;
     SPYValue *key = NULL, *reverse = NULL, *empty = NULL;
+    int unknown = 0;
     for (size_t i = 0; i < kwc; i++) {
         const char *name = builtin_value(c, kw[i].key, SPY_STRING)->as.string.data;
         SPYValue **slot = !strcmp(name, "key") ? &key : keyed == KEY_SORT ? !strcmp(name, "reverse") ? &reverse : NULL :
                           !strcmp(name, "default") && positional == 1 ? &empty : NULL;
+        /* sorted() takes its items before the sort refuses a keyword. */
+        if (!slot && !method && keyed == KEY_SORT) { unknown = 1; continue; }
         if (!slot || *slot) return 0;
         *slot = kw[i].value;
     }
+    if (unknown && !machine_source(c, argv[0])) return 0;
     if (key && key->type == SPY_NONE) key = NULL;
     if (positional == 1 && machine_source(c, argv[0]) && keyed != KEY_SORT) {
         /* min and max take each item on the machine, then its key (fed);

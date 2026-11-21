@@ -247,6 +247,8 @@ SOURCES = {
     "enumerate_bad_start": "result = enumerate('a', 1.5)",
     "all_any_empty": "result = (all([]), any([]), all([0, 1/1]), any(iter([0, '', 2])))",
     "all_returns_bool": "result = (all([1, 'x']), any([0, 'x']))",
+    "sorted_unknown_keyword": ("log = []\ndef g():\n    for i in (3, 1):\n        log.append(i)\n        yield i\n"
+                               "try:\n    sorted(g(), unknown=1)\nexcept TypeError as e:\n    result = (type(e).__name__, log)"),
     "sorted_key_none": "result = (sorted('bca', key=None), sorted([3, 1, 2], reverse=1))",
     "sorted_positional_key": 'result = sorted([1], None)',
     "sorted_mixed": "result = sorted([1, 'a'])",

@@ -64,7 +64,7 @@ Cases == {"iter_sequence_protocol", "filter_nested_generator", "enumerate_start_
           "zip_strict_third", "zip_strict_mixed", "adapter_zip_generator", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_generator", "map_repr", "map_metaclass", "callable_generator", "iterator_subclass", "iterator_subclass_next", "adapter_subclass_iter", "adapter_subclass_init", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "map_index", "map_index_bad", "callable_bound", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next", "filter_adapted", "filter_next_truth",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
-          "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
+          "all_returns_bool", "sorted_key_none", "sorted_unknown_keyword", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
           "sort_mutated", "sort_key_error", "sort_key_callables", "sort_builtin_keys", "builtin_key_iterators", "key_sources", "consume_getitem", "sort_lt_only", "sort_tuple_ties", "sort_list_ties", "sort_tuple_lt_only", "sort_gt_reflected", "sort_lt_declined", "min_reflected_truth", "sort_truth", "sort_reverse_truth", "max_key_truth", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
@@ -208,6 +208,8 @@ Case(c) ==
       [] c = "all_any_empty" -> "(True, False, False, True)"
       [] c = "all_returns_bool" -> "(True, True)"
       [] c = "sorted_key_none" -> "(['a', 'b', 'c'], [3, 2, 1])"
+      \* sorted() takes the items before sort refuses an unknown keyword
+      [] c = "sorted_unknown_keyword" -> "('TypeError', [3, 1])"
       [] c = "sorted_positional_key" -> "TypeError: sorted expected 1 argument, got 2"
       [] c = "sorted_mixed" -> "TypeError: '<' not supported between instances of 'str' and 'int'"
       [] c = "sorted_returns_new" -> "([3, 1], [1, 3], False)"
