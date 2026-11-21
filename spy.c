@@ -10805,7 +10805,7 @@ static ALWAYS_INLINE int percent_arg(SPYContext *c, SPYValue *v) {
     return instance_like(v) || (repr_container(v) && percent_items(c, v));
 }
 static int percent_reaches(SPYContext *c, SPYValue *y) {
-    if (y->type == SPY_INSTANCE) return !subclass(y->as.map.parent, c->types[SPY_STRING]);
+    if (y->type == SPY_INSTANCE) return 1;
     if (metaclassed(y)) return 1;
     if (y->type == SPY_TUPLE) {
         for (size_t i = 0; i < y->as.seq.len; i++) if (percent_arg(c, y->as.seq.items[i])) return 1;
@@ -10814,15 +10814,22 @@ static int percent_reaches(SPYContext *c, SPYValue *y) {
     } else if (y->type == SPY_LIST) return percent_items(c, y);
     return 0;
 }
+/* Whether b's Python __rmod__ answers a % b first: b's class is a proper
+ * subclass of a's (7.6.2). */
+static int percent_reflected(SPYContext *c, SPYValue *a, SPYValue *b) {
+    SPYValue *cls = b->type == SPY_INSTANCE ? b->as.map.parent : NULL;
+    return cls && cls != value_class(c, a) && subclass(cls, value_class(c, a)) && !builtin_base(c, b, "__rmod__", NULL);
+}
 /* The str whose % a str subclass's instance a takes, its class with no
- * Python __mod__, of b, no instance to reflect it, borrowed; else a. */
+ * Python __mod__, of b, borrowed; else a. */
 static SPYValue *percent_text(SPYContext *c, SPYValue *a, SPYValue *b) {
-    SPYValue *text = a->type == SPY_INSTANCE && b->type != SPY_INSTANCE ? builtin_value(c, a, SPY_STRING) : NULL;
+    SPYValue *text = a->type == SPY_INSTANCE && !percent_reflected(c, a, b) ? builtin_value(c, a, SPY_STRING) : NULL;
     return text && builtin_base(c, a, "__mod__", NULL) ? text : a;
 }
 /* Whether str or bytes a % b, or a %= b, may convert an argument by a
  * Python method (percent_reaches), on the machine (percent_call). */
 static NO_INLINE int percent_converts(SPYContext *c, SPYValue *a, SPYValue *b) {
+    if (percent_reflected(c, a, b)) return 0;
     a = percent_text(c, a, b);
     return (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && percent_reaches(c, b);
 }

@@ -54,6 +54,9 @@ class NotStr:
     def __str__(self): spin(); return 1
 
 SOURCES = {
+    "str_subclass_operands": "log = []\nclass Str(str):\n    def __str__(self):\n        for _ in (): pass\n        log.append('str')\n        return 'custom'\n"
+                             "class Rm(str):\n    def __rmod__(self, o):\n        log.append('rmod')\n        return 'rm'\n    def __str__(self):\n        log.append('s')\n        return 'S'\n"
+                             "result = ('%s' % Str('x'), Str('%s|%s') % (Str('a'), Rm('b')), '%s' % Rm('c'), log)",
     "s_r_a": "result = '%s %r %a' % ('\xe9', '\xe9', '\xe9')",
     "s_object": "result = '%s|%r|%5s|%-5s|%.1s' % (P(), P(), 'ab', 'ab', 'xyz')",
     "percent_literal": "result = '100%% %d' % 5",

@@ -82,7 +82,7 @@ FloatText(p) ==
     IN  Padded(Sign(p.num < 0, p.flags), IF p.type = "f" THEN fixed ELSE sci, p.flags, p.width)
 
 
-Cases == {"s_r_a", "s_object", "percent_literal", "mapping", "mapping_missing", "mapping_needs_dict", "mapping_mixed",
+Cases == {"s_r_a", "str_subclass_operands", "s_object", "percent_literal", "mapping", "mapping_missing", "mapping_needs_dict", "mapping_mixed",
           "star_width", "star_negative", "star_not_int", "single_value", "tuple_value", "not_enough",
           "not_all_converted", "no_format_tuple", "no_format_dict", "unsupported_char", "incomplete",
           "c_conversion", "c_bad", "c_range", "c_float", "d_float", "d_index", "d_str", "x_float",
@@ -110,6 +110,8 @@ Generated(p) ==
 
 Case(c) ==
     CASE c = "s_r_a" -> "\"\\xe9 '\\xe9' '\\\\xe9'\""
+      \* A str subclass's operand formats by str's %, unless a proper subclass's __rmod__ comes first
+      [] c = "str_subclass_operands" -> "('custom', 'custom|S', 'rm', ['str', 'str', 's', 'rmod'])"
       [] c = "s_object" -> "'p|P()|   ab|ab   |x'"
       [] c = "percent_literal" -> "'100% 5'"
       [] c = "mapping" -> "'Python has 002 quote types.'"
