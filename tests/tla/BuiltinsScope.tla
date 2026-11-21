@@ -22,7 +22,11 @@
 (* runs class C(base()) with exec() under builtins whose Python            *)
 (* __missing__, which may loop, logs each name and gives base and          *)
 (* __build_class__, or lacks the latter: the outcome is the names looked   *)
-(* up, in order, and whether the statement raised NameError.               *)
+(* up, in order, and whether the statement raised NameError. A keyed      *)
+(* program replaces the builtins module's len key by an object of its hash *)
+(* whose Python __eq__, which may loop, counts its calls, then calls a     *)
+(* function that reads len as a call's callee, as an argument, or twice:   *)
+(* each read compares once, and the outcome is the value and the count.    *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -30,6 +34,7 @@ Programs == [part : {"lookup"}, builtins : {"absent", "module", "custom", "empty
              name : {"len", "added", "import"}]
             \cup [part : {"insert"}]
             \cup [part : {"builder"}, lacking : BOOLEAN]
+            \cup [part : {"keyed"}, where : {"callee", "argument", "twice"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -48,7 +53,9 @@ Lookup(p) ==
 \* __build_class__ is looked up before the bases are evaluated (16.4.1).
 Built(p) == IF p.lacking THEN "__build_class__ NameError" ELSE "__build_class__ base"
 
-Run(p) == CASE p.part = "lookup" -> Lookup(p) [] p.part = "builder" -> Built(p) [] OTHER -> "True"
+Keyed(p) == CASE p.where = "callee" -> "2 1" [] p.where = "argument" -> "builtin_function_or_method 1" [] OTHER -> "0 2"
+
+Run(p) == CASE p.part = "lookup" -> Lookup(p) [] p.part = "builder" -> Built(p) [] p.part = "keyed" -> Keyed(p) [] OTHER -> "True"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

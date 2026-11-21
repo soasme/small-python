@@ -542,6 +542,13 @@ struct SPYContext {
     SPYValue *splitting;
     /* The code unit_enter runs in place of its unit's body: a generic class's header (header_step). */
     Program *k_code;
+    /* A call step's operands read in C (operand_call): their env and the
+     * step's machine, on which a name's comparing lookup runs (name_rewalk);
+     * the machine whose lookup answers at once, whether one left a call on
+     * it, and the lists of values those calls found on machines' stacks. */
+    SPYValue *walk_env;
+    Machine *walk_m, *walk_sync;
+    int walk_pending, walk_markers;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -3361,6 +3368,8 @@ static int name_compares(SPYContext *c, SPYValue *dict, Name name) {
     for (size_t i = 0; map && i < map->as.map.len; i++) if (!builtin_value(c, map_items(map)[i].key, SPY_STRING)) return 1;
     return 0;
 }
+static SPYValue *name_rewalk(SPYContext *, SPYValue *, SPYValue *, Name, int);
+static SPYValue *unchanged(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* name's value in env, looked up from env from on, annotation whether the
  * envs before from are annotation scopes, given to k with ctx, which it
  * takes; looked, the lookup at from, its binding env, gave v (owned) or
@@ -3390,6 +3399,7 @@ static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e
             /* A dict's key that is not a str compares on m (map_findk, name_searched). */
             SPYValue *dict = storage ? dictionary_value(c, namespace) : name_dict(e);
             if (dict && name_compares(c, dict, name)) {
+                if (!m && k == unchanged && env == c->walk_env) return name_rewalk(c, env, at, name, annotation);
                 SPYValue *key = spy_string(c, name.text, name.len), *state = NULL;
                 int64_t hash;
                 if (key && !hash_value(c, key, &hash))
@@ -31822,6 +31832,65 @@ static SPYValue *method_getter_of(SPYContext *c, Machine *m, const char *name, S
     spy_release(function);
     return result;
 }
+/* Whether v, atop a call step's machine, is the list of the names and
+ * values its operands' lookups found there (name_rewalked): c->unbound,
+ * then each name, its value and whether this run of the step took it. */
+static int walk_marker(SPYContext *c, SPYValue *v) {
+    return v && v->type == SPY_LIST && v->as.seq.len && v->as.seq.items[0] == c->unbound;
+}
+/* The marker atop m popped, if any. */
+static void walk_unmark(SPYContext *c, Machine *m) {
+    if (!m->len || !walk_marker(c, m->stack[m->len - 1])) return;
+    spy_release(machine_pop(m));
+    c->walk_markers--;
+}
+/* What the lookup of name ctx, which it takes, that name_rewalk began on
+ * call step m returned: at once, the value; later, kept in m's marker,
+ * the step runs again, its lookup of that name taking it. */
+static SPYValue *name_rewalked(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    if (c->walk_sync == m) { spy_release(ctx); return result; }
+    SPYValue *marker = m->len ? m->stack[m->len - 1] : NULL;
+    int failed = !result;
+    if (!failed && !walk_marker(c, marker)) {
+        failed = !(marker = spy_list(c)) || sequence_append(c, marker, c->unbound);
+        if (failed) spy_release(marker);
+        else if (machine_push(c, m, marker)) failed = 1;
+        else c->walk_markers++;
+    }
+    failed = failed || sequence_append(c, marker, ctx) || sequence_append(c, marker, result) || sequence_append(c, marker, c->booleans[0]);
+    spy_release(ctx); spy_release(result);
+    if (failed) { walk_unmark(c, m); return NULL; }
+    /* The next run takes each value once. */
+    for (size_t i = 3; i < marker->as.seq.len; i += 3) {
+        spy_release(marker->as.seq.items[i]);
+        marker->as.seq.items[i] = spy_retain(c->booleans[0]);
+    }
+    m->pc--;
+    return c->stepped;
+}
+/* A walker's lookup of name in env from from on, a call step's operand
+ * whose dict compares a key by a Python __eq__ (name_walk): the value the
+ * step's machine found before, or that lookup on it (name_rewalked), NULL
+ * with c->k_fn set when it calls Python, as one before it may have. */
+static NO_INLINE SPYValue *name_rewalk(SPYContext *c, SPYValue *env, SPYValue *from, Name name, int annotation) {
+    Machine *m = c->walk_m, *sync = c->walk_sync;
+    SPYValue *marker = m->len ? m->stack[m->len - 1] : NULL, *key;
+    if (c->k_fn) return NULL;
+    for (size_t i = 1; walk_marker(c, marker) && i + 2 < marker->as.seq.len; i += 3) {
+        SPYValue *text = marker->as.seq.items[i], **taken = &marker->as.seq.items[i + 2];
+        if (*taken == c->booleans[0] && text->as.string.len == name.len && !memcmp(text->as.string.data, name.text, name.len)) {
+            spy_release(*taken);
+            *taken = spy_retain(c->booleans[1]);
+            return spy_retain(marker->as.seq.items[i + 1]);
+        }
+    }
+    if (!(key = spy_string(c, name.text, name.len))) return NULL;
+    c->walk_sync = m;
+    SPYValue *value = name_walk(c, m, env, from, name, annotation, 0, NULL, name_rewalked, key);
+    c->walk_sync = sync;
+    if (!value && !c->error_type[0] && c->k_fn) c->walk_pending = 1;
+    return value;
+}
 /* BC_CALLF: plain call node n, whose operands need no steps of their own;
  * or NULL with no error when a consumer of a generator began on m. */
 static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
@@ -31829,7 +31898,16 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     size_t argc;
     int method;
     argv[0] = NULL;
-    if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1)))
+    c->walk_env = f->env; c->walk_m = m;
+    callee = plain_callee(c, f, n, argv, &argc, &method, 1);
+    c->walk_env = NULL;
+    /* An operand's lookup left a call on m, after which the step runs
+     * again (name_rewalked); once it ran, the values it took go. */
+    if (UNLIKELY(c->walk_pending | c->walk_markers)) {
+        if (c->walk_pending) { c->walk_pending = 0; return NULL; }
+        walk_unmark(c, m);
+    }
+    if (!callee)
         return argv[0] && !c->error_type[0] ? method_getter(c, m, n->a, argv[0], -1) : NULL;
     return operand_dispatch(c, m, n, callee, method, argc, argv, env);
 }

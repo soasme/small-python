@@ -73,7 +73,43 @@ def built(p):
     return " ".join(log + ended)
 
 
+def keyed(p):
+    calls = []
+
+    class Key:
+        def __hash__(self):
+            return hash("len")
+
+        def __eq__(self, other):
+            for _ in ():
+                pass
+            calls.append(other)
+            return other == "len"
+
+    def callee(x):
+        return len(x)
+
+    def argument(x):
+        return type(len).__name__
+
+    def twice(x):
+        return abs(len(x) - len(x))
+
+    names = vars(builtins)
+    original = names.pop("len")
+    names[Key()] = original
+    try:
+        value = {"callee": callee, "argument": argument, "twice": twice}[p["where"]]([1, 2])
+        seen = list(calls)
+    finally:
+        del names["len"]
+        names["len"] = original
+    return "%s %d" % (value, len(seen))
+
+
 def outcome(p):
+    if p["part"] == "keyed":
+        return keyed(p)
     if p["part"] == "builder":
         return built(p)
     if p["part"] == "insert":
