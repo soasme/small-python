@@ -38702,13 +38702,20 @@ static SPYValue *adapted_generator(SPYValue *v) {
     } else if (v->as.iterator.kind != I_ENUMERATE) return NULL;
     return resumable(source) ? source : NULL;
 }
+/* Whether filter v of None or bool tests item by a Python __bool__ or __len__ (filter_truth). */
+static int truth_filtered(SPYContext *c, SPYValue *v, SPYValue *item) {
+    SPYValue *function = v->as.iterator.source->as.seq.items[0];
+    int length;
+    return (function->type == SPY_NONE || function == c->types[SPY_BOOL]) && item && (item->type == SPY_INSTANCE || metaclassed(item)) &&
+           truth_special(c, item, &length);
+}
 /* Adapter v (adapted_generator) takes the item its generator yielded in
  * flow: a yield of its item; of none when it drops it, or when a filter's
- * Python function is to test it, the item waiting in v's counter
+ * Python function or truth is to test it, the item waiting in v's counter
  * (filter_next); else its end, a StopIteration from a filter's function,
  * as in iterator_next, or an error. */
 static NO_INLINE Result adapted_flow(SPYContext *c, SPYValue *v, Result flow) {
-    if (v->as.iterator.kind == I_FILTER && machine_function(c, v->as.iterator.source->as.seq.items[0])) {
+    if (v->as.iterator.kind == I_FILTER && (machine_function(c, v->as.iterator.source->as.seq.items[0]) || truth_filtered(c, v, flow.value))) {
         v->as.iterator.counter = flow.value; v->as.iterator.index = 1;
         return (Result){FLOW_YIELD, NULL};
     }
@@ -39008,10 +39015,23 @@ static ALWAYS_INLINE int sentineling(SPYContext *c, Machine *m) {
 }
 /* What the function of filter v, given the item waiting in v's counter
  * (filter_call), returned in test, taking it: the item when test is true;
- * else NULL, with *again set unless an error is pending; a callable
+ * else NULL, with *again set unless an error is pending; or, on m, at a
+ * test whose truth is a Python __bool__ or __len__, NULL with that call of
+ * kind in c->k_fn (convert_call), the item still waiting; a callable
  * iterator's call, sentinel_returned. */
 static NO_INLINE SPYValue *filter_returned(SPYContext *c, Machine *m, SPYValue *v, SPYValue *test, int *again, int kind) {
     if (v->as.iterator.kind == I_CALLABLE) return sentinel_returned(c, m, v, test, kind);
+    int length = 0;
+    SPYValue *function = m && test && (test->type == SPY_INSTANCE || metaclassed(test)) ? truth_special(c, test, &length) : NULL, *fn, *env;
+    if (function) {
+        SPYValue *name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8);
+        if (name && convert_call(c, m, function, test, name, NULL, &fn, &env) > 0) {
+            c->k_fn = fn; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
+        }
+        spy_release(test);
+        if (!c->error_type[0]) return NULL;
+        test = NULL;
+    }
     SPYValue *item = v->as.iterator.counter;
     v->as.iterator.counter = NULL;
     int keep = test && truthy(test);
@@ -39383,6 +39403,8 @@ static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue 
             *again = 1;
             return NULL;
         }
+        /* Its test's Python truth is m's call, v left on m's stack under it. */
+        if (!result && c->k_fn) return NULL;
     }
     if (!tested && inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE &&
         !(result = sentinel_returned(c, m, inner, result, kind)) && c->k_fn) return NULL;

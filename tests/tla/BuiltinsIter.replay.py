@@ -248,6 +248,10 @@ SOURCES = {
                     "class L:\n    def __init__(s, v): s.v = v\n    def __len__(s):\n        for _ in (): pass\n"
                     "        log.append('l%d' % s.v)\n        return s.v\n"
                     "result = ([x.v for x in filter(None, [T(1), T(0), 0, L(3)])], [x.v for x in filter(bool, (T(0), T(1)))], log)",
+    "filter_result_truth": "log = []\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n"
+                           "        log.append(s.v); return s.v\ndef gen(*a):\n    for x in a: yield x\n"
+                           "def obj(x):\n    for _ in (): pass\n    return T(x > 1)\n"
+                           "result = (list(filter(obj, range(4))), list(map(str, filter(obj, [5, 0]))), [t.v for t in filter(None, gen(T(True), T(False)))], log)",
     "filter_truth_bad": "class Bad:\n    def __bool__(s):\n        for _ in (): pass\n        return 1\nresult = list(filter(None, [Bad()]))",
     "enumerate_kw": "result = (list(enumerate('ab', start=-1)), list(enumerate(iterable='a')))",
     "enumerate_bad_start": "result = enumerate('a', 1.5)",
