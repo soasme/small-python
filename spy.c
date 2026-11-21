@@ -21285,14 +21285,18 @@ static ALWAYS_INLINE void entry_store(SPYContext *c, SPYValue *env, Entry *entry
         else release_dead(old);
     }
 }
+/* The entry name target n is remembered at in f's environment, unless a
+ * trace function watches; else NULL. */
+static ALWAYS_INLINE Entry *stored_entry(SPYContext *c, Frame *f, Node *n) {
+    SPYValue *env = f->env;
+    return n->kind != N_NAME || c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
+}
 /* Store value to target n; with calls, a machine step's store, which
  * returns 1, storing nothing, for a Python __setitem__ (store_call). */
 static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls) {
-    SPYValue *env = f->env;
-    Entry *entry = n->kind != N_NAME || c->settings[SET_TRACE] ? NULL :
-        env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
+    Entry *entry = stored_entry(c, f, n);
     if (!entry) return store_slow(c, f, n, value, calls);
-    entry_store(c, env, entry, spy_retain(value));
+    entry_store(c, f->env, entry, spy_retain(value));
     return 0;
 }
 static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, value, 0); }
@@ -38974,7 +38978,10 @@ static SPYValue *delegate_thrown(Machine *m) {
  * step stores (compile_next), or pushed. One bound through a namespace's
  * Python __setitem__ is pushed for that call (loop_stored): 1. */
 static ALWAYS_INLINE int loop_item(SPYContext *c, Machine *m, Frame *f, Instruction *next, SPYValue *item) {
-    int stores = next->other && store_into(c, f, next->node->args, item, 1) > 0;
+    Entry *entry = next->other ? stored_entry(c, f, next->node->args) : NULL;
+    /* A remembered name takes the item's reference. */
+    if (entry) { entry_store(c, f->env, entry, item); return 0; }
+    int stores = next->other && store_slow(c, f, next->node->args, item, 1) > 0;
     if (!next->other || stores) machine_push(c, m, item);
     else spy_release(item);
     return stores;
