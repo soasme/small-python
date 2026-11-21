@@ -197,6 +197,21 @@ def class_annotation_future():
     return Marking.log
 
 
+class Missing(dict):
+    def __missing__(self, key):
+        for _ in ():  # a loop: the method runs on the machine
+            pass
+        Missing.log.append(key)
+        return key.upper()
+
+
+def return_yield_missing():
+    Missing.log = []
+    namespace = Missing(__builtins__=__builtins__)
+    exec("def f(): return value\ndef g(): yield other\n", namespace)
+    return dict.__getitem__(namespace, "f")(), list(dict.__getitem__(namespace, "g")()), Missing.log
+
+
 def outcome(p):
     try:
         return repr(globals()[p["case"]]())

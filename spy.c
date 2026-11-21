@@ -16075,8 +16075,9 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         if (n->b) compile_expr(c, p, n->b);
         emit(c, p, BC_FORMAT, n, n->b != NULL); break;
     case N_YIELD: case N_AWAIT:
-        /* A yield of a name or literal loads it in its own step (arg 1). */
-        if (n->kind == N_YIELD && !n->op && n->a && (n->a->kind == N_NAME || n->a->constant)) { emit(c, p, BC_YIELD, n, 1); break; }
+        /* A yield of a name or literal loads it in its own step (arg 1);
+         * while calls can pause, a name takes name_load's. */
+        if (n->kind == N_YIELD && !n->op && n->a && ((n->a->kind == N_NAME && p->calls != PAUSING) || n->a->constant)) { emit(c, p, BC_YIELD, n, 1); break; }
         compile_expr(c, p, n->a);
         emit(c, p, n->op || n->kind == N_AWAIT ? BC_DELEGATE : BC_YIELD, n, n->kind == N_AWAIT); break;
     case N_UNARY: case N_ATTR:
@@ -16365,7 +16366,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     case N_EXPR:
         /* A yield statement drops the sent value rather than popping it (arg 2). */
         if (n->a->kind == N_YIELD && !n->a->op) {
-            int leaf = n->a->a && (n->a->a->kind == N_NAME || n->a->a->constant);
+            int leaf = n->a->a && ((n->a->a->kind == N_NAME && p->calls != PAUSING) || n->a->a->constant);
             if (!leaf) compile_expr(c, p, n->a->a);
             emit(c, p, BC_YIELD, n->a, leaf | 2); break;
         }
@@ -16451,8 +16452,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     case N_RETURN:
         /* A return of a name or literal loads it in its own step, one
-         * through a namespace aside (name_load). */
-        if (n->a && ((n->a->kind == N_NAME && !(n->a->flags & F_LOADED)) || n->a->constant)) { emit(c, p, BC_RETURN, n, 0); break; }
+         * through a namespace, or any while calls can pause, aside (name_load). */
+        if (n->a && ((n->a->kind == N_NAME && !(n->a->flags & F_LOADED) && p->calls != PAUSING) || n->a->constant)) { emit(c, p, BC_RETURN, n, 0); break; }
         compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     case N_RAISE:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b);

@@ -41,7 +41,7 @@ EXTENDS Naturals, Sequences
 Cases == {"exec_rebind", "exec_new", "exec_mapping", "eval_local", "eval_free", "eval_free_referenced",
           "locals_write", "locals_snapshot", "frame_locals", "eval_mappings", "class_eval", "exec_custom_hit",
           "exec_custom_miss", "exec_custom_error", "exec_custom_loop", "exec_globals_storage", "eval_key_eq", "global_key_eq",
-          "class_annotation_future"}
+          "class_annotation_future", "return_yield_missing"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -71,6 +71,8 @@ Run(p) == CASE p.case = "exec_rebind" -> "1"                   \* the snapshot c
             [] p.case = "global_key_eq" -> "(7, ['v'])"       \* so does a function's global load
             \* The body sets up its __annotations__, then records the text in it.
             [] p.case = "class_annotation_future" -> "['__name__', '__annotations__', '__annotations__']"
+            \* a function's return or yield of a global reads the globals' __missing__ once each
+            [] p.case = "return_yield_missing" -> "('VALUE', ['OTHER'], ['value', 'other'])"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

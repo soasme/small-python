@@ -725,6 +725,7 @@ Unreleased (0.10.0):
 - `getattr()`, `hasattr()` and method calls on a wrapper's `__isabstractmethod__` or a property's `__name__` call Python methods without nesting the C stack.
 - Reading a lazy import calls a Python `__import__` hook without nesting the C stack.
 - `__import__` called from Python, by an import statement, or by a lazy import runs module bodies without nesting the C stack.
+- While calls can pause, `return` and `yield` of a name read a namespace's Python `__getitem__` or `__missing__` without nesting the C stack.
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
