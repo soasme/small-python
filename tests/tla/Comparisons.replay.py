@@ -162,6 +162,10 @@ SOURCES = {
                             "    def __gt__(s, o):\n        for _ in (): pass\n        t('E>' + type(o).__name__); return s.r\n"
                             "def f(x, e):\n    try: return x < e\n    except TypeError: return 'TypeError'\n"
                             "result = (f(I(1), E('v')), f(I(1), E(NotImplemented)), f(N('n'), E(NotImplemented)), f({1}, E(NotImplemented)))",
+    "object_value_reflected": ("class R:\n    def __eq__(s, o):\n        for _ in (): pass\n        t('R=='); return True\n"
+                               "    def __ne__(s, o):\n        for _ in (): pass\n        t('R!='); return False\n"
+                               "    def __lt__(s, o):\n        for _ in (): pass\n        t('R<'); return 'lt'\n"
+                               "def f(): pass\nr = R()\nresult = (f == r, f != r, f > r, R == r)"),
     "builtin_sub_sibling": "class I(int):\n    def __eq__(s, o):\n        for _ in (): pass\n        t('I=='); return True\n"
                            "    def __lt__(s, o):\n        for _ in (): pass\n        t('I<'); return True\n"
                            "    __hash__ = int.__hash__\nclass J(int): pass\n"

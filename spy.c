@@ -32912,13 +32912,13 @@ static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, in
 }
 static SPYValue *bool_call(SPYContext *, Machine *, SPYValue *, SPYValue **);
 /* Whether x's rich comparison rich declines any plain instance: x is
- * None, a str, bytes, tuple, list or dict, or a plain instance, or a class
- * by its metaclass, whose class compares as object does, whose != calls
- * its __eq__. */
+ * None, a str, bytes, tuple, list or dict, or a plain instance, a class
+ * by its metaclass or any other builtin value, whose class compares as
+ * object does, whose != calls its __eq__. */
 static int rich_declines(SPYContext *c, SPYValue *x, int rich) {
     if (x->type == SPY_NONE || x->type == SPY_STRING || x->type == SPY_BYTES || x->type == SPY_TUPLE || x->type == SPY_LIST ||
         x->type == SPY_DICT) return 1;
-    return (plain_instance(x) || metaclassed(x)) && class_lookup(value_class(c, x), rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
+    return (plain_instance(x) || x->type != SPY_INSTANCE) && class_lookup(value_class(c, x), rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
            (rich != R_NE || rich_declines(c, x, R_EQ));
 }
 /* Whether x, a set, or an instance of a builtin's subclass whose rich
