@@ -672,6 +672,8 @@ Unreleased (0.10.0):
 - Storing a byte into a bytearray converts its Python `__index__` without nesting on the C stack
 - `bytes()`, `bytearray()` and `bytearray.extend()` convert their items' Python `__index__` without nesting on the C stack
 - A function's or method's `__call__` wrapper, and `map()` over a bound one, call Python without nesting on the C stack
+- An import statement's Python `__import__`, attribute reads, star `__all__` and namespace `__setitem__` run without nesting on the C stack
+- A from-import of a missing name from any object, and `import a.b as c`, raise CPython's `ImportError` naming the object's `__name__`
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

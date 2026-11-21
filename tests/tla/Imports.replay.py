@@ -30,6 +30,13 @@ SOURCES = {
     "missing_module": "import nosuchmodule",
     "missing_sub": "import pkg.nosuch",
     "from_inner_missing": "from pkg.inner import nothing",
+    "hook_calls": "log = []\nclass Dyn(type(__import__('builtins'))):\n    def __getattr__(self, n):\n        for _ in (): pass\n"
+                  "        log.append(n)\n        return ['z'] if n == '__all__' else 1\n"
+                  "class Up(dict):\n    def __setitem__(self, k, v):\n        for _ in (): pass\n        log.append('set')\n        super().__setitem__(k.upper(), v)\n"
+                  "def hook(*a):\n    for _ in (): pass\n    log.append('import')\n    return Dyn('d')\n"
+                  "t = Up()\nexec('from x import *\\nimport y.q as w', {'__builtins__': {'__import__': hook}}, t)\nresult = (sorted(t), log)",
+    "as_unnamed": "try:\n    exec('import y.q as w', {'__builtins__': {'__import__': lambda *a: object()}})\n"
+                  "except ImportError as e:\n    result = (e.name, e.name_from, str(e))",
 }
 
 

@@ -31,7 +31,8 @@ EXTENDS Naturals, Sequences
 
 Cases == {"import_sub", "binds", "import_as", "from_submodule", "from_missing", "from_star", "relative",
           "broken", "beyond", "no_parent", "namespace", "twice", "none_cached", "replaced", "cycle",
-          "attributes", "plain_attributes", "missing_module", "missing_sub", "from_inner_missing"}
+          "attributes", "plain_attributes", "missing_module", "missing_sub", "from_inner_missing",
+          "hook_calls", "as_unnamed"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -60,6 +61,9 @@ Run(p) ==
       [] p.case = "missing_module" -> "ModuleNotFoundError: No module named 'nosuchmodule' []"
       [] p.case = "missing_sub" -> "ModuleNotFoundError: No module named 'pkg.nosuch' ['pkg']"
       [] p.case = "from_inner_missing" -> "ImportError: cannot import name 'nothing' from 'pkg.inner' ['pkg', 'inner', 'sub', 'leaf']"
+      \* A Python __import__, a module's __getattr__ and a namespace's __setitem__, in order
+      [] p.case = "hook_calls" -> "(['W', 'Z'], ['import', '__all__', 'z', 'set', 'import', 'q', 'set']) []"
+      [] p.case = "as_unnamed" -> "(None, 'q', \"cannot import name 'q' from '<unknown module name>' (unknown location)\") []"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

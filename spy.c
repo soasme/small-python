@@ -20445,13 +20445,16 @@ static SPYValue *import_module(SPYContext *c, const char *name) {
     c->depth--; return module;
 }
 static SPYValue *raise_value(SPYContext *, SPYValue *);
-static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, int required) {
-    SPYValue *value = attribute(c, module, name);
-    if (value || !error_is(c, "AttributeError")) return value;
-    spy_clear_error(c);
-    if (module->type != SPY_MODULE) return errorf(c, "ImportError", "cannot import name '%s'", name);
-    SPYValue *module_name = name_local(module, "__name__");
-    if (name_local(module, "__path__") && module_name && module_name->type == SPY_STRING) {
+static SPYValue *optional_attribute(SPYContext *, SPYValue *, const char *);
+/* What from module import name gives when module, any object, has no
+ * attribute name: a package's submodule, else None when not required,
+ * else ImportError naming module's __name__ when a str. */
+static SPYValue *import_missing(SPYContext *c, SPYValue *module, const char *name, int required) {
+    SPYValue *value = NULL, *read = module->type == SPY_MODULE ? NULL : optional_attribute(c, module, "__name__");
+    if (c->error_type[0]) return NULL;
+    SPYValue *module_name = module->type == SPY_MODULE ? name_local(module, "__name__") : read;
+    module_name = module_name ? builtin_value(c, module_name, SPY_STRING) : NULL;
+    if (module->type == SPY_MODULE && name_local(module, "__path__") && module_name) {
         Buffer full = {.ctx = c};
         if (!puts_buffer(&full, module_name->as.string.data) && !puts_buffer(&full, ".") && !puts_buffer(&full, name))
             value = import_module(c, full.data);
@@ -20462,12 +20465,12 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
         if (value || !absent) return value;
         spy_clear_error(c);
     }
-    if (!required) return spy_none(c);
+    if (!required) { spy_release(read); return spy_none(c); }
     /* CPython names the module, the missing name, and the module's file. */
-    SPYValue *file = name_local(module, "__file__");
+    SPYValue *file = module->type == SPY_MODULE ? name_local(module, "__file__") : NULL;
     Buffer message = {.ctx = c};
     int failed = puts_buffer(&message, "cannot import name '") || puts_buffer(&message, name) || puts_buffer(&message, "' from '") ||
-        puts_buffer(&message, module_name && module_name->type == SPY_STRING ? module_name->as.string.data : "<unknown module name>") ||
+        puts_buffer(&message, module_name ? module_name->as.string.data : "<unknown module name>") ||
         puts_buffer(&message, "' (") || puts_buffer(&message, file && file->type == SPY_STRING ? file->as.string.data : "unknown location") ||
         puts_buffer(&message, ")");
     SPYValue *text = failed ? NULL : spy_string(c, message.data, message.len), *from = text ? spy_string(c, name, strlen(name)) : NULL;
@@ -20475,8 +20478,14 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
     SPYValue *error = from ? exception_create(c, c->exceptions[X_IMPORT_ERROR], 1, &text) : NULL;
     if (error && !set_hidden_field(c, error, "msg", text) && !set_hidden_field(c, error, "name", module_name ? module_name : c->none) &&
         !set_hidden_field(c, error, "name_from", from) && !set_hidden_field(c, error, "path", file ? file : c->none)) raise_value(c, error);
-    spy_release(error); spy_release(text); spy_release(from);
+    spy_release(error); spy_release(text); spy_release(from); spy_release(read);
     return NULL;
+}
+static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, int required) {
+    SPYValue *value = attribute(c, module, name);
+    if (value || !error_is(c, "AttributeError")) return value;
+    spy_clear_error(c);
+    return import_missing(c, module, name, required);
 }
 /* The absolute module name of an import, as importlib._bootstrap._resolve_name. */
 static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals, int64_t level) {
@@ -20747,17 +20756,28 @@ static NO_INLINE int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *local_snapshot(SPYContext *, SPYValue *);
-static NO_INLINE SPYValue *call_import(SPYContext *c, Frame *f, const char *name, SPYValue *fromlist, int level) {
+/* The __import__ that an import statement in f calls, borrowed, its five
+ * arguments for name, fromlist (NULL for None) and level in args, owned;
+ * or NULL with an error. */
+static NO_INLINE SPYValue *import_hook(SPYContext *c, Frame *f, const char *name, SPYValue *fromlist, int level, SPYValue **args) {
     SPYValue *globals = module_env(c, f->env);
     SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
-    SPYValue *function = spy_retain(name_local(builtins, "__import__"));
+    SPYValue *function = name_local(builtins, "__import__");
     if (!function) return spy_error(c, "ImportError", "__import__ not found");
-    SPYValue *text = spy_string(c, name, strlen(name)), *depth = spy_int(c, level);
-    SPYValue *locals = f->env->type == SPY_DICT || f->env->as.map.namespace ?
-        spy_retain(namespace_map(f->env)) : local_snapshot(c, f->env);
-    SPYValue *args[] = {text, namespace_map(globals), locals, fromlist ? fromlist : c->none, depth};
-    SPYValue *result = text && depth && locals ? call(c, function, 5, args) : NULL;
-    spy_release(text); spy_release(depth); spy_release(locals); spy_release(function); return result;
+    args[0] = spy_string(c, name, strlen(name)); args[1] = spy_retain(namespace_map(globals));
+    args[2] = f->env->type == SPY_DICT || f->env->as.map.namespace ? spy_retain(namespace_map(f->env)) : local_snapshot(c, f->env);
+    args[3] = spy_retain(fromlist ? fromlist : c->none); args[4] = spy_int(c, level);
+    if (args[0] && args[2] && args[4]) return function;
+    release_all(5, args);
+    return NULL;
+}
+static NO_INLINE SPYValue *call_import(SPYContext *c, Frame *f, const char *name, SPYValue *fromlist, int level) {
+    SPYValue *args[5], *function = import_hook(c, f, name, fromlist, level, args);
+    if (!function) return NULL;
+    spy_retain(function);
+    SPYValue *result = call(c, function, 5, args);
+    release_all(5, args); spy_release(function);
+    return result;
 }
 /* The count items of value, as an assignment target list with a star at
  * index star (SIZE_MAX for none) receives them: the starred items gathered
@@ -20914,9 +20934,8 @@ static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
 }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 /* The mapping, an instance with a Python __setitem__, through which
- * binding name node n in env stores (name_bind), borrowed; else NULL. */
-static NO_INLINE SPYValue *name_mapping(SPYContext *c, SPYValue *env, Node *n) {
-    Name name = node_name(n);
+ * binding name in env stores (name_bind), borrowed; else NULL. */
+static NO_INLINE SPYValue *name_mapping(SPYContext *c, SPYValue *env, Name name) {
     if (env->type != V_ENV) return NULL;
     env = symbol_env(c, env, name, scope_find(env->as.map.scope, name));
     SPYValue *namespace = env->type == V_ENV && env->as.map.flags != ENV_FORWARD && env->as.map.flags != 3 ? namespace_map(env) : env;
@@ -20941,7 +20960,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
     }
     if (n->kind == N_NAME) {
         Entry *entry = name_slot(f->env, n);
-        if (!entry) return calls && name_mapping(c, f->env, n) ? 1 : name_bind(c, f->env, node_name(n), value);
+        if (!entry) return calls && name_mapping(c, f->env, node_name(n)) ? 1 : name_bind(c, f->env, node_name(n), value);
         SPYValue *old = entry->value;
         class_changed(f->env);
         entry->value = spy_retain(value);
@@ -25846,7 +25865,7 @@ static NO_INLINE void import_statement(SPYContext *c, Frame *f, Node *n, Node *o
             while (*part && value) {
                 const char *end = strchr(part, '.');
                 char *name = copy_text(c, part, end ? (size_t)(end - part) : strlen(part));
-                SPYValue *child = name ? attribute(c, value, name) : NULL;
+                SPYValue *child = name ? import_from(c, value, name, 1) : NULL;
                 mem_free(name); spy_release(value); value = child;
                 if (!end) break;
                 part = end + 1;
@@ -36090,7 +36109,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     }
     if (n->kind == N_NAME) {
         /* A name bound through its namespace's Python __setitem__ (name_mapping). */
-        args[0] = spy_retain(name_mapping(c, f->env, n)); args[1] = spy_string(c, n->text, strlen(n->text));
+        args[0] = spy_retain(name_mapping(c, f->env, node_name(n))); args[1] = spy_string(c, n->text, strlen(n->text));
         args[2] = spy_retain(m->stack[m->len - 1]);
         if (!args[1]) { release_all(3, args); return NULL; }
     } else if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
@@ -36187,8 +36206,270 @@ static SPYValue *import_listed(SPYContext *c, Machine *m, SPYValue *at, SPYValue
     machine_push(c, m, operand);
     return c->stepped;
 }
+/* The stages of import_go: __import__ called, the module given, an item
+ * of a from-import read or a module of an import given, a part of an
+ * import's dotted name read, the value bound; and of a star: __all__
+ * read, an index of it, its name read. */
+enum { IM_START, IM_MODULE, IM_ITEM, IM_VALUE, IM_IMPORTED, IM_PART, IM_PART_VALUE, IM_BOUND, IM_STAR, IM_ALL, IM_INDEX, IM_KEY, IM_STAR_VALUE };
+/* What a call import_go left returned, result, for its stage in progress,
+ * the tuple import_go reads: the step running again with it as its
+ * operand. An attribute read's AttributeError, or an index's IndexError,
+ * that the statement looks past (import_from, import_star) gives
+ * c->unbound. */
+static SPYValue *import_resumed(SPYContext *c, Machine *m, SPYValue *progress, SPYValue *result) {
+    int stage = (int)progress->as.seq.items[0]->as.integer_data.small;
+    if (!result && !c->stopped && ((stage == IM_VALUE || stage == IM_ALL || stage == IM_PART_VALUE) ? error_is(c, "AttributeError") : stage == IM_KEY && error_is(c, "IndexError"))) {
+        spy_clear_error(c);
+        result = spy_retain(c->unbound);
+    }
+    SPYValue *items[8];
+    memcpy(items, progress->as.seq.items, sizeof(items));
+    items[6] = result;
+    SPYValue *operand = result ? spy_tuple(c, 8, items) : NULL;
+    spy_release(result); spy_release(progress);
+    if (!operand) return NULL;
+    spy_release(machine_pop(m));
+    m->pc--;
+    machine_push(c, m, operand);
+    return c->stepped;
+}
+/* Import statement n in f (17.4), on m, its operand atop m's stack the
+ * tuple of its progress: the stage, the module, a star's names, the index
+ * in them, the item, whether the names are __dict__'s keys, the last
+ * value read and a star's name. A call to Python (__import__, an
+ * attribute's getter, a star's __getitem__, a namespace's __setitem__) is
+ * m's (callk), import_resumed giving its result; NULL after the
+ * statement ran, taking the operand; c->stepped when the call returned. */
+static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    SPYValue **p = m->stack[m->len - 1]->as.seq.items;
+    int stage = (int)p[0]->as.integer_data.small, keys = p[5] == c->booleans[1];
+    int64_t index = p[3]->as.integer_data.small, at = p[4]->as.integer_data.small;
+    SPYValue *module = spy_retain(p[1]), *all = spy_retain(p[2]), *value = spy_retain(p[6]), *key = spy_retain(p[7]);
+    SPYValue *function = NULL, *args[5] = {NULL};
+    size_t argc = 0;
+    char *owned = NULL;
+    Node *item = n->args;
+    for (int64_t i = 0; item && i < at; i++) item = item->next;
+    for (;;) {
+        const char *name = NULL;
+        switch (stage) {
+        case IM_START: {
+            if (n->kind == N_IMPORT) { stage = IM_ITEM; continue; }
+            SPYValue *fromlist = value_new(c, SPY_TUPLE);
+            for (Node *each = n->args; fromlist && each && !c->error_type[0]; each = each->next) {
+                const char *text = each->kind == N_STAR ? "*" : source_name(each->a);
+                SPYValue *string = spy_string(c, text, strlen(text));
+                if (string) sequence_append(c, fromlist, string);
+                spy_release(string);
+            }
+            function = fromlist && !c->error_type[0] ? import_hook(c, f, n->a ? source_name(n->a) : "", fromlist, n->op, args) : NULL;
+            spy_release(fromlist);
+            if (!function) goto failed;
+            argc = 5; stage = IM_MODULE;
+            break;
+        }
+        case IM_MODULE:
+            spy_release(module); module = value; value = NULL;
+            stage = IM_ITEM;
+            continue;
+        case IM_ITEM:
+            if (!item) goto done;
+            if (n->kind == N_IMPORT) {
+                if (!(function = import_hook(c, f, source_name(item->a), NULL, 0, args))) goto failed;
+                argc = 5; stage = IM_IMPORTED;
+                break;
+            }
+            if (item->kind == N_STAR) { stage = IM_STAR; continue; }
+            name = source_name(item->a); stage = IM_VALUE;
+            break;
+        case IM_VALUE:
+            if (value == c->unbound) {
+                spy_release(value);
+                if (!(value = import_missing(c, module, source_name(item->a), 1))) goto failed;
+            }
+                name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->text;
+            goto bind;
+        case IM_IMPORTED:
+            /* import a.b.c as d binds what a's b, then that's c, gives
+             * (import_from), the module slot holding each in turn. */
+            if (item->b && item->a->a) {
+                spy_release(module); module = value; value = NULL;
+                index = 1; stage = IM_PART;
+                continue;
+            }
+            name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->text;
+            goto bind;
+        case IM_PART: {
+            const char *part = source_name(item->a);
+            for (int64_t i = 0; part && i < index; i++) part = strchr(part, '.') ? strchr(part, '.') + 1 : NULL;
+            if (!part) {
+                value = module; module = spy_none(c);
+                name = item->b->text;
+                goto bind;
+            }
+            const char *end = strchr(part, '.');
+            if (!(owned = copy_text(c, part, end ? (size_t)(end - part) : strlen(part)))) goto failed;
+            name = owned; stage = IM_PART_VALUE;
+            break;
+        }
+        case IM_PART_VALUE:
+            if (value == c->unbound) {
+                const char *part = source_name(item->a);
+                for (int64_t i = 0; i < index; i++) part = strchr(part, '.') + 1;
+                const char *end = strchr(part, '.');
+                char *text = copy_text(c, part, end ? (size_t)(end - part) : strlen(part));
+                spy_release(value);
+                value = text ? import_missing(c, module, text, 1) : NULL;
+                mem_free(text);
+                if (!value) goto failed;
+            }
+            spy_release(module); module = value; value = NULL;
+            index++; stage = IM_PART;
+            continue;
+        case IM_BOUND:
+            spy_release(value); value = NULL;
+            if (all->type != SPY_NONE) { index++; stage = IM_INDEX; continue; }
+            item = item->next; at++; stage = IM_ITEM;
+            continue;
+        case IM_STAR:
+            name = "__all__"; stage = IM_ALL;
+            break;
+        case IM_ALL:
+            spy_release(all); all = value; value = NULL;
+            if (all == c->unbound) {
+                spy_release(all); all = NULL; keys = 1;
+                SPYValue *dict = optional_attribute(c, module, "__dict__");
+                if (!dict && !c->error_type[0]) spy_error(c, "ImportError", "from-import-* object has no __dict__ and no __all__");
+                SPYValue *method = dict ? attribute(c, dict, "keys") : NULL, *view = method ? call(c, method, 0, NULL) : NULL;
+                all = view ? call(c, c->types[SPY_LIST], 1, &view) : NULL;
+                spy_release(dict); spy_release(method); spy_release(view);
+                if (!all) goto failed;
+            }
+            index = 0; stage = IM_INDEX;
+            continue;
+        case IM_INDEX: {
+            SPYValue *position = spy_int(c, index);
+            if (!position) goto failed;
+            stage = IM_KEY;
+            /* A Python __getitem__ is m's call (special_callk). */
+            if ((function = item_function(c, all, "__getitem__"))) { args[0] = position; argc = 1; break; }
+            spy_release(value);
+            value = get_index(c, all, position);
+            spy_release(position);
+            if (!value && error_is(c, "IndexError")) { spy_clear_error(c); value = spy_retain(c->unbound); }
+            if (!value) goto failed;
+            continue;
+        }
+        case IM_KEY: {
+            spy_release(key); key = value; value = NULL;
+            if (key == c->unbound) {
+                spy_release(key); key = spy_none(c);
+                spy_release(all); all = spy_none(c);
+                item = item->next; at++; stage = IM_ITEM;
+                continue;
+            }
+            SPYValue *text = builtin_value(c, key, SPY_STRING);
+            if (!text) {
+                SPYValue *module_name = attribute(c, module, "__name__"), *name_text = module_name ? builtin_value(c, module_name, SPY_STRING) : NULL;
+                if (module_name && !name_text) errorf(c, "TypeError", "module __name__ must be a string, not %s", type_name(module_name));
+                else if (module_name) errorf(c, "TypeError", "%s in %s.%s must be str, not %s", keys ? "Key" : "Item",
+                                             name_text->as.string.data, keys ? "__dict__" : "__all__", type_name(key));
+                spy_release(module_name);
+                goto failed;
+            }
+            if (keys && text->as.string.data[0] == '_') { stage = IM_BOUND; continue; }
+            /* A package's __all__ may name submodules, which are imported first. */
+            if (!keys && name_local(module, "__path__")) {
+                SPYValue *submodule = import_from(c, module, text->as.string.data, 0);
+                if (!submodule) goto failed;
+                spy_release(submodule);
+            }
+            name = text->as.string.data; stage = IM_STAR_VALUE;
+            break;
+        }
+        case IM_STAR_VALUE:
+            name = builtin_value(c, key, SPY_STRING)->as.string.data;
+            goto bind;
+        }
+        /* The call or attribute read of the stage; or, done here, its value. */
+        SPYValue *state = NULL, *items[8] = {int_value(c, stage), module, all, int_value(c, index), int_value(c, at),
+                                             spy_bool(c, keys), c->none, key};
+        if (items[0] && items[3] && items[4]) state = spy_tuple(c, 8, items);
+        spy_release(items[0]); spy_release(items[3]); spy_release(items[4]); spy_release(items[5]);
+        if (!state) { release_all(argc, args); goto failed; }
+        SPYValue *object = stage == IM_KEY ? all : module;
+        if (function && stage == IM_KEY) {
+            spy_release(module); spy_release(all); spy_release(value); spy_release(key);
+            return special_callk(c, m, function, object, 1, args, NULL, import_resumed, state);
+        }
+        if (function && function->type == SPY_NATIVE) {
+            /* The builtin __import__ runs here. */
+            spy_release(state);
+            spy_release(value);
+            value = call(c, function, 5, args);
+            release_all(5, args); function = NULL; argc = 0;
+            if (!value) goto failed;
+            continue;
+        }
+        if (function) {
+            spy_release(module); spy_release(all); spy_release(value); spy_release(key);
+            spy_retain(function);
+            SPYValue *result = callk(c, m, function, 5, args, import_resumed, state);
+            spy_release(function);
+            return result;
+        }
+        SPYValue *read = attribute_step(c, object, name);
+        if (!read && !c->error_type[0] && c->fallback) {
+            function = c->fallback; c->fallback = NULL;
+            spy_retain(object);
+            spy_release(module); spy_release(all); spy_release(value); spy_release(key);
+            read = attribute_callk(c, m, object, name, function, import_resumed, state);
+            spy_release(object); mem_free(owned);
+            return read;
+        }
+        spy_release(state);
+        mem_free(owned); owned = NULL;
+        if (!read && (stage == IM_VALUE || stage == IM_ALL || stage == IM_PART_VALUE) && error_is(c, "AttributeError")) {
+            spy_clear_error(c);
+            read = spy_retain(c->unbound);
+        }
+        if (!read) goto failed;
+        spy_release(value); value = read;
+        continue;
+    bind: {
+        /* A namespace's Python __setitem__ is m's call. */
+        SPYValue *mapping = name_mapping(c, f->env, name_of(name));
+        stage = IM_BOUND;
+        if (mapping) {
+            SPYValue *text = spy_string(c, name, strlen(name)), *items[8] = {int_value(c, stage), module, all, int_value(c, index),
+                                                                             int_value(c, at), spy_bool(c, keys), c->none, key};
+            SPYValue *state = text && items[0] && items[3] && items[4] ? spy_tuple(c, 8, items) : NULL;
+            spy_release(items[0]); spy_release(items[3]); spy_release(items[4]); spy_release(items[5]);
+            if (!state) { spy_release(text); goto failed; }
+            spy_release(module); spy_release(all); spy_release(key);
+            return callk(c, m, setitem_function(c, mapping), 3, (SPYValue *[]){spy_retain(mapping), text, value}, import_resumed, state);
+        }
+        if (name_set(c, f->env, name, value)) goto failed;
+        continue;
+    }
+    }
+done:
+failed:
+    mem_free(owned);
+    spy_release(module); spy_release(all); spy_release(value); spy_release(key);
+    spy_release(machine_pop(m));
+    return NULL;
+}
+/* import_stage until the statement ends or a call is left to m: a call
+ * that returned here (callk's) gives the next stage at once. */
+static SPYValue *import_go(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    SPYValue *result;
+    while ((result = import_stage(c, m, f, n)) == c->stepped) m->pc++;
+    return result;
+}
 static NO_INLINE SPYValue *import_step(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
     SPYValue *globals = module_env(c, f->env), *listing;
+    if (m->stack[m->len - 1]->type == SPY_TUPLE && m->stack[m->len - 1]->as.seq.len == 8) return import_go(c, m, f, n);
     if ((n->flags & F_LAZY_COMPAT) && !(n->flags & F_LAZY) && namespace_map(f->env) == namespace_map(globals) && (listing = name_getitem(c, globals)))
         return import_listing(c, m, f, n, globals, listing);
     SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
@@ -36218,6 +36499,18 @@ static NO_INLINE SPYValue *import_step(SPYContext *c, Machine *m, Frame *f, Node
     }
     mem_free(name);
     if (c->error_type[0]) return NULL;
+    /* An eager statement goes on as import_go; a lazy one, or a future
+     * statement, runs here. */
+    if (!unit && !(n->flags & F_LAZY) && !((n->flags & F_LAZY_COMPAT) && (c->settings[SET_LAZY_IMPORTS] || name_local(globals, "__lazy_modules__"))) &&
+        !(n->kind == N_FROM && !n->op && !strcmp(source, "__future__"))) {
+        SPYValue *items[8] = {int_value(c, IM_START), c->none, c->none, int_value(c, 0), int_value(c, 0), c->booleans[0], c->none, c->none};
+        SPYValue *progress = items[0] && items[3] ? spy_tuple(c, 8, items) : NULL;
+        spy_release(items[0]); spy_release(items[3]); spy_release(items[4]);
+        if (!progress) return NULL;
+        spy_release(machine_pop(m));
+        machine_push(c, m, progress);
+        return import_go(c, m, f, n);
+    }
     if (!unit) {
         spy_release(machine_pop(m));
         Result r = execute_statements(c, f, n, 1);
