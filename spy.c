@@ -27117,15 +27117,16 @@ static SPYValue *anext_asend(SPYValue *op) {
 }
 /* What anext() awaitable op relays its send, throw or close to
  * (awaitable_method): the asend an async generator's __anext__ returned,
- * or the coroutine another's did; else NULL. */
+ * or the coroutine, or iterable coroutine generator, another's did; else
+ * NULL. */
 static SPYValue *anext_relay(SPYValue *op) {
     SPYValue *source = op->as.iterator.source;
-    return source->type == SPY_ASYNC_GENERATOR_ASEND || source->type == SPY_COROUTINE ? source : NULL;
+    return source->type == SPY_ASYNC_GENERATOR_ASEND || source->type == SPY_COROUTINE || iterable_coroutine(source) ? source : NULL;
 }
 /* What an anext() awaitable relays its send, throw or close to
  * (anext_relay): for callee, the awaitable of method number *method or a
- * method of it bound, that asend or coroutine, *method then its number
- * and *defaulted, given, its default; else callee. */
+ * method of it bound, that asend, coroutine or generator, *method then
+ * its number and *defaulted, given, its default; else callee. */
 static SPYValue *anext_relayed(SPYValue *callee, int *method, SPYValue **defaulted) {
     SPYValue *self = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module ? callee->as.bound.self : *method >= 0 ? callee : NULL;
     int number = self != callee && self ? callee->as.bound.method : *method;
