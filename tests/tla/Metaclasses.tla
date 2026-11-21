@@ -27,7 +27,11 @@
 (* (flag=1) in source whose builtins hold a Python __build_class__, which *)
 (* may loop, called once with the body, name and keyword: it builds the   *)
 (* class without the keyword, raises KeyError, or returns "f", the body    *)
-(* only assigning or looping.                                              *)
+(* only assigning or looping. A delegate program calls type(name, (D,),  *)
+(* {}), or type.__new__(type, ...), where D's metaclass is more derived    *)
+(* than type with a Python __new__ that makes the class or raises KeyError *)
+(* and a Python __init__: that __new__ makes the class, and only the call  *)
+(* of type initializes it.                                                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -37,6 +41,7 @@ Programs == [part : {"derive"}, bases : BaseSets, meta : Metas]
             \cup [part : {"cell"}, cell : {"kept", "dropped", "unused"}]
             \cup [part : {"call"}, made : {"marker", "raises", "real"}]
             \cup [part : {"builder"}, made : {"marker", "raises", "real"}, loops : BOOLEAN]
+            \cup [part : {"delegate"}, via : {"type", "new"}, raises : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -72,7 +77,11 @@ Built(p) == CASE p.made = "marker" -> "f build X flag"
                [] p.made = "raises" -> "KeyError"
                [] OTHER -> "X build X flag"
 
-Run(p) == CASE p.part = "derive" -> Derive(p) [] p.part = "cell" -> Cell(p) [] p.part = "builder" -> Built(p) [] OTHER -> Called(p)
+Delegated(p) == IF p.raises THEN "KeyError"
+                ELSE IF p.via = "type" THEN "MD new init" ELSE "MD new"
+
+Run(p) == CASE p.part = "derive" -> Derive(p) [] p.part = "cell" -> Cell(p) [] p.part = "builder" -> Built(p)
+            [] p.part = "delegate" -> Delegated(p) [] OTHER -> Called(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

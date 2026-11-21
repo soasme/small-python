@@ -23927,11 +23927,31 @@ static ALWAYS_INLINE SPYValue *native_entered(SPYContext *c, Machine *m, SPYValu
 /* Whether callee of argc arguments argv makes a class class_make makes:
  * type() or a metaclass type_made of a name, bases of no more derived
  * metaclass and a namespace, or type.__new__. */
+/* The Python __new__ function of *winner, the metaclass more derived
+ * than callee that a call of it with argv (name, bases, namespace)
+ * creates its class by, whose arguments type.__new__ takes; else NULL. */
+static SPYValue *delegated_new(SPYContext *c, SPYValue *callee, SPYValue *const *argv, SPYValue **winner) {
+    SPYValue *bases = argv[1], *best = callee, *allocator;
+    if (bases->type != SPY_TUPLE || !builtin_value(c, argv[0], SPY_STRING) || !dictionary_value(c, argv[2])) return NULL;
+    for (size_t i = 0; i < bases->as.seq.len; i++) {
+        SPYValue *meta = bases->as.seq.items[i]->type == SPY_CLASS ? value_class(c, bases->as.seq.items[i]) : NULL;
+        if (!meta) return NULL;
+        if (!subclass(best, meta)) {
+            if (!subclass(meta, best)) return NULL;
+            best = meta;
+        }
+    }
+    allocator = best != callee ? class_lookup(best, "__new__") : NULL;
+    if (allocator && allocator->type == SPY_STATICMETHOD) allocator = allocator->as.wrapper.function;
+    *winner = best;
+    return allocator && machine_function(c, allocator) ? allocator : NULL;
+}
 static NO_INLINE int class_maker_rest(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_NATIVE) return argc == 4 && callee->as.native.kwcall == type_method && !callee->as.native.data;
     if (argc != 3 || argv[1]->type != SPY_TUPLE || !type_made(c, callee)) return 0;
     for (size_t i = 0; i < argv[1]->as.seq.len; i++)
-        if (argv[1]->as.seq.items[i]->type != SPY_CLASS || !subclass(callee, value_class(c, argv[1]->as.seq.items[i]))) return 0;
+        if (argv[1]->as.seq.items[i]->type != SPY_CLASS || !subclass(callee, value_class(c, argv[1]->as.seq.items[i])))
+            return delegated_new(c, callee, argv, &(SPYValue *){NULL}) != NULL;
     return 1;
 }
 /* class_maker_rest of a call of three or four arguments. */
@@ -24096,12 +24116,40 @@ static SPYValue *build_job(SPYContext *c, Machine *m, SPYValue *func, SPYValue *
 }
 /* A call (class_maker) of argc arguments argv and keywords: the class,
  * each Python callback of which is the calling step's call (class_next). */
+static SPYValue *native_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* What a more derived metaclass's Python __new__ returned, result, for a
+ * call of ctx[0], None for type.__new__, with ctx[1..3] and keywords
+ * ctx[4] (class_make): as type.__call__, an instance of ctx[0] is
+ * initialized by its type's __init__, a Python one m's call
+ * (native_inited); result, or NULL. */
+static SPYValue *type_delegated(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    SPYValue **items = ctx->as.seq.items, *keywords = items[4] == c->none ? NULL : items[4];
+    SPYValue *init = result && items[0] != c->none && subclass(value_class(c, result), items[0]) ? special_method(c, result, "__init__") : NULL;
+    if (!init && c->error_type[0]) { spy_release(result); result = NULL; }
+    if (!init) { spy_release(ctx); return result; }
+    SPYValue *args[] = {spy_retain(items[1]), spy_retain(items[2]), spy_retain(items[3])};
+    result = callk_keywords(c, m, init, 3, args, keywords, native_inited, result);
+    spy_release(init); spy_release(ctx);
+    return result;
+}
 static SPYValue *class_make(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    SPYValue *meta = callee, *state = NULL;
+    SPYValue *meta = callee, *state = NULL, *winner = NULL, *function;
     if (argc == 4 && new_check(c, c->types[SPY_CLASS], argc, argv)) return NULL;
     if (argc == 4) meta = *argv++;
+    if ((function = delegated_new(c, meta, argv, &winner))) {
+        /* A more derived metaclass's Python __new__ creates the class, the
+         * calling step's call; a call of callee, not type.__new__, then
+         * initializes it (type_delegated). */
+        SPYValue *args[] = {spy_retain(winner), spy_retain(argv[0]), spy_retain(argv[1]), spy_retain(argv[2])};
+        SPYValue *ctx = tuple_of(c, 5, (SPYValue *[]){argc == 3 ? callee : c->none, argv[0], argv[1], argv[2], keywords ? keywords : c->none});
+        if (!ctx) { release_all(4, args); return NULL; }
+        if (!(c->k_env = function_env(c, function, 4, args, keywords, 1))) { spy_release(ctx); return NULL; }
+        c->k_fn = spy_retain(function); c->k = type_delegated; c->k_ctx = ctx;
+        return NULL;
+    }
     SPYValue *cls = create_class(c, meta, argv[0], argv[1], argv[2], keywords, &state);
-    if (!cls) { spy_release(state); return NULL; }
+    /* A more derived metaclass's native __new__ made the class (create_class). */
+    if (!cls || !state) { spy_release(state); return cls; }
     spy_release(state->as.seq.items[0]);
     state->as.seq.items[0] = cls;
     return class_next(c, state);

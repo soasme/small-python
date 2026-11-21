@@ -107,8 +107,30 @@ def built(p):
     return " ".join([X if X == "f" else X.__name__] + log)
 
 
+def delegated(p):
+    log = []
+
+    class MD(type):
+        def __new__(meta, name, bases, namespace):
+            for _ in (): pass
+            log.append("new")
+            if p["raises"]:
+                raise KeyError(name)
+            return super().__new__(meta, name, bases, namespace)
+
+        def __init__(cls, name, bases, namespace):
+            log.append("init")
+
+    D = type.__new__(MD, "D", (), {})
+    del log[:]
+    X = type("X", (D,), {}) if p["via"] == "type" else type.__new__(type, "X", (D,), {})
+    return " ".join([type(X).__name__] + log)
+
+
 def outcome(p):
     try:
+        if p["part"] == "delegate":
+            return delegated(p)
         if p["part"] == "builder":
             return built(p)
         if p["part"] == "call":
