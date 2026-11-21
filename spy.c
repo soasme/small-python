@@ -28148,6 +28148,29 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     return id;
 }
 static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static int keyed_dict(SPYContext *, SPYValue *);
+/* For a call of callee on argc arguments argv that is dict.__ior__, given
+ * its dict or bound to it, of a plain instance or keyed_dict: the dict's
+ * storage, borrowed, *x the dict, which merges it as its |= does
+ * (ior_consume); else NULL. */
+static NO_INLINE SPYValue *ior_merges(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **x) {
+    SPYValue *function = callee, *self = argc == 2 ? argv[0] : NULL;
+    if (callee->type == SPY_METHOD) { function = callee->as.method.function; self = argc == 1 ? callee->as.method.self : NULL; }
+    if (!self || function->type != SPY_NATIVE || function->as.native.kwcall != slot_call || function->as.native.owner != c->types[SPY_DICT] ||
+        strcmp(function->as.native.name->as.string.data, "__ior__")) return NULL;
+    SPYValue *own = builtin_value(c, self, SPY_DICT), *y = argv[argc - 1];
+    *x = self;
+    return own && (plain_instance(y) || keyed_dict(c, y)) ? own : NULL;
+}
+/* Dict x's merge of y into own, its storage, as dict.update() does, on m
+ * (consume), x its result; 0, or -1 on an error. */
+static int ior_consume(SPYContext *c, Machine *m, SPYValue *own, SPYValue *x, SPYValue *y) {
+    size_t blocks = m->block_len;
+    consume(c, m, B_EXTEND, own, -1, NULL, spy_retain(y), NULL);
+    if (m->block_len == blocks) return -1;
+    m->blocks[m->block_len - 1].consumer->instance = spy_retain(x);
+    return 0;
+}
 /* Whether callee is a generator's or coroutine's method from its type,
  * send, throw, close or __next__, given v, one of them, first: the
  * machine resumes it as v's bound method (slot_call binds it in C). */
@@ -30521,6 +30544,13 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(callee); spy_release(argv[0]);
         callee = bound; argv++; argc--;
     }
+    /* dict.__ior__ merges as |= does (ior_merges). */
+    SPYValue *x, *own = method < 0 && argc && argc <= 2 ? ior_merges(c, callee, argc, argv, &x) : NULL;
+    if (UNLIKELY(own != NULL)) {
+        ior_consume(c, m, own, x, argv[argc - 1]);
+        release_all(argc, argv); spy_release(callee);
+        return NULL;
+    }
     int id = consumer_of(c, callee, method, argc, argv);
     /* So does a generator's method from its type given the generator
      * first (generator_slot). */
@@ -32319,6 +32349,16 @@ again:
     SPYValue *bound = calls && argc >= 2 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method && set_like(argv[0]) ?
                       bind_method(c, argv[0], callee) : NULL;
     size_t from = bound != NULL, given = argc - from;
+    SPYValue *x, *own = calls && !bound && argc && argc <= 2 ? ior_merges(c, callee, argc, argv, &x) : NULL;
+    if (UNLIKELY(own != NULL)) {
+        /* dict.__ior__ merges as |= does (ior_merges), the call leaving the stack. */
+        SPYValue *y = spy_retain(argv[argc - 1]);
+        spy_retain(x); spy_retain(own);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        ior_consume(c, m, own, x, y);
+        release_all(3, (SPYValue *[]){x, own, y});
+        return NULL;
+    }
     id = consumer_of(c, bound ? bound : callee, -1, given, argv + from);
     SPYValue *consumer = id < 0 ? NULL : bound ? bound : spy_retain(callee);
     if (id < 0) spy_release(bound);

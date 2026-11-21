@@ -127,6 +127,7 @@ SOURCES = {
     "update_bad": 'result = {}.update(1)',
     "update_too_many": 'result = {}.update({}, {})',
     "or_non_dict": 'result = {} | [1]',
+    "ior_explicit": "class M:\n    def keys(s):\n        for _ in range(2): pass\n        log.append('keys')\n        return ['a', 'b']\n    def __getitem__(s, k):\n        for _ in range(2): pass\n        log.append(k)\n        return k * 2\nclass LD(dict): pass\nlog = []\nd = {'z': 0}\ne = LD(y=1)\nresult = (dict.__ior__(d, M()) is d, d, e.__ior__(M()) is e, e, dict.__ior__({}, [('p', 1)]), log)",
     "ior_iterable": "d = {}\nd |= [('a', 1)]\nresult = d",
     "merge_dict_iter": "log = []\nclass D(dict):\n    def keys(s):\n        for _ in (): pass\n        log.append('keys')\n        return ['a']\n"
                        "    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k)\n        return k * 2\n"
