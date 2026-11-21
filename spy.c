@@ -27373,10 +27373,19 @@ static int called_iterator(SPYValue *v) {
                                    v->as.iterator.source->type == SPY_INSTANCE || next_resumes(v->as.iterator.source))) || adapts(v);
 }
 /* Whether next() of v takes its item on the machine (consume): one that
- * adapts a map's, or a map or filter whose function is Python. */
+ * adapts a map's, or a map or filter whose function is Python, or a
+ * map's class whose __init__ or __new__ is (init_convert). */
 static SPYValue *bound_function(SPYContext *, SPYValue *);
 static int filter_fetches(SPYContext *, SPYValue *);
 static int map_steps(SPYValue *);
+static NO_INLINE SPYValue *class_init(SPYContext *, SPYValue *, int *);
+static NO_INLINE SPYValue *new_method(SPYContext *, SPYValue *);
+static int class_converts(SPYContext *c, SPYValue *cls) {
+    int plain = 0, kind = c->entering_kind;
+    SPYValue *init = class_init(c, cls, &plain);
+    c->entering_kind = kind;
+    return init ? machine_function(c, init) : !c->error_type[0] && new_method(c, cls);
+}
 static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
@@ -27390,7 +27399,8 @@ static int next_calls(SPYContext *c, SPYValue *v) {
         (function->type == SPY_NONE || (function->type == SPY_NATIVE && function->as.native.call == builtin) ||
          (function->type == SPY_CLASS && builtin_class(c, function))))
         return v->as.iterator.source->as.seq.items[1]->type != SPY_ITERATOR || v->as.iterator.source->as.seq.items[1]->as.iterator.kind != I_RANGE;
-    return function && (machine_function(c, function) || (kind == I_MAP && (bound_function(c, function) || map_steps(function))));
+    return function && (machine_function(c, function) ||
+                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || (function->type == SPY_CLASS && class_converts(c, function)))));
 }
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
  * Python, or it is a tuple whose items' __hash__ or __eq__ may be
