@@ -29919,6 +29919,7 @@ static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
  * step's (map_convert): machine_builtin's, sorted(), min(), max() or a
  * native method that may leave a call to its step (step_native). */
 static int map_steps(SPYValue *callee) {
+    if (callee->type == SPY_METHOD) callee = callee->as.method.function;
     return machine_builtin(callee) || is_builtin(callee, B_SORTED) || is_builtin(callee, B_MIN) || is_builtin(callee, B_MAX) ||
            (callee->type == SPY_NATIVE && callee->as.native.host == 2);
 }
@@ -49071,7 +49072,18 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         SPYValue *result = method ? call_keywords(c, method, argc, argv, keywords) : NULL;
         spy_release(method); return result;
     }
-    if (slots[index].kind == SLOT_CALL) return call_keywords(c, value, argc, argv, keywords);
+    if (slots[index].kind == SLOT_CALL) {
+        /* On the step's machine the call is its (callk_keywords), that of
+         * the object of a __call__ wrapper of a wrapper. */
+        Machine *m = argc <= 8 ? step_machine(c) : NULL;
+        while (m && value->type == SPY_METHOD && value->as.method.function->type == SPY_NATIVE &&
+               value->as.method.function->as.native.kwcall == slot_call && slot_index(value->as.method.function->as.native.name->as.string.data) == index)
+            value = value->as.method.self;
+        if (!m) return call_keywords(c, value, argc, argv, keywords);
+        SPYValue *args[8];
+        for (size_t i = 0; i < argc; i++) args[i] = spy_retain(argv[i]);
+        return callk_keywords(c, m, value, argc, args, keywords && keywords->as.map.len ? keywords : NULL, unchanged, NULL);
+    }
     int kind = slots[index].kind, op = slots[index].op;
     size_t expected = kind == SLOT_UNARY || kind == SLOT_BUILTIN ? 0 : 1;
     if (kind == SLOT_OTHER) expected = op == SLOT_FORMAT || op == SLOT_CONTAINS || op == SLOT_GETITEM || op == SLOT_DELITEM ? 1 : op == SLOT_SETITEM ? 2 : 0;
@@ -49288,9 +49300,9 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
         descriptor->as.native.method = 1;
         descriptor->as.native.owner = spy_retain(cls);
         /* A lookup or comparison may leave a call to the step (comparek,
-         * view_containsk, view_comparek, map_lookupk). */
+         * view_containsk, view_comparek, map_lookupk), as __call__ does. */
         descriptor->as.native.host = index >= 0 && ((slots[index].kind == SLOT_OTHER && slots[index].op == SLOT_CONTAINS) ||
-                                                    slots[index].kind == SLOT_COMPARE) ? 2 : 0;
+                                                    slots[index].kind == SLOT_COMPARE || slots[index].kind == SLOT_CALL) ? 2 : 0;
         if (!(descriptor->as.native.name = spy_string(c, name, strlen(name)))) { spy_release(descriptor); return NULL; }
     }
     int status = name_set(c, c->slots, key, descriptor);
