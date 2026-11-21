@@ -19513,15 +19513,16 @@ static NO_INLINE SPYValue *callk_keywords(SPYContext *c, Machine *m, SPYValue *f
 static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
     return callk_keywords(c, m, fn, argc, argv, NULL, k, ctx);
 }
-/* The rich comparison rich of x and y, which it takes, then continuation
- * k with ctx, which it takes, as callk: on machine m, m's call
- * (compare_enter), whose Python methods run there; otherwise in C. */
+/* The rich comparison rich of x and y, or past COMPARE_CALL the call of x
+ * with the items of tuple y, which it takes, then continuation k with ctx,
+ * which it takes, as callk: on machine m, m's call (compare_enter), whose
+ * Python methods run there; otherwise in C. */
 static NO_INLINE SPYValue *comparek(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int rich, Continuation k, SPYValue *ctx) {
     if (m && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE]) {
         c->k_fn = x; c->k_env = y; c->k_unit = 2 + rich; c->k = k; c->k_ctx = ctx;
         return NULL;
     }
-    SPYValue *result = comparison(c, compare_tokens[rich], x, y);
+    SPYValue *result = rich < COMPARE_CALL ? comparison(c, compare_tokens[rich], x, y) : call(c, x, y->as.seq.len, y->as.seq.items);
     spy_release(x); spy_release(y);
     return k(c, m, ctx, result);
 }
@@ -19549,16 +19550,18 @@ static NO_INLINE Machine *k_enter(SPYContext *c, Machine *m) {
         c->k = NULL; c->k_ctx = NULL;
         return m;
     }
-    Call *call = c->k_unit >= 2 ? compare_enter(c, m, c->k_fn, c->k_env, c->k_unit - 2, CALL_K) :
-                 c->k_unit ? unit_enter(c, c->k_fn, c->k_env, c->k_code, m) : call_enter(c, c->k_fn, c->k_env, m);
-    c->k_fn = c->k_env = NULL; c->k_unit = 0; c->k_code = NULL;
-    int kind = c->k_kind;
-    c->k_kind = 0;
+    /* Entering may run a trace function, whose calls reuse these. */
+    Continuation k = c->k;
+    SPYValue *fn = c->k_fn, *env = c->k_env, *ctx = c->k_ctx;
+    SPYContinuation host = c->k_host;
+    int kind = c->k_kind, unit = c->k_unit;
+    Program *code = c->k_code;
+    c->k = NULL; c->k_fn = c->k_env = c->k_ctx = NULL; c->k_kind = c->k_unit = 0; c->k_code = NULL;
+    Call *call = unit >= 2 ? compare_enter(c, m, fn, env, unit - 2, CALL_K) : unit ? unit_enter(c, fn, env, code, m) : call_enter(c, fn, env, m);
     if (call) {
-        call->k = c->k; call->k_ctx = c->k_ctx; call->host = c->k_host;
-        call->m.outermost = c->k ? CALL_K : kind ? kind : CALL_CHECKED;
-    } else spy_release(c->k_ctx);
-    c->k_ctx = NULL;
+        call->k = k; call->k_ctx = ctx; call->host = host;
+        call->m.outermost = k ? CALL_K : kind ? kind : CALL_CHECKED;
+    } else spy_release(ctx);
     return call ? &call->m : m;
 }
 /* Run fn, whose body is on the machine, in env, called from C; it takes env. */
@@ -40372,6 +40375,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             b = machine_pop(m); a = machine_pop(m);
             value = decorate_step(c, m, a, &b);
+            a = b = NULL;
             if (c->k_fn) goto enter_k;
             machine_push(c, m, value); break;
         CASE(BC_FUNCTION) machine_push(c, m, function_new(c, &f, n)); break;

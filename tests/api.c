@@ -466,6 +466,11 @@ int main(int argc, char **argv) {
                     "space = {'__builtins__': dict(vars(__build_class__.__self__), __build_class__=builder), '__name__': 'built'}\n"
                     "lines.clear()\nsys.settrace(tracer)\nexec('class Generic:\\n    for i in range(2):\\n        pass\\n', space)\n"
                     "sys.settrace(None)\nassert lines == [1, 2, 3, 2, 3, 2], lines\n");
+    /* While it traces, a call step (a native decorator, a builtin
+     * subclass's construction, a generic class) is made in C. */
+    execute(traced, "sys.settrace(tracer)\n@staticmethod\ndef s(): return 1\nclass B(bytearray): pass\nb = B(b'ab')\n"
+                    "class I(int): pass\ni = I(5)\nclass G[T]: pass\nsys.settrace(None)\n"
+                    "assert s() == 1 and s.__func__.__name__ == 's' and b == b'ab' and i == 5 and G.__type_params__[0].__name__ == 'T'\n");
     spy_context_free(traced);
     SPYContext *c = spy_context_new();
     assert(c && !spy_std_init(c));
