@@ -154,6 +154,9 @@ tests/oom: $(OBJDIR)/tests/oom.o
 bench/lifecycle: $(OBJDIR)/bench/lifecycle.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
+bench/compiler: $(OBJDIR)/bench/compiler.o $(OBJDIR)/spy.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
 run-cython: $(OBJDIR)/run-cython.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
@@ -473,5 +476,5 @@ coverage:
 	python3 tools/coverage.py $(COVERAGE_DIR)/all.lcov spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c
 
 clean:
-	rm -f bin/spy bin/spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
+	rm -f bin/spy bin/spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle bench/compiler examples/fib.so $(FUZZERS)
 	rm -rf $(OBJDIR) examples/fib.so.dSYM java/licenses java/*/native java/*/target

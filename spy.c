@@ -15698,7 +15698,15 @@ enum { MACHINE_STEPS(STEP_ENUM) };
 /* step is op's label in the machine (run_steps), which dispatches to it
  * directly. A program's steps number fewer than UINT32_MAX (emit), which
  * marks no step. */
-typedef struct { const void *step; int op, arg; uint32_t target, other; Node *node; } Instruction;
+typedef struct {
+    const void *step;
+    int op, arg;
+    union {
+        struct { uint32_t target, other; };
+        SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit, or NULL for a name. */
+    };
+    Node *node; /* Source location; some older instructions also execute this tree. */
+} Instruction;
 #define NO_STEP UINT32_MAX
 /* calls: BODY for a function body whose calls run on the machine (expands). */
 /* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
@@ -16002,6 +16010,7 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     else if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
     else p->items[p->len++] = (Instruction){.node = n, .arg = arg};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
+    if (op == BC_LOAD) p->items[pc].constant = n->constant;
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
@@ -16035,6 +16044,7 @@ static int loads_name(Node *);
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
+    if (n->constant) { emit(c, p, BC_LOAD, n, 0); return; }
     /* What cannot suspend is evaluated whole, a leaf or an operator on
      * leaves in one step; a comparison of other operands costs less as
      * machine steps. */
@@ -16042,7 +16052,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
      * Python __eq__ (name_load): an expression loading one takes steps. */
     if (!expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
         !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
-        emit(c, p, n->kind == N_NAME && p->calls == PAUSING ? BC_CLASS : n->kind == N_NAME || n->constant ? BC_LOAD :
+        emit(c, p, n->kind == N_NAME && p->calls == PAUSING ? BC_CLASS : n->kind == N_NAME ? BC_LOAD :
                    operator_right(n) ? BC_OPERATE : BC_EVAL, n, n->kind == N_NAME && p->calls == PAUSING ? 10 : 0);
         return;
     }
@@ -18974,7 +18984,7 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
             failed = !(rest->value = spy_tuple(c, argc - fit, argv + fit));
         }
         if (!failed && open_parameters(c, fn, env, fit, kw, kwc)) failed = bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
-        if (take) release_all(argc - fit, argv + fit);
+        if (take && argc > fit) release_all(argc - fit, argv + fit);
     } else {
         failed = !plain ? bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords) || declare_locals(c, env) :
             declare_locals(c, env) ? -1 : bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
@@ -40149,8 +40159,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value);
             NEXT;
         CASE(BC_LOAD)
-            /* A literal or a name found along the fast path, without eval. */
-            value = leaf_operand(&f, n);
+            /* The constant is an instruction operand; names use their lookup cache. */
+            value = ins->constant ? ins->constant : name_fast(f.env, n);
             machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n)); NEXT;
         CASE(BC_EXEC) {
             /* An assignment, ticked as this step, needs no statement dispatch. */

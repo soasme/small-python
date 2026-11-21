@@ -9,6 +9,7 @@
 /tests/metering
 /tests/run-spec
 /bench/lifecycle
+/bench/compiler
 __pycache__/
 /tests/upstream/
 /tests/results/
