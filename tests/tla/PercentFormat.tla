@@ -82,7 +82,7 @@ FloatText(p) ==
     IN  Padded(Sign(p.num < 0, p.flags), IF p.type = "f" THEN fixed ELSE sci, p.flags, p.width)
 
 
-Cases == {"s_r_a", "str_subclass_operands", "s_object", "percent_literal", "mapping", "mapping_missing", "mapping_needs_dict", "mapping_mixed",
+Cases == {"s_r_a", "str_subclass_operands", "s_object", "percent_literal", "mapping", "mapping_getitem_order", "mapping_missing", "mapping_needs_dict", "mapping_mixed",
           "star_width", "star_negative", "star_not_int", "single_value", "tuple_value", "not_enough",
           "not_all_converted", "no_format_tuple", "no_format_dict", "unsupported_char", "incomplete",
           "c_conversion", "c_bad", "c_range", "c_float", "d_float", "d_index", "d_str", "x_float",
@@ -115,6 +115,8 @@ Case(c) ==
       [] c = "s_object" -> "'p|P()|   ab|ab   |x'"
       [] c = "percent_literal" -> "'100% 5'"
       [] c = "mapping" -> "'Python has 002 quote types.'"
+      \* A Python __getitem__ reads each key when its conversion is reached.
+      [] c = "mapping_getitem_order" -> "('1-V-1', ['a', 'b', 'repr', 'a'])"
       [] c = "mapping_missing" -> "KeyError: 'x'"
       [] c = "mapping_needs_dict" -> "TypeError: format requires a mapping, not tuple"
       [] c = "mapping_mixed" -> "ValueError: format requires a parenthesised mapping key at position 6"

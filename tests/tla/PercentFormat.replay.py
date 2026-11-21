@@ -62,6 +62,7 @@ SOURCES = {
     "percent_literal": "result = '100%% %d' % 5",
     "mapping": "result = '%(language)s has %(number)03d quote types.' % {'language': 'Python', 'number': 2}",
     "mapping_missing": "result = '%(x)s' % {}",
+    "mapping_getitem_order": "log = []\nclass M:\n    def __getitem__(s, k):\n        for _ in (): pass\n        log.append(k); return V() if k == 'b' else 1\nclass V:\n    def __repr__(s): log.append('repr'); return 'V'\nresult = ('%(a)s-%(b)r-%(a)d' % M(), log)",
     "mapping_needs_dict": "result = '%(x)s' % (1,)",
     "mapping_mixed": "result = '%(x)s %s' % {'x': 1}",
     "star_width": "result = '%*d|%-*d|%.*f' % (5, 1, 4, 2, 2, 3.14159)",

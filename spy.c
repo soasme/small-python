@@ -25581,6 +25581,18 @@ static SPYValue *conversion_method(SPYContext *, SPYValue *, size_t, SPYValue *c
 static SPYValue *conversion_value(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *percent_converted(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *index_function(SPYContext *, SPYValue *);
+/* A % job's state (percent_build): the format and args in held, the text
+ * so far in out, the spec's position and count of characters and the
+ * arguments' length and index in at, value v and name, which it takes. */
+static SPYValue *percent_job(SPYContext *c, SPYValue *const *held, Buffer *out, const int64_t *at, SPYValue *v, SPYValue *name) {
+    SPYValue *parts[] = {spy_retain(held[0]), spy_retain(held[1]), spy_string(c, out->data ? out->data : "", out->len),
+                         int_value(c, at[0]), int_value(c, at[1]), int_value(c, at[2]), int_value(c, at[3]), spy_retain(v), name};
+    int whole = 1;
+    for (int k = 0; k < 9; k++) whole = whole && parts[k];
+    SPYValue *job = whole ? spy_tuple(c, 9, parts) : NULL;
+    release_all(9, parts);
+    return job;
+}
 /* Of percent_build's spec ch at its arguments' value v, on m: 1 when
  * the job defers its conversion, as percent_build says, its state built
  * of the format and args in held, the text so far in out and the spec's
@@ -25599,13 +25611,7 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
         if (!(function = index_function(c, v)) || !(found[0] = bytes && ch == 'c' ? spy_string(c, "index", 5) : spy_string(c, "int", 3))) return 0;
     } else if (instance_like(v) ? !(function = conversion_method(c, callee, 1, &v, found)) && (number || c->error_type[0] || !repr_job(c, callee, v)) :
                number || !repr_job(c, callee, v)) return 0;
-    SPYValue *parts[] = {spy_retain(held[0]), spy_retain(held[1]), spy_string(c, out->data ? out->data : "", out->len),
-                         int_value(c, at[0]), int_value(c, at[1]), int_value(c, at[2]), int_value(c, at[3]),
-                         spy_retain(v), function ? found[0] : spy_none(c)};
-    int whole = 1;
-    for (int k = 0; k < 9; k++) whole = whole && parts[k];
-    if (whole) job = spy_tuple(c, 9, parts);
-    release_all(9, parts);
+    job = percent_job(c, held, out, at, v, function ? found[0] : spy_none(c));
     /* A __buffer__ takes the flags (conversion_method). */
     if (!job || !function) spy_release(found[1]);
     if (job && function) special_callk(c, m, function, v, found[1] != NULL, &found[1], machine_function(c, function) ? NULL : conversion_absent(c, found[0], v),
@@ -25634,6 +25640,7 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
  * no continuation (CALL_CHECKED); the job goes on from that spec, given
  * its state and the argument's text converted (percent_converted). A
  * bytearray format is held by a view of it, its export (percent_call). */
+static SPYValue *percent_keyed(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYValue *args, SPYValue *state, SPYValue *converted) {
     SPYValue *held = format;
     if (format->type == SPY_MEMORYVIEW) format = format->as.memory.source;
@@ -25643,6 +25650,9 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
     SPYValue *tuple = builtin_value(c, args, SPY_TUPLE), **saved = state ? state->as.seq.items : NULL;
     PercentArgs p = {.args = tuple ? tuple : args, .arglen = tuple ? (ptrdiff_t)tuple->as.seq.len : -1, .argidx = tuple ? 0 : -2, .bytes = bytes};
     SPYValue *dict = percent_mapping(c, args, bytes) ? args : NULL;
+    /* A resumed job's first key has its value, saved[7], read (percent_keyed). */
+    int keyed = saved && saved[8] == c->unbound;
+    SPYValue *went = NULL;
     Buffer out = {.ctx = c};
     size_t i = 0, chars = 0;
     if (saved) {
@@ -25680,7 +25690,18 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             }
             if (depth) { errorf(c, "ValueError", "stray %% or incomplete format key at position %zu", fmtstart); break; }
             key = bytes ? spy_bytes(c, s + keystart, at - keystart - 1) : spy_string(c, s + keystart, at - keystart - 1);
-            SPYValue *value = !key ? NULL : converted ? spy_retain(saved[7]) : get_index(c, dict, key);
+            SPYValue *getitem = key && m && !converted && !keyed && dict->type == SPY_INSTANCE ? class_lookup(dict->as.map.parent, "__getitem__") : NULL;
+            if (getitem && machine_function(c, getitem)) {
+                /* A Python __getitem__ reads the key on m, the job going on with its value (percent_keyed). */
+                SPYValue *job = percent_job(c, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx},
+                                            dict, spy_retain(c->unbound));
+                if (job) went = callk(c, m, getitem, 2, (SPYValue *[]){spy_retain(dict), key}, percent_keyed, job);
+                else spy_release(key);
+                deferred = 1;
+                break;
+            }
+            SPYValue *value = !key ? NULL : converted || keyed ? spy_retain(saved[7]) : get_index(c, dict, key);
+            keyed = 0;
             if (!value) { spy_release(key); break; }
             spy_release(p.owned); p.owned = value; p.args = value;
             p.arglen = -3; p.argidx = -4;
@@ -25817,7 +25838,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
         errorf(c, "TypeError", "not all arguments converted during %s formatting (required %td, got %td)", bytes ? "bytes" : "string",
                p.arglen < 0 ? 0 : p.argidx, p.arglen < 0 ? 1 : p.arglen);
     spy_release(p.owned); spy_release(converted);
-    SPYValue *result = NULL;
+    SPYValue *result = went;
     if (!c->error_type[0] && !deferred) result = format->type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
         bytes ? spy_bytes(c, out.data ? out.data : "", out.len) : spy_string(c, out.data ? out.data : "", out.len);
     mem_free(out.data); return result;
@@ -25859,6 +25880,17 @@ static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, S
     }
     SPYValue *value = text ? percent_build(c, m, saved[0], saved[1], state, text) : NULL;
     spy_release(result); spy_release(state);
+    return value;
+}
+/* What a mapping's Python __getitem__ returned for a % job's key: the job
+ * goes on from that spec with it as the key's value, saved[7]. */
+static SPYValue *percent_keyed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **saved = state->as.seq.items, *value = NULL;
+    if (result) {
+        spy_release(saved[7]); saved[7] = result;
+        value = percent_build(c, m, saved[0], saved[1], state, NULL);
+    }
+    spy_release(state);
     return value;
 }
 /* What the Python __release_buffer__ that percent_converted called
