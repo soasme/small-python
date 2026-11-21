@@ -27519,7 +27519,8 @@ static int called_iterator(SPYValue *v) {
 }
 /* Whether next() of v takes its item on the machine (consume): one that
  * adapts a map's, or a map or filter whose function is Python, or a
- * map's class whose __init__ or __new__ is (init_convert). */
+ * map's class whose __init__ or __new__ is (init_convert), or its
+ * staticmethod, a call step (map_convert). */
 static SPYValue *bound_function(SPYContext *, SPYValue *);
 static int filter_fetches(SPYContext *, SPYValue *);
 static int map_steps(SPYValue *);
@@ -27545,7 +27546,8 @@ static int next_calls(SPYContext *c, SPYValue *v) {
          (function->type == SPY_CLASS && builtin_class(c, function))))
         return v->as.iterator.source->as.seq.items[1]->type != SPY_ITERATOR || v->as.iterator.source->as.seq.items[1]->as.iterator.kind != I_RANGE;
     return function && (machine_function(c, function) ||
-                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || (function->type == SPY_CLASS && class_converts(c, function)))));
+                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD ||
+                                           (function->type == SPY_CLASS && class_converts(c, function)))));
 }
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
  * Python, or it is a tuple whose items' __hash__ or __eq__ may be
@@ -29594,6 +29596,16 @@ static SPYValue *getter_bound(SPYContext *c, SPYValue *get, SPYValue **argv, siz
     spy_retain(function); spy_release(get);
     return function;
 }
+/* The function a call of v calls: v a staticmethod, an instance of a
+ * subclass that keeps staticmethod's __call__, or that __call__ bound to
+ * one (super().__call__); borrowed, or NULL. */
+static SPYValue *static_called(SPYContext *c, SPYValue *v) {
+    if (v->type == SPY_STATICMETHOD) return v->as.wrapper.function;
+    SPYValue *call = name_local(c->types[SPY_STATICMETHOD], "__call__"), *base;
+    if (v->type == SPY_METHOD && v->as.method.function == call) return (base = builtin_value(c, v->as.method.self, SPY_STATICMETHOD)) ? base->as.wrapper.function : NULL;
+    base = v->type == SPY_INSTANCE && v->as.map.base ? builtin_value_base(c, v, SPY_STATICMETHOD) : NULL;
+    return base && class_lookup(v->as.map.parent, "__call__") == call ? base->as.wrapper.function : NULL;
+}
 /* The function on the machine that calling staticmethod v calls; borrowed, or NULL. */
 static ALWAYS_INLINE SPYValue *static_function(SPYContext *c, SPYValue *v) {
     return v->type == SPY_STATICMETHOD && machine_function(c, v->as.wrapper.function) ? v->as.wrapper.function : NULL;
@@ -30092,11 +30104,15 @@ static int anext_steps(SPYValue *callee, int method) {
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
-    if (method < 0 && (result = static_function(c, callee))) {
-        /* A staticmethod calls its function. */
-        spy_retain(result); spy_release(callee);
-        if ((*env = function_env(c, result, argc, argv, NULL, 1))) return result;
-        spy_release(result);
+    while (method < 0 && (result = static_called(c, callee))) {
+        /* A staticmethod calls its function, which takes its place. */
+        spy_retain(result);
+        spy_release(callee);
+        callee = result;
+    }
+    if (method < 0 && machine_function(c, callee)) {
+        if ((*env = function_env(c, callee, argc, argv, NULL, 1))) return callee;
+        spy_release(callee);
         return NULL;
     }
     if (method < 0 && (result = native_entered(c, m, callee, argc, argv, env))) {
@@ -31768,6 +31784,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return stack_method_call(c, m, n, argc, calls, env);
     }
     relocate(c, n);
+again:
     if (calls && machine_function(c, callee)) {
         /* A call on the machine takes the arguments and the callee from the stack. */
         m->len -= argc + 1;
@@ -31838,14 +31855,12 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
         return result;
     }
-    if (calls && (function = static_function(c, callee))) {
-        /* A staticmethod calls its function. */
-        spy_retain(function);
-        m->len -= argc + 1;
+    if (calls && (result = static_called(c, callee))) {
+        /* A staticmethod calls its function, which takes its place. */
+        argv[-1] = spy_retain(result);
         spy_release(callee);
-        if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
-        spy_release(function);
-        return NULL;
+        callee = argv[-1];
+        goto again;
     }
     if (calls && argc && generator_slot(c, callee, argv[0])) {
         /* A generator's method from its type given the generator is its
@@ -32353,9 +32368,14 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         kw[kwc] = (Entry){a->global_key, argv[positional + kwc], name.hash};
         kwc++;
     }
-    SPYValue *wrapped = calls ? static_function(c, callee) : NULL;
+    for (SPYValue *wrapped; calls && (wrapped = static_called(c, callee));) {
+        /* A staticmethod calls its function, which takes its place. */
+        argv[-1] = spy_retain(wrapped);
+        spy_release(callee);
+        callee = argv[-1];
+    }
+    SPYValue *wrapped = calls && machine_function(c, callee) ? callee : NULL;
     if (wrapped) {
-        /* A staticmethod calls its function. */
         SPYValue *callee_env = keyword_env(c, wrapped, positional, argv, kw, kwc, NULL, 0);
         if (!callee_env) goto done;
         spy_retain(wrapped);
@@ -32563,10 +32583,9 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         callee = first; args = rest; called = 1;
         if (!rest) { spy_release(keywords); spy_release(callee); return NULL; }
     }
-    if (calls && static_function(c, callee)) {
-        /* A staticmethod calls its function. */
-        SPYValue *wrapped = spy_retain(static_function(c, callee));
-        spy_release(callee); callee = wrapped;
+    for (SPYValue *wrapped; calls && (wrapped = static_called(c, callee));) {
+        /* A staticmethod calls its function, which takes its place. */
+        spy_retain(wrapped); spy_release(callee); callee = wrapped;
     }
     if (calls && callee == c->types[SPY_COMPLEX] && keywords->as.map.len)
         /* complex() naming its parts converts them on m (complex_go). */
@@ -38816,14 +38835,14 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         return status;
     }
     if (!c->error_type[0] && items->as.seq.len <= COMPARE_ARGS && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] &&
-        (map_steps(callee) || is_builtin(callee, B_NEXT) ||
+        (map_steps(callee) || is_builtin(callee, B_NEXT) || callee->type == SPY_STATICMETHOD ||
          (callee->type == SPY_CLASS && (described_new(c, callee, 0) || built_call(c, callee, 0, items->as.seq.len, items->as.seq.items))) ||
          index_arguments(c, callee, -1, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 2 && is_builtin(callee, B_ROUND) && is_number(items->as.seq.items[0]) && index_function(c, items->as.seq.items[1])) ||
          (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) ||
          (items->as.seq.len == 1 && repr_job(c, is_builtin(callee, B_ASCII) ? c->field_calls[0] : callee, items->as.seq.items[0])))) {
         /* A builtin whose call may go on on the machine, an argument's
-         * __index__ among them (index_arguments), is a call step of
+         * __index__ among them (index_arguments), or a staticmethod, is a call step of
          * its own (compare_enter), sorted()'s a keyword call's (key_consumer),
          * the call of c->unbound left in c->k_fn. */
         c->k_fn = spy_retain(callee); c->k_env = items; c->k = NULL; c->k_ctx = NULL;
@@ -38989,7 +39008,8 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
         if (!callee) return 0;
         if (!(function = machine_function(c, callee) ? callee : bound_function(c, callee)))
-            return callee->type == SPY_NATIVE || callee->type == SPY_CLASS || (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) ?
+            return callee->type == SPY_NATIVE || callee->type == SPY_CLASS || callee->type == SPY_STATICMETHOD ||
+                   (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) ?
                    map_convert(c, m, v, fn, env) : 0;
         if (!(args = zip_items(c, v))) return -1;
         /* A bound method or callable instance's self goes first. */
