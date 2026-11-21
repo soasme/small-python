@@ -42307,13 +42307,25 @@ static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv
     return env;
 }
 static SPYValue *directory_of(SPYContext *, SPYValue *, int);
-/* dir()'s listing, sorted. */
-static SPYValue *directory_sorted(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *listing) {
+/* dir()'s list, sorted. */
+static SPYValue *directory_listed(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
     (void)m; (void)ctx;
-    SPYValue *result = listing ? builtin(c, 1, &listing, (void *)(intptr_t)B_LIST) : NULL;
     if (result && sort_list(c, result, NULL, 0, NULL)) { spy_release(result); result = NULL; }
-    spy_release(listing);
     return result;
+}
+/* dir()'s listing, which it takes, as a sorted list: list() of it, a call
+ * step on m when the machine iterates it (step_callk). */
+static int machine_source(SPYContext *, SPYValue *);
+static SPYValue *directory_sorted(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *listing) {
+    (void)ctx;
+    if (listing && m && machine_source(c, listing)) {
+        SPYValue *args = tuple_of(c, 1, &listing);
+        spy_release(listing);
+        return args ? step_callk(c, m, spy_retain(c->types[SPY_LIST]), args, directory_listed, NULL) : NULL;
+    }
+    SPYValue *result = listing ? builtin(c, 1, &listing, (void *)(intptr_t)B_LIST) : NULL;
+    spy_release(listing);
+    return directory_listed(c, m, NULL, result);
 }
 /* What a module subclass's instance's __dict__ gave, own, for dir() of it:
  * its keys sorted, or what a __dir__ it holds returns, called on m when
@@ -42349,6 +42361,15 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
     if (!plain && object && object->type == SPY_CLASS && object->as.map.meta && class_lookup(object->as.map.meta, "__dir__") &&
         class_lookup(object->as.map.meta, "__dir__") != name_local(c->types[SPY_CLASS], "__dir__"))
         method = special_method(c, object, "__dir__");
+    Machine *m = step_machine(c);
+    SPYValue *function = !method || !m ? NULL : method->type == SPY_METHOD ? method->as.method.function : method;
+    if (function && machine_function(c, function)) {
+        /* A Python __dir__ is the step's call, its listing sorted after it (directory_sorted). */
+        int bound = method->type == SPY_METHOD;
+        SPYValue *self = bound ? spy_retain(method->as.method.self) : NULL;
+        spy_release(method); spy_release(result); spy_release(names);
+        return callk(c, m, function, (size_t)bound, &self, directory_sorted, NULL);
+    }
     if (method) {
         /* dir() lists what __dir__ returns, as list() would. */
         SPYValue *items = call(c, method, 0, NULL);
@@ -42374,6 +42395,18 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
         for (; source && !c->error_type[0]; source = mro && next < mro->as.seq.len ? mro->as.seq.items[next++] : NULL) {
             SPYValue *bindings = source->type == SPY_CLASS ? class_namespace(c, source) : spy_retain(namespace_map(source));
             if (!bindings) break;
+            /* A locals mapping's Python keys(), its own or its class's, is the
+             * step's call (directory_sorted). */
+            SPYValue *parent = !object && m && bindings->type == SPY_INSTANCE ? bindings->as.map.parent : NULL;
+            SPYValue *hook = parent ? class_lookup(parent, "__getattribute__") : NULL;
+            int plain = parent && (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) &&
+                        !data_descriptor(instance_lookup(parent, "keys"));
+            SPYValue *own = plain ? name_local(bindings, "keys") : NULL, *keys_function = own ? own : plain ? class_lookup(parent, "keys") : NULL;
+            if (keys_function && machine_function(c, keys_function)) {
+                spy_release(result); spy_release(names);
+                if (own) spy_release(bindings);
+                return callk(c, m, keys_function, !own, &bindings, directory_sorted, NULL);
+            }
             if (!object && bindings != source && bindings->type != SPY_DICT) {
                 SPYValue *method = attribute(c, bindings, "keys");
                 SPYValue *keys = method ? call(c, method, 0, NULL) : NULL;

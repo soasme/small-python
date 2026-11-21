@@ -83,6 +83,7 @@ SOURCES = {
                            "        return {'b': 1, 'a': 2}\nresult = (dir(M('m')), len(n))",
     "dir_sorted": "class D:\n    b = 1\n    a = 2\nresult = [n for n in dir(D) if not n.startswith('_')]",
     "dir_hook_calls": "n = []\nclass D:\n    def __dir__(self):\n        for _ in (): pass\n        n.append(1)\n        return ('z', 'a', 'y')\nresult = (dir(D()), len(n))",
+    "dir_locals_keys": "n = []\nclass NS:\n    def __getitem__(s, k): raise KeyError(k)\n    def keys(s):\n        for _ in (): pass\n        n.append('keys')\n        return iter(['q', 'p'])\nresult = (eval('dir()', {}, NS()), n)",
     "dir_hook": "class D:\n    def __dir__(self): return ['z', 'a']\nresult = dir(D())",
     "dir_hook_generator": "class D:\n    def __dir__(self):\n        for _ in range(2): pass\n        yield 'b'; yield 'a'\nresult = dir(D())",
     "dir_hook_iterable": "class I:\n    def __iter__(self):\n        for _ in range(2): pass\n        return iter(['y', 'x'])\n"

@@ -55,7 +55,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
 
 
 Cases == {"getattr_nonstr", "property_get_calls", "property_copy_calls", "property_subclass_doc", "property_abstract_truth", "wrapper_name_copy", "staticmethod_instance_call", "delattr_hook_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
-          "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
+          "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_locals_keys", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
           "dir_hook_bad", "dir_module_property", "callable_forms", "callable_unread", "id_identity", "hash_big", "hash_bad", "hash_eq_only", "hash_method_object",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
           "type_bad_dict", "type_bad_name", "type_qualname_kw", "isinstance_hook", "isinstance_bad",
@@ -106,6 +106,8 @@ Case(c) ==
       [] c = "dir_module_property" -> "(['a', 'b'], 1)"
       \* a Python __dir__, which may loop, is called once and its iterable sorted
       [] c = "dir_hook_calls" -> "(['a', 'y', 'z'], 1)"
+      \* dir() of a locals mapping lists what its Python keys() gives.
+      [] c = "dir_locals_keys" -> "(['p', 'q'], ['keys'])"
       [] c = "dir_hook" -> "['a', 'z']"
       \* a generator __dir__ or an instance's Python __iter__ is listed, then sorted
       [] c = "dir_hook_generator" -> "['a', 'b']"
