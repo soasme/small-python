@@ -11824,20 +11824,59 @@ static SPYValue *abstract_flag(SPYContext *c, SPYValue *const *callables, size_t
     }
     return spy_bool(c, 0);
 }
-static SPYValue *method_wrapper(SPYContext *c, SPYValue *function, int type) {
+/* The attributes a staticmethod or classmethod copies from its function. */
+static const char *const wrapper_names[] = {"__module__", "__name__", "__qualname__", "__doc__"};
+/* Wrapper v's copy of its function's attribute wrapper_names[at], value,
+ * an AttributeError leaving it out: 0, or -1 with another error. */
+static int wrapper_copy(SPYContext *c, SPYValue *v, size_t at, SPYValue *value) {
+    if (value) name_set(c, v->as.wrapper.attributes, wrapper_names[at], value);
+    else if (error_is(c, "AttributeError")) spy_clear_error(c);
+    spy_release(value);
+    return c->error_type[0] ? -1 : 0;
+}
+static SPYValue *wrapper_copy_next(SPYContext *, Machine *, SPYValue *, size_t);
+/* What the Python read of state[0]'s function's attribute state[1] gave,
+ * value: the copy goes on (wrapper_copy_next). */
+static SPYValue *wrapper_copied(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
+    SPYValue *v = spy_retain(state->as.seq.items[0]);
+    size_t at = (size_t)state->as.seq.items[1]->as.integer_data.small;
+    spy_release(state);
+    if (wrapper_copy(c, v, at, value)) { spy_release(v); return NULL; }
+    return wrapper_copy_next(c, m, v, at + 1);
+}
+/* Wrapper v's copies from wrapper_names[at] on, which it takes, a read
+ * that calls Python an attribute step on m (wrapper_copied): v, or NULL. */
+static SPYValue *wrapper_copy_next(SPYContext *c, Machine *m, SPYValue *v, size_t at) {
+    for (; at < sizeof(wrapper_names) / sizeof(*wrapper_names); at++) {
+        SPYValue *value = attribute_step(c, v->as.wrapper.function, wrapper_names[at]), *function = c->fallback, *index, *state;
+        if (value || c->error_type[0] || !function) {
+            if (wrapper_copy(c, v, at, value)) { spy_release(v); return NULL; }
+            continue;
+        }
+        c->fallback = NULL;
+        state = (index = spy_int(c, (int64_t)at)) ? spy_tuple(c, 2, (SPYValue *[]){v, index}) : NULL;
+        spy_release(index); spy_release(v);
+        if (!state) { spy_release(function); return NULL; }
+        return attribute_callk(c, m, state->as.seq.items[0]->as.wrapper.function, wrapper_names[at], function, wrapper_copied, state);
+    }
+    return v;
+}
+/* A staticmethod or classmethod (type) of function, a user's when user,
+ * its attributes copied on m when given (wrapper_copy_next), else
+ * natively. */
+static SPYValue *method_wrapper_on(SPYContext *c, Machine *m, SPYValue *function, int type, int user) {
     SPYValue *v = value_new(c, type);
     if (!v) return NULL;
     v->as.wrapper.function = spy_retain(function);
-    v->as.wrapper.attributes = value_new(c, SPY_DICT);
-    const char *names[] = {"__module__", "__name__", "__qualname__", "__doc__"};
-    for (size_t i = 0; i < sizeof(names) / sizeof(*names) && !c->error_type[0]; i++) {
-        SPYValue *value = attribute(c, function, names[i]);
-        if (value) name_set(c, v->as.wrapper.attributes, names[i], value);
-        else if (error_is(c, "AttributeError")) spy_clear_error(c);
-        spy_release(value);
-    }
-    if (c->error_type[0]) { spy_release(v); return NULL; }
+    v->as.wrapper.user = user;
+    if (!(v->as.wrapper.attributes = value_new(c, SPY_DICT))) { spy_release(v); return NULL; }
+    if (m) return wrapper_copy_next(c, m, v, 0);
+    for (size_t i = 0; i < sizeof(wrapper_names) / sizeof(*wrapper_names); i++)
+        if (wrapper_copy(c, v, i, attribute(c, function, wrapper_names[i]))) { spy_release(v); return NULL; }
     return v;
+}
+static SPYValue *method_wrapper(SPYContext *c, SPYValue *function, int type) {
+    return method_wrapper_on(c, NULL, function, type, 0);
 }
 /* member_descriptor and getset_descriptor: the slots of __slots__ classes
  * and the fields of builtin exception classes. Values live in the
@@ -16647,10 +16686,16 @@ static ALWAYS_INLINE int proxies_instance(SPYValue *v) {
 }
 /* Whether calling builtin class callee with argc arguments argv may leave
  * a call to its step (step_native): property(), which reads its getter's
- * __doc__ (property_init), and reversed() of a mappingproxy of an
- * instance, which calls its mapping's __reversed__ (mappingproxy_method). */
+ * __doc__ (property_init), staticmethod() and classmethod() of an
+ * instance or class, which read its names (method_wrapper_on), and
+ * reversed() of a mappingproxy of an instance, which calls its mapping's
+ * __reversed__ (mappingproxy_method). */
 static ALWAYS_INLINE int class_steps(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
-    return callee->type == SPY_CLASS && (callee == c->types[SPY_PROPERTY] || (argc == 1 && callee == c->iterator_types[IT_REVERSED] && proxies_instance(argv[0])));
+    return callee->type == SPY_CLASS &&
+           (callee == c->types[SPY_PROPERTY] ||
+            (argc == 1 && callee == c->iterator_types[IT_REVERSED] && proxies_instance(argv[0])) ||
+            (argc == 1 && (callee == c->types[SPY_STATICMETHOD] || callee == c->types[SPY_CLASSMETHOD]) &&
+             (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)));
 }
 /* Whether len() or hash() of a mappingproxy of an instance, in argv, is
  * that of its mapping (mappingproxy_len, mappingproxy_hash), put in its
@@ -47446,9 +47491,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     case B_STATICMETHOD: case B_CLASSMETHOD: {
         if (argc != 1) return errorf(c, "TypeError", "%s expected 1 argument, got %zu", id == B_STATICMETHOD ? "staticmethod" : "classmethod", argc);
-        SPYValue *wrapper = method_wrapper(c, a, id == B_STATICMETHOD ? SPY_STATICMETHOD : SPY_CLASSMETHOD);
-        if (wrapper) wrapper->as.wrapper.user = 1;
-        return wrapper;
+        /* An instance's or class's attribute reads may call Python, on the step's machine. */
+        Machine *m = a->type == SPY_INSTANCE || a->type == SPY_CLASS ? step_machine(c) : NULL;
+        return method_wrapper_on(c, m, a, id == B_STATICMETHOD ? SPY_STATICMETHOD : SPY_CLASSMETHOD, 1);
     }
     case B_SLICE: {
         if (argc < 1 || argc > 3) goto arity;

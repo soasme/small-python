@@ -58,6 +58,8 @@ SOURCES = {
                           "    def __delete__(self, i): log.append('delete')\nclass Q:\n    d = D()\n"
                           "def bad():\n    try: delattr(H(), 'bad')\n    except LookupError as e: return type(e).__name__\n"
                           "result = (delattr(H(), 'x'), delattr(P(), 'p'), delattr(Q(), 'd'), bad(), log)",
+    "wrapper_name_copy": ("log = []\nclass F:\n    def __getattr__(s, n):\n        log.append(n)\n        return 'n_' + n\n"
+                          "w = staticmethod(F())\nresult = (w.__name__, log)"),
     "property_abstract_truth": ("log = []\nclass B:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        log.append(s.v)\n        return bool(s.v)\n"
                                 "def a(s): pass\ndef b(s, v): pass\ndef d(s): pass\n"
                                 "a.__isabstractmethod__ = B(0)\nb.__isabstractmethod__ = B(1)\nd.__isabstractmethod__ = B(2)\n"

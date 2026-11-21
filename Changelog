@@ -692,6 +692,7 @@ Unreleased (0.10.0):
 - `float.fromhex()` and `float.from_number()` call a subclass, and a number's Python `__float__` or `__index__`, without nesting on the C stack
 - A property subclass's `getter()`, `setter()`, `deleter()` and construction call its Python `__new__`, `__init__` and the getter's `__doc__` without nesting on the C stack
 - `__isabstractmethod__` of a property, staticmethod or classmethod, and a property's `__name__`, call a Python `__getattr__` or `__bool__` without nesting on the C stack
+- `staticmethod()` and `classmethod()` of an instance or class call its Python `__getattr__` without nesting on the C stack
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
