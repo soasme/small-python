@@ -542,11 +542,10 @@ struct SPYContext {
     SPYValue *splitting;
     /* The code unit_enter runs in place of its unit's body: a generic class's header (header_step). */
     Program *k_code;
-    /* A call step's operands read in C (operand_call): their env and the
-     * step's machine, on which a name's comparing lookup runs (name_rewalk);
-     * the machine whose lookup answers at once, whether one left a call on
-     * it, and the lists of values those calls found on machines' stacks. */
-    SPYValue *walk_env;
+    /* A call step's operands read in C (operand_call): the step's machine,
+     * on which a name's comparing lookup runs (name_rewalk); the machine
+     * whose lookup answers at once, whether one left a call on it, and the
+     * lists of values those calls found on machines' stacks. */
     Machine *walk_m, *walk_sync;
     int walk_pending, walk_markers;
 };
@@ -3370,6 +3369,7 @@ static int name_compares(SPYContext *c, SPYValue *dict, Name name) {
     return 0;
 }
 static SPYValue *name_rewalk(SPYContext *, SPYValue *, SPYValue *, Name, int);
+static int walking(SPYContext *, SPYValue *);
 static SPYValue *unchanged(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *lazy_reifyk(SPYContext *, Machine *, SPYValue *, const char *, SPYValue *, Continuation, SPYValue *);
 /* name's value in env, looked up from env from on, annotation whether the
@@ -3401,7 +3401,7 @@ static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e
             /* A dict's key that is not a str compares on m (map_findk, name_searched). */
             SPYValue *dict = storage ? dictionary_value(c, namespace) : name_dict(e);
             if (dict && name_compares(c, dict, name)) {
-                if (!m && k == unchanged && env == c->walk_env) return name_rewalk(c, env, at, name, annotation);
+                if (!m && k == unchanged && walking(c, env)) return name_rewalk(c, env, at, name, annotation);
                 SPYValue *key = spy_string(c, name.text, name.len), *state = NULL;
                 int64_t hash;
                 if (key && !hash_value(c, key, &hash))
@@ -3430,7 +3430,7 @@ static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e
         /* A lazy import's __import__ is a call on m (lazy_reifyk). */
         if (v && v->type == SPY_LAZY_IMPORT && lazy_reifies(e)) {
             if (m) return lazy_reifyk(c, m, e, text, v, k, ctx);
-            if (k == unchanged && env == c->walk_env) { spy_release(v); return name_rewalk(c, env, e, name, annotation); }
+            if (k == unchanged && walking(c, env)) { spy_release(v); return name_rewalk(c, env, e, name, annotation); }
         }
         if (v) return k(c, m, ctx, name_bound(c, env, e, v, text));
     }
@@ -32100,6 +32100,8 @@ static SPYValue *method_getter_of(SPYContext *c, Machine *m, const char *name, S
     spy_release(function);
     return result;
 }
+/* Whether env is the env of a call step's operands read in C (operand_call). */
+static int walking(SPYContext *c, SPYValue *env) { return c->walk_m && env == c->walk_m->frame.env; }
 /* Whether v, atop a call step's machine, is the list of the names and
  * values its operands' lookups found there (name_rewalked): c->unbound,
  * then each name, its value and whether this run of the step took it. */
@@ -32166,9 +32168,9 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     size_t argc;
     int method;
     argv[0] = NULL;
-    c->walk_env = f->env; c->walk_m = m;
+    c->walk_m = m;
     callee = plain_callee(c, f, n, argv, &argc, &method, 1);
-    c->walk_env = NULL;
+    c->walk_m = NULL;
     /* An operand's lookup left a call on m, after which the step runs
      * again (name_rewalked); once it ran, the values it took go. */
     if (UNLIKELY(c->walk_pending | c->walk_markers)) {
