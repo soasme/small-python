@@ -32,7 +32,7 @@ Cases == {"mutable_default", "default_once", "default_order_error", "kwonly_no_d
           "two_stars", "kwargs_not_last", "star_default", "return_default", "docstring",
           "no_docstring_expr", "nested_qualname", "method_qualname", "generator_detect",
           "return_in_class", "return_outside", "yield_outside", "def_is_assignment", "decorator_expr",
-          "decorator_arbitrary", "lambda_basic", "lambda_name", "lambda_statement", "lambda_annotation",
+          "decorator_object_line", "decorator_arbitrary", "lambda_basic", "lambda_name", "lambda_statement", "lambda_annotation",
           "lambda_yield", "lambda_late_binding", "lambda_default_capture", "lambda_star_args",
           "lambda_posonly", "lambda_in_default", "lambda_cond", "walrus_scope", "walrus_statement",
           "walrus_attr", "walrus_subscript", "walrus_paren_ok", "walrus_in_call", "walrus_kwarg",
@@ -88,6 +88,8 @@ Case(c) ==
       [] c = "yield_outside" -> "SyntaxError: 'yield' outside function"
       [] c = "def_is_assignment" -> "(1, 2)"
       [] c = "decorator_expr" -> "['f']"
+      \* A class or callable instance decorates on its own line.
+      [] c = "decorator_object_line" -> "(['f'], ('W',), 1)"
       [] c = "decorator_arbitrary" -> "'wrapped'"
       [] c = "lambda_basic" -> "3"
       [] c = "lambda_name" -> "('<lambda>', '<lambda>')"

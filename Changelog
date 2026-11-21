@@ -705,6 +705,8 @@ Unreleased (0.10.0):
 - A generic class's bases and keywords call Python without nesting on the C stack
 - The last plain stores of a class body call its namespace's Python `__setitem__` without nesting on the C stack
 - A class statement reads a metaclass's `__prepare__` through a Python descriptor without nesting on the C stack
+- A decorator that is a class or callable object runs without nesting on the C stack
+- An error a decorator raises names the decorator's line in its traceback
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

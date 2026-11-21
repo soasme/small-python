@@ -15979,6 +15979,12 @@ static void compile_arguments(SPYContext *c, Program *p, Node *args) {
         emit(c, p, BC_ARG, a, a->kind);
     }
 }
+/* The applications of decorators, the last first, each on its own line. */
+static void compile_decorations(SPYContext *c, Program *p, Node *decorators) {
+    if (!decorators) return;
+    compile_decorations(c, p, decorators->next);
+    emit(c, p, BC_DECORATE, decorators, 0);
+}
 static int loads_name(Node *);
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
@@ -16358,7 +16364,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
                 compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
             }
         }
-        for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
+        compile_decorations(c, p, n->decorators);
         emit(c, p, BC_STORE, n->a, 1); break;
     case N_ANNASSIGN:
         /* Without a value, an attribute or subscript target's primary is
@@ -16527,7 +16533,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_CLASS, n, stacked ? 2 : 0);
             if (!stacked) emit(c, p, BC_CLASS, n, 7);
         }
-        for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
+        compile_decorations(c, p, n->decorators);
         emit(c, p, BC_STORE, n->a, 1); break;
     }
     }
@@ -32691,6 +32697,14 @@ static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
     spy_release(decorator);
     return NULL;
 }
+/* BC_DECORATE of any other decorator, which it takes with *decorated: a
+ * call step on m (step_callk), its value pushed as it is. */
+static NO_INLINE SPYValue *decorate_step(SPYContext *c, Machine *m, SPYValue *decorator, SPYValue **decorated) {
+    SPYValue *args = tuple_of(c, 1, decorated);
+    spy_release(*decorated);
+    if (!args) { spy_release(decorator); return NULL; }
+    return step_callk(c, m, decorator, args, unchanged, NULL);
+}
 /* BC_CALL of call node n: the callee, argument list and keyword dict on
  * the stack; a generator's machine (calls 0) enters no call. A bound
  * method's function takes its self first, and a plain class's Python
@@ -39887,7 +39901,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 break;
             }
             b = machine_pop(m); a = machine_pop(m);
-            machine_push(c, m, call(c, a, 1, &b)); break;
+            value = decorate_step(c, m, a, &b);
+            if (c->k_fn) goto enter_k;
+            machine_push(c, m, value); break;
         CASE(BC_FUNCTION) machine_push(c, m, function_new(c, &f, n)); break;
         CASE(BC_DEFAULT)
             a = machine_pop(m); function_default(c, m->stack[m->len - 1], n, a); break;

@@ -43,6 +43,7 @@ SOURCES = {
     "yield_outside": "yield 1",
     "def_is_assignment": "def f(): return 1\ng = f\ndef f(): return 2\nresult = (g(), f())",
     "decorator_expr": "result = []\n@(lambda f: (result.append(f.__name__), f)[1])\ndef f(): pass",
+    "decorator_object_line": "log = []\nclass W:\n    def __init__(self, f):\n        for _ in (): pass\n        log.append(f.__name__)\nclass Bad:\n    def __call__(self, f):\n        raise KeyError(type(f).__name__)\ntry:\n    exec('@Bad()\\n\\n@W\\ndef f(): pass', {'Bad': Bad, 'W': W})\nexcept KeyError as e:\n    result = (log, e.args, e.__traceback__.tb_next.tb_lineno)",
     "decorator_arbitrary": "@[lambda f: 'wrapped'][0]\ndef f(): pass\nresult = f",
     "lambda_basic": "result = (lambda x, y=2: x + y)(1)",
     "lambda_name": "f = lambda: 0\nresult = (f.__name__, f.__qualname__)",
