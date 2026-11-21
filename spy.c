@@ -27530,8 +27530,7 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
      * (throws_in), the operation ending as an await of it does
      * (delegate_left), or as its close (operation_closed). */
     if (m->operation)
-        /* An anext() of an async generator's close stays in C (awaitable_method). */
-        return (m->operation->type == SPY_ANEXT_AWAITABLE ? exception || !anext_asend(m->operation) : m->operation->as.async_operation.state == 1) &&
+        return (m->operation->type == SPY_ANEXT_AWAITABLE || m->operation->as.async_operation.state == 1) &&
                throws_in(c, m->delegate, exception ? exception : c->exceptions[X_GENERATOR_EXIT]);
     if (m->awaiting != AWAIT_DELEGATE) return m->awaiting == AWAIT_YIELD;
     /* Or at a yield from of a builtin iterator, which has neither close
@@ -41277,9 +41276,10 @@ static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
  * ends as its close() does (awaitable_method): an await yielded raises a
  * RuntimeError, the operation left running; a value yielded ends it, but
  * an aclose's raises a RuntimeError; g's end ends it, raising its
- * exception but StopIteration, StopAsyncIteration or GeneratorExit. */
+ * exception but StopIteration, StopAsyncIteration or GeneratorExit. An
+ * anext() awaitable's close is its asend's, of an async generator. */
 static void operation_closed(SPYContext *c, Machine *m, SPYValue *g, Result flow) {
-    SPYValue *op = m->operation;
+    SPYValue *held = m->operation, *op = held->type == SPY_ANEXT_AWAITABLE && anext_asend(held) ? anext_asend(held) : held;
     int awaits = flow.flow == FLOW_YIELD && g->as.generator.machine->awaiting != AWAIT_YIELD;
     m->operation = NULL;
     if (op->type == SPY_ANEXT_AWAITABLE) {
@@ -41309,7 +41309,7 @@ static void operation_closed(SPYContext *c, Machine *m, SPYValue *g, Result flow
     }
     if (c->error_type[0]) materialize_error(c);
     if (!awaits) { op->as.async_operation.state = 2; g->as.generator.async_running = 0; }
-    spy_release(op);
+    spy_release(held);
 }
 /* Generator machine m's yield from's delegate left with *flow: a return
  * gives the yield from its value, and an error raises there, chained again

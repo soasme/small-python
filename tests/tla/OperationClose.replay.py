@@ -35,11 +35,19 @@ def outcome(p):
         g.asend(None).send(None)
     except StopIteration:
         pass
-    a = {"asend": lambda: g.asend(None), "athrow": lambda: g.athrow(ValueError), "aclose": g.aclose}[p["kind"]]()
-    if p["begun"]:
+    a = {"asend": lambda: g.asend(None), "athrow": lambda: g.athrow(ValueError), "aclose": g.aclose,
+         "anext": lambda: anext(g, "d")}[p["kind"]]()
+
+    async def awaiting():
+        return await a
+    co = awaiting()
+    if p["how"] == "coclose":
+        co.send(None)  # the coroutine begins the awaitable
+    elif p["begun"]:
         a.send(None)
     try:
-        result = a.close() if p["how"] == "close" else a.throw(KeyError) if p["how"] == "throw" else next(a)
+        result = co.close() if p["how"] == "coclose" else a.close() if p["how"] == "close" else \
+            a.throw(KeyError) if p["how"] == "throw" else next(a)
         return "None" if result is None else "suspended"
     except (StopIteration, StopAsyncIteration, RuntimeError, LookupError, KeyError) as e:
         return type(e).__name__
