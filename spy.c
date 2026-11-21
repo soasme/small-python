@@ -13355,6 +13355,13 @@ static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
     return n->attr_kind;
 }
 static int machine_function(SPYContext *, SPYValue *);
+/* Whether descriptor is an unbound super object of a subclass with no
+ * __get__ of its own, which a read binds by calling that class on the
+ * super object's type and the instance (super_descr_get). */
+static int super_binds(SPYContext *c, SPYValue *descriptor) {
+    SPYValue *unbound = descriptor->type == SPY_INSTANCE && descriptor->ctx == c ? builtin_value(c, descriptor, SPY_SUPER) : NULL;
+    return unbound && !unbound->as.super.self && unbound->as.super.type && !class_lookup(descriptor->as.map.parent, "__get__");
+}
 /* What a descriptor of class kind calls on the machine as its __get__,
  * unbound as the descriptor slot calls it: a Python function, the one a
  * staticmethod wraps, or an instance, unbound too, whose class's __call__
@@ -13452,7 +13459,8 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
         descriptor = builtin_value(c, descriptor, SPY_PROPERTY);
         return property_enters(c, descriptor) ? spy_retain(descriptor) : NULL;
     }
-    if (!get || !get_function(c, kind) || !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
+    if (!(get ? get_function(c, kind) != NULL : kind && super_binds(c, descriptor)) ||
+        !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
         return NULL;
     /* The search may delete the descriptor. */
     spy_retain(descriptor);
@@ -30732,9 +30740,11 @@ static SPYValue *abstract_go(SPYContext *, Machine *, SPYValue *, SPYValue *, in
 /* What attribute_callk's Python read returned, state its object, the
  * name and the __getattr__ the read falls back to (None for none): an
  * AttributeError gives way to that __getattr__, a call on m too (callk);
- * else the continuation has the result (k_resume). */
+ * else the continuation has the result (k_resume), an AttributeError
+ * naming the attribute and object (attribute_failed). */
 static SPYValue *attribute_called(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **items = state->as.seq.items, *fallback = items[2];
+    if (!result && fallback == c->none) attribute_failed(c, items[0], items[1]->as.string.data);
     if (result || fallback == c->none || !error_is(c, "AttributeError")) return k_resume(c, m, state, result);
     spy_clear_error(c);
     SPYValue *name = spy_retain(items[1]);
@@ -37449,7 +37459,12 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
         return get;
     }
     if (function->type == SPY_PROPERTY) get = spy_retain(function->as.property.get);
-    else if (function->type == SPY_INSTANCE) {
+    else if (super_binds(c, function)) {
+        argv[0] = spy_retain(builtin_value(c, function, SPY_SUPER)->as.super.type); argv[1] = spy_retain(v); *argc = 2;
+        get = spy_retain(function->as.map.parent);
+        spy_release(function);
+        return get;
+    } else if (function->type == SPY_INSTANCE) {
         argv[0] = function; *argc = 3;
         getter_args(c, v, name, argv);
         return getter_called(get_function(c, function->as.map.parent), argv, argc);
@@ -37467,6 +37482,13 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
 static SPYValue *getter_enter(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *function, SPYValue **env) {
     SPYValue *argv[4] = {v, NULL, NULL}, *fallback = getter_fallback(v, function);
     size_t argc = 1;
+    if (super_binds(c, function)) {
+        /* Its class call is m's, the value pushed (callk). */
+        SPYValue *result = attribute_callk(c, m, v, name, function, unchanged, NULL);
+        spy_release(v);
+        if (result) machine_push(c, m, result);
+        return NULL;
+    }
     c->entering_kind = CALL_CHECKED;
     if (fallback_described(c, v, function)) {
         /* A __getattribute__'s AttributeError calls the __getattr__ after it. */
@@ -37501,7 +37523,8 @@ static SPYValue *attribute_searched(SPYContext *c, Machine *m, SPYValue *state, 
         if (!value && !c->error_type[0] && c->fallback) {
             function = c->fallback;
             c->fallback = NULL;
-            if ((function = getter_enter(c, m, spy_retain(v), name, function, &env))) {
+            if (super_binds(c, function)) value = attribute_callk(c, m, v, name, function, unchanged, NULL);
+            else if ((function = getter_enter(c, m, spy_retain(v), name, function, &env))) {
                 c->k_fn = function; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_CHECKED;
             }
         }
@@ -37592,6 +37615,14 @@ static SPYValue *getattr_searched(SPYContext *c, Machine *m, SPYValue *state, SP
     spy_release(state);
     return value;
 }
+/* What getattr()'s read through a super subclass's call returned
+ * (getattr_named), ctx its default, c->unbound for none. */
+static SPYValue *getattr_bound(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m;
+    result = getattr_returned(c, ctx == c->unbound ? NULL : ctx, result);
+    spy_release(ctx);
+    return result;
+}
 /* What getattr()'s __annotations__ read's __annotate__ returned (getattr_named),
  * ctx the owner and the default, c->unbound for none. */
 static SPYValue *getattr_annotated(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
@@ -37637,6 +37668,16 @@ static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulte
         }
         function = c->fallback;
         c->fallback = NULL;
+        if (super_binds(c, function)) {
+            /* Its class call is m's call (callk), the default given after it (getattr_bound). */
+            SPYValue *ctx = defaulted ? spy_retain(slots[3]) : spy_retain(c->unbound);
+            spy_retain(v);
+            m->len -= n;
+            release_all(n, slots);
+            SPYValue *result = attribute_callk(c, m, v, text, function, getattr_bound, ctx);
+            spy_release(v);
+            return result;
+        }
         fallback = getter_fallback(v, function);
         if (fallback_described(c, v, function)) described = function;
         else if (!(function = getter_function(c, v, text, function, argv, &argc))) return NULL;
@@ -50023,9 +50064,10 @@ static SPYValue *annotations_get(SPYContext *c, Machine *m, SPYValue *cls) {
 /* object.__getattribute__ of instance v, or type.__getattribute__ of
  * class v (type), and name, whose default lookup calls a Python getter
  * (instance_getter, class_getter): that getter, owned, with *env, to enter
- * as the call; else NULL. An instance __dict__ holding keys other than
- * str, whose search may call Python, is left to the native call. */
-static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYValue *name, int type, SPYValue **env) {
+ * as the call, or a super subclass's call on m (callk) and its value;
+ * else NULL. An instance __dict__ holding keys other than str, whose
+ * search may call Python, is left to the native call. */
+static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, Machine *m, SPYValue *v, SPYValue *name, int type, SPYValue **env) {
     SPYValue *text = builtin_value(c, name, SPY_STRING), *own = NULL, *descriptor, *argv[4] = {v, NULL, NULL}, *dict;
     size_t argc = 1;
     if (!text || v->type != (type ? SPY_CLASS : SPY_INSTANCE)) return NULL;
@@ -50035,6 +50077,14 @@ static NO_INLINE SPYValue *getattribute_entered(SPYContext *c, SPYValue *v, SPYV
         if (dict && !string_keys(c, dict)) return NULL;
         descriptor = instance_getter(c, v, v->as.map.parent, text->as.string.data, &own);
         spy_release(own);
+        /* Its class call is m's call (callk), the value given as it is. */
+        if (descriptor && super_binds(c, descriptor)) {
+            SPYValue *get = getter_function(c, v, text->as.string.data, descriptor, argv, &argc), *result;
+            if (!get) return NULL;
+            result = callk(c, m, get, argc, argv, unchanged, NULL);
+            spy_release(get);
+            return result;
+        }
     }
     SPYValue *function = descriptor ? getter_function(c, v, text->as.string.data, descriptor, argv, &argc) : NULL;
     if (!function) return NULL;
@@ -50163,7 +50213,7 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         !strcmp(builtin_value(c, argv[0], SPY_STRING)->as.string.data, "__annotations__") && type_answers(c, self, "__annotations__"))
         return annotations_get(c, m, self);
     if (argc == 1 && (is_builtin(callee, B_OBJECT_GETATTRIBUTE) || is_builtin(callee, B_TYPE_GETATTRIBUTE)))
-        return getattribute_entered(c, self, argv[0], is_builtin(callee, B_TYPE_GETATTRIBUTE), env);
+        return getattribute_entered(c, m, self, argv[0], is_builtin(callee, B_TYPE_GETATTRIBUTE), env);
     if (callee->as.native.kwcall != descriptor_method) return NULL;
     SPYValue *p = builtin_value(c, self, SPY_PROPERTY);
     int op = (int)((intptr_t)callee->as.native.data - ((intptr_t)SPY_PROPERTY << 8));

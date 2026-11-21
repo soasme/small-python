@@ -715,6 +715,8 @@ Unreleased (0.10.0):
 - A `reversed` subclass of a sequence with a Python `__len__` or `__reversed__` is made without nesting the C stack.
 - An `int` or `float` subclass with a Python `__iter__` is iterated, and searched by `in`, without nesting the C stack.
 - A builtin name found through a key with a Python `__eq__` is read as a call's callee or argument without nesting the C stack.
+- An unbound `super` subclass object read through an instance calls its class without nesting the C stack.
+- An AttributeError raised inside an explicit `object.__getattribute__` call is no longer given the attribute's name.
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed
