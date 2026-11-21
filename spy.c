@@ -29250,6 +29250,38 @@ static NO_INLINE SPYValue *key_enter(SPYContext *c, Machine *m, Consumer *s, SPY
     spy_retain(function != key ? args[0] : NULL);
     return (*env = function_env(c, function, 1 + (function != key), args + (function == key), NULL, 1)) ? spy_retain(function) : NULL;
 }
+/* A sort's key function, the innermost call, returning its key atop its
+ * stack: when nothing can tell, the sort keeps the key (key_took) and the
+ * function runs again on the next item in the same frame, rather than
+ * leaving it and entering another (key_enter): no trace or profile
+ * function, no frame object, a plain positional parameter, and an
+ * environment nothing else keeps. 1 when it does; else 0, nothing taken. */
+static NO_INLINE int key_again(SPYContext *c, Call *call) {
+    Machine *m = call->caller;
+    SPYValue *fn = call->fn, *env = call->m.frame.env, *top = m->len ? m->stack[m->len - 1] : NULL;
+    Consumer *s = m->blocks[m->block_len - 1].consumer;
+    SPYValue *items = m->blocks[m->block_len - 1].value;
+    Scope *scope = env->as.map.scope;
+    if (c->watch || c->error_type[0] || c->frames[c->py_depth - 1].object || call->m.len != 1 ||
+        s->keyed != KEY_SORT || s->phase || s->sorter || s->made || s->callee != fn || s->result->as.seq.len + 1 >= items->as.seq.len ||
+        top == c->tupling || top == c->converting || top == c->descripting ||
+        fn->as.function.signature || scope->positional != 1 || scope->kind != S_FUNCTION ||
+        env->refs != 1 || env->weak || env->as.map.index || env->as.map.namespace || env->as.map.class_cell || env->as.map.base ||
+        !env->as.map.keyed || (env->as.map.flags & ~2) || env->as.map.len != scope->order_len) return 0;
+    s->result->as.seq.items[s->result->as.seq.len++] = machine_pop(&call->m);
+    Entry *slots = env->as.map.items;
+    for (size_t i = 0; i < env->as.map.len; i++) {
+        SPYValue *old = slots[i].value;
+        slots[i].value = spy_retain(i ? c->unbound : items->as.seq.items[s->result->as.seq.len]);
+        spy_release(old);
+    }
+    /* The frame begins anew at its caller's line. */
+    struct ActiveFrame *frame = &c->frames[c->py_depth - 1];
+    frame->line = c->py_depth > 1 ? c->frames[c->py_depth - 2].line : c->line;
+    frame->serial = ++c->frame_serial;
+    call->m.pc = 0;
+    return 1;
+}
 static struct Sorter *sorter_begin(SPYContext *, SPYValue *, SPYValue *, int);
 static int sort_step(struct Sorter *);
 static SPYValue *sorter_call(SPYContext *, struct Sorter *);
@@ -40544,6 +40576,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 m = call_leave(c, (Call *)m, flow.value = machine_pop(m));
                 goto switch_call;
             }
+            if (ins->arg == FLOW_RETURN && !m->block_len && m->outermost == CALL_KEY && key_again(c, (Call *)m)) { pc = 0; break; }
             if (ins->arg == FLOW_RETURN && !m->block_len && m->outermost == CALL_INIT) {
                 /* An __init__ returns None into its class call, whose value is
                  * already on the caller's stack. */
