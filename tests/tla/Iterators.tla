@@ -89,7 +89,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once", "subclass_iter",
           "iterator_subclass_next", "next_method", "metaclass_getitem", "adapter_getitem",
           "adapter_nested", "adapter_delegate",
-          "next_generator_value", "zip_strict_generators"}
+          "next_generator_value", "zip_strict_generators", "released_items_finalized"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -176,6 +176,8 @@ Case(c) ==
       [] c = "next_generator_value" -> "((1, 'x'), ('StopIteration', (5,)), ('StopIteration', ()), 1, ('StopIteration', (7,)), (0, 1), ('StopIteration', (8,)), 'd', 1, ('StopIteration', (4,)))"
       \* A strict zip or map of generators checks its iterables end together.
       [] c = "zip_strict_generators" -> "(('ValueError', 'zip() argument 2 is shorter than argument 1'), ('ValueError', 'zip() argument 2 is longer than argument 1'), [0], (1, 3), ('StopIteration', ''), [('a', 1), ('b', 3), ('a', 2), 'b', ('a', 1), ('b', 3), 'a', ('b', 4), ('a', 2), ('c', 1), 'a', 'c', ('a', 1), ('b', 3), 'a', 'b'])"
+      \* Items a loop released are finalized before the store's next statement
+      [] c = "released_items_finalized" -> "[0, 0, 1, 1, 'a']"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

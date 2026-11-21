@@ -20947,7 +20947,8 @@ static NO_INLINE SPYValue *name_mapping(SPYContext *c, SPYValue *env, Name name)
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls) {
     if (n->kind == N_IMPORT || n->kind == N_FROM) return 1;
-    if (tick(c, f, n)) return -1;
+    /* A machine's store leaves a due finalizer to the machine (TICK_DEFER). */
+    if (calls ? !quiet(c, f) && tick_full(c, f, n, TICK_DEFER) < 0 : tick(c, f, n)) return -1;
     /* An attribute or item of a literal or name takes them as they are,
      * held across the store. */
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
