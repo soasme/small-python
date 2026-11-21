@@ -37,6 +37,7 @@ SOURCES = {
     "compat_try": "__lazy_modules__ = ['pkg']\ntry:\n    import pkg\nfinally:\n    pass\n" + PLACEHOLDER % "pkg",
     "compat_function": "__lazy_modules__ = ['pkg']\ndef f():\n    import pkg\n    return type(pkg).__name__\nresult = f()",
     "compat_getitem": "import pkg, nosuchmod\n" + PLACEHOLDER % "pkg",
+    "hook_used": "import builtins\nreal = builtins.__import__\nseen = []\ndef hook(name, *a):\n    for _ in (): pass\n    if name.startswith('pkg'): seen.append(name)\n    return real(name, *a)\nbuiltins.__import__ = hook\nlazy import pkg\nlazy from pkg import sub\ntry:\n    result = (pkg.pub, sub.x, seen)\nfinally:\n    builtins.__import__ = real",
 }
 
 

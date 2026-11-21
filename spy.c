@@ -3327,9 +3327,13 @@ static NO_INLINE SPYValue *name_missing(SPYContext *c, SPYValue *e, Name name) {
     SPYValue *namespace = e->as.map.namespace, *dict = namespace && namespace->type == SPY_INSTANCE ? dictionary_value(c, namespace) : NULL;
     return dict && !dict_name(c, dict, name) && !c->error_type[0] ? item_function(c, namespace, "__missing__") : NULL;
 }
+/* Whether a lazy import bound in env e is reified when read: in a global
+ * or class namespace; function locals are not. */
+static int lazy_reifies(SPYValue *e) {
+    return e->type != V_ENV || !e->as.map.scope || e->as.map.scope->kind == S_MODULE || e->as.map.scope->kind == S_CLASS;
+}
 /* Value v, owned, of name text found in env e of a lookup from env: an
- * unbound local's error, a lazy import reified in a global or class
- * namespace, else v. */
+ * unbound local's error, a lazy import reified (lazy_reifies), else v. */
 static SPYValue *name_bound(SPYContext *c, SPYValue *env, SPYValue *e, SPYValue *v, const char *text) {
     if (v->type == V_UNBOUND) {
         spy_release(v);
@@ -3340,10 +3344,7 @@ static SPYValue *name_bound(SPYContext *c, SPYValue *env, SPYValue *e, SPYValue 
         if (inner != e) return name_error(c, text, 1);
         return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", text);
     }
-    /* Global and class namespaces resolve lazy imports; function locals do not. */
-    if (v->type == SPY_LAZY_IMPORT && (e->type != V_ENV || !e->as.map.scope || e->as.map.scope->kind == S_MODULE ||
-                                       e->as.map.scope->kind == S_CLASS))
-        return lazy_reify(c, e, text, v);
+    if (v->type == SPY_LAZY_IMPORT && lazy_reifies(e)) return lazy_reify(c, e, text, v);
     return v;
 }
 static SPYValue *k_state(SPYContext *, size_t, SPYValue **, Continuation, SPYValue *);
@@ -3370,6 +3371,7 @@ static int name_compares(SPYContext *c, SPYValue *dict, Name name) {
 }
 static SPYValue *name_rewalk(SPYContext *, SPYValue *, SPYValue *, Name, int);
 static SPYValue *unchanged(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *lazy_reifyk(SPYContext *, Machine *, SPYValue *, const char *, SPYValue *, Continuation, SPYValue *);
 /* name's value in env, looked up from env from on, annotation whether the
  * envs before from are annotation scopes, given to k with ctx, which it
  * takes; looked, the lookup at from, its binding env, gave v (owned) or
@@ -3424,6 +3426,11 @@ static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e
             Symbol *symbol = scope_find(e->as.map.scope, name);
             if (symbol && (symbol->flags & S_LOCAL) && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)))
                 return name_walk(c, m, env, module_env(c, e), name, 1, 0, NULL, k, ctx);
+        }
+        /* A lazy import's __import__ is a call on m (lazy_reifyk). */
+        if (v && v->type == SPY_LAZY_IMPORT && lazy_reifies(e)) {
+            if (m) return lazy_reifyk(c, m, e, text, v, k, ctx);
+            if (k == unchanged && env == c->walk_env) { spy_release(v); return name_rewalk(c, env, e, name, annotation); }
         }
         if (v) return k(c, m, ctx, name_bound(c, env, e, v, text));
     }
@@ -20876,7 +20883,10 @@ static void lazy_cause(SPYContext *c, SPYValue *lazy) {
     spy_clear_error(c);
     restore_error(c, &error);
 }
-static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
+/* The __import__ of lazy's builtins, and in args its five arguments,
+ * owned, that resolve lazy: 1; or 0 with an error, an ImportCycleError
+ * while lazy resolves. */
+static int lazy_import_call(SPYContext *c, SPYValue *lazy, SPYValue **function, SPYValue **args) {
     SPYValue *root = lazy, *first = NULL;
     while (lazy_projection(root)) { first = root; root = root->as.lazy.from; }
     if (lazy->as.lazy.resolving) {
@@ -20886,43 +20896,112 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
             SPYValue *module = root->as.lazy.from;
             error_name_set(c, module->as.string.data, module->as.string.len);
         }
-        mem_free(name.data); return NULL;
+        mem_free(name.data); return 0;
     }
-    SPYValue *function = spy_retain(name_local(root->as.lazy.builtins, "__import__"));
-    if (!function) return spy_error(c, "ImportError", "__import__ not found");
+    if (!(*function = spy_retain(name_local(root->as.lazy.builtins, "__import__")))) return spy_error(c, "ImportError", "__import__ not found"), 0;
     /* `from a import b, c` imports only the name being resolved. */
     SPYValue *fromlist = first && root->as.lazy.attr->type == SPY_TUPLE && root->as.lazy.attr->as.seq.len ?
         spy_tuple(c, 1, &first->as.lazy.attr) : spy_retain(root->as.lazy.attr);
-    SPYValue *level = spy_int(c, 0), *module = NULL, *value = NULL;
-    lazy->as.lazy.resolving = 1;
     /* A bare `lazy import a.b` resolves to a alone; a.b loads on attribute access. */
     const char *full = root->as.lazy.from->as.string.data, *dot = strchr(full, '.');
     SPYValue *target = lazy == root && dot && !lazy_from_import(root) ? spy_string(c, full, (size_t)(dot - full)) : spy_retain(root->as.lazy.from);
-    if (fromlist && level && target) {
-        /* The globals of the frame that touched the name, as both mappings. */
-        SPYValue *globals = namespace_map(module_env(c, c->eval_env ? c->eval_env : c->globals));
-        SPYValue *args[] = {target, globals, globals, fromlist, level};
-        module = call(c, function, 5, args);
-    }
-    spy_release(target);
+    /* The globals of the frame that touched the name, as both mappings. */
+    SPYValue *globals = namespace_map(module_env(c, c->eval_env ? c->eval_env : c->globals));
+    args[0] = target; args[1] = spy_retain(globals); args[2] = spy_retain(globals); args[3] = fromlist; args[4] = spy_int(c, 0);
+    if (target && fromlist && args[4]) return 1;
+    release_all(5, args); spy_release(*function);
+    return 0;
+}
+static SPYValue *lazy_resolve(SPYContext *, SPYValue *);
+/* lazy's resolution once __import__ returned module, which it takes. */
+static SPYValue *lazy_imported_value(SPYContext *c, SPYValue *lazy, SPYValue *module) {
+    SPYValue *value = NULL;
     if (module && module->type == SPY_LAZY_IMPORT) { SPYValue *inner = lazy_resolve(c, module); spy_release(module); module = inner; }
     if (module) value = lazy_replay(c, module, lazy);
     lazy->as.lazy.resolving = 0;
-    spy_release(module); spy_release(fromlist); spy_release(level); spy_release(function);
+    spy_release(module);
     if (value && value->type == SPY_LAZY_IMPORT) { SPYValue *inner = lazy_resolve(c, value); spy_release(value); value = inner; }
     if (!value && c->error_type[0]) lazy_cause(c, lazy);
     return value;
 }
+static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
+    SPYValue *function, *args[5];
+    if (!lazy_import_call(c, lazy, &function, args)) return NULL;
+    lazy->as.lazy.resolving = 1;
+    SPYValue *module = call(c, function, 5, args);
+    release_all(5, args); spy_release(function);
+    return lazy_imported_value(c, lazy, module);
+}
+static SPYValue *k_state(SPYContext *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *k_resume(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *lazy_imported(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* lazy_resolve of lazy on m, its __import__ m's call (callk,
+ * lazy_imported): the value given to k with ctx, which it takes. */
+static SPYValue *lazy_resolvek(SPYContext *c, Machine *m, SPYValue *lazy, Continuation k, SPYValue *ctx) {
+    SPYValue *function, *args[5], *state;
+    if (!lazy_import_call(c, lazy, &function, args)) return k(c, m, ctx, NULL);
+    if (!(state = k_state(c, 1, (SPYValue *[3]){spy_retain(lazy)}, k, ctx))) { release_all(5, args); spy_release(function); return NULL; }
+    lazy->as.lazy.resolving = 1;
+    SPYValue *result = callk(c, m, function, 5, args, lazy_imported, state);
+    spy_release(function);
+    return result;
+}
+/* What resolving state[0] on m gave, value: an error's cause
+ * (lazy_cause), then state's continuation. */
+static SPYValue *lazy_settled(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
+    if (!value && c->error_type[0]) lazy_cause(c, state->as.seq.items[0]);
+    return k_resume(c, m, state, value);
+}
+/* What __import__ returned for state[0] (lazy_resolvek), module: a
+ * placeholder's own resolution first, then the names replayed from it
+ * (lazy_replay), a placeholder among them resolved after. */
+static SPYValue *lazy_imported(SPYContext *c, Machine *m, SPYValue *state, SPYValue *module) {
+    SPYValue *lazy = state->as.seq.items[0], *value = NULL, *result;
+    if (module && module->type == SPY_LAZY_IMPORT) {
+        result = lazy_resolvek(c, m, module, lazy_imported, state);
+        spy_release(module);
+        return result;
+    }
+    if (module) value = lazy_replay(c, module, lazy);
+    lazy->as.lazy.resolving = 0;
+    spy_release(module);
+    if (value && value->type == SPY_LAZY_IMPORT) {
+        result = lazy_resolvek(c, m, value, lazy_settled, state);
+        spy_release(value);
+        return result;
+    }
+    return lazy_settled(c, m, state, value);
+}
 /* Resolve a placeholder read from env's binding of name and replace the
  * binding, unless it has meanwhile been rebound. Takes ownership. */
 static SPYValue *name_lookup(SPYContext *, SPYValue *, Name);
-static SPYValue *lazy_reify(SPYContext *c, SPYValue *env, const char *name, SPYValue *placeholder) {
-    SPYValue *value = lazy_resolve(c, placeholder);
+static SPYValue *lazy_rebind(SPYContext *c, SPYValue *env, const char *name, SPYValue *placeholder, SPYValue *value) {
     SPYValue *current = value ? name_lookup(c, env, name_of(name)) : NULL;
     if (current == placeholder && name_set(c, env, name, value)) { spy_release(value); value = NULL; }
     spy_release(current); spy_release(placeholder);
     if (c->error_type[0]) { spy_release(value); return NULL; }
     return value;
+}
+static SPYValue *lazy_reify(SPYContext *c, SPYValue *env, const char *name, SPYValue *placeholder) {
+    return lazy_rebind(c, env, name, placeholder, lazy_resolve(c, placeholder));
+}
+/* What resolving the placeholder state[2], read from env state[0]'s
+ * binding of name state[1], on m gave, value: the binding replaced
+ * (lazy_rebind), then state's continuation. */
+static SPYValue *lazy_reified(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
+    SPYValue **items = state->as.seq.items;
+    value = lazy_rebind(c, items[0], items[1]->as.string.data, spy_retain(items[2]), value);
+    return k_resume(c, m, state, value);
+}
+/* lazy_reify on m, given to k with ctx, which it takes (lazy_reified). */
+static SPYValue *lazy_reifyk(SPYContext *c, Machine *m, SPYValue *env, const char *name, SPYValue *placeholder, Continuation k, SPYValue *ctx) {
+    SPYValue *key = spy_string(c, name, strlen(name)), *state;
+    if (!key) { spy_release(placeholder); spy_release(ctx); return NULL; }
+    if (!(state = k_state(c, 3, (SPYValue *[5]){spy_retain(env), key, spy_retain(placeholder)}, k, ctx))) { spy_release(placeholder); return NULL; }
+    SPYValue *result = lazy_resolvek(c, m, placeholder, lazy_reified, state);
+    spy_release(placeholder);
+    return result;
 }
 /* Bind each name of a lazy import statement, as _PyImport_LazyImportModuleLevelObject
  * and _PyEval_LazyImportFrom: a loaded module's concrete attribute binds directly. */

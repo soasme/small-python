@@ -29,7 +29,7 @@ Cases == {"unused", "used", "from_unused", "from_used", "placeholder", "from_pla
           "missing_used", "broken", "as", "not_cached", "in_function_use", "registry", "submodule",
           "in_function", "in_try", "in_class", "star", "future",
           "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function",
-          "compat_getitem"}
+          "compat_getitem", "hook_used"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -64,6 +64,9 @@ Run(p) ==
       [] p.case = "compat_try" -> "'module' ['pkg']"
       [] p.case = "compat_function" -> "'module' ['pkg']"
       [] p.case = "compat_getitem" -> "('lazy_import', 2) []"           \* read once per module
+      \* a Python __import__ hook reifies each name once, its modules run then
+      [] p.case = "hook_used" -> "(1, 'sub', ['pkg', 'pkg']) ['pkg', 'sub']"
+      [] p.case = "hook_dotted" -> "([('pkg.sub', None)], ['pkg', 'sub']) ['pkg', 'sub']"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
