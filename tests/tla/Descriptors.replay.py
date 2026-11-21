@@ -80,6 +80,10 @@ def outcome(p):
             return "None " + repr(A.__dict__["x"])
         if op == "set":
             a.x = 1
+        elif op == "objset":
+            object.__setattr__(a, "x", 1)
+        elif op == "objdel":
+            object.__delattr__(a, "x")
         else:
             del a.x
         result = " ".join(names.get("calls", [])) or "None"

@@ -3447,6 +3447,13 @@ static SPYValue *name_searched(SPYContext *c, Machine *m, SPYValue *state, SPYVa
 }
 /* The continuation that gives the result as it is (name_from, a mappingproxy's call). */
 static SPYValue *unchanged(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) { (void)c; (void)m; (void)ctx; return result; }
+/* None for a call's value, which it takes; an error passes. */
+static SPYValue *none_returned(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m; (void)ctx;
+    if (!result) return NULL;
+    spy_release(result);
+    return spy_none(c);
+}
 /* name_walk in C. */
 static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name name, int annotation) {
     return name_walk(c, NULL, env, from, name, annotation, 0, NULL, unchanged, NULL);
@@ -21083,25 +21090,31 @@ static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, SPYValue *
 static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, value, 0); }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 static int store_hooked(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+/* The function the data descriptor *descriptor that owner gives
+ * attribute name calls to store it, or with deleting to delete it: a
+ * property's setter or deleter, or an instance's class's __set__ or
+ * __delete__; a property missing it, whose error may call Python,
+ * *descriptor itself (property_missingk); else NULL. */
+static SPYValue *descriptor_setter(SPYContext *c, SPYValue *owner, const char *name, SPYValue **descriptor, int deleting) {
+    if (!data_descriptor(*descriptor = instance_lookup(owner, name))) return NULL;
+    /* A property subclass's inherited __set__ or __delete__ is its property's. */
+    SPYValue *p = (*descriptor)->type == SPY_INSTANCE ? builtin_value(c, *descriptor, SPY_PROPERTY) : NULL;
+    if (p && builtin_base(c, *descriptor, deleting ? "__delete__" : "__set__", NULL)) *descriptor = p;
+    SPYValue *function = (*descriptor)->type == SPY_PROPERTY ? (deleting ? (*descriptor)->as.property.del : (*descriptor)->as.property.set) :
+                         (*descriptor)->type == SPY_INSTANCE ? class_lookup((*descriptor)->as.map.parent, deleting ? "__delete__" : "__set__") : NULL;
+    return function && function->type == SPY_NONE && property_hooked(*descriptor) ? *descriptor : function;
+}
 /* The Python function a store to, or with deleting a deletion of,
  * attribute name of object, an instance or a class with a metaclass,
  * calls (SetAttr): its class's or metaclass's __setattr__ or __delattr__, a property's setter or deleter, or a data
  * descriptor's __set__ or __delete__, *descriptor that descriptor; else
  * NULL. */
 static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, const char *name, SPYValue **descriptor, int deleting) {
-    SPYValue *owner = object->type == SPY_INSTANCE ? object->as.map.parent : object->as.map.meta, *hook = class_lookup(owner, deleting ? "__delattr__" : "__setattr__"), *function = NULL;
+    SPYValue *owner = object->type == SPY_INSTANCE ? object->as.map.parent : object->as.map.meta, *hook = class_lookup(owner, deleting ? "__delattr__" : "__setattr__"), *function;
     *descriptor = NULL;
     if (hook && !(deleting ? default_hook(hook, B_OBJECT_DELATTR, B_TYPE_DELATTR) : default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR)))
         function = hook;
-    else if (data_descriptor(*descriptor = instance_lookup(owner, name))) {
-        /* A property subclass's inherited __set__ or __delete__ is its property's. */
-        SPYValue *p = (*descriptor)->type == SPY_INSTANCE ? builtin_value(c, *descriptor, SPY_PROPERTY) : NULL;
-        if (p && builtin_base(c, *descriptor, deleting ? "__delete__" : "__set__", NULL)) *descriptor = p;
-        function = (*descriptor)->type == SPY_PROPERTY ? (deleting ? (*descriptor)->as.property.del : (*descriptor)->as.property.set) :
-                   (*descriptor)->type == SPY_INSTANCE ? class_lookup((*descriptor)->as.map.parent, deleting ? "__delete__" : "__set__") : NULL;
-        /* A property missing it, whose error may call Python, itself (property_missingk). */
-        if (function && function->type == SPY_NONE && property_hooked(*descriptor)) return *descriptor;
-    }
+    else if ((function = descriptor_setter(c, owner, name, descriptor, deleting)) == *descriptor) return function;
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether a store to attribute n of object, which node_set_attribute
@@ -47245,7 +47258,19 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (!name) return NULL;
         if (id != B_OBJECT_GETATTRIBUTE && argv[0]->type == SPY_CLASS)
             return errorf(c, "TypeError", "can't apply this %s to type object", id == B_OBJECT_SETATTR ? "__setattr__" : "__delattr__");
-        SPYValue *saved = c->attribute_name, *result;
+        SPYValue *saved = c->attribute_name, *result, *descriptor, *function;
+        Machine *m = id != B_OBJECT_GETATTRIBUTE && argv[0]->type == SPY_INSTANCE ? step_machine(c) : NULL;
+        if (m && (function = descriptor_setter(c, argv[0]->as.map.parent, name, &descriptor, id == B_OBJECT_DELATTR)) &&
+            function != descriptor && machine_function(c, function)) {
+            /* A data descriptor's Python __set__ or __delete__, or a property's
+             * setter or deleter, is a call of the step; it returns None. */
+            SPYValue *args[3];
+            size_t n = 0;
+            if (descriptor->type != SPY_PROPERTY) args[n++] = spy_retain(descriptor);
+            args[n++] = spy_retain(argv[0]);
+            if (id == B_OBJECT_SETATTR) args[n++] = spy_retain(argv[2]);
+            return callk(c, m, function, n, args, none_returned, NULL);
+        }
         c->attribute_name = argv[1];
         if (id == B_OBJECT_GETATTRIBUTE) {
             if (!(result = attribute_value(c, argv[0], name))) attribute_failed(c, argv[0], name);
@@ -51331,6 +51356,8 @@ SPYContext *spy_context_new(void) {
         method->as.native.call = builtin;
         method->as.native.data = (void *)(intptr_t)constructors[i].id;
         method->as.native.method = constructors[i].method == 1;
+        /* Their data descriptor's Python __set__ or __delete__ is left to the call step (descriptor_setter). */
+        if (constructors[i].id == B_OBJECT_SETATTR || constructors[i].id == B_OBJECT_DELATTR) method->as.native.host = 2;
         if (constructors[i].method == 2) {
             SPYValue *wrapper = method_wrapper(c, method, SPY_CLASSMETHOD);
             spy_release(method); method = wrapper;

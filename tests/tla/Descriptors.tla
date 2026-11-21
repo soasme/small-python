@@ -25,7 +25,8 @@
 (*                                                                         *)
 (* with base object or list, and does a.x, getattr(a, "x"), getattr(a,     *)
 (* "x", "dflt"), hasattr(a, "x"), A.x, super(A, a).x,                      *)
-(* B.__dict__["x"].__get__(a), a.x = 1, del a.x, or A.x = 1; or, for       *)
+(* B.__dict__["x"].__get__(a), a.x = 1, del a.x, the same through         *)
+(* object.__setattr__ and object.__delattr__, or A.x = 1; or, for         *)
 (* metaget, makes B and A of metaclass M(type) holding x = D() instead,    *)
 (* A holding x = "cls" when dict, and reads A.x. The outcome is the        *)
 (* result (a descriptor call as                                            *)
@@ -39,7 +40,7 @@
 EXTENDS Naturals, Sequences
 
 Names == {"get", "set", "delete"}
-Ops == {"get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "set", "del", "classset", "metaget"}
+Ops == {"get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "set", "del", "objset", "objdel", "classset", "metaget"}
 Programs == {p \in [methods : SUBSET Names, dict : BOOLEAN, op : Ops, base : {"object", "list"}, raises : {"no", "yes", "fallback"},
                     get : {"function", "static", "callable"}] :
                 /\ p.raises # "no" => p.op \in {"get", "getattr", "getattrd", "hasattr"}
@@ -76,10 +77,10 @@ Run(p) ==
                                [] Has(p, "get") -> "get(A, M)"
                                [] OTHER -> "D"
       [] p.op = "direct" -> IF Has(p, "get") THEN "get(a, None)" ELSE "AttributeError"
-      [] p.op = "set" -> CASE Has(p, "set") -> "set(a, 1) " \o Dict(p)
+      [] p.op \in {"set", "objset"} -> CASE Has(p, "set") -> "set(a, 1) " \o Dict(p)
                            [] Data(p) -> "AttributeError " \o Dict(p)       \* __delete__ only: no __set__
                            [] OTHER -> "None {'x': 1}"
-      [] p.op = "del" -> CASE Has(p, "delete") -> "delete(a) " \o Dict(p)
+      [] p.op \in {"del", "objdel"} -> CASE Has(p, "delete") -> "delete(a) " \o Dict(p)
                            [] Data(p) -> "AttributeError " \o Dict(p)       \* __set__ only: no __delete__
                            [] p.dict -> "None {}"
                            [] OTHER -> "AttributeError {}"
