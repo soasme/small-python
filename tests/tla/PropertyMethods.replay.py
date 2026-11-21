@@ -75,8 +75,16 @@ def named(p):
     C.x = (property if p["maker"] == "property" else Sub)(Getter())
     c = C()
 
+    x = C.__dict__["x"]
+    later = x.__delete__
+
     def run():
-        if p["how"] == "statement": c.x = 1
+        if p["op"] == "callnamed":
+            if p["how"] == "statement": x.__set__(c, 1)
+            elif p["how"] == "method": type(x).__set__(x, c, 1)
+            elif p["how"] == "class": type(x).__delete__(x, c)
+            else: later(c)
+        elif p["how"] == "statement": c.x = 1
         elif p["how"] == "method": setattr(c, "x", 1)
         elif p["how"] == "class": del c.x
         else: delattr(c, "x")
@@ -93,7 +101,7 @@ def named(p):
 
 
 def outcome(p):
-    if p["op"] == "named":
+    if p["op"] in ("named", "callnamed"):
         return named(p)
     if p["op"] == "doc":
         return documented(p)

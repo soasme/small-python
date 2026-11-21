@@ -50072,6 +50072,11 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     if (callee->as.native.kwcall != descriptor_method) return NULL;
     SPYValue *p = builtin_value(c, self, SPY_PROPERTY);
     int op = (int)((intptr_t)callee->as.native.data - ((intptr_t)SPY_PROPERTY << 8));
+    /* A missing accessor's error reads the name on m (property_missingk),
+     * the accessor's index the op's. */
+    if (p && op <= DESCR_DELETE && argc && (op == DESCR_GET ? argc <= 2 : argc == (size_t)(op == DESCR_SET) + 1) && argv[0]->type != SPY_NONE &&
+        (op == DESCR_GET ? p->as.property.get : op == DESCR_SET ? p->as.property.set : p->as.property.del)->type == SPY_NONE && property_hooked(p))
+        return property_missingk(c, m, p, argv[0], op);
     if (p && (op == DESCR_SET || op == DESCR_DELETE) && argc == (size_t)(op == DESCR_SET) + 1 &&
         machine_function(c, (function = op == DESCR_SET ? p->as.property.set : p->as.property.del))) {
         /* property.__set__ and __delete__ call their function on m, giving None (property_called). */
