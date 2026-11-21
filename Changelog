@@ -719,6 +719,7 @@ Unreleased (0.10.0):
 - An AttributeError raised inside an explicit `object.__getattribute__` call is no longer given the attribute's name.
 - `filter()` tests its function's result, and a generator's items under `filter(None, ...)`, by a Python `__bool__` or `__len__` without nesting the C stack.
 - `dict.__ior__` called by name merges a mapping's Python `keys()` and `__getitem__` without nesting the C stack.
+- `str.__mod__` and `bytes.__mod__` called by name convert their arguments by Python methods without nesting the C stack.
 - a `FrameLocalsProxy` key's Python `__hash__` and `__eq__` run without nesting on the C stack, and `get()` and `setdefault()` give their default on any `KeyError`, as `proxy[key]` raises it
 - `getattr()` and `hasattr()` of an `__annotations__`, and a staticmethod's or classmethod's, call the Python `__annotate__` without nesting on the C stack
 - a bytes or bytearray subclass's `__buffer__` may return `super().__buffer__(flags)`, which recursed

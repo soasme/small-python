@@ -26068,13 +26068,17 @@ static SPYValue *percent_released(SPYContext *c, Machine *m, SPYValue *after, SP
 }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
 static SPYValue *memory_contents(SPYContext *, SPYValue *);
+static SPYValue *percent_begin(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* str, bytes or bytearray x % y on machine m, y reaching an instance
  * (percent_reaches), x also a str subclass's (percent_text): its job's
  * first call (percent_build), c->unbound;
  * else NULL, the text in c->looked or an error. A bytearray stays
  * exported, by a view of it, until the job ends. */
 static NO_INLINE SPYValue *percent_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y) {
-    x = percent_text(c, x, y);
+    return percent_begin(c, m, percent_text(c, x, y), y);
+}
+/* percent_call of str, bytes or bytearray x and y. */
+static NO_INLINE SPYValue *percent_begin(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y) {
     SPYValue *view = x->type == SPY_BYTEARRAY ? memory_from(c, x) : NULL;
     if (x->type == SPY_BYTEARRAY && !view) return NULL;
     SPYValue *text = percent_build(c, m, view ? view : x, y, NULL, NULL);
@@ -28149,18 +28153,32 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
 }
 static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int keyed_dict(SPYContext *, SPYValue *);
-/* For a call of callee on argc arguments argv that is dict.__ior__, given
- * its dict or bound to it, of a plain instance or keyed_dict: the dict's
- * storage, borrowed, *x the dict, which merges it as its |= does
- * (ior_consume); else NULL. */
-static NO_INLINE SPYValue *ior_merges(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **x) {
+/* For a call of callee on argc arguments argv that is type's slot
+ * wrapper name of one operand, given its object first or bound to it: that
+ * object, borrowed; else NULL. */
+static SPYValue *slot_object(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, int type, const char *name) {
     SPYValue *function = callee, *self = argc == 2 ? argv[0] : NULL;
     if (callee->type == SPY_METHOD) { function = callee->as.method.function; self = argc == 1 ? callee->as.method.self : NULL; }
-    if (!self || function->type != SPY_NATIVE || function->as.native.kwcall != slot_call || function->as.native.owner != c->types[SPY_DICT] ||
-        strcmp(function->as.native.name->as.string.data, "__ior__")) return NULL;
-    SPYValue *own = builtin_value(c, self, SPY_DICT), *y = argv[argc - 1];
-    *x = self;
+    return self && function->type == SPY_NATIVE && function->as.native.kwcall == slot_call && function->as.native.owner == c->types[type] &&
+           !strcmp(function->as.native.name->as.string.data, name) ? self : NULL;
+}
+/* For a call of callee on argc arguments argv that is dict.__ior__ of a
+ * plain instance or keyed_dict (slot_object): the dict's storage,
+ * borrowed, *x the dict, which merges it as its |= does (ior_consume);
+ * else NULL. */
+static NO_INLINE SPYValue *ior_merges(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **x) {
+    SPYValue *y = argv[argc - 1], *own = (*x = slot_object(c, callee, argc, argv, SPY_DICT, "__ior__")) ? builtin_value(c, *x, SPY_DICT) : NULL;
     return own && (plain_instance(y) || keyed_dict(c, y)) ? own : NULL;
+}
+static int percent_reaches(SPYContext *, SPYValue *);
+/* For a call of callee on argc arguments argv that is str.__mod__ or
+ * bytes.__mod__ of arguments whose conversion may call Python
+ * (slot_object, percent_reaches): the format's str or bytes, borrowed,
+ * which formats them as its % does (percent_begin); else NULL. */
+static NO_INLINE SPYValue *percent_slot(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    SPYValue *x = slot_object(c, callee, argc, argv, SPY_STRING, "__mod__"), *text = x ? builtin_value(c, x, SPY_STRING) : NULL;
+    if (!x && (x = slot_object(c, callee, argc, argv, SPY_BYTES, "__mod__"))) text = builtin_value(c, x, SPY_BYTES);
+    return text && percent_reaches(c, argv[argc - 1]) ? text : NULL;
 }
 /* Dict x's merge of y into own, its storage, as dict.update() does, on m
  * (consume), x its result; 0, or -1 on an error. */
@@ -30551,6 +30569,13 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         release_all(argc, argv); spy_release(callee);
         return NULL;
     }
+    /* str.__mod__ formats as % does (percent_slot), its text now or later. */
+    SPYValue *text = method < 0 && argc && argc <= 2 ? percent_slot(c, callee, argc, argv) : NULL;
+    if (UNLIKELY(text != NULL)) {
+        result = percent_begin(c, m, text, argv[argc - 1]);
+        release_all(argc, argv); spy_release(callee);
+        return result ? NULL : c->error_type[0] ? NULL : looked(c);
+    }
     int id = consumer_of(c, callee, method, argc, argv);
     /* So does a generator's method from its type given the generator
      * first (generator_slot). */
@@ -32358,6 +32383,16 @@ again:
         ior_consume(c, m, own, x, y);
         release_all(3, (SPYValue *[]){x, own, y});
         return NULL;
+    }
+    SPYValue *text = calls && !bound && argc && argc <= 2 ? percent_slot(c, callee, argc, argv) : NULL;
+    if (UNLIKELY(text != NULL)) {
+        /* str.__mod__ formats as % does (percent_slot), the call leaving the stack. */
+        SPYValue *y = spy_retain(argv[argc - 1]);
+        spy_retain(text);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        result = percent_begin(c, m, text, y);
+        spy_release(text); spy_release(y);
+        return result ? NULL : c->error_type[0] ? NULL : looked(c);
     }
     id = consumer_of(c, bound ? bound : callee, -1, given, argv + from);
     SPYValue *consumer = id < 0 ? NULL : bound ? bound : spy_retain(callee);
