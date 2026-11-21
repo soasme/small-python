@@ -15530,8 +15530,10 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * (KEY_ITEMS). One that makes a list of its items (hints) asks its
  * instance source's length hint once it has the iterator (ListExtend).
  * A set's item, or dict.fromkeys's key, whose __hash__ is Python waits in
- * item for that call (KEY_HASH), the key's value in best. */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH, KEY_BOOL, KEY_EQ, KEY_DONE };
+ * item for that call (KEY_HASH), the key's value in best; a byte of
+ * bytes(), bytearray() or bytearray.extend() for its Python __index__,
+ * in best (KEY_BYTE). */
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH, KEY_BOOL, KEY_EQ, KEY_BYTE, KEY_DONE };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
@@ -27159,6 +27161,17 @@ static ALWAYS_INLINE int hashed_pair(SPYContext *c, SPYValue *pair) {
     return (pair->type == SPY_LIST || pair->type == SPY_TUPLE) && pair->as.seq.len == 2 &&
            ((key = pair->as.seq.items[0])->type == SPY_INSTANCE || hash_walked(key)) && hashed_item(c, key);
 }
+/* Whether v is a list or tuple, or a forward iterator's next items of
+ * one, holding an item whose byte its Python __index__ gives
+ * (index_function), which bytes() takes on the machine. */
+static int indexed_items(SPYContext *c, SPYValue *v) {
+    size_t i = 0;
+    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE && !v->as.iterator.done) { i = v->as.iterator.index; v = v->as.iterator.source; }
+    if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
+    for (; i < v->as.seq.len; i++)
+        if (index_function(c, v->as.seq.items[i])) return 1;
+    return 0;
+}
 /* Whether a set takes v's items on the machine, a list or tuple, or a
  * forward iterator's next items of one, holding a hashed_item, or a dict
  * view whose keys, values or items are. */
@@ -27460,8 +27473,10 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates != -1 || init == SPY_SET;
     /* As do dict() and dict.update() of pairs. */
     int pairs = dicts || (method == M_UPDATE && callee->type == SPY_DICT);
+    /* So do bytes(), bytearray() and bytearray.extend() of bytes by Python __index__. */
+    int bytes = callee == c->types[SPY_BYTES] || callee == c->types[SPY_BYTEARRAY] || bytes_extend(callee);
     if (!argc || (argc > 1 && updates != -1 ? 0 : mapping ? !keys_function(c, argv[0], &(int){0}) && !asked_function(c, argv[0], "keys") :
-                  !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) &&
+                  !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) && !(bytes && indexed_items(c, argv[0])) &&
                   !(updates != -1 && compared_items(c, set_storage(callee->as.method.self), argv[0], (int)((intptr_t)function->as.native.data & 255))) && !(updates == B_SET_DISJOINT && set_storage(argv[0]) != argv[0]) &&
                   !(pairs && hashed_pairs(c, argv[0])) && !((sets || pairs) && zip_hashed(c, argv[0])))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
@@ -28564,6 +28579,12 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         spy_release(function);
         return entered;
     }
+    if (s->keyed == KEY_BYTE) {
+        /* A byte's Python __index__, a descriptor's read first (special_env). */
+        SPYValue *function = s->best, *entered = (s->best = NULL, special_env(c, m, function, s->item, NULL, NULL, env));
+        spy_release(function);
+        return entered;
+    }
     if (s->keyed == KEY_EQ) {
         int truth = s->phase >= 2;
         SPYValue *function = s->callee, *args[] = {spy_retain(s->swapped && !truth ? s->best : s->item),
@@ -28940,6 +28961,7 @@ static SPYValue *consumer_compared(SPYContext *c, Machine *m, SPYValue *state, S
 }
 /* The consumer atop m takes key, its item's key: a sort keeps it, and min
  * or max keeps the item while it is the best; 0, or -1 on an error. */
+static int consumer_byte(SPYContext *, Consumer *, SPYValue *, SPYValue *);
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
@@ -28992,6 +29014,12 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         s->result = spy_bool(c, !s->count);
         consumer_took(c, m, &m->frame, NULL);
         return 1;
+    }
+    if (s->keyed == KEY_BYTE) {
+        /* The byte its __index__ gave (consumer_byte). */
+        SPYValue *item = s->item;
+        s->item = NULL; s->keyed = 0;
+        return consumer_byte(c, s, index_result(c, item, key), item);
     }
     if (s->keyed == KEY_BOOL) {
         /* The item's truth goes on to the next item, or decides any() or
@@ -30901,6 +30929,8 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                         callee->as.native.kwcall == slot_call) ||
                                                        /* a bytes join of exporters (buffer_argument), or choices (buffered_choice) */
                                                        ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||
+                                                       /* bytearray.extend given its bytearray (consumer_of) */
+                                                       bytes_extend(callee) ||
                                                        (argv[1]->type == SPY_TUPLE && callee->as.native.call == string_search_method) ||
                                                        (argv[1]->type == SPY_STRING && attribute_owner(argv[0])) ||
                                                        /* next() with a default (next_builtin_call), an unbound
@@ -45852,6 +45882,16 @@ static int sum_compensated(SPYContext *c, Consumer *s, SPYValue *item) {
 /* Consumer s takes item: 0 to go on, 1 when its result is known (any, all),
  * -1 on an error. A float total accumulates with Neumaier's compensation,
  * as CPython's sum. */
+/* Consumer s's byte index, the conversion of item, both taken, appended
+ * to its bytes or bytearray: 0, or -1 with an error. */
+static int consumer_byte(SPYContext *c, Consumer *s, SPYValue *index, SPYValue *item) {
+    size_t len = s->result->as.string.len;
+    if (index && (index->as.integer_data.big || index->as.integer_data.small < 0 || index->as.integer_data.small > 255))
+        spy_error(c, "ValueError", s->id == B_BYTES ? "bytes must be in range(0, 256)" : "byte must be in range(0, 256)");
+    else if (index && !bytearray_resize(c, s->result, len + 1)) s->result->as.string.data[len] = (char)index->as.integer_data.small;
+    spy_release(index); spy_release(item);
+    return c->error_type[0] ? -1 : 0;
+}
 static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
     if (s->id == B_NEXT || s->id == B_THROW) { s->best = item; return 1; }
     if (s->id == B_CLOSE) {
@@ -45894,13 +45934,9 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         return status;
     }
     if (s->id == B_BYTES || s->id == B_BYTEARRAY) {
-        SPYValue *index = index_object(c, item);
-        size_t len = s->result->as.string.len;
-        if (index && (index->as.integer_data.big || index->as.integer_data.small < 0 || index->as.integer_data.small > 255))
-            spy_error(c, "ValueError", s->id == B_BYTES ? "bytes must be in range(0, 256)" : "byte must be in range(0, 256)");
-        else if (index && !bytearray_resize(c, s->result, len + 1)) s->result->as.string.data[len] = (char)index->as.integer_data.small;
-        spy_release(index); spy_release(item);
-        return c->error_type[0] ? -1 : 0;
+        SPYValue *function = index_function(c, item);
+        if (function) { s->best = spy_retain(function); s->item = item; s->keyed = KEY_BYTE; return 0; }
+        return consumer_byte(c, s, index_object(c, item), item);
     }
     if (s->id == B_LIST || s->id == B_TUPLE || s->callee || s->id == UNPACK_ITEMS || s->id == PAIR_ITEMS || s->id == B_EXTEND) {
         int status = sequence_append(c, s->result, item);

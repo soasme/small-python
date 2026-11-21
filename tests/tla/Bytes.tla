@@ -132,7 +132,7 @@ Padded(p) ==
           [] OTHER -> Wrap(Fill("0", pad) \o Cat(s))
 
 
-Cases == {"literal_forms", "hex_group_first", "hex_sep_length", "search_needle_last", "bytearray_index_calls", "bytearray_take_calls", "bytearray_store_calls", "bytearray_arity", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_subclass_index", "ctor_iter_calls", "ctor_size_fallback", "extend_iter_calls", "join_iter_calls", "ctor_index_big",
+Cases == {"literal_forms", "hex_group_first", "hex_sep_length", "search_needle_last", "bytearray_index_calls", "bytearray_take_calls", "bytearray_store_calls", "bytes_item_index", "bytearray_arity", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_subclass_index", "ctor_iter_calls", "ctor_size_fallback", "extend_iter_calls", "join_iter_calls", "ctor_index_big",
           "ctor_negative", "ctor_range_error", "ctor_float", "bytearray_ctor", "fromhex", "fromhex_bad",
           "fromhex_space_middle", "fromhex_non_hex", "hex", "hex_bad_sep", "index_is_int", "iterate_ints",
           "repr_escapes", "immutable", "concat_repeat", "concat_str", "contains", "contains_str", "compare",
@@ -168,6 +168,7 @@ Case(c) ==
       [] c = "search_needle_last" -> "(3, 2, 1, [2, 98, 0, 4, 98, 3, 98])"
       \* A bytearray's search bounds, pop() and insert() index convert before it is read, free to resize it.
       [] c = "bytearray_index_calls" -> "(1, b'xbxb', 98, -1, None, b'xaxb', 3)"
+      [] c = "bytes_item_index" -> "(b'AB', bytearray(b'qC'), b'AD', [67, 65, 66, 65, 68])"
       [] c = "bytearray_store_calls" -> "(b'Ab', 'IndexError', b'', 'byte must be in range(0, 256)')"
       [] c = "bytearray_take_calls" -> "(b'xb', b'xb', None, b'xb\\x00\\x00\\x00', 'n must be an integer or None', 'Can only resize to positive sizes, got -1')"
       \* A bytearray mutator takes positional arguments only and names the type when it refuses them.
