@@ -4516,6 +4516,11 @@ typedef struct {
      * whether one may still appear, and barry_as_FLUFL. */
     int statement_level, future_closed, barry, future_annotations;
     int annotated, conditional_annotations; /* A body's annotated assignment; one in a conditional block, or a module's. */
+    /* The simple annotations of the module or class body being parsed, in
+     * order (annotated): collecting, how many compound statements enclose
+     * the statement (a module's are all conditional), the next index. */
+    int collecting, conditional, annotation_index;
+    Node *annotations, **annotations_tail;
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
@@ -6900,54 +6905,49 @@ static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
     fn->line = body->line = entries ? entries->line : fn->line;
     return fn;
 }
-/* Collect simple annotated names of a module or class body in order. */
-static int collect_annotations(Parser *p, Node *body, int conditional, Node ***tail, int *index) {
-    for (Node *n = body; n; n = n->next) {
-        if (n->kind == N_ANNASSIGN) { p->annotated = 1; p->conditional_annotations |= conditional; }
-        if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE) && p->future_annotations) {
-            /* PEP 563 stores each string in __annotations__ as it runs. */
-            n->flags |= F_FUTURE; (*index)++;
-        } else if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE)) {
-            Node *entry = annotation_entry(p, n->a->name.text, n->b, *index, conditional ? F_CONDITIONAL : 0);
-            if (!entry) return -1;
-            n->op = (*index)++;
-            if (conditional) n->flags |= F_CONDITIONAL;
-            **tail = entry; *tail = &entry->next;
-        }
-        int status = 0;
-        switch (n->kind) {
-        case N_IF: case N_WHILE: case N_FOR:
-            status = collect_annotations(p, n->b, 1, tail, index) || collect_annotations(p, n->c, 1, tail, index);
-            break;
-        case N_WITH: case N_EXCEPT: status = collect_annotations(p, n->b, 1, tail, index); break;
-        case N_MATCH:
-            for (Node *item = n->args; item && !status; item = item->next) status = collect_annotations(p, item->c, 1, tail, index);
-            break;
-        case N_TRY:
-            status = collect_annotations(p, n->a, 1, tail, index) || collect_annotations(p, n->args, 1, tail, index) ||
-                     collect_annotations(p, n->b, 1, tail, index) || collect_annotations(p, n->c, 1, tail, index);
-            break;
-        }
-        if (status) return -1;
-    }
+/* Simple annotated assignment n of the body being parsed, if it collects
+ * them: PEP 563 stores each string in __annotations__ as it runs; else its
+ * entry of the body's __annotate__ (collect_end). */
+static int annotated(Parser *p, Node *n) {
+    if (!p->collecting) return 0;
+    p->annotated = 1; p->conditional_annotations |= p->conditional > 0;
+    if (!(n->flags & F_SIMPLE)) return 0;
+    if (p->future_annotations) { n->flags |= F_FUTURE; p->annotation_index++; return 0; }
+    Node *entry = annotation_entry(p, n->a->name.text, n->b, p->annotation_index, p->conditional ? F_CONDITIONAL : 0);
+    if (!entry) return -1;
+    n->op = p->annotation_index++;
+    if (p->conditional) n->flags |= F_CONDITIONAL;
+    *p->annotations_tail = entry; p->annotations_tail = &entry->next;
     return 0;
 }
-static int body_annotations(Parser *p, Node *owner, Node *body, Node **out) {
-    Node *entries = NULL, **tail = &entries;
-    int index = 0;
-    *out = NULL;
-    /* Every annotation of a module, which may run in part, is conditional. */
+/* The annotation state of a body, saved across a nested one. */
+typedef struct { int collecting, conditional, index, annotated, conditional_annotations; Node *annotations, **tail; } Annotations;
+/* Begin collecting the annotations of a class body, or of the module's
+ * (conditional), or stop for a function body. */
+static Annotations collect_begin(Parser *p, int collecting, int conditional) {
+    Annotations saved = {p->collecting, p->conditional, p->annotation_index, p->annotated, p->conditional_annotations, p->annotations, p->annotations_tail};
+    p->collecting = collecting; p->conditional = conditional; p->annotation_index = 0;
     p->annotated = p->conditional_annotations = 0;
-    if (collect_annotations(p, body, !owner, &tail, &index)) return -1;
-    if (p->conditional_annotations && owner) owner->flags |= F_CONDITIONAL;
-    else if (p->conditional_annotations) p->unit->as.unit.conditional_annotations = 1;
+    p->annotations = NULL; p->annotations_tail = &p->annotations;
+    return saved;
+}
+/* The collected annotations of owner's body, or the module's: its flags
+ * and its __annotate__ in *out; then the enclosing body's state again. */
+static int collect_end(Parser *p, Node *owner, Node **out, Annotations saved) {
+    Node *entries = p->annotations;
+    int annotated = p->annotated, conditional = p->conditional_annotations;
+    p->collecting = saved.collecting; p->conditional = saved.conditional; p->annotation_index = saved.index;
+    p->annotated = saved.annotated; p->conditional_annotations = saved.conditional_annotations;
+    p->annotations = saved.annotations; p->annotations_tail = saved.tail;
+    *out = NULL;
+    if (conditional && owner) owner->flags |= F_CONDITIONAL;
+    else if (conditional) p->unit->as.unit.conditional_annotations = 1;
     if (p->future_annotations && owner) owner->flags |= F_FUTURE;
-    if (p->future_annotations && p->annotated) {
+    if (p->future_annotations && annotated) {
         if (owner) owner->flags |= F_SETUP_ANNOTATIONS;
         else p->unit->as.unit.setup_annotations = 1;
     }
-    if (entries && !(*out = annotation_function(p, owner, entries))) return -1;
-    return 0;
+    return entries && !(*out = annotation_function(p, owner, entries)) ? -1 : 0;
 }
 static int function_annotations(Parser *p, Node *def) {
     Node *entries = NULL, **tail = &entries;
@@ -7574,9 +7574,10 @@ static Node *statement_body(Parser *p) {
         const char *private_name = p->private_name;
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
+        Annotations annotations = collect_begin(p, 1, 0);
         n->b = suite_after(p, "class definition", n->line);
         p->definition = definition; p->return_line = return_line;
-        if (n->b && body_annotations(p, n, n->b, &n->annotate)) return NULL;
+        if (collect_end(p, n, &n->annotate, annotations) || !n->b) return NULL;
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
         return n->b ? n : NULL;
@@ -7716,9 +7717,11 @@ static Node *statement_body(Parser *p) {
         size_t return_line = p->return_line;
         p->definition = n; p->return_line = 0;
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
+        int collecting = p->collecting;
+        p->collecting = 0;
         n->b = suite_after(p, "function definition", n->line);
         size_t first_return = p->return_line;
-        p->definition = definition; p->return_line = return_line;
+        p->definition = definition; p->return_line = return_line; p->collecting = collecting;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
         if (!n->b || !(n->scope = scope_new(p->ctx, NULL, S_FUNCTION))) return NULL;
         n->scope->return_line = first_return;
@@ -7868,7 +7871,7 @@ static Node *statement_body(Parser *p) {
             n->c = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->c) return NULL;
         }
-        return n;
+        return annotated(p, n) ? NULL : n;
     }
     if (op == '=' || (op >= T_ADDEQ && op <= T_XOREQ)) {
         if (op != '=' && n->a->kind != N_NAME && n->a->kind != N_INDEX && n->a->kind != N_ATTR) {
@@ -7938,6 +7941,9 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
                  !strcmp(what, "'finally' statement") || !strcmp(what, "function definition");
     if (!expect(p, ':', forced || at(p, T_NL) ? "expected ':'" : "invalid syntax")) return NULL;
     Node *body;
+    /* A body of a compound statement but a definition is conditional. */
+    int compound = strcmp(what, "class definition") && strcmp(what, "function definition");
+    p->conditional += compound;
     if (!take(p, T_NL)) {
         p->inline_suite = 1;
         body = line_statements(p);
@@ -7951,6 +7957,7 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
         p->depth--;
         if (!body || !expect(p, T_DEDENT, "invalid syntax")) return NULL;
     }
+    p->conditional -= compound;
     if (body && !strcmp(what, "'else' statement") && keyword(p, "elif")) return syntax(p, "'elif' block follows an 'else' block");
     return body;
 }
@@ -8658,6 +8665,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
     }
     if (unit->as.unit.filename && !failed) {
         size_t failures = c->allocation_failures;
+        Annotations annotations = collect_begin(&p, 1, 1);
         unit->as.unit.body = statements(&p);
         if (c->allocation_failures != failures && !error_is(c, "MemoryError")) {
             spy_clear_error(c);
@@ -8733,7 +8741,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         parsing = c->error_type[0] != 0;
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         c->node_start = c->node_end = NULL;
-        if (!c->error_type[0]) body_annotations(&p, NULL, unit->as.unit.body, &unit->as.unit.annotate);
+        if (!c->error_type[0]) collect_end(&p, NULL, &unit->as.unit.annotate, annotations);
         if (c->optimize > 1) {
             drop_docstring(unit->as.unit.body);
             for (Node *n = unit->as.unit.nodes; n; n = n->allocated)
