@@ -15747,7 +15747,7 @@ typedef struct { int flow; SPYValue *value; } Result;
 /* Suspended functions keep their operand and cleanup stacks on the heap.
  * Instructions borrow AST nodes from the generator's retained source unit. */
 #define MACHINE_STEPS(X) \
-    X(BC_EVAL) X(BC_LOAD) X(BC_NAME) X(BC_OPERATE) X(BC_EXEC) X(BC_NONE) X(BC_POP) X(BC_UNARY) \
+    X(BC_LOAD) X(BC_NAME) X(BC_OPERATE) X(BC_NONE) X(BC_POP) X(BC_UNARY) \
     X(BC_BINARY) X(BC_COMPARE) X(BC_ATTR) X(BC_INDEX) X(BC_NEW) X(BC_ADD) X(BC_EXTEND) \
     X(BC_MAP) X(BC_ARGS) X(BC_ARG) X(BC_CALL) X(BC_STORE) X(BC_NAMED) X(BC_JUMP) X(BC_FALSE) \
     X(BC_SHORT) X(BC_YIELD) X(BC_DELEGATE) X(BC_FLOW) X(BC_LOOP) X(BC_NEXT) X(BC_POP_BLOCK) \
@@ -16156,7 +16156,6 @@ static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (n && !expands(n, p->calls) && operator_right(n)) compile_operator(c, p, n, 1);
     else if (n && !expands(n, p->calls) && stacked_right(n)) compile_stacked(c, p, n, 1);
-    else if (n && !expands(n, p->calls) && n->kind == N_BINARY && (n->op == O_AND || n->op == O_OR)) emit(c, p, BC_EVAL, n, 1);
     else compile_expr(c, p, n);
 }
 /* A call's or class header's arguments, each added by BC_ARG: the
@@ -16191,7 +16190,6 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         if (operator_right(n)) { compile_operator(c, p, n, 0); return; }
         if (stacked_right(n)) { compile_stacked(c, p, n, 0); return; }
         /* Arithmetic on arithmetic takes its steps. */
-        if (!operands_at_hand(n) && !packed(n)) { emit(c, p, BC_EVAL, n, 0); return; }
     }
     size_t branch, end, parts;
     switch (n->kind) {
@@ -16548,8 +16546,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
      * assignment of arithmetic to a target at hand takes its steps. */
     if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR) && !pausing_loads(p, n) &&
         !(assigns_steps(p, n))) {
-        emit(c, p, increment(n) && !p->namespace ? BC_INCREMENT : BC_EXEC, n, 0);
-        return;
+        if (increment(n) && !p->namespace) { emit(c, p, BC_INCREMENT, n, 0); return; }
     }
     switch (n->kind) {
     case N_EXPR:
@@ -16645,6 +16642,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         if (n->a && ((n->a->kind == N_NAME && !(n->a->flags & F_LOADED) && p->calls != PAUSING) || n->a->constant)) { emit(c, p, BC_RETURN, n, 0); break; }
         compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     case N_RAISE:
+        /* A bare raise takes no operands (arg 2). */
+        if (!n->a) { emit(c, p, BC_RAISE, n, 2); break; }
         compile_expr(c, p, n->a); compile_expr(c, p, n->b);
         emit(c, p, BC_RAISE, n, n->b != NULL); break;
     case N_ASSERT:
@@ -16666,12 +16665,11 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         }
         else branch = compile_branch(c, p, n->a, n);
         compile_body(c, p, n->b);
-        /* A body of one step that a loop's step stores into runs in it: 3
-         * a walker statement, 4 an assignment at hand. */
+        /* A body of one assignment at hand that a loop's step stores into
+         * runs in it (4). */
         if (n->kind == N_FOR && branch != SIZE_MAX && p->items[branch].other && p->len > branch + 1 &&
-            (p->len == branch + 2 ? p->items[branch + 1].op == BC_EXEC :
-             p->items[branch + 1].op == BC_ASSIGN && p->items[branch + 1].target == p->len))
-            p->items[branch].other = p->items[branch + 1].op == BC_EXEC ? 3 : 4;
+            p->items[branch + 1].op == BC_ASSIGN && p->items[branch + 1].target == p->len)
+            p->items[branch].other = 4;
         patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
         patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
         compile_body(c, p, n->c); patch(p, loop, p->len); break;
@@ -16740,6 +16738,10 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     case N_IMPORT: case N_FROM: emit(c, p, BC_NONE, n, 0); emit(c, p, BC_STORE, n, 1); break;
     /* The alias (alias_step), stored as a name. */
     case N_TYPEALIAS: emit(c, p, BC_CLASS, n, 11); emit(c, p, BC_STORE, n->a, 1); break;
+    case N_GLOBAL: case N_NONLOCAL: break;
+    /* A pass is a step to the next, for its line. */
+    case N_PASS: patch(p, emit(c, p, BC_JUMP, n, 0), p->len); break;
+    case N_BREAK: case N_CONTINUE: emit(c, p, BC_FLOW, n, n->kind == N_BREAK ? FLOW_BREAK : FLOW_CONTINUE); break;
     default: { /* N_CLASS, the last statement that can contain a yield */
         /* Decorators, __build_class__ (BC_BUILDER), then the bases and
          * keywords as its arguments; a generic class's bases cannot suspend. */
@@ -23501,6 +23503,15 @@ static void raise_from(SPYContext *c, Machine *m, SPYValue *value, SPYValue *exc
  * __new__ (raise_newed) or __init__ is m's (callk), the raise going on
  * with the instance when it returns (raise_inited); else the raise
  * (raise_with_cause). */
+/* A bare raise: the active exception again, its traceback going on. */
+static NO_INLINE void reraise(SPYContext *c) {
+    SPYValue *value = spy_retain(active_exception(c));
+    if (value) {
+        raise_with_cause(c, value, NULL);
+        if (c->traceback && c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+    } else spy_error(c, "RuntimeError", "No active exception to reraise");
+    spy_release(value);
+}
 static void raise_step(SPYContext *c, Machine *m, SPYValue *value, SPYValue *cause) {
     int called = 0;
     SPYValue *init = NULL, *made = raise_made(c, value, &init, &called), *exception;
@@ -34505,7 +34516,7 @@ static NO_INLINE SPYValue *lookup_call(SPYContext *c, Machine *m, SPYValue *map,
 /* Whether lookup step ins stores into its map: a display's item, a
  * store or a deletion (store_lookup). */
 static int lookup_stores(Instruction *ins) {
-    return ins->op == BC_MAP || ins->op == BC_STORE || ins->op == BC_EXEC || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET;
+    return ins->op == BC_MAP || ins->op == BC_STORE || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET;
 }
 /* Whether a store or deletion of key in map looks it up on the machine
  * (lookup_call): an exact dict's, or a display's into a set too, with a
@@ -34600,7 +34611,7 @@ static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYVa
         int deletion = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = deletion ? NULL : machine_pop(m), *storage = namespace_map(map);
         m->pc = pc;
-        if (ins->op != BC_MAP) relocate(c, ins->op == BC_EXEC ? ins->node->a : ins->node);
+        if (ins->op != BC_MAP) relocate(c, ins->node);
         if (c->error_type[0]) {
         } else if (deletion && found < 0) missing_key(c, key);
         else if (deletion) {
@@ -34612,7 +34623,7 @@ static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYVa
             storage->as.map.items[found].value = spy_retain(value);
             spy_release(old);
         } else map_append(c, storage, key, value, hash);
-        if (!c->error_type[0] && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
+        if (!c->error_type[0] && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
         spy_release(value);
         return m;
     }
@@ -35173,7 +35184,7 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         }
         return call_hashed(c, m, ins, key, hashed, hash);
     }
-    if (ins->op == BC_STORE || ins->op == BC_EXEC || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET) {
+    if (ins->op == BC_STORE || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET) {
         /* A store's object, key and value, or a deletion's object and key. */
         int deletion = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m);
@@ -35186,10 +35197,10 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
             return m;
         }
         if (hash_kept(c, key, hashed, hash)) {
-            relocate(c, ins->op == BC_EXEC ? ins->node->a : ins->node);
+            relocate(c, ins->node);
             if (deletion) delete_evaluated(c, ins->node, object, item);
             else set_index(c, object, item, value);
-            if (!c->error_type[0] && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
+            if (!c->error_type[0] && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
         }
         spy_release(object); spy_release(item); spy_release(value);
         return m;
@@ -35433,10 +35444,10 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
         }
         if (status < 0) { spy_release(index); index = NULL; }
     } else index = index_result(c, key, result);
-    relocate(c, ins->op == BC_EXEC ? ins->node->a : ins->node);
+    relocate(c, ins->node);
     if (index && index->type == SPY_INT && index->as.integer_data.big) errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key));
     else if (index && deletion) delete_evaluated(c, ins->node, object, index);
-    else if (index && !set_index(c, object, index, value) && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
+    else if (index && !set_index(c, object, index, value) && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
     release_all(5, (SPYValue *[]){index, object, item, value, key});
 }
 /* Whether key hashes and compares calling no Python: a builtin scalar,
@@ -37280,7 +37291,7 @@ static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *,
  * or BC_STORE 1's. */
 static SPYValue *store_ended(SPYContext *c, Machine *m, Instruction *ins) {
     if (!ins) ins = &m->code->items[m->pc - 1];
-    if (ins->op == BC_EXEC || ins->op == BC_NEXT || (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
+    if (ins->op == BC_NEXT || (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
     return c->stepped;
 }
 /* What the Python __index__ of the byte state[2] to store at index state[1]
@@ -37326,7 +37337,7 @@ static SPYValue *frame_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue
     return failed ? NULL : store_ended(c, m, NULL);
 }
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
-    Node *n = ins->op == BC_EXEC ? ins->node->a : ins->op == BC_NEXT ? ins->node->args : ins->node;
+    Node *n = ins->op == BC_NEXT ? ins->node->args : ins->node;
     if (n->kind == N_IMPORT || n->kind == N_FROM) return import_step(c, m, f, n, env);
     c->entering_kind = CALL_STORE;
     SPYValue *args[3];
@@ -37442,7 +37453,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
             release_all(3, args);
             return NULL;
         }
-        if (!set_index(c, args[0], args[1], args[2]) && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
+        if (!set_index(c, args[0], args[1], args[2]) && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
         release_all(3, args);
         return NULL;
     }
@@ -39145,8 +39156,6 @@ static NO_INLINE int assign_fused(SPYContext *c, Frame *f, Instruction *code, si
     spy_release(value);
     return result != NULL || c->error_type[0];
 }
-/* assign, out of line for the machine and inline in execute_statements. */
-static NO_INLINE int assign_step(SPYContext *c, Machine *m, Frame *f, Node *n) { return assign(c, f, n, m); }
 /* BC_INCREMENT: small integers in a remembered slot, while no trace
  * function watches, sum in place of the assignment. */
 static NO_INLINE void increment_step(SPYContext *c, Frame *f, Node *n) {
@@ -40331,7 +40340,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (UNLIKELY(c->k_fn != NULL)) goto enter_k;
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
-                        if (result && (code[pc - 1].op == BC_EXEC || code[pc - 1].op == BC_NEXT || (code[pc - 1].op == BC_STORE && code[pc - 1].arg)))
+                        if (result && (code[pc - 1].op == BC_NEXT || (code[pc - 1].op == BC_STORE && code[pc - 1].arg)))
                             spy_release(machine_pop(m));
                     } else if (kind == CALL_CHECKED) {
                         m = checked_returned(c, m, &code[pc - 1], result, pc);
@@ -40458,13 +40467,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         goto *ins->step;
 #endif
         switch (ins->op) {
-        CASE(BC_EVAL)
-            if (ins->arg) {
-                int truth;
-                machine_push(c, m, eval_tested(c, &f, n, &truth));
-                if (truth >= 0) known = truth + 1;
-            } else machine_push(c, m, eval(c, &f, n));
-            NEXT;
         CASE(BC_OPERATE)
             /* Its operands taken at hand from its plain steps, which run when
              * it cannot compute n natively (compile_operator). */
@@ -40490,16 +40492,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             value = spy_retain(ins->constant);
         load_push: /* One dispatch for both loads keeps clang's dispatch sites apart. */
             machine_push(c, m, value); NEXT;
-        CASE(BC_EXEC) {
-            /* An assignment, ticked as this step, needs no statement dispatch. */
-            if (n->kind == N_ASSIGN) {
-                if (assign_step(c, m, &f, n) > 0) goto store_step;
-                NEXT;
-            }
-            flow = execute_statements(c, &f, n, 1);
-            if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
-            continue;
-        }
 
         CASE(BC_NONE) machine_push(c, m, spy_none(c)); NEXT;
         CASE(BC_ANNOTATE)
@@ -40655,6 +40647,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             raise_assertion(c, a);
             break;
         CASE(BC_RAISE)
+            if (ins->arg == 2) { reraise(c); break; }
             b = machine_pop(m); a = machine_pop(m);
             raise_step(c, m, a, ins->arg ? b : NULL);
             if (!c->k_fn) break;
@@ -40949,19 +40942,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     if (UNLIKELY(store_into(c, &f, n->args, a, 1) > 0)) { machine_push(c, m, a); a = NULL; goto loop_stored; }
                     /* The body and the jump back, while no pass is counted or
                      * watched and the iterator steps itself without raising. */
-                    if (ins->other >= 3 && !watched(c)) {
-                        Node *body = code[pc].node;
+                    if (ins->other == 4 && !watched(c)) {
                         int left = 0;
                         while (quiet(c, &f)) {
                             spy_release(a); a = NULL;
-                            relocate(c, body);
-                            if (ins->other == 4) {
-                                /* Its plain steps run when it declines. */
-                                if (!assign_fused(c, &f, code, pc + 1, &code[pc])) { pc++; break; }
-                            } else if (ins->other == 3 && body->kind == N_ASSIGN) assign_step(c, NULL, &f, body);
-                            else flow = execute_statements(c, &f, body, 1);
-                            if (flow.flow != FLOW_NORMAL || c->error_type[0]) { left = 1; break; }
-                            spy_release(flow.value); flow.value = NULL;
+                            relocate(c, code[pc].node);
+                            /* Its plain steps run when it declines. */
+                            if (!assign_fused(c, &f, code, pc + 1, &code[pc])) { pc++; break; }
+                            if (c->error_type[0]) { left = 1; break; }
                             if (watched(c) || !quiet(c, &f) || !iterator_fast(c, iterator, &a)) { pc--; break; }
                             if (!a) { pc = ins->target; break; }
                             store_target(c, &f, n->args, a);
