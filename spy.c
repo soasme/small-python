@@ -40528,7 +40528,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_FALSE)
             a = machine_pop(m);
-            if ((a->type == SPY_INSTANCE || metaclassed(a)) && !truth_known) goto bool_step;
+            if (a->type != SPY_BOOL && (a->type == SPY_INSTANCE || metaclassed(a)) && !truth_known) goto bool_step;
             if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a))) pc = ins->target;
             NEXT_RELEASE;
         CASE(BC_SHORT) {
@@ -40885,7 +40885,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             special = CALL_ENTER;
             goto enter_special;
-        CASE(BC_INCREMENT) increment_step(c, &f, n); break;
+        CASE(BC_INCREMENT) increment_step(c, &f, n); continue;
         }
         if (a) spy_release(a);
         if (b) spy_release(b);
