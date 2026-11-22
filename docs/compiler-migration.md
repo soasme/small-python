@@ -119,7 +119,7 @@ specification tests run neither.
 The tenth stage removes the tree walker. `eval`, `execute_statements` and
 the statement and call evaluators behind them are deleted, so no statement
 or general expression runs from its tree. The paths that still reached
-them now run on the machine, except match patterns:
+them now run on the machine:
 
 - A fused call step (`BC_CALLF`) finds its callee and arguments only
   where no code runs; otherwise its plain steps run, as an operator's do.
@@ -136,9 +136,8 @@ them now run on the machine, except match patterns:
   argument steps. `exec` of a class body's code calls the body on the
   machine.
 - A `del` of an attribute or item evaluates its operands as steps.
-- A pattern's value, class and key expressions, which are literals or
-  dotted names, are still read from their nodes, by `pattern_value`, as
-  the match reaches them.
+- A match pattern's value, class and key expressions are compiled as
+  ordinary expression steps (the thirteenth stage, below).
 
 Instruction counts (clang -O2 -flto, callgrind, Linux arm64) against 0.9.0
 are lower for every benchmark program except `fib`, which is 1.18% higher;
@@ -190,6 +189,27 @@ A class body starts its set of conditional annotations in
 when it has annotations (`Program.entry`), so no body's opening
 instructions wait for its end. Expressions are still compiled from their
 trees when their statement or clause header ends.
+
+The thirteenth stage compiles match patterns. A case's pattern is a run
+of `BC_PATTERN` steps in the order CPython's compiler emits its pattern
+opcodes, and the C matchers that walked the pattern tree, with the log
+that replayed their Python calls, are deleted:
+
+- Each pattern test leaves a boolean for `BC_FALSE`, whose exit records
+  how many values it leaves above the case's slots; a failed case drops
+  each depth once, deepest first.
+- A case's captures fill one stack slot per name, in first-binding order
+  (`pattern_names`), and are stored after the whole pattern matches,
+  before the guard. An or-pattern's alternatives bind the same names, so a
+  later alternative overwrites a failed one's slots.
+- A mapping pattern evaluates its keys, reads `get`, then checks each key
+  for a duplicate and looks it up before any sub-pattern; a class pattern
+  reads `__match_args__` and every attribute before any sub-pattern. The
+  Python calls among these (`get`, getters, `__instancecheck__`,
+  `__len__`) are machine calls.
+
+A mixed match program executes 16% fewer instructions than at the twelfth
+stage; a failed value sub-pattern of a class pattern costs 4.5% more.
 
 ## Remaining stages
 
