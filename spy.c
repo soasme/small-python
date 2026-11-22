@@ -126,7 +126,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
-       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048,
+       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048, F_FINISHED = 4096 /* Seen by nodes_finish. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
@@ -4516,7 +4516,6 @@ typedef struct {
      * the statement (a module's are all conditional), the next index. */
     int collecting, conditional, annotation_index;
     Node *annotations, **annotations_tail;
-    Node *finished; /* The newest node nodes_finish saw. */
     int awaits; /* The awaits and async for clauses parsed (comprehension). */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
@@ -7975,27 +7974,37 @@ static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
 static SPYValue *literal_value(SPYContext *, Node *);
 static Node *operator_right(Node *);
 static SPYValue *unary(SPYContext *, int, SPYValue *);
-/* The nodes parsed since the last statement's, newest first: a number's
- * value, F_OPERATOR, then a negated number as a constant, as CPython
- * folds it, an inner negation before its outer. */
-static int nodes_finish(Parser *p) {
+static int compile_generator(SPYContext *, Node *);
+static int compile_comprehension(SPYContext *, Node *);
+/* The nodes parsed since start, newest first, but those an inner
+ * statement's call finished: a number's value, F_OPERATOR, then a negated
+ * number as a constant, as CPython folds it, an inner negation before its
+ * outer; then the instructions of the bodies among them, inner ones
+ * first. */
+static int nodes_finish(Parser *p, Node *start) {
     SPYContext *c = p->ctx;
     Node *newest = p->unit->as.unit.nodes;
-    for (Node *n = newest; n != p->finished && !c->error_type[0]; n = n->allocated) {
+    for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
+        if (n->flags & F_FINISHED) continue;
         if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) literal_value(c, n);
         if (operator_right(n)) n->flags |= F_OPERATOR;
     }
-    for (Node *n = newest; n != p->finished && !c->error_type[0]; n = n->allocated)
-        if (n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
-    p->finished = newest;
+    for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated)
+        if (!(n->flags & F_FINISHED) && n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
+    for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
+        if (n->flags & F_FINISHED) continue;
+        n->flags |= F_FINISHED;
+        if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
+        if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
+    }
     return c->error_type[0] ? -1 : 0;
 }
 static Node *statements(Parser *p) {
     Node *head = NULL, **tail = &head;
     while (!at(p, T_END) && !at(p, T_DEDENT)) {
         if (take(p, T_NL)) continue;
-        Node *n = line_statements(p);
-        if (!n || nodes_finish(p)) return NULL;
+        Node *start = p->unit->as.unit.nodes, *n = line_statements(p);
+        if (!n || nodes_finish(p, start)) return NULL;
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) tail = &(*tail)->next;
@@ -8085,8 +8094,6 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
 static void drop_docstring(Node *body) {
     if (body && body->kind == N_EXPR && body->a->kind == N_STRING) { body->kind = N_PASS; body->a = NULL; }
 }
-static int compile_generator(SPYContext *, Node *);
-static int compile_comprehension(SPYContext *, Node *);
 static Scope *scope_new(SPYContext *c, Scope *parent, int kind) {
     Scope *s = allocate(c, sizeof(*s));
     if (s) { s->parent = parent; s->kind = kind; }
@@ -8754,8 +8761,9 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         unit->as.unit.string_source = c->string_source != 0;
         c->node_start = c->node_end = NULL;
+        Node *start = unit->as.unit.nodes;
         if (!c->error_type[0]) collect_end(&p, NULL, &unit->as.unit.annotate, annotations);
-        if (!c->error_type[0]) nodes_finish(&p);
+        if (!c->error_type[0]) nodes_finish(&p, start);
         if (c->optimize > 1) {
             drop_docstring(unit->as.unit.body);
             for (Node *n = unit->as.unit.nodes; n; n = n->allocated)
@@ -8775,8 +8783,6 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 c->line = n->scope->return_line;
                 spy_error(c, "SyntaxError", "'return' with value in async generator"); break;
             }
-            if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
-            if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
         }
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
