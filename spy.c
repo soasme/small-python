@@ -50736,6 +50736,22 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
     if (callee->type != SPY_NATIVE || (!self && !argc--)) return NULL;
     if (!self) self = *argv++;
+    if (callee->as.native.call == builtin) {
+        intptr_t id = (intptr_t)callee->as.native.data;
+        if (id == B_OBJECT_REDUCE || id == B_OBJECT_REDUCE_EX || id == B_OBJECT_GETSTATE) {
+            /* Object's reduction goes on on m, its intrinsic's call or an error (object_reduce). */
+            SPYValue *args[] = {self, argc ? argv[0] : NULL};
+            if (argc < 2) object_reduce(c, m, (int)id, argc + 1, args);
+            return NULL;
+        }
+        if (argc == 1 && id == B_TYPE_GETATTRIBUTE && self->type == SPY_CLASS && builtin_value(c, argv[0], SPY_STRING) &&
+            !strcmp(builtin_value(c, argv[0], SPY_STRING)->as.string.data, "__annotations__") && type_answers(c, self, "__annotations__"))
+            return annotations_get(c, m, self);
+        if (argc == 1 && (id == B_OBJECT_GETATTRIBUTE || id == B_TYPE_GETATTRIBUTE))
+            return getattribute_entered(c, m, self, argv[0], id == B_TYPE_GETATTRIBUTE, env);
+        /* No other builtin function goes on on m. */
+        return NULL;
+    }
     /* T.__new__(T, ...) is T() of the arguments, a call step on m (comparek). */
     int built = callee->as.native.kwcall == type_new ? (int)(intptr_t)callee->as.native.data : SPY_BYTEARRAY;
     if (built != SPY_BYTEARRAY && built_layout(built) && self == c->types[built] && built_calls(argc, argv)) {
@@ -50790,18 +50806,6 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
         (entry = reduce_entry(iterator_class_id(self))) && (map = entry_compares(c, entry)))
         /* An iterator's __reduce__ looks its builtins entry up on m (reduce_begin). */
         return reduce_begin(c, m, self, map, entry);
-    intptr_t reduce = callee->as.native.call == builtin ? (intptr_t)callee->as.native.data : -1;
-    if (reduce == B_OBJECT_REDUCE || reduce == B_OBJECT_REDUCE_EX || reduce == B_OBJECT_GETSTATE) {
-        /* So does object's reduction, its intrinsic's call or an error (object_reduce). */
-        SPYValue *args[] = {self, argc ? argv[0] : NULL};
-        if (argc < 2) object_reduce(c, m, (int)reduce, argc + 1, args);
-        return NULL;
-    }
-    if (argc == 1 && is_builtin(callee, B_TYPE_GETATTRIBUTE) && self->type == SPY_CLASS && builtin_value(c, argv[0], SPY_STRING) &&
-        !strcmp(builtin_value(c, argv[0], SPY_STRING)->as.string.data, "__annotations__") && type_answers(c, self, "__annotations__"))
-        return annotations_get(c, m, self);
-    if (argc == 1 && (is_builtin(callee, B_OBJECT_GETATTRIBUTE) || is_builtin(callee, B_TYPE_GETATTRIBUTE)))
-        return getattribute_entered(c, m, self, argv[0], is_builtin(callee, B_TYPE_GETATTRIBUTE), env);
     if (callee->as.native.kwcall != descriptor_method) return NULL;
     SPYValue *p = builtin_value(c, self, SPY_PROPERTY);
     int op = (int)((intptr_t)callee->as.native.data - ((intptr_t)SPY_PROPERTY << 8));
