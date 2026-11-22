@@ -105,6 +105,12 @@ typedef struct ImportRecord { struct ImportRecord *next; const char *module; int
 typedef struct { Program *program; Node *head, *done; size_t depth; int holds, docs, tries; } Body;
 /* A try statement's shape and its instructions to patch (try_begin). */
 typedef struct { size_t final, handler, skip, first, rest; int has_final, excepts, star, otherwise; } Try;
+/* A pattern's failure exits (compile_pattern): each jump's step and the
+ * values it leaves above its case's slots, to drops that leave base. */
+typedef struct { size_t pc, temps; } PatternExit;
+/* A pattern's failing exits, and the names its case captures, in a slot each (case_begin). */
+typedef struct { PatternExit *exits; size_t len, cap, base; const char **names; size_t count; } PatternFail;
+typedef struct { PatternFail fail; size_t guard; const char **names; } Case;
 typedef struct Machine Machine;
 /* callk's continuation (as Lua's lua_KFunction): given its context and
  * what the call callk asked for returned (NULL with an error), both
@@ -494,8 +500,6 @@ struct SPYContext {
     SPYValue *sorter;
     /* Whether a call's return began a consumer that the machine goes on with (dir_listing). */
     int consuming;
-    /* The replay of the pattern a step matches, while it runs (pattern_step). */
-    struct Replay *replay;
     /* Whether a read of __annotations__ calls its Python __annotate__ (annotate_pending). */
     int annotating;
     /* On a machine's stack, marks the dict subclass's instance, under it,
@@ -560,6 +564,7 @@ struct SPYContext {
     /* The code unit_enter runs in place of its unit's body: a generic class's header (header_step). */
     Program *k_code;
     int interactive_input; /* eval_source parses interactive input, whose expression statements display their values. */
+    SPYValue *pattern_calls[2]; /* The builtin len and isinstance, as a pattern's steps call them (pattern_step). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -1313,6 +1318,7 @@ static void scope_edges(Scope *scope, Visit visit, void *data) {
         if (scope->symbols[i].key) visit(scope->symbols[i].key, data);
     if (scope->static_attributes) visit(scope->static_attributes, data);
 }
+static void program_edges(Program *, Visit, void *);
 static void edges(SPYValue *v, Visit visit, void *data) {
     /* A value released half-built, after a failed allocation, may hold NULL. */
 #define VISIT(e) do { SPYValue *e_ = (e); if (e_) visit(e_, data); } while (0)
@@ -1326,8 +1332,11 @@ static void edges(SPYValue *v, Visit visit, void *data) {
             VISIT(node->constant);
             VISIT(node->name.global_key);
             scope_edges(node->scope, visit, data);
+            program_edges(node->code, visit, data);
+            program_edges(node->flat, visit, data);
         }
         scope_edges(v->as.unit.scope, visit, data);
+        program_edges(v->as.unit.flat, visit, data);
         break;
     case SPY_LIST: case SPY_TUPLE:
         for (i = 0; i < v->as.seq.len; i++) VISIT(v->as.seq.items[i]);
@@ -5266,8 +5275,8 @@ static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
 static void patch(Program *, size_t, size_t);
 static size_t program_len(Program *);
 static uint32_t with_begin(SPYContext *, Program *, Node *, int);
-static size_t case_begin(SPYContext *, Program *, Node *, size_t *);
-static void case_end(SPYContext *, Program *, Node *, size_t, size_t, uint32_t *);
+static void case_begin(SPYContext *, Program *, Node *, Case *);
+static void case_end(SPYContext *, Program *, Node *, Case *, uint32_t *);
 static void match_end(SPYContext *, Program *, Node *, uint32_t);
 static void try_begin(SPYContext *, Program *, Node *, Try *);
 static void try_handlers(SPYContext *, Program *, Node *, Try *);
@@ -7075,6 +7084,9 @@ static int function_annotations(Parser *p, Node *def) {
 /* Structural pattern matching (PEP 634). Patterns are N_PATTERN nodes whose
  * op is the pattern kind; captures bind only after a pattern succeeds. */
 enum { PT_WILDCARD, PT_CAPTURE, PT_VALUE, PT_LITERAL, PT_SEQUENCE, PT_STAR, PT_MAPPING, PT_CLASS, PT_OR, PT_AS };
+/* The operations of a compiled pattern's BC_PATTERN steps (pattern_step). */
+enum { P_BEGIN, P_COPY, P_BIND, P_STORE, P_SEQUENCE, P_MAPPING, P_LEN, P_LENGTH, P_IS, P_UNPACK, P_CLASS,
+       P_INSTANCE, P_MATCH_ARGS, P_ATTRIBUTE, P_REVERSE, P_DROP, P_GET, P_LOOKUP, P_REST };
 static Node *pattern(Parser *);
 static Node *pattern_node(Parser *p, int kind) {
     Node *n = node(p, N_PATTERN);
@@ -7427,12 +7439,13 @@ static Node *match_statement(Parser *p) {
         if (take(p, T_NL)) continue;
         if (!keyword(p, "case")) return syntax(p, "invalid syntax");
         p->pos++;
-        size_t case_line = keyword_line(p), fail = 0, guard = 0;
+        size_t case_line = keyword_line(p);
+        Case k = {{0}, 0, NULL};
         Node *before = p->unit->as.unit.nodes, *item = case_header(p);
         if (!item || (emits && header_ready(p, before))) return NULL;
-        if (emits) fail = case_begin(p->ctx, p->body.program, item, &guard);
-        if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) return NULL;
-        if (emits) case_end(p->ctx, p->body.program, item, fail, guard, &exits);
+        if (emits) case_begin(p->ctx, p->body.program, item, &k);
+        if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); return NULL; }
+        if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
         *tail = item; tail = &item->next;
     }
     if (!n->args) return syntax(p, "expected 'case' block");
@@ -15948,7 +15961,11 @@ typedef struct {
  * names load through mappings (name_load): no fused step takes them. */
 /* plain, while a fused operator's plain steps compile (compile_operator);
  * tested, one past the last fused truth test, whose BC_FALSE may follow. */
-struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; ImportRecord *imports; };
+struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; ImportRecord *imports; SPYValue **values; size_t values_len, values_cap; };
+/* The values a program owns (emit_value). */
+static void program_edges(Program *code, Visit visit, void *data) {
+    for (size_t i = 0; code && i < code->values_len; i++) visit(code->values[i], data);
+}
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -16092,7 +16109,7 @@ enum { CLOSING = 1, THROWING };
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__, a key's
  * __hash__ (hash_call) or a list index's __index__ (index_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_PATTERN, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_ASKED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT, CALL_INTRINSICS };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_ASKED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT, CALL_INTRINSICS };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */
@@ -16106,7 +16123,7 @@ static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
 static void free_program(Program *code) {
     if (!code) return;
     for (ImportRecord *r = code->imports, *next; r; r = next) { next = r->next; mem_free(r); }
-    mem_free(code->items); mem_free(code);
+    mem_free(code->values); mem_free(code->items); mem_free(code);
 }
 static void machine_edges(Machine *m, Visit visit, void *data) {
     for (size_t i = 0; i < m->len; i++) visit(m->stack[i], data);
@@ -16760,21 +16777,244 @@ static void loop_else(SPYContext *c, Program *p, Node *n, size_t loop, size_t br
     if (loop != SIZE_MAX) patch(p, emit(c, p, BC_JUMP, NULL, 0), p->items[loop].other);
     patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
 }
+/* A BC_LOAD of value, which p takes. */
+static void emit_value(SPYContext *c, Program *p, Node *n, SPYValue *value) {
+    size_t pc = value && !grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)) ? emit(c, p, BC_NONE, n, 0) : SIZE_MAX;
+    if (pc == SIZE_MAX) { spy_release(value); return; }
+    p->values[p->values_len++] = value;
+    p->items[pc].op = BC_LOAD; p->items[pc].step = c->steps ? c->steps[BC_LOAD] : NULL; p->items[pc].constant = value;
+}
+/* BC_PATTERN's operation op, with operand (pattern_step). */
+static size_t emit_pattern(SPYContext *c, Program *p, Node *n, int op, size_t operand) {
+    return emit(c, p, BC_PATTERN, n, op | (int)operand << 5);
+}
+/* An exit from a pattern that fails, at step pc, leaving temps values
+ * above the case's slots. */
+static void pattern_exit(SPYContext *c, PatternFail *fail, size_t pc, size_t temps) {
+    if (pc == SIZE_MAX || grow(c, (void **)&fail->exits, &fail->cap, fail->len + 1, sizeof(*fail->exits))) return;
+    fail->exits[fail->len++] = (PatternExit){pc, temps};
+}
+/* The test of the value atop the stack, which fails the pattern when false. */
+static void pattern_test(SPYContext *c, Program *p, Node *n, PatternFail *fail, size_t temps) {
+    p->tested = 0;
+    pattern_exit(c, fail, emit(c, p, BC_FALSE, n, 0), temps);
+}
+/* The exits of fail: drops down to its base, one for each depth an exit
+ * leaves, deepest first, each exit entering at its own. */
+static void pattern_close(SPYContext *c, Program *p, PatternFail *fail, Node *n) {
+    size_t level = SIZE_MAX;
+    for (;;) {
+        size_t next = fail->base;
+        for (size_t i = 0; i < fail->len; i++) if (fail->exits[i].temps < level && fail->exits[i].temps > next) next = fail->exits[i].temps;
+        if (level != SIZE_MAX) emit_pattern(c, p, n, P_DROP, level - next);
+        for (size_t i = 0; i < fail->len; i++) if (fail->exits[i].temps == next) patch(p, fail->exits[i].pc, p->len);
+        if (next == fail->base) break;
+        level = next;
+    }
+    mem_free(fail->exits);
+    *fail = (PatternFail){.names = fail->names, .count = fail->count};
+}
+static void compile_pattern(SPYContext *, Program *, Node *, size_t, PatternFail *);
+/* The capture of the value atop the stack by name, temps values above
+ * the case's slots, into its slot; a name the parse rejects has none. */
+static void pattern_bind(SPYContext *c, Program *p, Node *n, Node *name, size_t temps, PatternFail *fail) {
+    size_t slot = 0;
+    while (slot < fail->count && strcmp(fail->names[slot], name->name.text)) slot++;
+    if (slot == fail->count) emit(c, p, BC_POP, n, 0);
+    else emit_pattern(c, p, n, P_BIND, temps + fail->count - 1 - slot);
+}
+/* A sequence pattern (16.6.3), as CPython compiles it: after the length
+ * check, a pattern of wildcards reads nothing; with a `*_` star the other
+ * items are read by index, those after the star from a fresh length;
+ * otherwise the subject is unpacked by iteration before any item is
+ * matched. */
+static void compile_sequence_pattern(SPYContext *c, Program *p, Node *n, size_t temps, PatternFail *fail) {
+    size_t count = 0, star = SIZE_MAX;
+    int wildcards = 1;
+    Node *star_item = NULL;
+    for (Node *item = n->args; item; item = item->next, count++) {
+        if (item->op == PT_STAR) { star = count; star_item = item; }
+        wildcards &= item->op == PT_WILDCARD || (item->op == PT_STAR && !item->a);
+    }
+    emit_pattern(c, p, n, P_SEQUENCE, 0);
+    pattern_test(c, p, n, fail, temps);
+    if (star == SIZE_MAX || count > 1) {
+        size_t pc = emit_pattern(c, p, n, P_LENGTH, 0);
+        if (pc != SIZE_MAX) { p->items[pc].target = (uint32_t)(star == SIZE_MAX ? count : count - 1); p->items[pc].other = star != SIZE_MAX; }
+        pattern_test(c, p, n, fail, temps);
+    }
+    if (wildcards) { emit(c, p, BC_POP, n, 0); return; }
+    if (star_item && !star_item->a) {
+        size_t index = 0;
+        for (Node *item = n->args; item; item = item->next, index++) {
+            if (item->op == PT_WILDCARD || index == star) continue;
+            emit_pattern(c, p, item, P_COPY, 0);
+            if (index > star) emit_pattern(c, p, item, P_LEN, 0);
+            emit_value(c, p, item, spy_int(c, index < star ? (int64_t)index : (int64_t)(count - index)));
+            if (index > star) emit(c, p, BC_BINARY, item, '-');
+            emit(c, p, BC_INDEX, item, 0);
+            compile_pattern(c, p, item, temps + 1, fail);
+        }
+        emit(c, p, BC_POP, n, 0);
+        return;
+    }
+    size_t pc = emit_pattern(c, p, n, P_UNPACK, 0);
+    if (pc != SIZE_MAX) { p->items[pc].target = (uint32_t)count; p->items[pc].other = star == SIZE_MAX ? 0 : (uint32_t)star + 1; }
+    size_t left = count;
+    for (Node *item = n->args; item; item = item->next, left--) {
+        if (item->op != PT_STAR) compile_pattern(c, p, item, temps + left, fail);
+        else if (item->a) pattern_bind(c, p, item, item->a, temps + left, fail);
+        else emit(c, p, BC_POP, item, 0);
+    }
+    emit(c, p, BC_POP, n, 0);
+}
+/* A mapping pattern (16.6.6), as CPython compiles it: after the type and
+ * length checks, every key is evaluated, then every value looked up, a
+ * missing key failing the match, before the sub-patterns match them. */
+static void compile_mapping_pattern(SPYContext *c, Program *p, Node *n, size_t temps, PatternFail *fail) {
+    size_t size = 0, index = 0;
+    for (Node *entry = n->args; entry; entry = entry->next) size++;
+    emit_pattern(c, p, n, P_MAPPING, 0);
+    pattern_test(c, p, n, fail, temps);
+    if (!size && !n->c) { emit(c, p, BC_POP, n, 0); return; }
+    if (size) {
+        size_t pc = emit_pattern(c, p, n, P_LENGTH, 0);
+        if (pc != SIZE_MAX) { p->items[pc].target = (uint32_t)size; p->items[pc].other = 1; }
+        pattern_test(c, p, n, fail, temps);
+    }
+    /* subject, keys, missing, the keys seen, get, then each value found. */
+    for (Node *entry = n->args; entry; entry = entry->next) compile_expr(c, p, entry->a);
+    if (size) {
+        emit_pattern(c, p, n, P_GET, size);
+        for (index = 0; index < size; index++) {
+            size_t pc = emit_pattern(c, p, n, P_LOOKUP, index);
+            if (pc != SIZE_MAX) p->items[pc].target = (uint32_t)size;
+            pattern_test(c, p, n, fail, temps + size + 3 + index);
+        }
+        if (size > 1) emit_pattern(c, p, n, P_REVERSE, size);
+        index = 0;
+        for (Node *entry = n->args; entry; entry = entry->next, index++) compile_pattern(c, p, entry->b, temps + 2 * size + 3 - index, fail);
+        if (n->c) emit_pattern(c, p, n, P_DROP, 3);
+    }
+    if (n->c) {
+        emit_pattern(c, p, n, P_REST, size);
+        pattern_bind(c, p, n, n->c, temps + size + 1, fail);
+    }
+    emit_pattern(c, p, n, P_DROP, size + 1 + (size && !n->c ? 3 : 0));
+}
+/* A class pattern (16.6.7), as CPython compiles it: the class checked
+ * and the subject's instance check, then every attribute read, positional
+ * ones by the class's __match_args__, a missing one failing the match,
+ * before the sub-patterns match them. */
+static void compile_class_pattern(SPYContext *c, Program *p, Node *n, size_t temps, PatternFail *fail) {
+    size_t positional = 0, keywords = 0, index = 0;
+    for (Node *item = n->args; item; item = item->next) positional++;
+    for (Node *entry = n->c; entry; entry = entry->next) keywords++;
+    compile_expr(c, p, n->a);
+    emit_pattern(c, p, n, P_CLASS, 0);
+    emit_pattern(c, p, n, P_INSTANCE, 0);
+    pattern_test(c, p, n, fail, temps + 1);
+    if (!positional && !keywords) { emit_pattern(c, p, n, P_DROP, 2); return; }
+    /* subject, class, __match_args__, keyword names, then each attribute read. */
+    size_t pc = emit_pattern(c, p, n, P_MATCH_ARGS, 0);
+    if (pc != SIZE_MAX) p->items[pc].target = (uint32_t)positional;
+    SPYValue *names = spy_tuple(c, 0, NULL);
+    for (Node *entry = n->c; names && entry; entry = entry->next) {
+        SPYValue *name = spy_string(c, entry->name.text, strlen(entry->name.text));
+        if (!name || sequence_append(c, names, name)) { spy_release(names); names = NULL; }
+        spy_release(name);
+    }
+    emit_value(c, p, n, names);
+    for (index = 0; index < positional + keywords; index++) {
+        if ((pc = emit_pattern(c, p, n, P_ATTRIBUTE, index)) != SIZE_MAX) p->items[pc].target = (uint32_t)positional;
+        pattern_test(c, p, n, fail, temps + 3 + index);
+    }
+    if (positional + keywords > 1) emit_pattern(c, p, n, P_REVERSE, positional + keywords);
+    index = 0;
+    for (Node *item = n->args; item; item = item->next, index++) compile_pattern(c, p, item, temps + 3 + positional + keywords - index, fail);
+    for (Node *entry = n->c; entry; entry = entry->next, index++) compile_pattern(c, p, entry->b, temps + 3 + positional + keywords - index, fail);
+    emit_pattern(c, p, n, P_DROP, 4);
+}
+/* Pattern n (16.6) of the value atop the stack, temps values above the
+ * case's slots counting it, which it takes when it matches; failing,
+ * to an exit of fail. */
+static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, PatternFail *fail) {
+    if (c->error_type[0]) return;
+    switch (n->op) {
+    case PT_WILDCARD: emit(c, p, BC_POP, n, 0); return;
+    case PT_CAPTURE: pattern_bind(c, p, n, n->a, temps, fail); return;
+    case PT_VALUE: case PT_LITERAL:
+        compile_expr(c, p, n->a);
+        if (n->a->kind == N_NONE || n->a->kind == N_BOOL) emit_pattern(c, p, n, P_IS, 0);
+        else emit(c, p, BC_BINARY, n, T_EQ);
+        pattern_test(c, p, n, fail, temps - 1);
+        return;
+    case PT_AS:
+        emit_pattern(c, p, n, P_COPY, 0);
+        compile_pattern(c, p, n->a, temps + 1, fail);
+        pattern_bind(c, p, n, n->b, temps, fail);
+        return;
+    case PT_OR: {
+        /* Each alternative matches a copy; every one captures the same
+         * names, so a later one overwrites a failed one's captures. */
+        uint32_t ends = NO_STEP;
+        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
+            PatternFail alternative = {.base = temps, .names = fail->names, .count = fail->count};
+            emit_pattern(c, p, item, P_COPY, 0);
+            compile_pattern(c, p, item, temps + 1, &alternative);
+            emit(c, p, BC_POP, item, 0);
+            size_t end = emit(c, p, BC_JUMP, item, 0);
+            if (end != SIZE_MAX) { p->items[end].other = ends; ends = (uint32_t)end; }
+            pattern_close(c, p, &alternative, item);
+        }
+        pattern_exit(c, fail, emit(c, p, BC_JUMP, n, 0), temps);
+        while (ends != NO_STEP && !c->error_type[0]) {
+            uint32_t next = p->items[ends].other;
+            p->items[ends].other = 0; patch(p, ends, p->len); ends = next;
+        }
+        return;
+    }
+    case PT_SEQUENCE: compile_sequence_pattern(c, p, n, temps, fail); return;
+    case PT_MAPPING: compile_mapping_pattern(c, p, n, temps, fail); return;
+    case PT_CLASS: compile_class_pattern(c, p, n, temps, fail); return;
+    }
+}
 /* The cases of a match statement, whose subject stays on the stack until
  * a case is chosen, compiled as the parser parses them (match_statement):
- * a case's pattern and guard, whose failures skip its suite; after the
- * suite, its jump past the rest, linked to the earlier cases' in exits;
- * after the last, the subject's pop, where those jumps go. */
-static size_t case_begin(SPYContext *c, Program *p, Node *item, size_t *guard) {
-    size_t fail = emit(c, p, BC_PATTERN, item, 0);
-    *guard = item->b ? compile_branch(c, p, item->b, item->b) : SIZE_MAX;
+ * a case's pattern matches a copy of the subject above a slot for each
+ * name it captures (pattern_names), stored once it matches, before its
+ * guard; after the suite, its jump past the rest, linked to the earlier
+ * cases' in exits; then the drops of a failed match, and the next case, where a failed
+ * guard goes. After the last, the subject's pop, where those jumps go. */
+static void case_begin(SPYContext *c, Program *p, Node *item, Case *k) {
+    const char *bad;
+    size_t count = 0;
+    if (!(k->names = allocate(c, 256 * sizeof(*k->names)))) return;
+    pattern_names(item->a, k->names, &count, 256, &bad);
+    k->fail.names = k->names; k->fail.count = count;
+    emit_pattern(c, p, item, P_BEGIN, count);
+    compile_pattern(c, p, item->a, 1, &k->fail);
+    SPYValue *names = count ? spy_tuple(c, 0, NULL) : NULL;
+    for (size_t i = 0; names && i < count; i++) {
+        SPYValue *name = spy_string(c, k->names[i], strlen(k->names[i]));
+        if (!name || sequence_append(c, names, name)) { spy_release(names); names = NULL; }
+        spy_release(name);
+    }
+    size_t pc = names && !grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)) ? emit_pattern(c, p, item, P_STORE, count) : SIZE_MAX;
+    if (pc != SIZE_MAX) { p->values[p->values_len++] = names; p->items[pc].constant = names; }
+    else spy_release(names);
+    k->guard = item->b ? compile_branch(c, p, item->b, item->b) : SIZE_MAX;
     emit(c, p, BC_POP, item, 0);
-    return fail;
 }
-static void case_end(SPYContext *c, Program *p, Node *item, size_t fail, size_t guard, uint32_t *exits) {
+static void case_end(SPYContext *c, Program *p, Node *item, Case *k, uint32_t *exits) {
     size_t end = emit(c, p, BC_JUMP, item, 0);
     if (end != SIZE_MAX) { p->items[end].other = *exits; *exits = (uint32_t)end; }
-    patch(p, fail, p->len); patch(p, guard, p->len);
+    /* A failed pattern drops the slots too. */
+    for (size_t i = 0; i < k->fail.len; i++) k->fail.exits[i].temps += k->fail.count;
+    pattern_close(c, p, &k->fail, item);
+    patch(p, k->guard, p->len);
+    mem_free(k->names);
+    k->names = NULL;
 }
 static void match_end(SPYContext *c, Program *p, Node *n, uint32_t exits) {
     emit(c, p, BC_POP, n, 0);
@@ -19723,9 +19963,7 @@ static ALWAYS_INLINE SPYValue *run_function(SPYContext *c, SPYValue *fn, SPYValu
     release_left(env, 1);
     return result;
 }
-static SPYValue *replayed_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    if (UNLIKELY(c->replay != NULL)) return replayed_call(c, fn, argc, argv, keywords);
     SPYValue *env = function_env(c, fn, argc, argv, keywords, 0);
     return env ? run_function(c, fn, env) : NULL;
 }
@@ -21364,10 +21602,6 @@ static size_t target_count(Node *n, size_t *star) {
         count++;
     }
     return count;
-}
-static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
-    size_t star, count = target_count(n, &star);
-    return unpack_values(c, f, n, value, count, star);
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls);
 /* A name stored in its remembered slot cannot fail, so it skips the step
@@ -25940,22 +26174,9 @@ static Machine *percent_returned(SPYContext *c, Machine *m, SPYValue *text) {
     if (value) machine_push(c, m, value);
     return c->k_fn ? k_enter(c, m) : m;
 }
-/* The replay of a pattern's Python calls (pattern_step). */
-typedef struct Replay { SPYValue *log, *missing, *fn, *args; size_t at; } Replay;
-/* Pattern matching runtime. Bindings collect in a dictionary and are stored
- * only after the whole pattern succeeds, before any guard runs. */
-static void bindings_truncate(SPYValue *bindings, size_t len) {
-    while (bindings->as.map.len > len) {
-        Entry old = map_remove(bindings, map_used(bindings) - 1);
-        spy_release(old.key); spy_release(old.value);
-    }
-}
-static int bind_capture(SPYContext *c, SPYValue *bindings, Node *name, SPYValue *value) {
-    SPYValue *key = spy_string(c, name->name.text, strlen(name->name.text));
-    int status = key ? map_set(c, bindings, key, value) : -1;
-    spy_release(key);
-    return status;
-}
+/* Pattern matching runtime (compile_pattern). A case's captures fill
+ * slots below the values its steps test and are stored only after the
+ * whole pattern matched, before any guard runs. */
 static int match_sequence_subject(SPYContext *c, SPYValue *subject) {
     if (subject->type == SPY_LIST || subject->type == SPY_TUPLE || subject->type == SPY_RANGE || subject->type == SPY_MEMORYVIEW) return 1;
     if (subject->type != SPY_INSTANCE) return 0;
@@ -25967,357 +26188,257 @@ static int match_mapping_subject(SPYContext *c, SPYValue *subject) {
     return subject->type == SPY_INSTANCE && (subclass(subject->as.map.parent, c->types[SPY_DICT]) ||
         subclass(subject->as.map.parent, c->types[SPY_FROZENDICT]));
 }
-static int match_pattern(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings);
-static int match_equal(SPYContext *c, SPYValue *subject, SPYValue *value, int identity) {
-    if (identity) return subject == value;
-    SPYValue *result = comparison(c, T_EQ, subject, value);
-    int truth = result ? truthy(result) : -1;
-    spy_release(result);
-    return c->error_type[0] ? -1 : truth;
-}
-/* The value of a pattern's expression: a literal, a negated or complex
- * literal, or a dotted name (16.6.2). */
-static SPYValue *pattern_value(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *a, *b, *result = NULL;
-    switch (n->kind) {
-    case N_NAME:
-        if ((a = name_fast(f->env, &n->name))) return spy_retain(a);
-        return name_find(c, f->env, node_name(n));
-    case N_ATTR:
-        if (!(a = pattern_value(c, f, n->a))) return NULL;
-        relocate(c, n);
-        result = node_attribute(c, a, n, 0);
-        spy_release(a);
-        return result;
-    case N_UNARY:
-        if (!(a = pattern_value(c, f, n->a))) return NULL;
-        result = unary(c, n->op, a);
-        spy_release(a);
-        return result;
-    case N_BINARY:
-        if (!(a = pattern_value(c, f, n->a))) return NULL;
-        if ((b = pattern_value(c, f, n->b))) result = binary(c, n->op, a, b);
-        spy_release(a); spy_release(b);
-        return result;
-    default: return spy_retain(literal_value(c, n));
-    }
-}
-static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub, size_t depth);
-static int match_class(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
-    SPYValue *cls = pattern_value(c, f, n->a);
-    if (!cls) return -1;
-    int result = -1;
-    SPYValue *match_args = NULL;
-    if (cls->type != SPY_CLASS) { errorf(c, "TypeError", "class pattern must refer to a class"); goto done; }
-    if ((result = instance_check(c, subject, cls, 0, 0)) <= 0) goto done;
-    result = -1;
-    size_t positional = 0;
-    for (Node *item = n->args; item; item = item->next) positional++;
-    static const int self_types[] = {SPY_BOOL, SPY_BYTEARRAY, SPY_BYTES, SPY_DICT, SPY_FROZENDICT, SPY_FLOAT, SPY_FROZENSET, SPY_INT, SPY_LIST, SPY_SET, SPY_STRING, SPY_TUPLE};
-    int self_match = 0;
-    for (size_t i = 0; i < sizeof(self_types) / sizeof(*self_types); i++) if (subclass(cls, c->types[self_types[i]])) self_match = 1;
-    const char *cls_name = name_text(cls, "__name__")->as.string.data;
-    if (positional) {
-        match_args = attribute(c, cls, "__match_args__");
-        if (!match_args && error_is(c, "AttributeError")) { spy_clear_error(c); match_args = NULL; }
-        else if (!match_args) goto done;
-        if (match_args && match_args->type != SPY_TUPLE) {
-            errorf(c, "TypeError", "%s.__match_args__ must be a tuple (got %s)", cls_name, type_name(match_args)); goto done;
-        }
-        size_t allowed = match_args ? match_args->as.seq.len : self_match ? 1 : 0;
-        if (positional > allowed) {
-            errorf(c, "TypeError", "%s() accepts %zu positional sub-pattern%s (%zu given)", cls_name, allowed, allowed == 1 ? "" : "s", positional);
-            goto done;
-        }
-    }
-    /* _PyEval_MatchClass: look up every attribute, positional then keyword,
-     * refusing a name seen before; a missing one fails the match. The
-     * sub-patterns are matched only afterwards. */
-    size_t keywords = 0, count = 0;
-    for (Node *keyword = n->c; keyword; keyword = keyword->next) keywords++;
-    SPYValue **values = allocate(c, (positional + keywords + 1) * sizeof(*values));
-    const char **seen = allocate(c, (positional + keywords + 1) * sizeof(*seen));
-    size_t seen_count = 0;
-    if (!values || !seen) { mem_free(values); mem_free(seen); goto done; }
-    Node *item = n->args;
-    for (size_t index = 0; index < positional + keywords; index++) {
-        const char *name;
-        if (index < positional) {
-            if (!match_args) { values[count++] = spy_retain(subject); continue; }
-            SPYValue *entry = match_args->as.seq.items[index];
-            if (entry->type != SPY_STRING) { errorf(c, "TypeError", "__match_args__ elements must be strings (got %s)", type_name(entry)); goto collected; }
-            name = entry->as.string.data;
-        } else {
-            Node *keyword = n->c;
-            for (size_t k = positional; k < index; k++) keyword = keyword->next;
-            name = keyword->name.text;
-        }
-        for (size_t j = 0; j < seen_count; j++)
-            if (!strcmp(seen[j], name)) { errorf(c, "TypeError", "%s() got multiple sub-patterns for attribute '%s'", cls_name, name); goto collected; }
-        seen[seen_count++] = name;
-        SPYValue *value = attribute(c, subject, name);
-        if (!value) {
-            if (error_is(c, "AttributeError")) { spy_clear_error(c); result = 0; }
-            goto collected;
-        }
-        values[count++] = value;
-    }
-    result = 1;
-    for (size_t index = 0; index < count && result == 1; index++) {
-        Node *pattern;
-        if (index < positional) { pattern = item; item = item->next; }
-        else {
-            Node *keyword = n->c;
-            for (size_t k = positional; k < index; k++) keyword = keyword->next;
-            pattern = keyword->b;
-        }
-        int matched = match_pattern(c, f, pattern, values[index], bindings);
-        if (matched <= 0) result = matched;
-    }
-collected:
-    for (size_t i = 0; i < count; i++) spy_release(values[i]);
-    mem_free(values); mem_free(seen);
-done:
-    spy_release(cls); spy_release(match_args);
+static SPYValue *unpack_counted(SPYContext *, Machine *, Frame *, Node *, size_t, size_t);
+static int checks_call_rest(SPYContext *, Machine *, int, size_t, SPYValue *const *, SPYValue **);
+static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
+/* What a pattern step's call returned, as it is. */
+static SPYValue *pattern_given(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)c; (void)m; (void)ctx;
     return result;
 }
-static int match_mapping(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
-    if (!match_mapping_subject(c, subject)) return 0;
-    SPYValue *keys = value_new(c, SPY_LIST), *missing = c->replay ? spy_retain(c->replay->missing) : value_new(c, SPY_LIST), *get = NULL;
-    int result = -1;
-    if (!keys || !missing) goto done;
-    if (n->args) {
-        SPYValue *length = builtin(c, 1, &subject, (void *)(intptr_t)B_LEN);
-        int64_t size = 0, needed = 0;
-        for (Node *entry = n->args; entry; entry = entry->next) needed++;
-        int status = !length || spy_as_int(c, length, &size);
-        spy_release(length);
-        if (status) goto done;
-        if (size < needed) { result = 0; goto done; }
-    }
-    if (!is_dict(subject) && n->args && !(get = attribute(c, subject, "get"))) goto done;
-    for (Node *entry = n->args; entry; entry = entry->next) {
-        SPYValue *key = pattern_value(c, f, entry->a), *value = NULL;
-        if (!key) goto done;
-        for (size_t i = 0; i < keys->as.seq.len && !c->error_type[0]; i++)
-            if (equal(keys->as.seq.items[i], key)) {
-                SPYValue *text = spy_repr(c, key);
-                if (text) errorf(c, "ValueError", "mapping pattern checks duplicate key (%s)", text->as.string.data);
-                spy_release(text);
-            }
-        if (c->error_type[0] || sequence_append(c, keys, key)) { spy_release(key); goto done; }
-        if (is_dict(subject)) {
-            ptrdiff_t found = map_find(subject, key);
-            if (found >= 0) value = spy_retain(subject->as.map.items[found].value);
-        } else {
-            SPYValue *args[] = {key, missing};
-            value = call(c, get, 2, args);
-            if (value == missing) { spy_release(value); value = NULL; }
-        }
-        spy_release(key);
-        if (c->error_type[0]) { spy_release(value); goto done; }
-        if (!value) { result = 0; goto done; }
-        int matched = match_pattern(c, f, entry->b, value, bindings);
-        spy_release(value);
-        if (matched <= 0) { result = matched; goto done; }
-    }
-    if (n->c) {
-        SPYValue *rest = builtin(c, 1, &subject, (void *)(intptr_t)B_DICT);
-        if (!rest) goto done;
-        for (size_t i = 0; i < keys->as.seq.len; i++) {
-            ptrdiff_t found = map_find(rest, keys->as.seq.items[i]);
-            if (found >= 0) {
-                Entry old = map_remove(rest, (size_t)found);
-                spy_release(old.key); spy_release(old.value);
-            }
-        }
-        int status = bind_capture(c, bindings, n->c, rest);
-        spy_release(rest);
-        if (status) goto done;
-    }
-    result = 1;
-done:
-    spy_release(keys); spy_release(missing); spy_release(get);
-    return result;
-}
-static int match_length(SPYContext *c, SPYValue *subject, int64_t *size) {
-    SPYValue *length = builtin(c, 1, &subject, (void *)(intptr_t)B_LEN);
-    int status = !length || spy_as_int(c, length, size);
+/* Whether the length a P_LENGTH step's len() returned is its count,
+ * ctx twice it, or with ctx odd at least that. */
+static SPYValue *pattern_measured(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *length) {
+    (void)m;
+    int64_t want = ctx->as.integer_data.small, size = length ? length->as.integer_data.small : 0;
+    spy_release(ctx);
+    if (!length) return NULL;
+    int big = length->as.integer_data.big != NULL;
     spy_release(length);
-    return status ? -1 : 0;
+    return spy_bool(c, big || (want & 1 ? size >= want >> 1 : size == want >> 1));
 }
-static SPYValue *unpack_values(SPYContext *, Frame *, Node *, SPYValue *, size_t, size_t);
-/* 15.6.3, as CPython compiles a sequence pattern: after the length check, a
- * pattern of wildcards reads nothing; with a `*_` star the other items are
- * read by index, those after the star from a fresh length; otherwise the
- * subject is unpacked by iteration, as a target list is, before any item
- * is matched. */
-static int match_sequence(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
-    if (!match_sequence_subject(c, subject)) return 0;
-    size_t count = 0, star = SIZE_MAX;
-    int wildcards = 1;
-    for (Node *item = n->args; item; item = item->next, count++) {
-        if (item->op == PT_STAR) star = count;
-        wildcards &= item->op == PT_WILDCARD || (item->op == PT_STAR && !item->a);
-    }
-    int64_t size;
-    if ((star == SIZE_MAX || count > 1) && match_length(c, subject, &size)) return -1;
-    if (star == SIZE_MAX ? (uint64_t)size != count : count > 1 && (uint64_t)size < count - 1) return 0;
-    if (wildcards) return 1;
-    Node *star_item = n->args;
-    for (size_t i = 0; star != SIZE_MAX && i < star; i++) star_item = star_item->next;
-    if (star != SIZE_MAX && !star_item->a) {
-        size_t index = 0;
-        for (Node *item = n->args; item; item = item->next, index++) {
-            if (item->op == PT_WILDCARD || index == star) continue;
-            int64_t position = (int64_t)index;
-            if (index > star && match_length(c, subject, &size)) return -1;
-            if (index > star) position = size - (int64_t)(count - index);
-            SPYValue *key = spy_int(c, position), *value = key ? get_index(c, subject, key) : NULL;
-            spy_release(key);
-            if (!value) return -1;
-            int matched = match_pattern(c, f, item, value, bindings);
-            spy_release(value);
-            if (matched <= 0) return matched;
-        }
-        return 1;
-    }
-    SPYValue *items = unpack_values(c, f, n, subject, count, star);
-    if (!items) return -1;
-    size_t index = 0;
-    int matched = 1;
-    for (Node *item = n->args; item && matched > 0; item = item->next, index++) {
-        SPYValue *value = items->as.seq.items[index];
-        matched = item->op == PT_STAR ? (item->a ? (bind_capture(c, bindings, item->a, value) ? -1 : 1) : 1)
-                                      : match_pattern(c, f, item, value, bindings);
-    }
-    spy_release(items);
-    return matched;
-}
-static int match_pattern(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
-    if (deeper(c, "")) return -1;
-    int result = -1;
-    switch (n->op) {
-    case PT_WILDCARD: result = 1; break;
-    case PT_CAPTURE: result = bind_capture(c, bindings, n->a, subject) ? -1 : 1; break;
-    case PT_VALUE: case PT_LITERAL: {
-        SPYValue *value = pattern_value(c, f, n->a);
-        if (value) result = match_equal(c, subject, value, n->a->kind == N_NONE || n->a->kind == N_BOOL);
-        spy_release(value);
-        break;
-    }
-    case PT_AS:
-        result = match_pattern(c, f, n->a, subject, bindings);
-        if (result > 0 && bind_capture(c, bindings, n->b, subject)) result = -1;
-        break;
-    case PT_OR:
-        result = 0;
-        for (Node *item = n->args; item && !result; item = item->next) {
-            size_t saved = bindings->as.map.len;
-            result = match_pattern(c, f, item, subject, bindings);
-            if (result <= 0) bindings_truncate(bindings, saved);
-        }
-        break;
-    case PT_SEQUENCE: result = match_sequence(c, f, n, subject, bindings); break;
-    case PT_MAPPING: result = match_mapping(c, f, n, subject, bindings); break;
-    case PT_CLASS: result = match_class(c, f, n, subject, bindings); break;
-    }
-    c->depth--;
-    return c->error_type[0] ? -1 : result;
-}
-/* Match one case and store its captures. Returns 1, 0, or -1 on error. */
-static int match_case(SPYContext *c, Frame *f, Node *item, SPYValue *subject) {
-    SPYValue *bindings = value_new(c, SPY_DICT);
-    if (!bindings) return -1;
-    int result = match_pattern(c, f, item->a, subject, bindings);
-    for (size_t i = 0; result > 0 && (!c->replay || !c->replay->fn) && i < bindings->as.map.len; i++)
-        if (name_set(c, f->env, map_items(bindings)[i].key->as.string.data, map_items(bindings)[i].value)) result = -1;
-    spy_release(bindings);
+/* The attribute a pattern step read, result, a missing one c->unbound. */
+static SPYValue *pattern_read(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m; (void)ctx;
+    if (!result && !c->stopped && error_is(c, "AttributeError")) { spy_clear_error(c); return spy_retain(c->unbound); }
     return result;
 }
-/* A pattern's Python calls run on the machine by replay: a pass matches
- * it in C until a call to a Python function (replayed_call), which the
- * machine makes; its result or exception goes in the log, and the pass
- * runs again, each call it reaches taking the logged result in turn,
- * until one completes. A pass is deterministic but for those calls; one
- * reaching a call not logged with the same function and arguments, or
- * running a machine in C, goes on in C. The log holds the missing
- * sentinel of mapping patterns first, then [function, arguments, result,
- * exception, error state] for each call. */
-static NO_INLINE int replay_log(SPYContext *c, Replay *r, SPYValue *fn, SPYValue *args, SPYValue *result);
-static NO_INLINE SPYValue *replayed_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    Replay *r = c->replay;
-    /* A pass that left a call goes no further. */
-    if (r->fn) return spy_error(c, "RuntimeError", "pattern call pending");
-    if (!keywords || !keywords->as.map.len) {
-        if (r->at < r->log->as.seq.len) {
-            SPYValue **e = r->log->as.seq.items[r->at++]->as.seq.items;
-            int same = e[0] == fn && e[1]->as.seq.len == argc;
-            for (size_t i = 0; same && i < argc; i++) same = e[1]->as.seq.items[i] == argv[i];
-            if (same && e[3]->type == SPY_NONE) return spy_retain(e[2]);
-            if (same) {
-                ErrorState state;
-                memcpy(&state, e[4]->as.string.data, sizeof(state));
-                state.value = spy_retain(e[3]);
-                restore_error(c, &state);
+/* The rest of a read of attribute name of object that attribute_step
+ * left to a Python getter, on m, then k with ctx, which it takes. */
+static SPYValue *pattern_getter(SPYContext *c, Machine *m, SPYValue *object, const char *name, Continuation k, SPYValue *ctx) {
+    SPYValue *function = c->fallback;
+    c->fallback = NULL;
+    return attribute_callk(c, m, object, name, function, k, ctx);
+}
+/* The attribute name of v, as attribute_step reads it: a tuple entry of
+ * a class with no metaclass, read in place. */
+static SPYValue *pattern_attribute(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *found = NULL;
+    if (v->type == SPY_CLASS && !v->as.map.meta && (found = class_lookup(v, name)) && found->type != SPY_TUPLE) found = NULL;
+    return found ? spy_retain(found) : attribute_step(c, v, name);
+}
+/* Whether attribute_step left a read to a Python getter. */
+static int pattern_left(SPYContext *c, SPYValue *read) { return !read && !c->error_type[0] && c->fallback; }
+/* The __match_args__ of a class pattern's class, cls, read, result:
+ * checked against positional, c->unbound when the class has none (16.6.7). */
+static SPYValue *pattern_match_args_of(SPYContext *c, SPYValue *cls, size_t positional, SPYValue *result) {
+    static const int self_types[] = {SPY_BOOL, SPY_BYTEARRAY, SPY_BYTES, SPY_DICT, SPY_FROZENDICT, SPY_FLOAT, SPY_FROZENSET, SPY_INT, SPY_LIST, SPY_SET, SPY_STRING, SPY_TUPLE};
+    if (!(result = pattern_read(c, NULL, NULL, result))) return NULL;
+    if (result != c->unbound && result->type != SPY_TUPLE) {
+        errorf(c, "TypeError", "%s.__match_args__ must be a tuple (got %s)", name_text(cls, "__name__")->as.string.data, type_name(result));
+        spy_release(result);
+        return NULL;
+    }
+    size_t allowed = result != c->unbound ? result->as.seq.len : 0;
+    for (size_t i = 0; result == c->unbound && !allowed && i < sizeof(self_types) / sizeof(*self_types); i++) allowed = subclass(cls, c->types[self_types[i]]);
+    if (positional > allowed) {
+        errorf(c, "TypeError", "%s() accepts %zu positional sub-pattern%s (%zu given)", name_text(cls, "__name__")->as.string.data, allowed,
+               allowed == 1 ? "" : "s", positional);
+        spy_release(result);
+        return NULL;
+    }
+    return result;
+}
+static SPYValue *pattern_match_args(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) {
+    (void)m;
+    result = pattern_match_args_of(c, ctx->as.seq.items[0], (size_t)ctx->as.seq.items[1]->as.integer_data.small, result);
+    spy_release(ctx);
+    return result;
+}
+/* Whether a P_ATTRIBUTE or P_LOOKUP step found a value, result, which
+ * it pushes on m: not c->unbound, or the sentinel missing; an attribute
+ * has none, its AttributeError failing the match. */
+static SPYValue *pattern_found_in(SPYContext *c, Machine *m, SPYValue *missing, SPYValue *result) {
+    if (missing == c->unbound) result = pattern_read(c, NULL, NULL, result);
+    if (!result) return NULL;
+    if (result == c->unbound || result == missing) { spy_release(result); return spy_bool(c, 0); }
+    return machine_push(c, m, result) ? NULL : spy_bool(c, 1);
+}
+/* An attribute read's continuation has no ctx (k_resume). */
+static SPYValue *pattern_found(SPYContext *c, Machine *m, SPYValue *missing, SPYValue *result) {
+    SPYValue *truth = pattern_found_in(c, m, missing ? missing : c->unbound, result);
+    spy_release(missing);
+    return truth;
+}
+/* The dict of a mapping pattern's remaining items: the copy dict()
+ * made, result, without the count keys (16.6.6). */
+static SPYValue *pattern_rest_of(SPYContext *c, size_t count, SPYValue *const *keys, SPYValue *result) {
+    for (size_t i = 0; result && i < count; i++) {
+        ptrdiff_t found = map_find(result, keys[i]);
+        if (found < 0) { if (!c->error_type[0]) missing_key(c, keys[i]); spy_release(result); return NULL; }
+        Entry old = map_remove(result, (size_t)found);
+        spy_release(old.key); spy_release(old.value);
+    }
+    return result;
+}
+static SPYValue *pattern_rest(SPYContext *c, Machine *m, SPYValue *keys, SPYValue *result) {
+    (void)m;
+    result = pattern_rest_of(c, keys->as.seq.len, keys->as.seq.items, result);
+    spy_release(keys);
+    return result;
+}
+/* BC_PATTERN: operation arg & 31 of a compiled pattern, the rest of arg
+ * its operand, on the values atop m's stack (compile_pattern): the value
+ * to push, c->stepped for none, or NULL for an error or a call left to
+ * the machine (step_callk, callk), whose continuation gives the value;
+ * or with neither, a consumer begun (P_UNPACK). P_BIND's slot is the
+ * operand's depth below the top. */
+static NO_INLINE SPYValue *pattern_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
+    SPYValue **top = &m->stack[m->len - 1], *v = *top;
+    size_t operand = (size_t)ins->arg >> 5;
+    switch (ins->arg & 31) {
+    /* A slot for each of the operand names the case captures, under a copy of the subject. */
+    case P_BEGIN:
+        for (size_t i = 0; i < operand; i++) if (machine_push(c, m, spy_retain(c->unbound))) return NULL;
+        return spy_retain(v);
+    case P_COPY: return spy_retain(top[-(ptrdiff_t)operand]);
+    case P_BIND:
+        spy_release(top[-(ptrdiff_t)operand]);
+        top[-(ptrdiff_t)operand] = machine_pop(m);
+        return c->stepped;
+    /* The case matched: each slot stored under its name, in capture order. */
+    case P_STORE:
+        for (size_t i = 0; i < operand; i++)
+            if (name_set(c, f->env, ins->constant->as.seq.items[i]->as.string.data, top[(ptrdiff_t)i + 1 - (ptrdiff_t)operand])) return NULL;
+        for (size_t i = 0; i < operand; i++) spy_release(machine_pop(m));
+        return c->stepped;
+    case P_SEQUENCE: return spy_bool(c, match_sequence_subject(c, v));
+    case P_MAPPING: return spy_bool(c, match_mapping_subject(c, v));
+    case P_LEN: case P_LENGTH: {
+        /* Only an instance's len() may call Python. */
+        if (v->type != SPY_INSTANCE) {
+            int64_t size;
+            if (v->type == SPY_LIST || v->type == SPY_TUPLE || is_dict(v)) size = (int64_t)(is_dict(v) ? v->as.map.len : v->as.seq.len);
+            else {
+                SPYValue *length = builtin(c, 1, &v, (void *)(intptr_t)B_LEN);
+                if (!length) return NULL;
+                size = length->as.integer_data.small;
+                spy_release(length);
+            }
+            if ((ins->arg & 31) == P_LEN) return spy_int(c, size);
+            return spy_bool(c, ins->other ? size >= (int64_t)ins->target : size == (int64_t)ins->target);
+        }
+        SPYValue *args = tuple_of(c, 1, &v), *want = args && (ins->arg & 31) == P_LENGTH ? spy_int(c, (int64_t)ins->target << 1 | ins->other) : NULL;
+        if (!args || ((ins->arg & 31) == P_LENGTH && !want)) { spy_release(args); return NULL; }
+        return step_callk(c, m, spy_retain(c->pattern_calls[0]), args, want ? pattern_measured : pattern_given, want);
+    }
+    case P_IS: {
+        SPYValue *same = spy_bool(c, top[-1] == v);
+        spy_release(machine_pop(m)); spy_release(machine_pop(m));
+        return same;
+    }
+    case P_UNPACK: {
+        SPYValue *items = unpack_counted(c, m, f, ins->node, ins->target, ins->other ? ins->other - 1 : SIZE_MAX);
+        if (!items) return NULL;
+        for (size_t i = items->as.seq.len; i; i--) if (machine_push(c, m, spy_retain(items->as.seq.items[i - 1]))) break;
+        spy_release(items);
+        return c->error_type[0] ? NULL : c->stepped;
+    }
+    case P_CLASS:
+        if (v->type != SPY_CLASS) { spy_error(c, "TypeError", "class pattern must refer to a class"); return NULL; }
+        return c->stepped;
+    case P_INSTANCE: {
+        /* isinstance(), its Python __instancecheck__ called on m (checks_call_rest). */
+        SPYValue *result = NULL, *subject = top[-1];
+        /* A class of no metaclass has no hook, and its instance's __class__ needs no read. */
+        int plain = v->type == SPY_CLASS && !v->as.map.meta && (subject->type != SPY_INSTANCE || subclass(subject->as.map.parent, v));
+        if (!plain && checks_call_rest(c, m, B_ISINSTANCE, 2, top - 1, &result)) return result;
+        int found = instance_check(c, top[-1], v, 0, 0);
+        return found < 0 ? NULL : spy_bool(c, found);
+    }
+    case P_MATCH_ARGS: {
+        if (!ins->target) return spy_retain(c->unbound);
+        SPYValue *read = pattern_attribute(c, v, "__match_args__"), *count;
+        if (!pattern_left(c, read)) return pattern_match_args_of(c, v, ins->target, read);
+        SPYValue *ctx = (count = spy_int(c, ins->target)) ? spy_tuple(c, 2, (SPYValue *[]){v, count}) : NULL;
+        spy_release(count);
+        if (!ctx) { spy_release(c->fallback); c->fallback = NULL; return NULL; }
+        return pattern_getter(c, m, v, "__match_args__", pattern_match_args, ctx);
+    }
+    case P_ATTRIBUTE: {
+        /* subject, class, __match_args__, keyword names, then the operand attributes read. */
+        SPYValue *subject = top[-(ptrdiff_t)operand - 3], *cls = top[-(ptrdiff_t)operand - 2], *match_args = top[-(ptrdiff_t)operand - 1],
+                 *names = top[-(ptrdiff_t)operand];
+        size_t positional = ins->target, attrs = positional + names->as.seq.len;
+        const char *name;
+        if (operand < positional && match_args == c->unbound) return machine_push(c, m, spy_retain(subject)) ? NULL : spy_bool(c, 1);
+        if (operand < positional) {
+            SPYValue *entry = match_args->as.seq.items[operand];
+            if (entry->type != SPY_STRING) { errorf(c, "TypeError", "__match_args__ elements must be strings (got %s)", type_name(entry)); return NULL; }
+            name = entry->as.string.data;
+        } else name = names->as.seq.items[operand - positional]->as.string.data;
+        /* CPython checks positional names among themselves and against the keywords. */
+        for (size_t i = 0; positional && attrs > 1 && match_args != c->unbound && i < (operand < positional ? operand : positional); i++)
+            if (!strcmp(match_args->as.seq.items[i]->as.string.data, name)) {
+                errorf(c, "TypeError", "%s() got multiple sub-patterns for attribute '%s'", name_text(cls, "__name__")->as.string.data, name);
                 return NULL;
             }
-        } else if (!machine_function(c, fn)) {
-            /* A function whose body is not on the machine runs here, logged. */
-            SPYValue *args = spy_tuple(c, argc, argv);
-            if (!args) return NULL;
-            c->replay = NULL;
-            SPYValue *result = call_function(c, fn, argc, argv, keywords);
-            c->replay = r;
-            if (replay_log(c, r, fn, args, result)) { spy_release(result); result = NULL; }
-            spy_release(args);
-            return result;
-        } else if ((r->args = spy_tuple(c, argc, argv))) {
-            r->fn = spy_retain(fn);
-            return spy_error(c, "RuntimeError", "pattern call pending");
-        } else return NULL;
+        SPYValue *read = pattern_attribute(c, subject, name);
+        return pattern_left(c, read) ? pattern_getter(c, m, subject, name, pattern_found, NULL) : pattern_found_in(c, m, c->unbound, read);
     }
-    c->replay = NULL;
-    return call_function(c, fn, argc, argv, keywords);
-}
-/* Log a call of fn with args that gave result, or NULL with the pending
- * exception, which stays pending; nonzero when logging fails, an error
- * pending. */
-static NO_INLINE int replay_log(SPYContext *c, Replay *r, SPYValue *fn, SPYValue *args, SPYValue *result) {
-    SPYValue *parts[] = {fn, args, result ? result : c->none, c->none, c->none}, *entry = spy_tuple(c, 5, parts);
-    int failed = !entry || sequence_append(c, r->log, entry);
-    spy_release(entry);
-    if (failed || result) return failed;
-    ErrorState state = take_error(c);
-    SPYValue **e = r->log->as.seq.items[r->log->as.seq.len - 1]->as.seq.items, *exception = state.value ? state.value : c->none;
-    e[3] = spy_retain(exception); spy_release(c->none);
-    state.value = NULL;
-    if (!(e[4] = spy_bytes(c, &state, sizeof(state)))) e[4] = spy_retain(c->none);
-    state.value = exception == c->none ? NULL : spy_retain(exception);
-    restore_error(c, &state);
-    return 0;
-}
-/* A pass of the case pattern n of BC_PATTERN, its subject on m's stack
- * under the log when replaying: 1 or 0 whether it matched, its captures
- * stored, or -1 on an error, the log popped; or 2, a call left for the
- * machine (callk, CALL_PATTERN), the log atop m's stack. */
-static NO_INLINE int pattern_step(SPYContext *c, Machine *m, Frame *f, Node *n, int replaying) {
-    SPYValue *log = replaying ? m->stack[m->len - 1] : value_new(c, SPY_LIST), *subject = m->stack[m->len - 1 - replaying];
-    if (!replaying && (!log || sequence_append(c, log, c->none))) { spy_release(log); return -1; }
-    if (!replaying && machine_push(c, m, log)) return -1;
-    Replay r = {.log = log, .missing = log->as.seq.items[0], .at = 1}, *outer = c->replay;
-    c->replay = &r;
-    int matched = match_case(c, f, n, subject);
-    c->replay = outer;
-    if (r.fn) {
-        spy_clear_error(c);
-        SPYValue *env = !replay_log(c, &r, r.fn, r.args, c->none) ? function_env(c, r.fn, r.args->as.seq.len, r.args->as.seq.items, NULL, 0) : NULL;
-        if (env) { c->k_fn = spy_retain(r.fn); c->k_env = env; c->k = NULL; c->k_kind = CALL_PATTERN; matched = 2; }
-        else matched = -1;
+    case P_REVERSE:
+        for (size_t i = 0; i < operand / 2; i++) { SPYValue *swap = top[-(ptrdiff_t)i]; top[-(ptrdiff_t)i] = top[(ptrdiff_t)i + 1 - (ptrdiff_t)operand]; top[(ptrdiff_t)i + 1 - (ptrdiff_t)operand] = swap; }
+        return c->stepped;
+    case P_DROP:
+        for (size_t i = 0; i < operand; i++) spy_release(machine_pop(m));
+        return c->stepped;
+    case P_GET: {
+        /* subject, the operand keys: the missing sentinel, made when get is
+         * called, and the keys seen, made once a key is not an exact str or
+         * int (P_LOOKUP), unbound, then get, an exact dict's read in place. */
+        SPYValue *subject = top[-(ptrdiff_t)operand];
+        if (machine_push(c, m, spy_retain(c->unbound)) || machine_push(c, m, spy_retain(c->unbound))) return NULL;
+        if (is_dict(subject)) return spy_retain(c->unbound);
+        SPYValue *get = attribute_step(c, subject, "get");
+        return pattern_left(c, get) ? pattern_getter(c, m, subject, "get", pattern_given, NULL) : get;
     }
-    if (matched != 2) spy_release(machine_pop(m));
-    spy_release(r.fn); spy_release(r.args);
-    return matched;
+    case P_LOOKUP: {
+        /* subject, the size keys, missing, the keys seen, get, then the operand values found. */
+        size_t size = ins->target;
+        SPYValue *subject = top[-(ptrdiff_t)(operand + size + 3)], *key = top[-(ptrdiff_t)(size + 2)], **missing = &top[-(ptrdiff_t)operand - 2],
+                 *get = top[-(ptrdiff_t)operand], *seen = top[-(ptrdiff_t)operand - 1];
+        /* Equal exact str and int keys compare natively; once one is not, a set holds the keys so far. */
+        int found = 0, plain = key->type == SPY_STRING || key->type == SPY_INT;
+        if (seen == c->unbound && plain)
+            for (size_t i = 0; i < operand && !found; i++) found = equal(top[-(ptrdiff_t)(size + 2 + operand - i)], key);
+        else if (seen == c->unbound) {
+            if (!(seen = value_new(c, SPY_SET))) return NULL;
+            spy_release(top[-(ptrdiff_t)operand - 1]); top[-(ptrdiff_t)operand - 1] = seen;
+            for (size_t i = 0; i < operand; i++) if (set_add(c, seen, top[-(ptrdiff_t)(size + 2 + operand - i)])) return NULL;
+        }
+        if (seen != c->unbound && (found = contains(c, seen, key)) >= 0 && !found) found = set_add(c, seen, key) ? -1 : 0;
+        if (found > 0) {
+            SPYValue *text = spy_repr(c, key);
+            if (text) errorf(c, "ValueError", "mapping pattern checks duplicate key (%s)", text->as.string.data);
+            spy_release(text);
+        }
+        if (found) return NULL;
+        if (get == c->unbound) {
+            ptrdiff_t at = map_find(subject, key);
+            return at >= 0 ? pattern_found_in(c, m, NULL, spy_retain(subject->as.map.items[at].value)) : c->error_type[0] ? NULL : spy_bool(c, 0);
+        }
+        if (*missing == c->unbound) { spy_release(*missing); if (!(*missing = spy_list(c))) { *missing = spy_retain(c->unbound); return NULL; } }
+        return callk(c, m, spy_retain(get), 2, (SPYValue *[]){spy_retain(key), spy_retain(*missing)}, pattern_found, spy_retain(*missing));
+    }
+    case P_REST: {
+        /* subject, the operand keys: an exact dict's copy runs no Python. */
+        if (is_dict(top[-(ptrdiff_t)operand])) return pattern_rest_of(c, operand, top + 1 - operand, builtin(c, 1, top - operand, (void *)(intptr_t)B_DICT));
+        SPYValue *args = tuple_of(c, 1, top - operand), *keys = args ? tuple_of(c, operand, top + 1 - operand) : NULL;
+        if (!keys) { spy_release(args); return NULL; }
+        return step_callk(c, m, spy_retain(c->types[SPY_DICT]), args, pattern_rest, keys);
+    }
+    }
+    return NULL;
 }
 /* Run import statement n (17.1, 17.4), or of an import only its module
  * only, the __lazy_modules__ its globals list given in listed (c->unbound
@@ -26361,20 +26482,7 @@ static NO_INLINE void import_statement(SPYContext *c, Frame *f, const ImportReco
         spy_release(value);
     }
     spy_release(module);
-}/* The call pattern_step left for the machine returned result, or NULL
- * with its exception: logged for the next pass. */
-static NO_INLINE void pattern_returned(SPYContext *c, Machine *m, SPYValue *result) {
-    SPYValue *log = m->stack[m->len - 1], **e = log->as.seq.items[log->as.seq.len - 1]->as.seq.items;
-    if (result) { spy_release(e[2]); e[2] = result; return; }
-    ErrorState state = take_error(c);
-    SPYValue *exception = state.value ? state.value : spy_retain(c->none);
-    state.value = NULL;
-    SPYValue *saved = spy_bytes(c, &state, sizeof(state));
-    if (!saved) { spy_release(exception); return; }
-    spy_release(e[3]); e[3] = exception;
-    spy_release(e[4]); e[4] = saved;
 }
-
 /* cr_origin: (filename, line, function name) of the frames creating a
  * coroutine, innermost first, as many as the origin tracking depth. */
 static SPYValue *coroutine_origin(SPYContext *c) {
@@ -28380,15 +28488,19 @@ static int machine_items(SPYContext *c, SPYValue *v) {
  * its items to be taken on the machine (BLOCK_CONSUME) as an unpacking
  * (UNPACK_ITEMS). */
 static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    size_t star, count = target_count(n, &star);
+    return unpack_counted(c, m, f, n, count, star);
+}
+/* unpack_step of count items with a star at index star, SIZE_MAX for none. */
+static SPYValue *unpack_counted(SPYContext *c, Machine *m, Frame *f, Node *n, size_t count, size_t star) {
     SPYValue *value = m->stack[m->len - 1];
-    if (!machine_items(c, value)) return unpack_target(c, f, n, value);
+    if (!machine_items(c, value)) return unpack_values(c, f, n, value, count, star);
     Consumer *s = allocate(c, sizeof(*s));
     SPYValue *items = s ? spy_list(c) : NULL, *source = items ? spy_retain(value) : NULL;
     int keyed = source ? consumer_source(c, &source) : 0;
     Block *block = source ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(s); spy_release(items); spy_release(source); return NULL; }
-    *s = (Consumer){.id = UNPACK_ITEMS, .result = items, .keyed = keyed};
-    s->count = target_count(n, &s->star);
+    *s = (Consumer){.id = UNPACK_ITEMS, .result = items, .keyed = keyed, .count = count, .star = star};
     block->value = source; block->consumer = s;
     return NULL;
 }
@@ -39644,12 +39756,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;
-                    } else if (kind == CALL_PATTERN) {
-                        /* The pattern's next pass. */
-                        pattern_returned(c, m, result);
-                        int matched = pattern_step(c, m, &f, code[pc - 1].node, 1);
-                        if (matched == 2) goto enter_k;
-                        if (!matched) pc = code[pc - 1].target;
                     } else if (kind >= CALL_DELEGATE && kind <= CALL_ASKED) {
                         if (kind == CALL_DELEGATE && m->delegate && m->delegate->type == SPY_ITERATOR) {
                             /* An iterator's call gives its item as to a loop (CALL_NEXT). */
@@ -40111,12 +40217,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
             }
             pc = ins->target; NEXT;
-        CASE(BC_PATTERN) {
-            int matched = pattern_step(c, m, &f, n, 0);
-            if (matched == 2) goto enter_k;
-            if (!matched) pc = ins->target;
+        CASE(BC_PATTERN)
+            value = pattern_step(c, m, &f, ins);
+            if (!value && c->k_fn) goto enter_k;
+            if (UNLIKELY(!value && !c->error_type[0])) goto consume_generator;
+            if (value != c->stepped) machine_push(c, m, value);
             break;
-        }
         CASE(BC_STACKED_TEST)
             /* BC_TEST on the left operand atop the stack, which it takes. */
             x = m->stack[m->len - 1];
@@ -40832,8 +40938,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
  * outermost one, a pausable call's, may pause. */
 static ALWAYS_INLINE Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValue *thrown,
                                         size_t argc, SPYValue *const *argv) {
-    /* A pattern that runs a machine in C goes on in C (replayed_call). */
-    if (UNLIKELY(c->replay != NULL)) c->replay = NULL;
     c->machines++;
     Result r = run_steps(c, m, sent, thrown, argc, argv);
     c->machines--;
@@ -51617,6 +51721,7 @@ SPYContext *spy_context_new(void) {
         if (i == B_COMPILE || i == B_IMPORT) v->as.native.host = 2;
         if (i == B_REPR || i == B_FORMAT) c->field_calls[i == B_FORMAT] = spy_retain(v);
         if (i == B_SORTED) c->sorter = spy_retain(v);
+        if (i == B_LEN || i == B_ISINSTANCE) c->pattern_calls[i == B_ISINSTANCE] = spy_retain(v);
         int status = name_set(c, c->builtins, names[i], v);
         spy_release(v);
         if (status) goto fail;

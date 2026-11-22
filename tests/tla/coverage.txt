@@ -239,8 +239,8 @@ Contents | - navigation
 15 Compound Statements > 15.6 The `match` statement > 15.6.1 Runtime Semantics: Evaluation | Match, MatchGuards
 15 Compound Statements > 15.6 The `match` statement > 15.6.2 Patterns | Match
 15 Compound Statements > 15.6 The `match` statement > 15.6.3 Sequence patterns | Match
-15 Compound Statements > 15.6 The `match` statement > 15.6.4 Mapping patterns | Match
-15 Compound Statements > 15.6 The `match` statement > 15.6.5 Class patterns | Match
+15 Compound Statements > 15.6 The `match` statement > 15.6.4 Mapping patterns | Match, MatchLookups
+15 Compound Statements > 15.6 The `match` statement > 15.6.5 Class patterns | Match, MatchLookups
 16 Functions and Classes | = sections
 16 Functions and Classes > 16.1 Function definitions | = sections
 16 Functions and Classes > 16.1 Function definitions > 16.1.1 Parameters | Calls, FunctionDefs
