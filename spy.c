@@ -7974,6 +7974,10 @@ static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
 static SPYValue *literal_value(SPYContext *, Node *);
 static Node *operator_right(Node *);
 static SPYValue *unary(SPYContext *, int, SPYValue *);
+/* Optimization level 2 keeps no docstrings: each becomes pass, so __doc__ is None. */
+static void drop_docstring(Node *body) {
+    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) { body->kind = N_PASS; body->a = NULL; }
+}
 static int compile_generator(SPYContext *, Node *);
 static int compile_comprehension(SPYContext *, Node *);
 /* The nodes parsed since start, newest first, but those an inner
@@ -7994,6 +7998,7 @@ static int nodes_finish(Parser *p, Node *start) {
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
         if (n->flags & F_FINISHED) continue;
         n->flags |= F_FINISHED;
+        if (c->optimize > 1 && (n->kind == N_DEF || n->kind == N_CLASS)) drop_docstring(n->b);
         if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
         if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
     }
@@ -8089,10 +8094,6 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
     }
     c->depth--;
     return status ? -1 : 0;
-}
-/* Optimization level 2 keeps no docstrings: each becomes pass, so __doc__ is None. */
-static void drop_docstring(Node *body) {
-    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) { body->kind = N_PASS; body->a = NULL; }
 }
 static Scope *scope_new(SPYContext *c, Scope *parent, int kind) {
     Scope *s = allocate(c, sizeof(*s));
@@ -8766,8 +8767,6 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (!c->error_type[0]) nodes_finish(&p, start);
         if (c->optimize > 1) {
             drop_docstring(unit->as.unit.body);
-            for (Node *n = unit->as.unit.nodes; n; n = n->allocated)
-                if (n->kind == N_DEF || n->kind == N_CLASS) drop_docstring(n->b);
         }
         NamedScope comps[128];
         if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0);
