@@ -4517,6 +4517,7 @@ typedef struct {
     int collecting, conditional, annotation_index;
     Node *annotations, **annotations_tail;
     Node *finished; /* The newest node nodes_finish saw. */
+    int awaits; /* The awaits and async for clauses parsed (comprehension). */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
@@ -5235,7 +5236,7 @@ static Node *yield_expression(Parser *);
 static void star_expression_error(Parser *, size_t);
 static int named_equals_error(Parser *, size_t);
 static const char *expression_name(Node *);
-static Node *comprehension(Parser *, Node *);
+static Node *comprehension(Parser *, Node *, int);
 static Node *statements(Parser *);
 static Node *suite_after(Parser *, const char *, size_t);
 static Node *missing_block(Parser *, const char *, size_t);
@@ -5977,6 +5978,7 @@ static Node *atom(Parser *p) {
     n = node(p, open == '[' ? N_LIST : open == '{' ? N_DICT : N_TUPLE);
     if (!n) return NULL;
     p->pos++;
+    int awaits = p->awaits;
     if (open == '(' && keyword(p, "yield")) {
         Node *value = yield_expression(p);
         return value && expect(p, ')', "invalid syntax") ? value : NULL;
@@ -6051,7 +6053,7 @@ static Node *atom(Parser *p) {
             }
             *tail = item; tail = &item->next;
             if (keyword(p, "for") || keyword(p, "async")) {
-                if (!comprehension(p, n)) return NULL;
+                if (!comprehension(p, n, awaits)) return NULL;
                 if (at(p, ':') && item->kind == N_MAPPING) return syntax_span(p, item_at, item_at + 1, "cannot use dict unpacking here");
                 break;
             }
@@ -6125,6 +6127,7 @@ static int call_arguments(Parser *p, Node *n) {
     if (!at(p, ')')) do {
         Node *arg;
         size_t first = p->pos;
+        int awaits = p->awaits;
         if (at(p, '*') || at(p, T_POW)) {
             size_t star = p->pos;
             int unpack_mapping = take(p, T_POW);
@@ -6221,14 +6224,14 @@ static int call_arguments(Parser *p, Node *n) {
                 Node *probe = node(p, N_TUPLE);
                 if (!probe) return -1;
                 probe->args = arg;
-                if (comprehension(p, probe)) genexp = p->pos;
+                if (comprehension(p, probe, awaits)) genexp = p->pos;
                 spy_clear_error(p->ctx);
                 syntax_span(p, first, genexp, "Generator expression must be parenthesized"); return -1;
             }
             Node *generator = node(p, N_TUPLE);
             if (!generator) return -1;
             generator->args = arg;
-            if (!comprehension(p, generator)) return -1;
+            if (!comprehension(p, generator, awaits)) return -1;
             if (at(p, ',')) {
                 /* CPython's invalid_arguments reads the arguments after the comma. */
                 p->pos++; peek(p); p->pos--;
@@ -6323,6 +6326,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
             Node *n = node(p, N_AWAIT);
             if (!n) return NULL;
             n->a = left; n->line = await_line; left = n;
+            p->awaits++;
         }
     }
     for (;;) {
@@ -6648,7 +6652,12 @@ static Node *assignment_error(Parser *p, size_t start) {
     if (bare_yield) return syntax_at(p, bad, "assignment to yield expression not possible");
     return target_error(p, bad, TARGETS_STAR);
 }
-static Node *comprehension(Parser *p, Node *n) {
+/* Comprehension n of the element already parsed, after awaits counted
+ * before it: asynchronous when an await or async for is in its own scope,
+ * all but its first iterable. A generator expression's own stay its own;
+ * a list, set or dict comprehension's are its enclosing scope's too, as
+ * it runs inlined there. */
+static Node *comprehension(Parser *p, Node *n, int awaits) {
     if (n->args->next) {
         /* invalid_comprehension: the range of the unparenthesized targets. */
         Node *last = n->args;
@@ -6660,18 +6669,21 @@ static Node *comprehension(Parser *p, Node *n) {
     n->op = n->kind; n->kind = N_COMPREHENSION;
     Node **tail = &n->a;
     size_t clauses = 0;
+    int outer = 0; /* The first iterable's awaits. */
     while (keyword(p, "for") || keyword(p, "async")) {
         int asynchronous = take_word(p, "async");
         if (!take_word(p, "for")) return syntax(p, "invalid syntax");
         if (++clauses > 128) return syntax(p, "too many comprehension clauses");
         Node *loop = node(p, N_FOR);
         if (!loop || !(loop->args = expression_list(p, 4))) return NULL;
-        loop->op = asynchronous;
+        loop->op = asynchronous; p->awaits += asynchronous;
         /* invalid_for_if_clause precedes invalid_for_target. */
         if (!keyword(p, "in")) return syntax(p, "'in' expected after for-loop variables");
         if (!target(p, loop->args)) return p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
         p->pos++;
+        int before = p->awaits;
         if (!(loop->a = expression(p, 1))) return NULL;
+        if (tail == &n->a) outer = p->awaits - before;
         *tail = loop; tail = &loop->b;
         while (take_word(p, "if")) {
             if (++clauses > 128) return syntax(p, "too many comprehension clauses");
@@ -6680,6 +6692,8 @@ static Node *comprehension(Parser *p, Node *n) {
             *tail = test; tail = &test->b;
         }
     }
+    if (p->awaits - awaits > outer) n->asynchronous = 1;
+    if (n->op == N_TUPLE) p->awaits = awaits + outer;
     return n;
 }
 static Node *if_statement(Parser *p) {
@@ -8150,8 +8164,8 @@ static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
 }
 static int scope_await(SPYContext *c, Scope *scope, Node *n) {
     Node *comprehension = NULL;
+    /* The parser marked the comprehensions asynchronous (comprehension). */
     while (scope->kind == S_COMPREHENSION) {
-        scope->owner->asynchronous = 1;
         if (scope->owner->op == N_TUPLE) return 0;
         comprehension = scope->owner; scope = scope->parent;
     }
