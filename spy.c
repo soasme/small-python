@@ -8560,6 +8560,15 @@ static int at_hand(Node *n) {
     return (n->kind == N_NAME && !(n->flags & F_LOADED)) || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING || n->kind == N_BYTES;
 }
 static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)) || (n->kind == N_ATTR && n->a->kind == N_NAME && at_hand(n->a)); }
+/* Whether n is an operand at hand, or arithmetic or a comparison of such. */
+static int operands_at_hand(Node *n) {
+    if (n->kind == N_COMPARE) {
+        for (Node *cmp = n->args; cmp; cmp = cmp->next) if (!operands_at_hand(cmp->a)) return 0;
+        return operands_at_hand(n->a);
+    }
+    return item_at_hand(n) || (n->kind == N_UNARY && operands_at_hand(n->a)) ||
+           (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR && operands_at_hand(n->a) && operands_at_hand(n->b));
+}
 /* The right operand of n when n is an index whose operands are literals or
  * names, or arithmetic or a single comparison whose operands are those, an
  * index of those, or an attribute of a name, else NULL. The compiler marks
@@ -16150,7 +16159,7 @@ static int loads_name(Node *);
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
-    if (n->constant || ((n->kind == N_STRING || n->kind == N_BYTES) && literal_value(c, n))) { emit(c, p, BC_LOAD, n, 0); return; }
+    if (n->constant || (at_hand(n) && n->kind != N_NAME)) { if (literal_value(c, n)) emit(c, p, BC_LOAD, n, 0); return; }
     if (n->kind == N_NAME) { emit(c, p, BC_NAME, n, 0); return; }
     /* What cannot suspend is evaluated whole, a leaf or an operator on
      * leaves in one step; a comparison of other operands costs less as
@@ -16159,10 +16168,10 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
      * Python __eq__ (name_load): an expression loading one takes steps. */
     if (!p->plain && !expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
         !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
-        if (operator_right(n)) compile_operator(c, p, n, 0);
-        else if (stacked_right(n)) compile_stacked(c, p, n, 0);
-        else emit(c, p, BC_EVAL, n, 0);
-        return;
+        if (operator_right(n)) { compile_operator(c, p, n, 0); return; }
+        if (stacked_right(n)) { compile_stacked(c, p, n, 0); return; }
+        /* Arithmetic on arithmetic takes its steps. */
+        if (!operands_at_hand(n)) { emit(c, p, BC_EVAL, n, 0); return; }
     }
     size_t branch, end, parts;
     switch (n->kind) {
@@ -16476,6 +16485,12 @@ static int assigns_at_hand(Program *p, Node *n) {
     return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) &&
            (item_at_hand(n->b) || operator_right(n->b));
 }
+/* Whether n is an assignment as assigns_at_hand takes, of arithmetic. */
+static int assigns_steps(Program *p, Node *n) {
+    if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, p->calls)) return 0;
+    Node *t = n->a;
+    return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) && operands_at_hand(n->b);
+}
 /* Assignment n at hand: a fused step that stores its value when no step
  * of it runs Python code, and jumps past n's plain steps after it; else
  * those run. Its arg holds whether the target is an item, whether n is
@@ -16502,8 +16517,10 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end, start, loop;
     if (assigns_at_hand(p, n)) { compile_assignment(c, p, n); return; }
-    /* A starred annotation unpacks on the machine (annotation_step). */
-    if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR) && !pausing_loads(p, n)) {
+    /* A starred annotation unpacks on the machine (annotation_step); an
+     * assignment of arithmetic to a target at hand takes its steps. */
+    if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR) && !pausing_loads(p, n) &&
+        !(assigns_steps(p, n))) {
         emit(c, p, increment(n) && !p->namespace ? BC_INCREMENT : BC_EXEC, n, 0);
         return;
     }

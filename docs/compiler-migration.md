@@ -91,11 +91,18 @@ steps. An operator whose left operand is an operator and whose right one
 is at hand compiles the left operand's steps, then `BC_STACKED`, which
 takes that value from the stack, or `BC_STACKED_TEST` when it is tested;
 both fall through to the plain steps as `BC_OPERATE` and `BC_TEST` do.
-String and bytes literals load as constants. Assignments whose values
-are not at hand, and `BC_EVAL` values that are neither operators nor
-names, still execute their trees.
+String and bytes literals load as constants.
 `tests/spec/expressions/computed_left_operand.py` reaches both steps'
 computed, fall-through and non-bool paths.
+
+The seventh stage compiles arithmetic, unary operators and comparisons
+built only from operands at hand to their steps rather than `BC_EVAL`,
+and an assignment of such a value to a target at hand to its plain steps
+rather than `BC_EXEC`. Literals make their constants when first compiled.
+Tuple displays stay a `BC_EVAL`: building one item by item costs more
+than evaluating it whole.
+`tests/spec/statements/computed_assignment.py` checks their evaluation
+order and single evaluation.
 
 ## Remaining stages
 
