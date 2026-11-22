@@ -29169,7 +29169,8 @@ static NO_INLINE int keys_sort(SPYContext *c, SPYValue *source) {
  * tuple or list holding one within depth nestings. */
 static int sort_reaches(SPYValue *key, int depth) {
     if (key->type == SPY_INSTANCE) return 1;
-    if ((key->type != SPY_TUPLE && key->type != SPY_LIST) || !depth) return 0;
+    /* A sealed tuple holds numbers and sealed tuples alone (seal_tuple). */
+    if ((key->type != SPY_TUPLE && key->type != SPY_LIST) || !depth || !key->listed) return 0;
     for (size_t i = 0; i < key->as.seq.len; i++) if (sort_reaches(key->as.seq.items[i], depth - 1)) return 1;
     return 0;
 }
