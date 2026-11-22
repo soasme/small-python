@@ -41,7 +41,7 @@ EXTENDS Naturals, Sequences
 Cases == {"exec_rebind", "exec_new", "exec_mapping", "eval_local", "eval_free", "eval_free_referenced",
           "locals_write", "locals_snapshot", "frame_locals", "eval_mappings", "class_eval", "exec_custom_hit",
           "exec_custom_miss", "exec_custom_error", "exec_custom_loop", "exec_globals_storage", "eval_key_eq", "global_key_eq",
-          "class_annotation_future", "return_yield_missing"}
+          "class_annotation_future", "return_yield_missing", "shared_name_operands", "mutating_name_key"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -73,6 +73,10 @@ Run(p) == CASE p.case = "exec_rebind" -> "1"                   \* the snapshot c
             [] p.case = "class_annotation_future" -> "['__name__', '__annotations__', '__annotations__']"
             \* a function's return or yield of a global reads the globals' __missing__ once each
             [] p.case = "return_yield_missing" -> "('VALUE', ['OTHER'], ['value', 'other'])"
+            \* One compiled definition retains independent global bindings on each call.
+            [] p.case = "shared_name_operands" -> "(2, 5, 2, 9, 17, 23)"
+            \* A key comparison replaces the mapping; lookup observes the new binding.
+            [] p.case = "mutating_name_key" -> "29"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

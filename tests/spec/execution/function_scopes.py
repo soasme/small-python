@@ -73,6 +73,47 @@ for optimize in (0, 1, 2):
             else:
                 assert False, "optimized async generator accepted a valued return"
 
+# Defaults, decorators, class headers and string fields execute in the
+# enclosing scope. Nested bodies keep their own yields, even in assertions.
+contexts = (
+    ("g = lambda: (yield 1)", False),
+    ("g = lambda x=(yield 1): None", True),
+    ("@(yield 1)\ndef g(): pass", True),
+    ("@(yield 1)\nclass C: pass", True),
+    ("class C((yield 1)): pass", True),
+    ("class C:\n    def g(self): yield 1", False),
+    ("f'{(yield 1)}'", True),
+    ("t'{(yield 1)}'", True),
+    ("assert (lambda: (yield 1))", False),
+    ("assert (lambda x=(yield 1): None)", True),
+    ("assert f'{(yield 1)}'", True),
+    ("assert t'{(yield 1)}'", True),
+)
+for body, generator in contexts:
+    for asynchronous in (False, True):
+        for optimize in (0, 1, 2):
+            source = ("async def" if asynchronous else "def") + " f():\n"
+            source += "    " + body.replace("\n", "\n    ") + "\n"
+            namespace = {}
+            exec(compile(source, "<yield-context>", "exec", optimize=optimize), namespace)
+            f = namespace["f"]
+            expected = 0x200 if asynchronous and generator else 0x80 if asynchronous else 0x20 if generator else 0
+            assert f.__code__.co_flags & 0x2a0 == expected
+            value = f()
+            if asynchronous and generator:
+                assert type(value).__name__ == "async_generator"
+                try:
+                    value.aclose().send(None)
+                except StopIteration:
+                    pass
+                else:
+                    assert False, "close did not complete"
+            elif asynchronous or generator:
+                assert type(value).__name__ == ("coroutine" if asynchronous else "generator")
+                value.close()
+            else:
+                assert value is None
+
 # Both branches contain invalid returns. Python 3.15 reports the else suite
 # first, even though the handler occurs earlier in source order.
 source = """async def f():

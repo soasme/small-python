@@ -212,6 +212,40 @@ def return_yield_missing():
     return dict.__getitem__(namespace, "f")(), list(dict.__getitem__(namespace, "g")()), Missing.log
 
 
+def shared_name_operands():
+    def zero():
+        return 0
+    code = compile("def read(): return zero() + payload\n", "<shared-names>", "exec")
+    first = {"zero": zero, "payload": 2, "__builtins__": {"payload": 9}}
+    second = {"zero": zero, "payload": 5}
+    exec(code, first)
+    exec(code, second)
+    left, right = first["read"], second["read"]
+    result = (left(), right(), left())
+    del first["payload"]
+    result += (left(),)
+    first["payload"] = 17
+    second["payload"] = 23
+    return result + (left(), right())
+
+
+def mutating_name_key():
+    namespace = {"zero": lambda: 0}
+    class Key:
+        def __hash__(self):
+            return hash("payload")
+        def __eq__(self, other):
+            if other != "payload":
+                return False
+            namespace.clear()
+            namespace["payload"] = 29
+            host.collect()
+            return True
+    namespace[Key()] = 19
+    exec("def read(): return zero() + payload\n", namespace)
+    return namespace["read"]()
+
+
 def outcome(p):
     try:
         return repr(globals()[p["case"]]())

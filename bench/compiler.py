@@ -22,6 +22,18 @@ def workloads():
     yield "function_body", "def run(x):\n" + body + "\n    return x\nassert run(1) == 8129\n"
     namespace = "\n".join(f"    a{i} = b{i} = {i}" for i in range(64))
     yield "namespace", "class Values:\n" + namespace + "\nassert Values.a63 == Values.b63 == 63\n"
+    yield "names", """value = 7
+def zero():
+    return 0
+def read():
+    return zero() + value
+def run():
+    total = 0
+    for i in range(100):
+        total += read()
+    return total
+assert run() == 700
+"""
     yield "constants", """def sink(first, x):
     return x
 def zero():

@@ -42,6 +42,21 @@ optimized assertions also fixes generator classification under `-O` and
 `-OO`. Symbol binding and instruction emission still traverse trees; this
 stage does not claim to have completed the direct compiler.
 
+The third stage gives name loads their own `BC_NAME` instruction. Its
+operand holds the spelling and lookup cache; the lookup helpers accept
+that record rather than a syntax node. Both constant and name loads now
+read their instruction operands directly. A `BC_NAME` cache miss continues on
+the machine, including Python namespace lookups and key comparisons,
+instead of falling back to `eval`. The instruction still borrows its
+source-location node for tracing and diagnostics.
+
+The name record currently lives inside its source node, with the same
+ownership and tracing of its cached dictionary key. This extraction adds
+no allocation and leaves `Instruction` at 32 bytes and `Node` at 312 bytes
+on arm64. Other instructions and the parser still depend on trees. The
+next ownership change must move these records into code-owned storage
+before those nodes can be removed.
+
 ## Remaining stages
 
 1. Separate the remaining executable operands and definition records from
@@ -128,6 +143,25 @@ replay and full sanitizer runs for this second stage are not yet complete.
 Its alternating compilation measurements are 0.9–2.0% lower; end-to-end
 execution changes range from 0.7% faster to 1.0% slower. These small, mixed
 execution differences do not establish a general runtime improvement.
+
+The name-operand stage passed the 1,041 existing specification tests and
+the added `name_operands.py` test on macOS arm64, including their pinned
+oracle checks. All 1,042 tests also passed on native Linux arm64 under
+AddressSanitizer and UndefinedBehaviorSanitizer. The new tests cover shared
+code with different globals, invalidated name caches, closure rebinding,
+collection during key and truth callbacks, and suspended-frame lifetime.
+The updated `DynamicScopes` model checks 44 states and replays 22
+transitions; all 158 models passed. The native C API and metering probes,
+all 205 allocation-failure programs and intrinsic initialization, and all
+33 standalone-build tests passed. The worker binding suite passed 127
+tests, with its one Windows-only test skipped; it required running outside
+the outer macOS sandbox so the worker could initialize its own sandbox.
+
+The name-operand stage's longer fuzz and replay checks and its final
+alternating performance comparison are still pending. Preliminary timings
+while verification jobs were running are not used to establish a
+performance difference. The source for these completed checks is `spy.c`
+SHA-256 `68d514dc8cd32b1aa7a9153d79f15d1bceaa01130f2223119c3a99d0fe75febb`.
 
 `bench/compiler.c` and `bench/compiler.py` measure compilation separately
 from repeated execution. See [benchmark.md](benchmark.md) for the method
