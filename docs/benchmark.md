@@ -290,9 +290,9 @@ It measures two operations independently, using C11 `clock()` CPU time:
 Both exclude process launch, source-file I/O, context creation and shutdown.
 The output callback discards Python output. Each workload checks its result;
 a syntax error, runtime error, failed assertion or invalid timing aborts the
-comparison. Compilation currently generates function instructions eagerly
-but module instructions on first execution. Its timing therefore does not
-yet represent a complete source-to-bytecode compiler.
+comparison. Compilation generates every body's instructions, the
+module's too, during the parse, but still from a syntax tree, so its
+timing does not yet represent a one-pass source-to-bytecode compiler.
 
 Build the same harness against each revision's library, then run:
 

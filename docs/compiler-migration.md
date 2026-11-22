@@ -144,13 +144,35 @@ Instruction counts (clang -O2 -flto, callgrind, Linux arm64) against 0.9.0
 are lower for every benchmark program except `fib`, which is 1.18% higher;
 against the ninth stage they are within 0.26%.
 
+The eleventh stage moves compilation into the parse. Everything the
+compiler decides is now known when a statement ends, so it no longer
+waits for the passes after the parse:
+
+- The parser collects a module's or class body's annotations as it reads
+  each annotated assignment, and marks a comprehension asynchronous by
+  counting the awaits and `async for` clauses in its own scope. The walks
+  of finished bodies that did both are gone.
+- A number's value, a negated number's constant and `F_OPERATOR` are set
+  as each statement ends, over the nodes parsed since it began.
+- Whether a name loads through a mapping, in a class body or in code of
+  `exec()` or `eval()` source, is the program's property, not a flag the
+  scope walk set.
+- The async generator's `return` error, the compiler's one diagnostic,
+  is raised beside scope resolution.
+
+The parser then compiles each function, lambda and class body and each
+comprehension as the statement holding it ends, and the module's body as
+the parse ends. Compiling `compile()` of the benchmark programs' sources
+costs the same number of instructions as before.
+
 ## Remaining stages
 
 1. Separate the remaining executable operands and definition records from
    source-location metadata. Preserve the existing fast paths while moving
    their operands out of tree links. Put constants and names in storage
    owned and traced by their code, including failure cleanup.
-2. Emit expressions and statements from the parser. Collect bindings and
+2. Emit expressions and statements from the parser, in place of the
+   finished statement's compile. Collect bindings and
    declaration locations as each scope is parsed; resolve forward local,
    global, nonlocal and cell references by patching instructions. Branches
    use labels, and assignment parsing keeps target descriptors. Deferred
@@ -248,10 +270,10 @@ SHA-256 `68d514dc8cd32b1aa7a9153d79f15d1bceaa01130f2223119c3a99d0fe75febb`.
 
 `bench/compiler.c` and `bench/compiler.py` measure compilation separately
 from repeated execution. See [benchmark.md](benchmark.md) for the method
-and results. The compilation measurement currently includes parsing, scope
-analysis, eager function instruction generation and code release. Module
-instructions are still generated on first execution, so this is not yet a
-measurement of complete source-to-bytecode compilation.
+and results. The compilation measurement includes parsing, the
+generation of every body's instructions during the parse, scope analysis
+and code release. The instructions still come from a syntax tree, so this
+is not yet a measurement of one-pass source-to-bytecode compilation.
 
 ## Design source
 
