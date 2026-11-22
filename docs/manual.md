@@ -481,10 +481,10 @@ separate identifiers.
 spy conforms to the Core profile of PLS-315. The evidence is
 [Local tests](#24-local-tests), and nothing else. On the bare core:
 
-- spy passes all 771 specification tests. `make test-spec-oracle` also runs
+- spy passes all 1051 specification tests. `make test-spec-oracle` also runs
   them on the pinned CPython 3.15 build. Together they cover each of the 180
   clauses of chapters 6–29 and Annexes A–B.
-- All 136 TLA+ models check. Of the 118 that replay on an engine, every
+- All 159 TLA+ models check. Of the 141 that replay on an engine, every
   transition passes on spy, as it does on the oracle.
 
 Where PLS-315 leaves a choice to the implementation (its Annex D), spy

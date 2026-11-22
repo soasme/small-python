@@ -30,8 +30,8 @@ $ bin/spy -c 'print(sum(range(10)))'
 ## Conformance
 
 Small Python implements the Core profile of [PLS-315](docs/standards/3_15.md),
-a written specification of the Python 3.15 core language. All 771
-specification tests and all 136 TLA+ models pass. Each test is also checked
+a written specification of the Python 3.15 core language. All 1051
+specification tests and all 159 TLA+ models pass. Each test is also checked
 against CPython 3.15.
 
 Small Python implements the language and its builtins. The standard library
