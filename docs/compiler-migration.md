@@ -72,6 +72,19 @@ since a comprehension may compile before the pass that makes the rest.
 `tests/spec/expressions/operator_operands_once.py` checks that operands
 and special methods run once along every fall-through.
 
+The fifth stage applies the same arrangement to assignments. A one-target
+assignment to a name or to an item of names and literals, plain or
+augmented, whose value is an operand at hand or a fused operator, compiles
+to `BC_ASSIGN` followed by its plain steps. The fused step stores into the
+name's remembered entry, a list's slot, or a container whose store calls
+no Python, and combines augmented numbers natively. Otherwise its plain
+steps run; `BC_INPLACE` now tries the same number fast path first. A loop
+body consisting of one such assignment runs inside the loop's step, as a
+body of one walker step did. These assignments no longer execute their
+tree with `BC_EXEC`. A counter's `+=` or `-=` by a literal or name stays
+`BC_INCREMENT`. `tests/spec/statements/assignment_operands_once.py`
+checks single evaluation along each fall-through.
+
 ## Remaining stages
 
 1. Separate the remaining executable operands and definition records from

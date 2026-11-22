@@ -15738,7 +15738,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_WITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK) X(BC_INCREMENT) X(BC_DISPLAY)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK) X(BC_INCREMENT) X(BC_DISPLAY) X(BC_ASSIGN)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
@@ -16451,8 +16451,42 @@ static int pausing_loads(Program *p, Node *n) {
     for (Node *t = n->args; t; t = t->next) if (t->kind != N_NAME && loads_name(t)) return 1;
     return 0;
 }
+/* Whether n is an assignment BC_ASSIGN takes at hand: of one target, a
+ * name or an item of literals or names, and a value at hand or an
+ * operator on such, outside a class body and while no name load takes
+ * steps (pausing_loads); a counter's is BC_INCREMENT's. */
+static int assigns_at_hand(Program *p, Node *n) {
+    if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, p->calls)) return 0;
+    Node *t = n->a;
+    return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) &&
+           (item_at_hand(n->b) || operator_right(n->b));
+}
+/* Assignment n at hand: a fused step that stores its value when no step
+ * of it runs Python code, and jumps past n's plain steps after it; else
+ * those run. Its arg holds whether the target is an item, whether n is
+ * augmented, the value's shape (4 a fused operator), and from bit 5 the
+ * value's first step after it; other, an augmented n's operator. */
+static void compile_assignment(SPYContext *c, Program *p, Node *n) {
+    Node *t = n->a;
+    int item = t->kind == N_INDEX, augmented = n->op != '=';
+    if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
+    int shape = operator_right(n->b) ? 4 : operand_shape(c, n->b);
+    size_t fused = emit(c, p, BC_ASSIGN, n, item | augmented << 1 | shape << 2 | (augmented ? item ? 3 : 1 : 0) << 5);
+    if (fused != SIZE_MAX && augmented) p->items[fused].other = (uint32_t)operators[n->op - T_ADDEQ].token;
+    if (augmented) {
+        compile_expr(c, p, item ? t->a : t);
+        if (item) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
+        compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
+        emit(c, p, item ? BC_SAVE_TARGET : BC_STORE, t, !item);
+    } else if (item) {
+        compile_expr(c, p, n->b); compile_expr(c, p, t->a); compile_expr(c, p, t->b);
+        emit(c, p, BC_SET_TARGET, t, 0); emit(c, p, BC_POP, n, 0);
+    } else { compile_expr(c, p, n->b); emit(c, p, BC_STORE, t, 1); }
+    patch(p, fused, p->len);
+}
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end, start, loop;
+    if (assigns_at_hand(p, n)) { compile_assignment(c, p, n); return; }
     /* A starred annotation unpacks on the machine (annotation_step). */
     if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR) && !pausing_loads(p, n)) {
         emit(c, p, increment(n) && !p->namespace ? BC_INCREMENT : BC_EXEC, n, 0);
@@ -16574,10 +16608,11 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
         compile_body(c, p, n->b);
         /* A body of one walker step that a loop's step stores into runs
-         * in it: 2 a block, 3 a statement. */
-        if (n->kind == N_FOR && branch != SIZE_MAX && p->len == branch + 2 && p->items[branch].other &&
-            (p->items[branch + 1].op == BC_BLOCK || p->items[branch + 1].op == BC_EXEC))
-            p->items[branch].other = p->items[branch + 1].op == BC_BLOCK ? 2 : 3;
+         * in it: 2 a block, 3 a statement, 4 an assignment at hand. */
+        if (n->kind == N_FOR && branch != SIZE_MAX && p->items[branch].other && p->len > branch + 1 &&
+            (p->len == branch + 2 ? p->items[branch + 1].op == BC_BLOCK || p->items[branch + 1].op == BC_EXEC :
+             p->items[branch + 1].op == BC_ASSIGN && p->items[branch + 1].target == p->len))
+            p->items[branch].other = p->items[branch + 1].op == BC_BLOCK ? 2 : p->items[branch + 1].op == BC_EXEC ? 3 : 4;
         patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
         patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
         compile_body(c, p, n->c); patch(p, loop, p->len); break;
@@ -17964,9 +17999,16 @@ static ALWAYS_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) { 
 static ALWAYS_INLINE SPYValue *leaf_step(Frame *f, Instruction *ins) {
     return ins->op == BC_LOAD ? ins->constant : name_fast(f->env, ins->name);
 }
+/* The item of an exact dict x at an int or str key y, found without a
+ * Python __eq__, borrowed; else NULL. */
+static SPYValue *dict_item(SPYValue *x, SPYValue *y) {
+    if (!((y->type == SPY_INT && !y->as.integer_data.big) || y->type == SPY_STRING) || eq_keyed(x)) return NULL;
+    ptrdiff_t i = map_find(x, y);
+    return i < 0 ? NULL : namespace_map(x)->as.map.items[i].value;
+}
 static NO_INLINE SPYValue *item_step(Frame *f, Instruction *ins) {
     SPYValue *x = leaf_step(f, ins), *y = x ? leaf_step(f, ins + 1) : NULL;
-    return y ? sequence_item(x, y) : NULL;
+    return !y ? NULL : x->type == SPY_DICT ? dict_item(x, y) : sequence_item(x, y);
 }
 /* The operand of shape whose plain steps start at ins, found without
  * running code (operand), borrowed; else NULL. */
@@ -38960,6 +39002,48 @@ static NO_INLINE SPYValue *operate_native(SPYContext *c, Instruction *ins, SPYVa
                       y->type == SPY_DICT && x->type == SPY_DICT ? c->unbound : NULL;
     return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
 }
+/* The value of fused operator step ins computed at hand, owned; else
+ * NULL, with an error or for its plain steps to run. */
+static ALWAYS_INLINE SPYValue *fused_value(SPYContext *c, Frame *f, Instruction *ins) {
+    Node *n = ins->node;
+    SPYValue *x = n->flags & F_OPERATOR ? step_operand(c, f, ins + 1, ins->arg >> 1 & 3) : NULL;
+    SPYValue *y = x ? step_operand(c, f, ins + 1 + (ins->arg >> 5), ins->arg >> 3 & 3) : NULL;
+    SPYValue *value = y ? operator_fast(c, n, x, y) : NULL;
+    if (UNLIKELY(!value) && y && !c->error_type[0] && (value = operate_native(c, ins, x, y)) == c->unbound) value = NULL;
+    return value;
+}
+/* The slot of an exact list x at an int y within it; else NULL. */
+static SPYValue **list_slot(SPYValue *x, SPYValue *y) {
+    if (x->type != SPY_LIST || y->type != SPY_INT || y->as.integer_data.big) return NULL;
+    int64_t i = y->as.integer_data.small, len = (int64_t)x->as.seq.len;
+    if (i < 0) i += len;
+    return i >= 0 && i < len ? &x->as.seq.items[i] : NULL;
+}
+/* BC_ASSIGN ins, with its plain steps from code[pc] (compile_assignment):
+ * 1 once it stored its value at hand, or raised; 0 for those steps to run.
+ * A name's value goes to its remembered entry; an augmented one combines
+ * numbers only (number_fast). An item goes to a list, or, plainly
+ * assigned, to a container whose store calls no Python (store_calls). */
+static NO_INLINE int assign_fused(SPYContext *c, Frame *f, Instruction *code, size_t pc, Instruction *ins) {
+    int arg = ins->arg, shape = arg >> 2 & 7;
+    Instruction *at = &code[pc + (arg >> 5)];
+    SPYValue *value = shape == 4 ? fused_value(c, f, at) : spy_retain(step_operand(c, f, at, shape)), *result;
+    if (!value) return c->error_type[0] != 0;
+    if (!(arg & 1)) {
+        Entry *entry = stored_entry(c, f, code[ins->target - 1].node);
+        result = !entry ? NULL : !(arg & 2) ? spy_retain(value) : entry->value ? number_fast(c, (int)ins->other, entry->value, value, 0) : NULL;
+        if (result) entry_store(c, f->env, entry, result);
+    } else {
+        Instruction *t = arg & 2 ? &code[pc] : &code[ins->target - 4];
+        SPYValue *object = leaf_step(f, t), *key = object ? leaf_step(f, t + 1) : NULL, **slot = key ? list_slot(object, key) : NULL;
+        if (arg & 2) {
+            if ((result = slot ? number_fast(c, (int)ins->other, *slot, value, 0) : NULL)) { spy_release(*slot); *slot = result; }
+        } else if (slot) { result = *slot; *slot = spy_retain(value); spy_release(result); }
+        else if ((result = key && !store_calls(c, object, key, value) ? value : NULL)) set_index(c, object, key, value);
+    }
+    spy_release(value);
+    return result != NULL || c->error_type[0];
+}
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Machine *m, Frame *f, Node *n) { return assign(c, f, n, m); }
 /* BC_INCREMENT: small integers in a remembered slot, while no trace
@@ -40282,16 +40366,13 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_OPERATE)
             /* Its operands taken at hand from its plain steps, which run when
              * it cannot compute n natively (compile_operator). */
-            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 3) : NULL;
-            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 5)], ins->arg >> 3 & 3) : NULL;
-            value = y ? operator_fast(c, n, x, y) : NULL;
-            if (UNLIKELY(!value)) {
-                if (y && !c->error_type[0]) value = operate_native(c, ins, x, y);
-                if (!value || value == c->unbound) { value = NULL; continue; }
-            }
+            if (!(value = quiet(c, &f) ? fused_value(c, &f, ins) : NULL)) continue;
             pc = ins->target;
             machine_push(c, m, value);
             NEXT;
+        CASE(BC_ASSIGN)
+            if (quiet(c, &f) && assign_fused(c, &f, code, pc, ins)) pc = ins->target;
+            continue;
         CASE(BC_NAME)
             value = name_fast(f.env, ins->name);
             value = value ? spy_retain(value) : name_load(c, m, &f, ins->name);
@@ -40505,6 +40586,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(value); break;
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m);
+            /* Exact ints and floats have no in-place methods (inplace). */
+            if ((value = number_fast(c, operators[ins->arg - T_ADDEQ].token, a, b, 1)) || c->error_type[0]) { machine_push(c, m, value); break; }
             /* A list's += of a generator takes its items on the machine. */
             if (UNLIKELY(a->type == SPY_LIST && ins->arg == T_ADDEQ)) {
                 int began = list_augments(c, m, a, b);
@@ -40767,7 +40850,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         while (quiet(c, &f)) {
                             spy_release(a); a = NULL;
                             relocate(c, body);
-                            if (ins->other == 3 && body->kind == N_ASSIGN) assign_step(c, NULL, &f, body);
+                            if (ins->other == 4) {
+                                /* Its plain steps run when it declines. */
+                                if (!assign_fused(c, &f, code, pc + 1, &code[pc])) { pc++; break; }
+                            } else if (ins->other == 3 && body->kind == N_ASSIGN) assign_step(c, NULL, &f, body);
                             else flow = execute_statements(c, &f, body, ins->other == 3);
                             if (flow.flow != FLOW_NORMAL || c->error_type[0]) { left = 1; break; }
                             spy_release(flow.value); flow.value = NULL;
