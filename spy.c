@@ -17763,44 +17763,59 @@ static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **
     return callee;
 }
 /* The callee of a call node n, owned, or NULL. */
-static ALWAYS_INLINE SPYValue *callee_of(SPYContext *c, Frame *f, Node *n) {
+/* Node n evaluated, owned, as an operand of call step walk when there is
+ * one: its lookups may leave a call on walk (name_rewalk) until the step
+ * clears c->walk_m (operand_call). */
+static ALWAYS_INLINE SPYValue *walk_eval(SPYContext *c, Frame *f, Node *n, Machine *walk) {
+    if (walk) c->walk_m = walk;
+    return eval(c, f, n);
+}
+static ALWAYS_INLINE SPYValue *callee_of(SPYContext *c, Frame *f, Node *n, Machine *walk) {
     if ((n->flags & F_NAMED_CALLEE) && quiet(c, f)) {
         /* A name the fast path misses, as a method's globals are, usually always will. */
         SPYValue *callee = name_fast(f->env, &n->a->name);
         if (!callee) n->flags &= ~F_NAMED_CALLEE;
-        return callee ? spy_retain(callee) : eval(c, f, n->a);
+        if (callee) return spy_retain(callee);
     }
-    return eval(c, f, n->a);
+    return walk_eval(c, f, n->a, walk);
 }
 static SPYValue *operand(SPYContext *, Frame *, Node *);
 static SPYValue *operator_fast(SPYContext *, Node *, SPYValue *, SPYValue *);
 /* The callee of plain call node n, owned, with its arguments in argv,
  * owned too, after the instance a method call passes first; or NULL,
  * argv released. A literal or name among them, while tick has only the
- * line to record, is taken as it is, and with operators, so is an
+ * line to record, is taken as it is, and for call step walk, so is an
  * operator on such operands that operator_fast computes. With *method
- * set, the callee is the object whose native method n names. With
- * operators, NULL with no error and argv[0] the object is a Python getter
- * of a method call's attribute for the machine to call (method_of). */
-static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SPYValue **argv, size_t *argc, int *method, int operators) {
+ * set, the callee is the object whose native method n names. For walk,
+ * NULL with no error and argv[0] the object is a Python getter of a
+ * method call's attribute for the machine to call (method_of); operands
+ * it evaluates are walk_eval's. */
+static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SPYValue **argv, size_t *argc, int *method, Machine *walk) {
     SPYValue *a;
     size_t done = 0;
     *method = -1;
     if (n->a->kind == N_ATTR) {
-        a = method_callee(c, f, n->a, argv, method, operators);
+        /* A name the fast path finds is the object, else it is evaluated (walk_eval). */
+        Node *object = n->a->a;
+        SPYValue *found = walk && object->kind == N_NAME && quiet(c, f) ? name_fast(f->env, &object->name) : NULL;
+        if (found) { argv[0] = NULL; a = method_of(c, n->a, spy_retain(found), argv, method, 1); }
+        else {
+            if (walk) c->walk_m = walk;
+            a = method_callee(c, f, n->a, argv, method, walk != NULL);
+        }
         done = argv[0] != NULL;
-    } else a = callee_of(c, f, n);
+    } else a = callee_of(c, f, n, walk);
     if (!a) return NULL;
     for (Node *arg = n->args; arg; arg = arg->next) {
         SPYValue *value = NULL;
         if (quiet(c, f)) {
             if (arg->constant || arg->kind == N_NAME) { if ((value = leaf_operand(f, arg))) spy_retain(value); }
-            else if (operators && (arg->flags & F_OPERATOR)) {
+            else if (walk && (arg->flags & F_OPERATOR)) {
                 SPYValue *x = operand(c, f, arg->a), *y = x ? operand(c, f, arg->kind == N_COMPARE ? arg->args->a : arg->b) : NULL;
                 if (y) value = operator_fast(c, arg, x, y);
             }
         }
-        if (!(argv[done] = value ? value : c->error_type[0] ? NULL : eval(c, f, arg))) {
+        if (!(argv[done] = value ? value : c->error_type[0] ? NULL : walk_eval(c, f, arg, walk))) {
             while (done) spy_release(argv[--done]);
             argv[0] = NULL;
             spy_release(a);
@@ -17834,13 +17849,13 @@ static HOT NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
         SPYValue *argv[9];
         size_t argc;
         int method;
-        if (!(a = plain_callee(c, f, n, argv, &argc, &method, 0))) return NULL;
+        if (!(a = plain_callee(c, f, n, argv, &argc, &method, NULL))) return NULL;
         result = call_plain(c, a, method, n, argc, argv);
         while (argc) spy_release(argv[--argc]);
         spy_release(a);
         return result;
     }
-    if (!(a = callee_of(c, f, n))) return NULL;
+    if (!(a = callee_of(c, f, n, NULL))) return NULL;
     SPYValue *args = spy_list(c), *keywords = value_new(c, SPY_DICT);
     if (!args || !keywords) { spy_release(a); spy_release(args); spy_release(keywords); return NULL; }
     eval_arguments(c, f, n->args, a, args, keywords);
@@ -32346,14 +32361,13 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     size_t argc;
     int method;
     argv[0] = NULL;
-    c->walk_m = m;
-    callee = plain_callee(c, f, n, argv, &argc, &method, 1);
-    c->walk_m = NULL;
+    callee = plain_callee(c, f, n, argv, &argc, &method, m);
     /* An operand's lookup left a call on m, after which the step runs
      * again (name_rewalked); once it ran, the values it took go. */
-    if (UNLIKELY(c->walk_pending | c->walk_markers)) {
+    if (UNLIKELY(c->walk_m)) {
+        c->walk_m = NULL;
         if (c->walk_pending) { c->walk_pending = 0; return NULL; }
-        walk_unmark(c, m);
+        if (c->walk_markers) walk_unmark(c, m);
     }
     if (!callee)
         return argv[0] && !c->error_type[0] ? method_getter(c, m, n->a, argv[0], -1) : NULL;
