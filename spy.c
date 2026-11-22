@@ -119,7 +119,7 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * statics chain its methods' self.attr stores through static_next; its
  * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
  * its first build. */
-struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -133,26 +133,13 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
-       F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */ };
-struct Node {
-    int kind, op, asynchronous, flags;
-    size_t line;
-    /* The source the node covers, for error locations; spanned once the
-     * innermost rule that matched it has set the range. */
-    const char *start, *end;
-    int spanned;
-    char *text, *original;
-    char *local; /* A replace()d code's parameter: the body's name for its slot. */
-    Node *a, *b, *c, *args, *next, *allocated, *decorators;
-    Node *annotate; /* Annotation function; on that function, its owner. */
-    Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
-    Node *static_next; /* A self.attr store's next one in its class's statics. */
-    Program *code;
-    Program *flat; /* A function body that holds a call and cannot suspend, on the machine. */
-    Scope *scope;
-    SPYValue *code_value;
-    SPYValue *constant; /* A literal's value, made once. */
-    size_t name_len; int64_t name_hash; /* A name's length and hash, once computed. */
+       F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */,
+       F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
+/* A text operand and its name-lookup cache. Literal nodes use only text.
+ * Instructions can borrow this record without inspecting a syntax tree. */
+typedef struct {
+    char *text;
+    size_t len; int64_t hash; /* A name's length and hash, once computed. */
     /* A name's symbol in the scope it last ran in, the key and position it
      * was last found under in a function environment of that scope (the
      * symbol's key, borrowed from the scope), and the str key and position
@@ -163,11 +150,31 @@ struct Node {
     /* A dictionary the name was missing from while the context's dict_keys
      * was absent_keys (name_fast); borrowed. */
     SPYValue *absent; size_t absent_keys;
+} NameOperand;
+struct Node {
+    int kind, op, asynchronous, flags;
+    size_t line;
+    /* The source the node covers, for error locations; spanned once the
+     * innermost rule that matched it has set the range. */
+    const char *start, *end;
+    int spanned;
+    NameOperand name;
+    char *original;
+    char *local; /* A replace()d code's parameter: the body's name for its slot. */
+    Node *a, *b, *c, *args, *next, *allocated, *decorators;
+    Node *annotate; /* Annotation function; on that function, its owner. */
+    Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
+    Node *static_next; /* A self.attr store's next one in its class's statics. */
+    Program *code;
+    Program *flat; /* A function body that holds a call and cannot suspend, on the machine. */
+    Scope *scope;
+    SPYValue *code_value;
+    SPYValue *constant; /* A literal's value, made once. */
     /* How an attribute read answers for instances of attr_class while
      * classes_changed is attr_epoch (node_attribute); all borrowed. */
     SPYValue *attr_class, *attr_method; size_t attr_epoch; int attr_kind;
 };
-static const char *source_name(Node *n) { return n->original ? n->original : n->text; }
+static const char *source_name(Node *n) { return n->original ? n->original : n->name.text; }
 enum { TUPLE_WITHIN = 15, TUPLE_SHORT = 3 };
 struct SPYValue {
     SPYContext *ctx;
@@ -1312,7 +1319,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
             VISIT(node->code_value);
             VISIT(node->constant);
-            VISIT(node->global_key);
+            VISIT(node->name.global_key);
             scope_edges(node->scope, visit, data);
         }
         scope_edges(v->as.unit.scope, visit, data);
@@ -1548,7 +1555,7 @@ static void free_value(SPYValue *v) {
         mem_free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->text); mem_free(n->original); mem_free(n->local); mem_free(n); n = next; }
+        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->name.text); mem_free(n->original); mem_free(n->local); mem_free(n); n = next; }
         free_scope(v->as.unit.scope);
         free_program(v->as.unit.flat);
         if (c->filename_from == v) c->filename_from = c->quiet_unit = NULL;
@@ -2978,10 +2985,11 @@ static Name name_of(const char *text) {
     size_t len = strlen(text);
     return (Name){text, len, text_hash(text, len)};
 }
-static ALWAYS_INLINE Name node_name(Node *n) {
-    if (!n->name_len) { n->name_len = strlen(n->text); n->name_hash = text_hash(n->text, n->name_len); }
-    return (Name){n->text, n->name_len, n->name_hash};
+static ALWAYS_INLINE Name operand_name(NameOperand *n) {
+    if (!n->len) { n->len = strlen(n->text); n->hash = text_hash(n->text, n->len); }
+    return (Name){n->text, n->len, n->hash};
 }
+static ALWAYS_INLINE Name node_name(Node *n) { return operand_name(&n->name); }
 /* The entry stored under name in env's own entries. */
 static int key_names(SPYValue *env, SPYValue *key, Name name) {
     if (key->type != SPY_STRING && !(key = builtin_value(env->ctx, key, SPY_STRING))) return 0;
@@ -3479,14 +3487,14 @@ static SPYValue *name_from(SPYContext *c, SPYValue *env, SPYValue *from, Name na
 }
 static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) { return name_from(c, env, env, name, 1); }
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
-/* What the full lookup of name node n does at env, a plain function or
+/* What the full lookup of name operand n does at env, a plain function or
  * comprehension environment: binds the name there (with *key its symbol's
  * key, NULL while never bound), passes over env to its parent, or something
  * else. The first environment's symbol is remembered by scope. */
 enum { NAME_HERE, NAME_PARENT, NAME_SLOW };
-/* Remember on name node n its symbol in scope, and what that makes of n in a
+/* Remember on name operand n its symbol in scope, and what that makes of n in a
  * plain function environment of scope. */
-static Symbol *remember_symbol(Node *n, Scope *scope, Symbol *symbol) {
+static Symbol *remember_symbol(NameOperand *n, Scope *scope, Symbol *symbol) {
     n->slot_scope = scope; n->slot = 0; n->slot_key = NULL;
     n->slot_symbol = symbol ? (size_t)(symbol - scope->symbols) : SIZE_MAX;
     n->slot_kind = !symbol ? NAME_PARENT : symbol->flags & (S_GLOBAL | S_NONLOCAL) ? NAME_SLOW :
@@ -3500,11 +3508,11 @@ static ALWAYS_INLINE int plain_locals(SPYValue *env, Scope *scope) {
     return env->type == V_ENV && !env->as.map.namespace &&
         (env->as.map.flags ? env->as.map.flags == 2 && scope->kind == S_COMPREHENSION : scope->kind == S_FUNCTION);
 }
-static ALWAYS_INLINE int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
+static ALWAYS_INLINE int function_binding(SPYValue *env, NameOperand *n, int first, SPYValue **key) {
     Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
     if (!scope || !plain_locals(env, scope)) return NAME_SLOW;
     if (!first || n->slot_scope != scope) {
-        Symbol *symbol = scope_find(scope, node_name(n));
+        Symbol *symbol = scope_find(scope, operand_name(n));
         if (!first) {
             if (!symbol) return NAME_PARENT;
             if (symbol->flags & (S_GLOBAL | S_NONLOCAL)) return NAME_SLOW;
@@ -3519,44 +3527,44 @@ static ALWAYS_INLINE int function_binding(SPYValue *env, Node *n, int first, SPY
 }
 /* The entry of a function local under its symbol's key: function
  * environments bind locals under those keys only. */
-static ALWAYS_INLINE Entry *function_slot(SPYValue *env, Node *n, SPYValue *key, int first) {
+static ALWAYS_INLINE Entry *function_slot(SPYValue *env, NameOperand *n, SPYValue *key, int first) {
     if (!key) return NULL;
-    Entry *entry = env_find(env, node_name(n));
+    Entry *entry = env_find(env, operand_name(n));
     if (!entry || entry->key != key) return NULL;
     if (first) { n->slot = (size_t)(entry - env->as.map.items); n->slot_key = key; }
     return entry;
 }
-/* The entry of name node n in a dictionary when n's retained exact str
+/* The entry of name operand n in a dictionary when n's retained exact str
  * still keys the entry it was last found at. */
-static ALWAYS_INLINE Entry *remembered_global(SPYValue *dict, Node *n) {
+static ALWAYS_INLINE Entry *remembered_global(SPYValue *dict, NameOperand *n) {
     SPYValue *key = n->global_key;
     return key && n->global_slot < map_used(dict) && dict->as.map.items[n->global_slot].key == key ? &dict->as.map.items[n->global_slot] : NULL;
 }
-/* The entry for name node n in an exact dictionary or a plain instance's
+/* The entry for name operand n in an exact dictionary or a plain instance's
  * attributes, or NULL when there is none. */
-static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
+static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, NameOperand *n) {
     Entry *entry = remembered_global(dict, n);
     if (entry) return entry;
     SPYValue *key = n->global_key;
-    entry = env_find(dict, node_name(n));
+    entry = env_find(dict, operand_name(n));
     if (entry && entry->key->type == SPY_STRING) {
         if (entry->key != key) { n->global_key = spy_retain(entry->key); spy_release(key); }
         n->global_slot = (size_t)(entry - dict->as.map.items);
     }
     return entry;
 }
-/* The value name node n reads, borrowed, along the plain function
+/* The value name operand n reads, borrowed, along the plain function
  * environments and exact dictionaries the full lookup (name_find) would
  * walk, or NULL to take that path. */
-/* The entry of name node n in env when n was last found a local of its
+/* The entry of name operand n in env when n was last found a local of its
  * scope and env binds it at the same position: only an environment of
  * that scope holds the symbol's own key in its entries. */
-static ALWAYS_INLINE Entry *remembered_local(SPYValue *env, Node *n) {
+static ALWAYS_INLINE Entry *remembered_local(SPYValue *env, NameOperand *n) {
     SPYValue *key = n->slot_key;
     return key && env->type == V_ENV && n->slot < map_used(env) && env->as.map.items[n->slot].key == key ? &env->as.map.items[n->slot] : NULL;
 }
-static SPYValue *name_outer(SPYValue *env, Node *n);
-static ALWAYS_INLINE SPYValue *name_fast(SPYValue *env, Node *n) {
+static SPYValue *name_outer(SPYValue *env, NameOperand *n);
+static ALWAYS_INLINE SPYValue *name_fast(SPYValue *env, NameOperand *n) {
     /* A remembered local, at module level a remembered global, or a
      * global a function's scope does not bind, remembered in the module's
      * dictionary that is the function's parent. */
@@ -3568,7 +3576,7 @@ static ALWAYS_INLINE SPYValue *name_fast(SPYValue *env, Node *n) {
     return name_outer(env, n);
 }
 /* name_fast past the remembered entry. */
-static NO_INLINE SPYValue *name_outer(SPYValue *env, Node *n) {
+static NO_INLINE SPYValue *name_outer(SPYValue *env, NameOperand *n) {
     SPYValue *e = env;
     Scope *scope = n->slot_scope;
     /* A name last found further out than the running function's scope:
@@ -3596,7 +3604,7 @@ static NO_INLINE SPYValue *name_outer(SPYValue *env, Node *n) {
             if (binding == NAME_SLOW) {
                 /* A method's class cell environment binds only __class__ and
                  * a few such names: others pass over it. */
-                if (e->type != V_ENV || e->as.map.flags != 4 || env_find(e, node_name(n))) return NULL;
+                if (e->type != V_ENV || e->as.map.flags != 4 || env_find(e, operand_name(n))) return NULL;
                 continue;
             }
             if (binding == NAME_PARENT) continue;
@@ -3613,9 +3621,9 @@ static NO_INLINE SPYValue *name_outer(SPYValue *env, Node *n) {
     }
     return NULL;
 }
-/* The entry that rebinding name node n in env replaces, or NULL to bind it
+/* The entry that rebinding name operand n in env replaces, or NULL to bind it
  * through name_bind. */
-static Entry *name_slot(SPYValue *env, Node *n) {
+static Entry *name_slot(SPYValue *env, NameOperand *n) {
     if (env->type == SPY_DICT) {
         Entry *entry = dict_slot(env, n);
         return entry && entry->key->type == SPY_STRING ? entry : NULL;
@@ -4493,6 +4501,8 @@ typedef struct {
     const char *error_start, *error_end;
     int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1; 3: also a 0-based offset; 4: a 0-based offset, end offset 0). */
     SPYValue *unit;
+    Node *definition; /* The current function, lambda or class body; NULL at module level. */
+    size_t return_line; /* First valued return in the compiler's diagnostic order. */
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
     Node *deferred_node; /* When set, the deferred error covers this node. */
@@ -4519,6 +4529,7 @@ typedef struct {
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
+static Scope *scope_new(SPYContext *, Scope *, int);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
     if (grow(p->ctx, (void **)&p->tokens, &p->cap, p->len + 1, sizeof(Token))) return -1;
     p->tokens[p->len++] = (Token){kind, s, n, line, 0};
@@ -5188,25 +5199,25 @@ static Node *identifier(Parser *p) {
     if (!n) return NULL;
     Token *t = peek(p);
     n->end = t->start + t->len; n->spanned = 1;
-    n->text = normalize_identifier(p->ctx, t->start, t->len);
-    size_t length = n->text ? strlen(n->text) : 0;
+    n->name.text = normalize_identifier(p->ctx, t->start, t->len);
+    size_t length = n->name.text ? strlen(n->name.text) : 0;
     /* CPython's parser fails as it reads such a name, before any later error. */
-    if (n->text && !p->constant_name && (!strcmp(n->text, "None") || !strcmp(n->text, "True") || !strcmp(n->text, "False")))
-        p->constant_name = !strcmp(n->text, "None") ? "None" : !strcmp(n->text, "True") ? "True" : "False";
-    if (n->text && p->private_name && length > 2 && n->text[0] == '_' && n->text[1] == '_' &&
-        !(n->text[length - 1] == '_' && n->text[length - 2] == '_')) {
+    if (n->name.text && !p->constant_name && (!strcmp(n->name.text, "None") || !strcmp(n->name.text, "True") || !strcmp(n->name.text, "False")))
+        p->constant_name = !strcmp(n->name.text, "None") ? "None" : !strcmp(n->name.text, "True") ? "True" : "False";
+    if (n->name.text && p->private_name && length > 2 && n->name.text[0] == '_' && n->name.text[1] == '_' &&
+        !(n->name.text[length - 1] == '_' && n->name.text[length - 2] == '_')) {
         const char *cls = p->private_name;
         while (*cls == '_') cls++;
         if (*cls) {
             Buffer name = {.ctx = p->ctx};
-            if (puts_buffer(&name, "_") || puts_buffer(&name, cls) || puts_buffer(&name, n->text)) {
+            if (puts_buffer(&name, "_") || puts_buffer(&name, cls) || puts_buffer(&name, n->name.text)) {
                 mem_free(name.data); return NULL;
             }
-            n->original = n->text; n->text = name.data;
+            n->original = n->name.text; n->name.text = name.data;
         }
     }
     p->pos++;
-    return n->text ? n : NULL;
+    return n->name.text ? n : NULL;
 }
 static Node *import_name(Parser *p) {
     Node *first = identifier(p);
@@ -5221,7 +5232,7 @@ static Node *import_name(Parser *p) {
             mem_free(text.data); return NULL;
         }
     }
-    name->text = text.data; name->a = first;
+    name->name.text = text.data; name->a = first;
     return name;
 }
 static Node *expression(Parser *, int);
@@ -5285,7 +5296,7 @@ static int parameter_list(Parser *p, Node *n, int close) {
             Node *arg = identifier(p);
             if (!arg) return -1;
             for (Node *a = n->args; a; a = a->next)
-                if (!strcmp(a->text, arg->text)) {
+                if (!strcmp(a->name.text, arg->name.text)) {
                     p->pos--;
                     errorf(p->ctx, "SyntaxError", "duplicate parameter '%s' in function definition", source_name(arg));
                     p->ctx->line = peek(p)->line; p->error_start = peek(p)->start; p->error_end = peek(p)->start + peek(p)->len;
@@ -5745,7 +5756,7 @@ static int flush_literal(Parser *p, Node ***tail, Buffer *out) {
     if (out->len > INT_MAX) { syntax(p, "string literal too large"); return -1; }
     Node *n = node(p, N_STRING);
     if (!n) return -1;
-    n->text = out->data; n->op = (int)out->len;
+    n->name.text = out->data; n->op = (int)out->len;
     out->data = NULL; out->len = out->cap = 0;
     **tail = n; *tail = &n->next;
     return 0;
@@ -5758,7 +5769,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
     if (puts_buffer(&text, "(") || append(&text, start, (size_t)(end - start)) || puts_buffer(&text, "\n)")) {
         mem_free(text.data); return NULL;
     }
-    Parser inner = {.ctx = p->ctx, .unit = p->unit, .private_name = p->private_name,
+    Parser inner = {.ctx = p->ctx, .unit = p->unit, .definition = p->definition, .private_name = p->private_name,
                     .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
     Node *result = NULL;
     const char *copy = text.data + 1, *copy_end = copy + (end - start);
@@ -5846,7 +5857,7 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
                 if (append_source(p, &source, begin, expr_end) || (!source.data && !(source.data = copy_text(p->ctx, "", 0)))) {
                     mem_free(source.data); return -1;
                 }
-                field->text = source.data;
+                field->name.text = source.data;
             }
             s = expr_end;
             int debug = *s == '=';
@@ -5920,8 +5931,8 @@ static Node *string_node(Parser *p) {
     if (!formatted) {
         if (literal.len > INT_MAX) { mem_free(literal.data); return syntax(p, "string literal too large"); }
         n->kind = bytes ? N_BYTES : N_STRING; n->op = (int)literal.len;
-        n->text = literal.data ? literal.data : copy_text(p->ctx, "", 0);
-        return n->text ? n : NULL;
+        n->name.text = literal.data ? literal.data : copy_text(p->ctx, "", 0);
+        return n->name.text ? n : NULL;
     }
     int status = flush_literal(p, &tail, &literal);
     mem_free(literal.data);
@@ -5936,6 +5947,7 @@ static Node *yield_expression(Parser *p) {
     }
     Node *n = node(p, N_YIELD);
     if (!n) return NULL;
+    if (p->definition && p->definition->kind != N_CLASS) p->definition->flags |= F_YIELDS;
     if (outside) p->deferred_node = n;
     if (take_word(p, "from")) {
         n->op = 1;
@@ -5955,9 +5967,9 @@ static Node *atom(Parser *p) {
         n = node(p, at(p, T_INT) ? N_INT : at(p, T_IMAG) ? N_IMAG : N_FLOAT);
         if (!n) return NULL;
         Token *t = peek(p);
-        n->text = copy_text(p->ctx, t->start, t->len);
+        n->name.text = copy_text(p->ctx, t->start, t->len);
         p->pos++;
-        return n->text ? n : NULL;
+        return n->name.text ? n : NULL;
     }
     if (keyword(p, "None") || keyword(p, "True") || keyword(p, "False")) {
         n = node(p, keyword(p, "None") ? N_NONE : N_BOOL);
@@ -5966,7 +5978,7 @@ static Node *atom(Parser *p) {
     }
     if (at(p, T_NAME)) {
         n = identifier(p);
-        if (n && p->ctx->optimize && !strcmp(n->text, "__debug__")) { n->kind = N_BOOL; n->op = 0; }
+        if (n && p->ctx->optimize && !strcmp(n->name.text, "__debug__")) { n->kind = N_BOOL; n->op = 0; }
         return n;
     }
     int open = peek(p)->kind;
@@ -6182,12 +6194,12 @@ static int call_arguments(Parser *p, Node *n) {
                 }
                 p->pos++;
                 if (at(p, ',') || at(p, ')')) { syntax_span(p, start, p->pos, "expected argument value expression"); return -1; }
-                if (arg->original) { mem_free(arg->text); arg->text = arg->original; arg->original = NULL; }
+                if (arg->original) { mem_free(arg->name.text); arg->name.text = arg->original; arg->original = NULL; }
                 arg->kind = N_KEYWORD;
                 for (Node *a = n->args; a; a = a->next)
-                    if (a->kind == N_KEYWORD && !strcmp(a->text, arg->text)) {
+                    if (a->kind == N_KEYWORD && !strcmp(a->name.text, arg->name.text)) {
                         char message[256];
-                        snprintf(message, sizeof(message), "keyword argument repeated: %s", arg->text);
+                        snprintf(message, sizeof(message), "keyword argument repeated: %s", arg->name.text);
                         /* The compiler reports this after the whole module parses. */
                         size_t here = p->pos;
                         int first = !p->deferred;
@@ -6250,12 +6262,14 @@ static Node *expression_inner(Parser *p, int min, int named) {
         p->pos++;
         left = node(p, N_LAMBDA);
         if (!left || !(left->a = node(p, N_NAME))) return NULL;
-        left->a->text = copy_text(p->ctx, "<lambda>", 8);
-        if (!left->a->text || parameters(p, left, ':')) return NULL;
+        left->a->name.text = copy_text(p->ctx, "<lambda>", 8);
+        if (!left->a->name.text || parameters(p, left, ':')) return NULL;
         left->b = node(p, N_RETURN);
         if (!left->b) return NULL;
         int async_function = p->async_function; p->async_function = 0; p->functions++;
+        Node *definition = p->definition; p->definition = left;
         left->b->a = plain_expression(p, 0);
+        p->definition = definition;
         p->functions--; p->async_function = async_function;
         if (!left->b->a) return NULL;
         goto assignment_expression;
@@ -6723,7 +6737,7 @@ static int unparse_fstring_body(Buffer *b, Node *parts) {
     for (Node *part = parts; part; part = part->next) {
         if (part->kind == N_STRING) {
             for (int i = 0; i < part->op; i++)
-                if (append(b, part->text + i, 1) || ((part->text[i] == '{' || part->text[i] == '}') && append(b, part->text + i, 1))) return -1;
+                if (append(b, part->name.text + i, 1) || ((part->name.text[i] == '{' || part->name.text[i] == '}') && append(b, part->name.text + i, 1))) return -1;
             continue;
         }
         Buffer field = {.ctx = b->ctx};
@@ -6768,7 +6782,7 @@ static int unparse(Buffer *b, Node *n, int level) {
         spy_release(value); return status;
     }
     case N_STRING: case N_BYTES: {
-        SPYValue *value = n->kind == N_STRING ? spy_string(b->ctx, n->text, (size_t)n->op) : spy_bytes(b->ctx, n->text, (size_t)n->op);
+        SPYValue *value = n->kind == N_STRING ? spy_string(b->ctx, n->name.text, (size_t)n->op) : spy_bytes(b->ctx, n->name.text, (size_t)n->op);
         int status = value ? format_value(b, value, 1) : -1;
         spy_release(value); return status;
     }
@@ -6800,7 +6814,7 @@ static int unparse(Buffer *b, Node *n, int level) {
     }
     case N_STAR: return puts_buffer(b, "*") || unparse(b, n->a, PR_BOR);
     case N_MAPPING: return puts_buffer(b, "**") || unparse(b, n->a, PR_BOR);
-    case N_KEYWORD: return puts_buffer(b, n->text) || puts_buffer(b, "=") || unparse(b, n->a, PR_TEST);
+    case N_KEYWORD: return puts_buffer(b, n->name.text) || puts_buffer(b, "=") || unparse(b, n->a, PR_TEST);
     case N_AWAIT:
         return (level > PR_AWAIT && puts_buffer(b, "(")) || puts_buffer(b, "await ") || unparse(b, n->a, PR_ATOM) ||
                (level > PR_AWAIT && puts_buffer(b, ")"));
@@ -6871,25 +6885,25 @@ static Node *annotation_string(Parser *p, Node *annotation) {
     Node *n = node(p, N_STRING);
     if (!n || unparse(&text, annotation, PR_TEST) || text.len > INT_MAX) { mem_free(text.data); return NULL; }
     n->line = annotation->line; n->annotate = annotation;
-    n->text = text.data ? text.data : copy_text(p->ctx, "", 0);
+    n->name.text = text.data ? text.data : copy_text(p->ctx, "", 0);
     n->op = (int)text.len;
-    return n->text ? n : NULL;
+    return n->name.text ? n : NULL;
 }
 static Node *annotation_entry(Parser *p, const char *name, Node *annotation, int index, int flags) {
     Node *entry = node(p, N_KEYWORD);
     if (!entry) return NULL;
-    entry->text = copy_text(p->ctx, name, strlen(name));
+    entry->name.text = copy_text(p->ctx, name, strlen(name));
     if (p->future_annotations && !(annotation = annotation_string(p, annotation))) return NULL;
     entry->a = annotation; entry->op = index; entry->flags = flags;
-    return entry->text ? entry : NULL;
+    return entry->name.text ? entry : NULL;
 }
 static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
     Node *fn = node(p, N_DEF), *name = fn ? node(p, N_NAME) : NULL, *format = name ? node(p, N_NAME) : NULL;
     Node *body = format ? node(p, N_ANNOTATIONS) : NULL;
     if (!body) return NULL;
-    name->text = copy_text(p->ctx, "__annotate__", 12);
-    format->text = copy_text(p->ctx, "format", 6);
-    if (!name->text || !format->text) return NULL;
+    name->name.text = copy_text(p->ctx, "__annotate__", 12);
+    format->name.text = copy_text(p->ctx, "format", 6);
+    if (!name->name.text || !format->name.text) return NULL;
     format->op = P_POSONLY;
     fn->a = name; fn->args = format; fn->b = body; body->args = entries;
     fn->flags = F_ANNOTATE; fn->annotate = owner;
@@ -6904,7 +6918,7 @@ static int collect_annotations(Parser *p, Node *body, int conditional, Node ***t
             /* PEP 563 stores each string in __annotations__ as it runs. */
             n->flags |= F_FUTURE; (*index)++;
         } else if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE)) {
-            Node *entry = annotation_entry(p, n->a->text, n->b, *index, conditional ? F_CONDITIONAL : 0);
+            Node *entry = annotation_entry(p, n->a->name.text, n->b, *index, conditional ? F_CONDITIONAL : 0);
             if (!entry) return -1;
             n->op = (*index)++;
             if (conditional) n->flags |= F_CONDITIONAL;
@@ -6950,7 +6964,7 @@ static int function_annotations(Parser *p, Node *def) {
     int index = 0;
     for (Node *arg = def->args; arg; arg = arg->next) {
         if (!arg->b) continue;
-        Node *entry = annotation_entry(p, arg->text, arg->b, index++, 0);
+        Node *entry = annotation_entry(p, arg->name.text, arg->b, index++, 0);
         if (!entry) return -1;
         *tail = entry; tail = &entry->next;
     }
@@ -7024,7 +7038,7 @@ static Node *star_or_pattern(Parser *p) {
     if (!star) return NULL;
     Node *name = identifier(p);
     if (!name) return NULL;
-    if (strcmp(name->text, "_")) star->a = name;
+    if (strcmp(name->name.text, "_")) star->a = name;
     return span(p, star, start);
 }
 static int check_sequence_stars(Parser *p, Node *items) {
@@ -7082,7 +7096,7 @@ static Node *closed_pattern_body(Parser *p) {
                 size_t name = p->pos;
                 Node *rest = identifier(p);
                 if (!rest) return NULL;
-                if (!strcmp(rest->text, "_")) { p->pos = name; return syntax(p, "invalid syntax"); }
+                if (!strcmp(rest->name.text, "_")) { p->pos = name; return syntax(p, "invalid syntax"); }
                 n->c = rest;
                 if (take(p, ',') && !at(p, '}')) {
                     if (at(p, T_POW)) return syntax(p, "invalid syntax");
@@ -7137,9 +7151,9 @@ static Node *closed_pattern_body(Parser *p) {
                     if (!key) return NULL;
                     Node *repeated = NULL;
                     for (Node *other = n->c; other; other = other->next)
-                        if (!strcmp(other->text, key->original ? key->original : key->text)) repeated = other;
-                    const char *attr = key->original ? key->original : key->text;
-                    if (!(entry->text = copy_text(p->ctx, attr, strlen(attr)))) return NULL;
+                        if (!strcmp(other->name.text, key->original ? key->original : key->name.text)) repeated = other;
+                    const char *attr = key->original ? key->original : key->name.text;
+                    if (!(entry->name.text = copy_text(p->ctx, attr, strlen(attr)))) return NULL;
                     int debug = !strcmp(attr, "__debug__") && !p->deferred;
                     if (debug) { p->pos--; defer(p, "cannot assign to __debug__"); p->pos++; }
                     p->pos++;
@@ -7148,7 +7162,7 @@ static Node *closed_pattern_body(Parser *p) {
                     if (debug) p->deferred_node = entry->b;
                     if (repeated) {
                         char message[300];
-                        snprintf(message, sizeof(message), "attribute name repeated in class pattern: %s", repeated->text);
+                        snprintf(message, sizeof(message), "attribute name repeated in class pattern: %s", repeated->name.text);
                         return syntax_at(p, entry->b, message);
                     }
                     *keywords = entry; keywords = &entry->next;
@@ -7167,7 +7181,7 @@ static Node *closed_pattern_body(Parser *p) {
             if (n) n->a = value;
             return n;
         }
-        Node *n = pattern_node(p, strcmp(name->text, "_") ? PT_CAPTURE : PT_WILDCARD);
+        Node *n = pattern_node(p, strcmp(name->name.text, "_") ? PT_CAPTURE : PT_WILDCARD);
         if (n && n->op == PT_CAPTURE) n->a = name;
         return n;
     }
@@ -7207,7 +7221,7 @@ static Node *pattern_body(Parser *p) {
         }
         Node *n = pattern_node(p, PT_AS), *name = n ? identifier(p) : NULL;
         if (!name) return NULL;
-        if (!strcmp(name->text, "_")) { p->pos--; return syntax(p, "cannot use '_' as a target"); }
+        if (!strcmp(name->name.text, "_")) { p->pos--; return syntax(p, "cannot use '_' as a target"); }
         n->a = first; n->b = name;
         first = n;
     }
@@ -7220,9 +7234,9 @@ static int pattern_names(Node *n, const char **names, size_t *count, size_t limi
     Node *name = n->op == PT_CAPTURE ? n->a : n->op == PT_STAR ? n->a : n->op == PT_AS ? n->b : NULL;
     if (n->op == PT_AS) { int s = pattern_names(n->a, names, count, limit, bad); if (s < 0) return s; }
     if (name) {
-        for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], name->text)) { *bad = source_name(name); return -2; }
+        for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], name->name.text)) { *bad = source_name(name); return -2; }
         if (*count == limit) return -1;
-        names[(*count)++] = name->text;
+        names[(*count)++] = name->name.text;
     }
     if (n->op == PT_OR) {
         size_t start = *count;
@@ -7248,9 +7262,9 @@ static int pattern_names(Node *n, const char **names, size_t *count, size_t limi
     if (n->op == PT_MAPPING) {
         for (Node *entry = n->args; entry; entry = entry->next) { int s = pattern_names(entry->b, names, count, limit, bad); if (s < 0) return s; }
         if (n->c) {
-            for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], n->c->text)) { *bad = source_name(n->c); return -2; }
+            for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], n->c->name.text)) { *bad = source_name(n->c); return -2; }
             if (*count == limit) return -1;
-            names[(*count)++] = n->c->text;
+            names[(*count)++] = n->c->name.text;
         }
     }
     if (n->op == PT_CLASS)
@@ -7341,11 +7355,11 @@ static Node *lazy_function(Parser *p, const char *name, Node *value) {
     Node *one = format ? node(p, N_INT) : NULL, *body = one ? node(p, N_ANNOTATIONS) : NULL;
     Node *entry = body ? node(p, N_KEYWORD) : NULL;
     if (!entry) return NULL;
-    label->text = copy_text(p->ctx, name, strlen(name));
-    format->text = copy_text(p->ctx, ".format", 7);
-    one->text = copy_text(p->ctx, "1", 1);
-    entry->text = copy_text(p->ctx, name, strlen(name));
-    if (!label->text || !format->text || !one->text || !entry->text) return NULL;
+    label->name.text = copy_text(p->ctx, name, strlen(name));
+    format->name.text = copy_text(p->ctx, ".format", 7);
+    one->name.text = copy_text(p->ctx, "1", 1);
+    entry->name.text = copy_text(p->ctx, name, strlen(name));
+    if (!label->name.text || !format->name.text || !one->name.text || !entry->name.text) return NULL;
     format->op = P_POSONLY; format->a = one;
     fn->a = label; fn->args = format; fn->b = body;
     body->op = 1; body->args = entry; entry->a = value;
@@ -7379,7 +7393,7 @@ static Node *type_params(Parser *p) {
             Node *bound = expression(p, 0);
             if (!bound) return NULL;
             if (bound->kind == N_TUPLE) param->flags |= F_CONSTRAINTS;
-            if (!(param->b = lazy_function(p, param->text, bound))) return NULL;
+            if (!(param->b = lazy_function(p, param->name.text, bound))) return NULL;
         }
         if (take(p, '=')) {
             Node *value;
@@ -7390,7 +7404,7 @@ static Node *type_params(Parser *p) {
                 if (value && !value->a) value = NULL;
             } else value = expression(p, 0);
             if (!value) return NULL;
-            if (!(param->c = lazy_function(p, param->text, value))) return NULL;
+            if (!(param->c = lazy_function(p, param->name.text, value))) return NULL;
             defaults = 1;
         } else if (defaults) {
             p->ctx->line = param->line;
@@ -7455,6 +7469,11 @@ static Node *statement(Parser *p) {
     p->statement_level++;
     Node *n = statement_body(p);
     p->statement_level--;
+    /* Namespace stores are known when the statement's body finishes. A
+     * nested definition has restored the enclosing parser context here. */
+    if (n && (!p->definition || p->definition->kind == N_CLASS) &&
+        (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) ||
+         n->kind == N_DELETE || (n->kind == N_ASSIGN && n->op == '=' && n->args))) n->flags |= F_NAMESPACE;
     if (n && misplaced) p->deferred_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
     if (n && !n->spanned) span_block(p, n, (size_t)(first - p->tokens));
     if (!p->statement_level) {
@@ -7559,10 +7578,14 @@ static Node *statement_body(Parser *p) {
             if (call_arguments(p, n)) return NULL;
         }
         int loops = p->loops, functions = p->functions, async_function = p->async_function, star = p->star;
+        Node *definition = p->definition;
+        size_t return_line = p->return_line;
+        p->definition = n; p->return_line = 0;
         const char *private_name = p->private_name;
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
         n->b = suite_after(p, "class definition", n->line);
+        p->definition = definition; p->return_line = return_line;
         if (n->b && body_annotations(p, n, n->b, &n->annotate)) return NULL;
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
@@ -7585,6 +7608,10 @@ static Node *statement_body(Parser *p) {
         size_t line = keyword_line(p);
         n = node(p, N_TRY);
         if (!n || !(n->a = suite_after(p, "'try' statement", line))) return NULL;
+        /* Bindings still follow source order. For return diagnostics the
+         * compiler visits else and finally before exception handlers. */
+        size_t body_return = p->return_line;
+        p->return_line = 0;
         Node **tail = &n->args;
         int bare = 0, star = -1;
         size_t bare_at = 0;
@@ -7652,12 +7679,15 @@ static Node *statement_body(Parser *p) {
             span_block(p, handler, except_at);
             *tail = handler; tail = &handler->next;
         }
+        size_t handler_return = p->return_line;
+        p->return_line = body_return;
         if (star == 1) n->flags |= F_STAR;
         if (take_word(p, "else")) {
             if (!n->args) { p->pos--; return syntax(p, "expected 'except' or 'finally' block"); }
             if (!(n->b = suite_after(p, "'else' statement", keyword_line(p)))) return NULL;
         }
         if (take_word(p, "finally") && !(n->c = suite_after(p, "'finally' statement", keyword_line(p)))) return NULL;
+        if (!p->return_line) p->return_line = handler_return;
         return n->args || n->c ? n : syntax(p, "expected 'except' or 'finally' block");
     }
     if (take_word(p, "if")) return if_statement(p);
@@ -7692,10 +7722,18 @@ static Node *statement_body(Parser *p) {
         if (take(p, T_ARROW) && !(n->c = expression(p, 0))) return NULL;
         if (function_annotations(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
+        Node *definition = p->definition;
+        size_t return_line = p->return_line;
+        p->definition = n; p->return_line = 0;
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
         n->b = suite_after(p, "function definition", n->line);
+        size_t first_return = p->return_line;
+        p->definition = definition; p->return_line = return_line;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
-        return n->b ? n : NULL;
+        if (!n->b || !(n->scope = scope_new(p->ctx, NULL, S_FUNCTION))) return NULL;
+        n->scope->return_line = first_return;
+        if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
+        return n;
     }
     if (keyword(p, "global") || keyword(p, "nonlocal")) {
         n = node(p, keyword(p, "global") ? N_GLOBAL : N_NONLOCAL);
@@ -7719,6 +7757,7 @@ static Node *statement_body(Parser *p) {
         if (outside) p->deferred_node = n;
         if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
         if (keyword(p, "for")) return syntax(p, "invalid syntax");
+        if (n->a && !p->return_line) p->return_line = n->line;
         return n;
     }
     if (keyword(p, "break") || keyword(p, "continue")) {
@@ -7941,7 +7980,7 @@ static Node *statements(Parser *p) {
 static SPYValue *number_literal(SPYContext *, Node *);
 /* The name node in target n that binds name, if any. */
 static Node *target_name(Node *n, const char *name) {
-    if (n->kind == N_NAME) return strcmp(n->text, name) ? NULL : n;
+    if (n->kind == N_NAME) return strcmp(n->name.text, name) ? NULL : n;
     if (n->kind == N_STAR) return target_name(n->a, name);
     if (n->kind == N_LIST || n->kind == N_TUPLE)
         for (Node *item = n->args, *found; item; item = item->next)
@@ -7973,7 +8012,7 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
                 int future = 0;
                 for (Node *clause = comps[i].expression->a; clause; clause = clause->b) {
                     if (clause == comps[i].clause) future = 1;
-                    Node *bound = clause->kind == N_FOR ? target_name(clause->args, n->a->text) : NULL;
+                    Node *bound = clause->kind == N_FOR ? target_name(clause->args, n->a->name.text) : NULL;
                     if (!bound) continue;
                     /* An inner loop's error is at its own target. */
                     if (future) node_error(c, bound);
@@ -8020,22 +8059,22 @@ static Scope *scope_new(SPYContext *c, Scope *parent, int kind) {
 }
 /* Binds the name n, reporting errors at the node `at` covers. */
 static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node *at) {
-    if ((flags & (S_LOCAL | S_PARAM)) && !strcmp(n->text, "__debug__")) {
+    if ((flags & (S_LOCAL | S_PARAM)) && !strcmp(n->name.text, "__debug__")) {
         node_error(c, at); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1;
     }
-    Symbol *symbol = scope_symbol(scope, n->text);
+    Symbol *symbol = scope_symbol(scope, n->name.text);
     if (!symbol) {
         if (grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return -1;
         symbol = &scope->symbols[scope->len++];
-        *symbol = (Symbol){n->text, 0, n->line, NULL, text_hash(n->text, strlen(n->text)), NULL};
+        *symbol = (Symbol){n->name.text, 0, n->line, NULL, text_hash(n->name.text, strlen(n->name.text)), NULL};
     }
     if (flags & (S_GLOBAL | S_NONLOCAL)) {
         const char *kind = flags & S_GLOBAL ? "global" : "nonlocal";
         node_error(c, at);
-        if (symbol->flags & S_PARAM) errorf(c, "SyntaxError", "name '%s' is parameter and %s", n->text, kind);
-        else if (symbol->flags & S_USE) errorf(c, "SyntaxError", "name '%s' is used prior to %s declaration", n->text, kind);
-        else if (symbol->flags & S_ANNOT) errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->text, kind);
-        else if (symbol->flags & S_LOCAL) errorf(c, "SyntaxError", "name '%s' is assigned to before %s declaration", n->text, kind);
+        if (symbol->flags & S_PARAM) errorf(c, "SyntaxError", "name '%s' is parameter and %s", n->name.text, kind);
+        else if (symbol->flags & S_USE) errorf(c, "SyntaxError", "name '%s' is used prior to %s declaration", n->name.text, kind);
+        else if (symbol->flags & S_ANNOT) errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->name.text, kind);
+        else if (symbol->flags & S_LOCAL) errorf(c, "SyntaxError", "name '%s' is assigned to before %s declaration", n->name.text, kind);
         if (c->error_type[0]) return -1;
         /* Conflicting declarations are reported at the first one. */
         if (!(symbol->flags & (S_GLOBAL | S_NONLOCAL))) { symbol->line = n->line; symbol->declared = at; }
@@ -8046,11 +8085,11 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
          * nested scope also makes the name explicitly global in the module block. */
         Scope *top = scope;
         while (top->parent) top = top->parent;
-        Symbol *global = top->kind == S_MODULE ? scope_symbol(top, n->text) : NULL;
+        Symbol *global = top->kind == S_MODULE ? scope_symbol(top, n->name.text) : NULL;
         if (top->kind == S_MODULE && !global) {
             if (grow(c, (void **)&top->symbols, &top->cap, top->len + 1, sizeof(*top->symbols))) return -1;
             global = &top->symbols[top->len++];
-            *global = (Symbol){n->text, 0, n->line, NULL, text_hash(n->text, strlen(n->text)), NULL};
+            *global = (Symbol){n->name.text, 0, n->line, NULL, text_hash(n->name.text, strlen(n->name.text)), NULL};
         }
         if (global) global->flags |= S_GLOBAL;
     }
@@ -8062,7 +8101,7 @@ static int scope_node(SPYContext *, Scope *, Node *);
 static int check_debug_target(SPYContext *c, Node *n, int deleting) {
     if (!n) return 0;
     Node *name = n->kind == N_NAME ? n : n->kind == N_ATTR ? n->b : NULL;
-    if (name && !strcmp(name->text, "__debug__")) {
+    if (name && !strcmp(name->name.text, "__debug__")) {
         node_error(c, n); errorf(c, "SyntaxError", "cannot %s __debug__", deleting ? "delete" : "assign to"); return -1;
     }
     if (n->kind == N_STAR) return check_debug_target(c, n->a, deleting);
@@ -8079,7 +8118,7 @@ static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
         for (Node *item = n->args; item; item = item->next) if (scope_target(c, scope, item, store)) return -1;
         return 0;
     }
-    if (store > 0 && n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->text, "self")) {
+    if (store > 0 && n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self")) {
         for (Scope *outer = scope->parent; outer; outer = outer->parent) {
             if (outer->kind != S_CLASS) continue;
             n->static_next = outer->statics; outer->statics = n;
@@ -8138,7 +8177,7 @@ static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
     if (!(generic->scope = scope_new(c, parent, S_FUNCTION))) return NULL;
     generic->scope->owner = generic; generic->scope->within = "the definition of a generic";
     for (Node *param = generic->args; param; param = param->next) {
-        if (scope_symbol(generic->scope, param->text)) {
+        if (scope_symbol(generic->scope, param->name.text)) {
             c->line = param->line;
             errorf(c, "SyntaxError", "duplicate type parameter '%s'", source_name(param));
             return NULL;
@@ -8158,8 +8197,8 @@ static SPYValue *pattern_constant(SPYContext *c, Node *n) {
     SPYValue *a, *b, *result;
     switch (n->kind) {
     case N_INT: case N_FLOAT: case N_IMAG: return number_literal(c, n);
-    case N_STRING: return spy_string(c, n->text, (size_t)n->op);
-    case N_BYTES: return spy_bytes(c, n->text, (size_t)n->op);
+    case N_STRING: return spy_string(c, n->name.text, (size_t)n->op);
+    case N_BYTES: return spy_bytes(c, n->name.text, (size_t)n->op);
     case N_NONE: return spy_none(c);
     case N_BOOL: return spy_bool(c, n->op);
     case N_UNARY:
@@ -8198,10 +8237,10 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     scope->nodes++;
     switch (n->kind) {
     case N_ANNASSIGN: {
-        Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->text) : NULL;
+        Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->name.text) : NULL;
         if (symbol && scope->kind != S_MODULE && (symbol->flags & (S_GLOBAL | S_NONLOCAL))) {
             c->line = n->a->line;
-            errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
+            errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->name.text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
             return -1;
         }
         /* An annotation no __annotate__ evaluates is still analysed, in this
@@ -8217,7 +8256,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         /* A parenthesized name without a value is neither bound nor used. */
         int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
         if (scope_node(c, scope, n->c) || (!bare && scope_target(c, scope, n->a, n->c ? 1 : -1))) return -1;
-        if ((n->flags & F_SIMPLE) && n->a->kind == N_NAME && (symbol = scope_symbol(scope, n->a->text))) symbol->flags |= S_ANNOT;
+        if ((n->flags & F_SIMPLE) && n->a->kind == N_NAME && (symbol = scope_symbol(scope, n->a->name.text))) symbol->flags |= S_ANNOT;
         return 0;
     }
     case N_AWAIT:
@@ -8274,7 +8313,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     case N_DELETE:
         return scope_target(c, scope, n->a, 0) ? -1 : 0;
     case N_KEYWORD:
-        if (!strcmp(n->text, "__debug__")) { node_error(c, n); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1; }
+        if (!strcmp(n->name.text, "__debug__")) { node_error(c, n); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1; }
         return scope_node(c, scope, n->a);
     case N_NAMED: {
         if (scope_annotation_error(c, scope, n) || scope_node(c, scope, n->b)) return -1;
@@ -8297,7 +8336,10 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         Scope *outer = n->params ? scope_generic(c, scope, n->params) : scope;
         if (!outer) return -1;
         if (n->kind == N_CLASS && scope_walk(c, outer, n->args)) return -1;
-        n->scope = scope_new(c, outer, n->kind == N_CLASS ? S_CLASS : S_FUNCTION);
+        /* A parsed def already owns its compile-time properties. Lambdas,
+         * classes and synthesized annotation functions get their scope here. */
+        if (n->scope) n->scope->parent = outer;
+        else n->scope = scope_new(c, outer, n->kind == N_CLASS ? S_CLASS : S_FUNCTION);
         if (!n->scope) return -1;
         n->scope->owner = n;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
@@ -8538,7 +8580,7 @@ static int plain_call(Node *n) {
 /* Whether plain call n names sorted or a sort method, which may compare
  * by Python on the machine: BC_CALLK's step finds out (key_consumer). */
 static int sort_call(Node *n) {
-    return n->a->kind == N_NAME ? !strcmp(n->a->text, "sorted") : n->a->kind == N_ATTR && !strcmp(n->a->b->text, "sort");
+    return n->a->kind == N_NAME ? !strcmp(n->a->name.text, "sorted") : n->a->kind == N_ATTR && !strcmp(n->a->b->name.text, "sort");
 }
 /* Whether plain call n names print, or repr, ascii, str or format of one
  * argument, whose arguments' Python __str__, or a list's or tuple's items'
@@ -8548,7 +8590,7 @@ static int sort_call(Node *n) {
  * (getattr_call, setattr_call). */
 static int text_call(Node *n) {
     if (n->a->kind != N_NAME || !n->args) return 0;
-    const char *name = n->a->text;
+    const char *name = n->a->name.text;
     return !strcmp(name, "print") || (!n->args->next && (!strcmp(name, "repr") || !strcmp(name, "ascii") || !strcmp(name, "str") || !strcmp(name, "format"))) ||
            ((!strcmp(name, "getattr") || !strcmp(name, "delattr")) && n->args->next && !n->args->next->next) ||
            (!strcmp(name, "setattr") && n->args->next && n->args->next->next && !n->args->next->next->next);
@@ -8561,9 +8603,9 @@ static int comparing_call(Node *n) {
     if (!n->args) return 0;
     size_t argc = 0;
     for (Node *a = n->args; a; a = a->next, argc++) if (a->kind == N_STAR || a->kind == N_KEYWORD || a->kind == N_MAPPING) return 0;
-    if (n->a->kind == N_NAME) return !strcmp(n->a->text, "min") || !strcmp(n->a->text, "max");
+    if (n->a->kind == N_NAME) return !strcmp(n->a->name.text, "min") || !strcmp(n->a->name.text, "max");
     if (n->a->kind != N_ATTR) return 0;
-    const char *name = n->a->b->text;
+    const char *name = n->a->b->name.text;
     return argc == 1 ? !strcmp(name, "index") || !strcmp(name, "count") || !strcmp(name, "remove") : argc <= 3 && !strcmp(name, "index");
 }
 /* A call of at most 8 positional and keyword arguments, with a keyword. */
@@ -12671,7 +12713,7 @@ static SPYValue *builtin_slot_before(SPYContext *, SPYValue *, const char *);
  * indentation removed. NULL without a docstring or with an error set. */
 static SPYValue *docstring(SPYContext *c, Node *body) {
     if (!body || body->kind != N_EXPR || body->a->kind != N_STRING) return NULL;
-    const char *text = body->a->text;
+    const char *text = body->a->name.text;
     size_t len = (size_t)body->a->op, column = 0;
     Buffer doc = {.ctx = c};
     for (size_t i = 0; i < len; i++) {
@@ -12863,7 +12905,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             for (int pass = 0; pass < 3; pass++)
             for (Node *arg = def && def->kind != N_COMPREHENSION && def->kind != N_CLASS ? def->args : NULL; names && arg; arg = arg->next) {
                 if ((arg->op == P_VARARGS) != (pass == 1) || (arg->op == P_KWARGS) != (pass == 2)) continue;
-                SPYValue *text = spy_string(c, arg->text, strlen(arg->text));
+                SPYValue *text = spy_string(c, arg->name.text, strlen(arg->name.text));
                 if (!text || sequence_append(c, names, text)) { spy_release(text); spy_release(names); return NULL; }
                 spy_release(text);
             }
@@ -13368,7 +13410,7 @@ static int instance_access(SPYContext *c, SPYValue *cls, const char *name, SPYVa
     return read | (write ? ATTR_WRITE : 0);
 }
 static NO_INLINE int node_access_refresh(SPYContext *c, SPYValue *cls, Node *n) {
-    n->attr_kind = instance_access(c, cls, n->b->text, &n->attr_method);
+    n->attr_kind = instance_access(c, cls, n->b->name.text, &n->attr_method);
     n->attr_class = cls; n->attr_epoch = c->classes_changed;
     return n->attr_kind;
 }
@@ -13608,18 +13650,18 @@ static void searched_go(SPYContext *c, SPYValue *state) {
 static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int calls) {
     int kind = plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
     if (kind == ATTR_OWN || kind == ATTR_METHOD) {
-        Entry *e = dict_slot(v, n->b);
+        Entry *e = dict_slot(v, &n->b->name);
         if (e) return spy_retain(e->value);
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
     if (calls && kind == ATTR_PROPERTY && property_enters(c, n->attr_method)) return NULL;
     /* A function's, class's or module's __annotations__ its Python __annotate__ makes (getter_call). */
-    if (calls && UNLIKELY(annotated_type(v)) && !strcmp(n->b->text, "__annotations__") && annotate_pending(c, v)) {
+    if (calls && UNLIKELY(annotated_type(v)) && !strcmp(n->b->name.text, "__annotations__") && annotate_pending(c, v)) {
         c->annotating = 1;
         return NULL;
     }
     /* A wrapper's __isabstractmethod__ or a property's __name__ read on the machine (getter_call). */
-    if (calls && UNLIKELY(v->type == SPY_PROPERTY || v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && wrapper_computes(v, n->b->text)) {
+    if (calls && UNLIKELY(v->type == SPY_PROPERTY || v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && wrapper_computes(v, n->b->name.text)) {
         c->annotating = 3;
         return NULL;
     }
@@ -13628,46 +13670,46 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
          * until any class changes, under the epoch's complement, which no
          * other answer kept on n uses. */
         if (n->attr_class != v || n->attr_epoch != ~c->classes_changed) {
-            if (class_getter(c, v, n->b->text) || class_hooked(v)) return attribute_step(c, v, n->b->text);
+            if (class_getter(c, v, n->b->name.text) || class_hooked(v)) return attribute_step(c, v, n->b->name.text);
             if (c->error_type[0]) return NULL;
             n->attr_class = v; n->attr_epoch = ~c->classes_changed;
         }
-        return attribute(c, v, n->b->text);
+        return attribute(c, v, n->b->name.text);
     }
     /* A __dict__ whose search calls a Python __eq__ is searched on the machine (getter_call, method_getter). */
-    if (calls && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, n->b->text)) {
+    if (calls && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, n->b->name.text)) {
         c->annotating = 2;
         return NULL;
     }
-    return calls ? attribute_step(c, v, n->b->text) : attribute(c, v, n->b->text);
+    return calls ? attribute_step(c, v, n->b->name.text) : attribute(c, v, n->b->name.text);
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
  * new entry takes is kept on the name node. */
 static ALWAYS_INLINE int node_set_own(SPYContext *, SPYValue *, Node *, SPYValue *);
 static HOT int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
-    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->text, value);
+    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->name.text, value);
     return node_set_own(c, v, n, value);
 }
 static int setter_called(SPYContext *, SPYValue *, Node *);
 /* node_set_attribute for a machine step, which returns 1, storing nothing,
  * for a Python setter (store_call). */
 static HOT int node_store_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
-    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return setter_called(c, v, n) ? 1 : set_attribute(c, v, n->b->text, value);
+    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return setter_called(c, v, n) ? 1 : set_attribute(c, v, n->b->name.text, value);
     return node_set_own(c, v, n, value);
 }
 /* node_set_attribute's store into v's own entries. */
 static ALWAYS_INLINE int node_set_own(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
-    Entry *e = dict_slot(v, n->b);
+    Entry *e = dict_slot(v, &n->b->name);
     if (e && e->key->type == SPY_STRING) {
         SPYValue *old = e->value;
         e->value = spy_retain(value);
         spy_release(old);
         return 0;
     }
-    if (e) return set_attribute(c, v, n->b->text, value);
+    if (e) return set_attribute(c, v, n->b->name.text, value);
     Name name = node_name(n->b);
-    if (!n->b->global_key && !(n->b->global_key = spy_string(c, name.text, name.len))) return -1;
-    return map_append(c, v, n->b->global_key, value, name.hash);
+    if (!n->b->name.global_key && !(n->b->name.global_key = spy_string(c, name.text, name.len))) return -1;
+    return map_append(c, v, n->b->name.global_key, value, name.hash);
 }
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     /* An instance's class, or a class's metaclass, may customize lookup. */
@@ -14211,7 +14253,7 @@ static SPYValue *format_field(SPYContext *c, SPYValue *value, SPYValue *spec) {
     spy_release(result); return copy;
 }
 static SPYValue *interpolation_field(SPYContext *c, Node *n, SPYValue *value, SPYValue *spec) {
-    SPYValue *expression = spy_string(c, n->text, strlen(n->text));
+    SPYValue *expression = spy_string(c, n->name.text, strlen(n->name.text));
     char ch = (char)n->op;
     SPYValue *conversion = n->op ? spy_string(c, &ch, 1) : spy_none(c);
     SPYValue *format = spec->type == SPY_NONE ? spy_string(c, "", 0) : spy_retain(spec);
@@ -14811,12 +14853,12 @@ static Node *code_signature(SPYContext *c, SPYValue *varnames, SPYValue *locals,
             arg->op = group == 1 ? P_VARARGS : group == 2 ? P_KWONLY : group == 3 ? P_KWARGS : (int64_t)i < posonly ? P_POSONLY : P_POSITIONAL;
             SPYValue *name = varnames->as.seq.items[i];
             const char *local = i < locals->as.seq.len ? locals->as.seq.items[i]->as.string.data : NULL;
-            if ((arg->text = copy_text(c, name->as.string.data, name->as.string.len)) && local && strcmp(local, arg->text))
+            if ((arg->name.text = copy_text(c, name->as.string.data, name->as.string.len)) && local && strcmp(local, arg->name.text))
                 arg->local = copy_text(c, local, strlen(local));
         }
     for (Node *arg = head; arg; arg = arg->next) arg->allocated = arg->next;
     if (c->error_type[0]) {
-        for (Node *arg = head, *next; arg; arg = next) { next = arg->next; mem_free(arg->text); mem_free(arg->local); mem_free(arg); }
+        for (Node *arg = head, *next; arg; arg = next) { next = arg->next; mem_free(arg->name.text); mem_free(arg->local); mem_free(arg); }
         return NULL;
     }
     return head;
@@ -15670,7 +15712,7 @@ static int set_attribute(SPYContext *c, SPYValue *object, const char *name, SPYV
 typedef struct { SPYValue *env, *unit; int interactive; } Frame;
 /* A literal's value or a name found along the fast path, borrowed. */
 static ALWAYS_INLINE SPYValue *leaf_operand(Frame *f, Node *n) {
-    return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, n) : NULL;
+    return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, &n->name) : NULL;
 }
 /* FLOW_HALT: an error raised before a suspended generator resumed, which stays suspended. */
 /* FLOW_PAUSE: a pausable call paused at a step (docs/metering.md 3.8). */
@@ -15681,7 +15723,7 @@ typedef struct { int flow; SPYValue *value; } Result;
 /* Suspended functions keep their operand and cleanup stacks on the heap.
  * Instructions borrow AST nodes from the generator's retained source unit. */
 #define MACHINE_STEPS(X) \
-    X(BC_EVAL) X(BC_LOAD) X(BC_OPERATE) X(BC_EXEC) X(BC_NONE) X(BC_POP) X(BC_UNARY) \
+    X(BC_EVAL) X(BC_LOAD) X(BC_NAME) X(BC_OPERATE) X(BC_EXEC) X(BC_NONE) X(BC_POP) X(BC_UNARY) \
     X(BC_BINARY) X(BC_COMPARE) X(BC_ATTR) X(BC_INDEX) X(BC_NEW) X(BC_ADD) X(BC_EXTEND) \
     X(BC_MAP) X(BC_ARGS) X(BC_ARG) X(BC_CALL) X(BC_STORE) X(BC_NAMED) X(BC_JUMP) X(BC_FALSE) \
     X(BC_SHORT) X(BC_YIELD) X(BC_DELEGATE) X(BC_FLOW) X(BC_LOOP) X(BC_NEXT) X(BC_POP_BLOCK) \
@@ -15698,7 +15740,16 @@ enum { MACHINE_STEPS(STEP_ENUM) };
 /* step is op's label in the machine (run_steps), which dispatches to it
  * directly. A program's steps number fewer than UINT32_MAX (emit), which
  * marks no step. */
-typedef struct { const void *step; int op, arg; uint32_t target, other; Node *node; } Instruction;
+typedef struct {
+    const void *step;
+    int op, arg;
+    union {
+        struct { uint32_t target, other; };
+        SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit. */
+        NameOperand *name; /* BC_NAME: spelling and lookup cache, borrowed from the source unit. */
+    };
+    Node *node; /* Source location; some older instructions also execute this tree. */
+} Instruction;
 #define NO_STEP UINT32_MAX
 /* calls: BODY for a function body whose calls run on the machine (expands). */
 /* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
@@ -16002,6 +16053,8 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     else if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
     else p->items[p->len++] = (Instruction){.node = n, .arg = arg};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
+    if (op == BC_LOAD) p->items[pc].constant = n->constant;
+    if (op == BC_NAME) p->items[pc].name = &n->name;
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
@@ -16035,6 +16088,8 @@ static int loads_name(Node *);
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
+    if (n->constant) { emit(c, p, BC_LOAD, n, 0); return; }
+    if (n->kind == N_NAME) { emit(c, p, BC_NAME, n, 0); return; }
     /* What cannot suspend is evaluated whole, a leaf or an operator on
      * leaves in one step; a comparison of other operands costs less as
      * machine steps. */
@@ -16042,13 +16097,11 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
      * Python __eq__ (name_load): an expression loading one takes steps. */
     if (!expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
         !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
-        emit(c, p, n->kind == N_NAME && p->calls == PAUSING ? BC_CLASS : n->kind == N_NAME || n->constant ? BC_LOAD :
-                   operator_right(n) ? BC_OPERATE : BC_EVAL, n, n->kind == N_NAME && p->calls == PAUSING ? 10 : 0);
+        emit(c, p, operator_right(n) ? BC_OPERATE : BC_EVAL, n, 0);
         return;
     }
     size_t branch, end, parts;
     switch (n->kind) {
-    case N_NAME: emit(c, p, BC_CLASS, n, 10); break;
     case N_JOINED:
         /* The parts stay on the stack for the join, as many as arg. */
         parts = 0;
@@ -16585,18 +16638,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     }
     }
 }
-static int check_async_return(SPYContext *c, Node *n) {
-    for (; n; n = n->next) {
-        if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) continue;
-        if (n->kind == N_RETURN && n->a) {
-            c->line = n->line;
-            spy_error(c, "SyntaxError", "'return' with value in async generator"); return -1;
-        }
-        if (check_async_return(c, n->a) || check_async_return(c, n->b) ||
-            check_async_return(c, n->c) || check_async_return(c, n->args)) return -1;
-    }
-    return 0;
-}
 /* Whether statements body hold a loop, a comprehension's too, outside
  * the definitions among them. */
 static int loops(Node *body) {
@@ -16607,24 +16648,15 @@ static int loops(Node *body) {
     }
     return 0;
 }
-/* Flag the statements of class or module body n that bind names through
- * its namespace (F_NAMESPACE), outside the definitions among them. */
-static void namespace_bindings(Node *n) {
-    for (; n; n = n->next) {
-        if (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) || n->kind == N_DELETE ||
-            (n->kind == N_ASSIGN && n->op == '=' && n->args))
-            n->flags |= F_NAMESPACE;
-        /* A type alias's value is a function of its own. */
-        if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_TYPEALIAS) continue;
-        namespace_bindings(n->a); namespace_bindings(n->b); namespace_bindings(n->c); namespace_bindings(n->args);
-    }
-}
 /* A generator's, function's or class's body, on the machine: even a body
  * without a call may call Python through an operator or attribute. */
 static int compile_generator(SPYContext *c, Node *n) {
-    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
+    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS)), mode = c->pausing ? PAUSING : BODY;
     if (!generator && !n->b) return 0;
-    if (n->op == 2 && check_async_return(c, n->b)) return -1;
+    if (n->op == 2 && n->scope && n->scope->return_line) {
+        c->line = n->scope->return_line;
+        spy_error(c, "SyntaxError", "'return' with value in async generator"); return -1;
+    }
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
     p->calls = mode; p->namespace = p->unbinds = n->kind == N_CLASS;
@@ -16633,7 +16665,7 @@ static int compile_generator(SPYContext *c, Node *n) {
     c->code_work++;
     /* A class body first binds its implicit names, then the set of its
      * executed conditional annotations (class_part). */
-    if (n->kind == N_CLASS) { namespace_bindings(n->b); emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
+    if (n->kind == N_CLASS) { emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
     if (UNLIKELY(n->kind == N_CLASS && (n->flags & F_CONDITIONAL))) { emit(c, p, BC_CLASS, n, 8); emit(c, p, BC_POP, n, 0); }
     compile_body(c, p, n->b);
     if (n->kind == N_CLASS && n->params && n->args) {
@@ -17125,11 +17157,11 @@ static ALWAYS_INLINE int tick(SPYContext *c, Frame *f, Node *n) {
 }
 static SPYValue *number_literal(SPYContext *c, Node *n) {
     if (n->constant) return spy_retain(n->constant);
-    char *s = copy_text(c, n->text, strlen(n->text));
+    char *s = copy_text(c, n->name.text, strlen(n->name.text));
     if (!s) return NULL;
     /* The lexer has checked the separators; drop them and an imaginary suffix. */
-    size_t j = 0, limit = strlen(n->text) - (n->kind == N_IMAG);
-    for (size_t i = 0; i < limit; i++) if (n->text[i] != '_') s[j++] = n->text[i];
+    size_t j = 0, limit = strlen(n->name.text) - (n->kind == N_IMAG);
+    for (size_t i = 0; i < limit; i++) if (n->name.text[i] != '_') s[j++] = n->name.text[i];
     s[j] = 0;
     char *end;
     SPYValue *v = NULL;
@@ -17171,7 +17203,7 @@ static int append_qualname(Buffer *out, Scope *scope) {
     Scope *parent = scope->parent;
     if (parent && parent->owner && parent->owner->kind == N_GENERIC) parent = parent->parent;
     Symbol *binding = definition->kind == N_DEF || definition->kind == N_CLASS ?
-        scope_symbol(parent, definition->a->text) : NULL;
+        scope_symbol(parent, definition->a->name.text) : NULL;
     if ((!binding || !(binding->flags & S_GLOBAL)) && append_qualname(out, parent)) return -1;
     if (out->len && puts_buffer(out, parent && parent->kind == S_FUNCTION ? ".<locals>." : ".")) return -1;
     const char *name = definition->kind == N_LAMBDA ? "<lambda>" : definition->kind == N_COMPREHENSION ?
@@ -17269,8 +17301,8 @@ static int code_names_node(ClosureNames *w, Scope *scope, Node *n, int depth) {
 #define NODE(x) code_names_walk(w, scope, (x), depth + 1)
     if (!n || depth >= 1000) return 0;
     switch (n->kind) {
-    case N_NAME: return n->text && strcmp(n->text, "__debug__") ? code_name_use(w, scope, n->text) : 0; /* __debug__ is a constant */
-    case N_ATTR: return NODE(n->a) || (n->b && n->b->text && code_name_add(w, n->b->text)) ? -1 : 0;
+    case N_NAME: return n->name.text && strcmp(n->name.text, "__debug__") ? code_name_use(w, scope, n->name.text) : 0; /* __debug__ is a constant */
+    case N_ATTR: return NODE(n->a) || (n->b && n->b->name.text && code_name_add(w, n->b->name.text)) ? -1 : 0;
     case N_GLOBAL: case N_NONLOCAL: return 0;
     case N_ASSIGN:
         /* An augmented target is read first; otherwise the value comes first. */
@@ -17390,7 +17422,7 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
         for (Node *arg = def->args; arg; arg = arg->next) {
             if ((arg->op == P_VARARGS) != (pass == 1) || (arg->op == P_KWARGS) != (pass == 2)) continue;
             for (size_t i = front; i < w.names->as.seq.len; i++)
-                if (!strcmp(items[i]->as.string.data, arg->text)) {
+                if (!strcmp(items[i]->as.string.data, arg->name.text)) {
                     SPYValue *item = items[i]; memmove(items + front + 1, items + front, (i - front) * sizeof(*items)); items[front++] = item;
                     break;
                 }
@@ -17506,7 +17538,7 @@ static int function_default(SPYContext *c, SPYValue *fn, Node *arg, SPYValue *va
         spy_release(defaults);
         if (status) return -1;
     }
-    return arg->op == P_KWONLY ? name_set(c, defaults, arg->text, value) : sequence_append(c, defaults, value);
+    return arg->op == P_KWONLY ? name_set(c, defaults, arg->name.text, value) : sequence_append(c, defaults, value);
 }
 static NO_INLINE SPYValue *make_function(SPYContext *c, Frame *f, Node *n) {
     SPYValue *fn = function_new(c, f, n);
@@ -17563,7 +17595,7 @@ static int eval_arguments(SPYContext *c, Frame *f, Node *arguments, SPYValue *ca
             if (!value) break;
             if (arg->kind == N_MAPPING) extend_container(c, keywords, value, callable, 0);
             else if (arg->kind == N_KEYWORD) {
-                SPYValue *key = spy_string(c, arg->text, strlen(arg->text));
+                SPYValue *key = spy_string(c, arg->name.text, strlen(arg->name.text));
                 if (key) merge_keyword(c, NULL, keywords, key, value, callable);
                 spy_release(key);
             } else if (arg->kind == N_STAR) extend_display(c, args, value);
@@ -17613,13 +17645,13 @@ static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **
     }
     SPYValue *callee = node_attribute(c, object, n, calls);
     if (!callee && calls && !c->error_type[0]) { *self = object; return NULL; }
-    int dunder = n->b->text[0] == '_' && n->b->text[1] == '_';
+    int dunder = n->b->name.text[0] == '_' && n->b->name.text[1] == '_';
     if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
-        !dunder && callee->as.method.function == class_lookup(type, n->b->text)) {
+        !dunder && callee->as.method.function == class_lookup(type, n->b->name.text)) {
         n->attr_class = type; n->attr_method = callee->as.method.function; n->attr_kind = 0; n->attr_epoch = c->classes_changed;
     } else if (type && callee && callee->type == SPY_BOUND_METHOD && callee->as.bound.self == object && !callee->as.bound.module &&
-               !dunder && callee->as.bound.name && !strcmp(callee->as.bound.name->as.string.data, n->b->text) &&
-               (n->b->global_key || (n->b->global_key = spy_retain(callee->as.bound.name)))) {
+               !dunder && callee->as.bound.name && !strcmp(callee->as.bound.name->as.string.data, n->b->name.text) &&
+               (n->b->name.global_key || (n->b->name.global_key = spy_retain(callee->as.bound.name)))) {
         n->attr_class = type; n->attr_method = NULL; n->attr_kind = -1 - callee->as.bound.method; n->attr_epoch = c->classes_changed;
     }
     spy_release(object);
@@ -17629,7 +17661,7 @@ static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **
 static ALWAYS_INLINE SPYValue *callee_of(SPYContext *c, Frame *f, Node *n) {
     if ((n->flags & F_NAMED_CALLEE) && quiet(c, f)) {
         /* A name the fast path misses, as a method's globals are, usually always will. */
-        SPYValue *callee = name_fast(f->env, n->a);
+        SPYValue *callee = name_fast(f->env, &n->a->name);
         if (!callee) n->flags &= ~F_NAMED_CALLEE;
         return callee ? spy_retain(callee) : eval(c, f, n->a);
     }
@@ -17679,7 +17711,7 @@ static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SP
  * function skips call_keywords' dispatch; the stack guard stays with
  * eval, which every node of its body passes. */
 static ALWAYS_INLINE SPYValue *call_plain(SPYContext *c, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv) {
-    if (method >= 0) return call_native_method(c, fn, method, n->a->b->global_key, argc, argv);
+    if (method >= 0) return call_native_method(c, fn, method, n->a->b->name.global_key, argc, argv);
     if (fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def &&
         fn->as.function.def->kind != N_CLASS && fn->as.function.def->kind != N_COMPREHENSION) {
         SPYValue *result = call_function(c, fn, argc, argv, NULL);
@@ -17716,7 +17748,7 @@ static HOT NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
  * guard and environment eval set. */
 static ALWAYS_INLINE SPYValue *eval_operand(SPYContext *c, Frame *f, Node *n) {
     if (n->kind == N_CALL && quiet(c, f)) { relocate(c, n); return eval_call(c, f, n); }
-    SPYValue *v = n->kind == N_ATTR && n->a->kind == N_NAME && quiet(c, f) ? name_fast(f->env, n->a) : NULL;
+    SPYValue *v = n->kind == N_ATTR && n->a->kind == N_NAME && quiet(c, f) ? name_fast(f->env, &n->a->name) : NULL;
     if (!v) return eval(c, f, n);
     relocate(c, n);
     spy_retain(v);
@@ -17729,7 +17761,7 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     SPYValue *a = NULL, *b = NULL, *result = NULL;
     switch (n->kind) {
     case N_STRING: case N_BYTES:
-        if (!n->constant) n->constant = n->kind == N_STRING ? spy_string(c, n->text, (size_t)n->op) : spy_bytes(c, n->text, (size_t)n->op);
+        if (!n->constant) n->constant = n->kind == N_STRING ? spy_string(c, n->name.text, (size_t)n->op) : spy_bytes(c, n->name.text, (size_t)n->op);
         return spy_retain(n->constant);
     case N_TEMPLATE: {
         SPYValue *parts = value_new(c, SPY_LIST);
@@ -17769,9 +17801,9 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     case N_ELLIPSIS: return spy_retain(c->ellipsis);
     case N_BOOL: return spy_bool(c, n->op);
     case N_NAME: {
-        SPYValue *value = name_fast(f->env, n);
+        SPYValue *value = name_fast(f->env, &n->name);
         if (value) return spy_retain(value);
-        return !strcmp(n->text, "__debug__") ? spy_bool(c, 1) : name_find(c, f->env, node_name(n));
+        return !strcmp(n->name.text, "__debug__") ? spy_bool(c, 1) : name_find(c, f->env, node_name(n));
     }
     case N_SLICE: {
         a = n->a ? eval(c, f, n->a) : spy_none(c);
@@ -17785,7 +17817,7 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
         SPYValue *env = f->env;
         while (env->type == V_ENV && env->as.map.flags == 2) env = env->as.map.parent;
         result = eval(c, f, n->b);
-        if (result && name_set(c, env, n->a->text, result)) { spy_release(result); result = NULL; }
+        if (result && name_set(c, env, n->a->name.text, result)) { spy_release(result); result = NULL; }
         return result;
     }
     case N_COMPREHENSION: return eval_comprehension(c, f, n);
@@ -17863,7 +17895,7 @@ container_fail:
     case N_ATTR:
         /* An attribute of a name, while tick has only the line to record,
          * takes the name's value as it is, held across the lookup. */
-        a = n->a->kind == N_NAME && quiet(c, f) ? spy_retain(name_fast(f->env, n->a)) : NULL;
+        a = n->a->kind == N_NAME && quiet(c, f) ? spy_retain(name_fast(f->env, &n->a->name)) : NULL;
         if (a || (a = eval(c, f, n->a))) { relocate(c, n); result = node_attribute(c, a, n, 0); }
         break;
     default: return eval_call(c, f, n); /* N_CALL, the last expression */
@@ -17886,9 +17918,9 @@ static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
 /* An attribute of a name found in a plain instance's own entries, as
  * node_attribute finds it, borrowed. */
 static NO_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *v = name_fast(f->env, n->a);
+    SPYValue *v = name_fast(f->env, &n->a->name);
     int kind = v && plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
-    Entry *e = kind == ATTR_OWN || kind == ATTR_METHOD ? dict_slot(v, n->b) : NULL;
+    Entry *e = kind == ATTR_OWN || kind == ATTR_METHOD ? dict_slot(v, &n->b->name) : NULL;
     return e ? e->value : NULL;
 }
 /* An operand found along the fast path, borrowed: a literal, a name, an
@@ -17962,7 +17994,7 @@ static HOT SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
      * watches for its line. */
     if (n->constant) return c->error_type[0] || (c->settings[SET_TRACE] && tick(c, f, n)) ? NULL : spy_retain(n->constant);
     if (n->kind == N_NAME && !c->error_type[0]) {
-        SPYValue *value = name_fast(f->env, n);
+        SPYValue *value = name_fast(f->env, &n->name);
         if (value) return c->settings[SET_TRACE] && tick(c, f, n) ? NULL : spy_retain(value);
     }
     /* An operator whose operands are found along the fast path, while tick
@@ -18029,7 +18061,7 @@ static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
     }
     for (int pass = 0; pass < 3; pass++)
         for (Node *arg = params; arg; arg = arg->next) {
-            Symbol *symbol = (arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0) == pass ? remember_symbol(arg, scope, scope_find(scope, node_name(arg))) : NULL;
+            Symbol *symbol = (arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0) == pass ? remember_symbol(&arg->name, scope, scope_find(scope, node_name(arg))) : NULL;
             if (symbol && !(symbol->flags & (S_GLOBAL | S_NONLOCAL))) order[len++] = (size_t)(symbol - scope->symbols);
         }
     for (size_t i = 0; i < scope->len; i++) {
@@ -18596,14 +18628,14 @@ static int missing_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, int key
     size_t missing = 0, index = 0;
     for (Node *arg = function_parameters(fn); arg; arg = arg->next)
         if ((keyword_only ? arg->op == P_KWONLY : arg->op == P_POSITIONAL || arg->op == P_POSONLY) &&
-            !bound_local(env, arg->text)) missing++;
+            !bound_local(env, arg->name.text)) missing++;
     if (!missing) return 0;
     Buffer names = {.ctx = c};
     for (Node *arg = function_parameters(fn); arg && !c->error_type[0]; arg = arg->next) {
         if (!(keyword_only ? arg->op == P_KWONLY : arg->op == P_POSITIONAL || arg->op == P_POSONLY) ||
-            bound_local(env, arg->text)) continue;
+            bound_local(env, arg->name.text)) continue;
         if (index) puts_buffer(&names, index + 1 == missing ? (missing == 2 ? " and " : ", and ") : ", ");
-        puts_buffer(&names, "'"); puts_buffer(&names, arg->text); puts_buffer(&names, "'"); index++;
+        puts_buffer(&names, "'"); puts_buffer(&names, arg->name.text); puts_buffer(&names, "'"); index++;
     }
     SPYValue *name = name_text(fn->as.function.metadata, "__qualname__");
     errorf(c, "TypeError", "%s() missing %zu required %s argument%s: %s", name->as.string.data,
@@ -18635,21 +18667,21 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
         for (; arg && (arg->op == P_POSITIONAL || arg->op == P_POSONLY) && !arg->local; arg = arg->next) count++;
         if (!arg && count == argc) {
             for (arg = params, count = 0; arg; arg = arg->next, count++)
-                if (name_set(c, env, arg->text, argv[count])) return -1;
+                if (name_set(c, env, arg->name.text, argv[count])) return -1;
             return 0;
         }
     }
     size_t positional = 0;
     for (Node *arg = params; arg; arg = arg->next) {
         if (arg->op == P_POSITIONAL || arg->op == P_POSONLY) {
-            if (positional < argc && name_set(c, env, arg->text, argv[positional])) return -1;
+            if (positional < argc && name_set(c, env, arg->name.text, argv[positional])) return -1;
             positional++;
         } else if (arg->op == P_VARARGS || arg->op == P_KWARGS) {
             SPYValue *value = value_new(c, arg->op == P_VARARGS ? SPY_TUPLE : SPY_DICT);
             if (!value) return -1;
             if (arg->op == P_VARARGS)
                 for (size_t i = positional; i < argc && !c->error_type[0]; i++) sequence_append(c, value, argv[i]);
-            int status = name_set(c, env, arg->text, value);
+            int status = name_set(c, env, arg->name.text, value);
             spy_release(value);
             if (status || c->error_type[0]) return -1;
         }
@@ -18688,7 +18720,7 @@ static NO_INLINE int keyword_compare(SPYContext *c, SPYValue *fn, SPYValue *env,
     Machine *m = binding_machine(c, fn);
     SPYValue *key = map_items(keywords)[i].key, *text, *function;
     if (!m || key->type != SPY_INSTANCE) return 0;
-    if (!(text = spy_string(c, arg->text, strlen(arg->text)))) return 1;
+    if (!(text = spy_string(c, arg->name.text, strlen(arg->name.text)))) return 1;
     if (!(function = rich_function(c, key, text, R_EQ))) { spy_release(text); return 0; }
     int64_t at = 0;
     for (Node *param = function_parameters(fn); param != arg; param = param->next) at++;
@@ -18706,7 +18738,7 @@ static NO_INLINE int keyword_hash(SPYContext *c, SPYValue *fn, SPYValue *env, si
 }
 /* The **kwargs dict of fn binding into env, borrowed, or NULL. */
 static SPYValue *kwargs_of(SPYValue *fn, SPYValue *env) {
-    for (Node *arg = function_parameters(fn); arg; arg = arg->next) if (arg->op == P_KWARGS) return bound_local(env, arg->text);
+    for (Node *arg = function_parameters(fn); arg; arg = arg->next) if (arg->op == P_KWARGS) return bound_local(env, arg->name.text);
     return NULL;
 }
 static int map_scan(SPYContext *, SPYValue *, SPYValue *, int64_t, MapCursor *, ptrdiff_t *);
@@ -18752,14 +18784,14 @@ static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, S
         for (; !matched && arg && !c->error_type[0]; arg = arg->next) {
             if (arg->op != P_POSITIONAL && arg->op != P_KWONLY) continue;
             if (entry->key->type != SPY_STRING && keyword_compare(c, fn, env, argc, keywords, i, arg)) return c->error_type[0] ? -1 : 2;
-            if (keyword_matches(c, entry->key, arg->text)) break;
+            if (keyword_matches(c, entry->key, arg->name.text)) break;
         }
         if (c->error_type[0]) return -1;
         if (arg) {
-            if (bound_local(env, arg->text)) {
+            if (bound_local(env, arg->name.text)) {
                 errorf(c, "TypeError", "%s() got multiple values for argument '%s'", name, keyword); return -1;
             }
-            if (name_set(c, env, arg->text, entry->value)) return -1;
+            if (name_set(c, env, arg->name.text, entry->value)) return -1;
         } else if (extra) {
             int64_t hash;
             if (entry->key->type != SPY_STRING && keyword_hash(c, fn, env, argc, keywords, i)) return c->error_type[0] ? -1 : 2;
@@ -18769,9 +18801,9 @@ static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, S
         } else {
             Buffer names = {.ctx = c};
             for (Node *param = params; param && param->op == P_POSONLY; param = param->next)
-                if (name_local(keywords, param->text)) {
+                if (name_local(keywords, param->name.text)) {
                     if (names.len) puts_buffer(&names, ", ");
-                    puts_buffer(&names, param->text);
+                    puts_buffer(&names, param->name.text);
                 }
             if (names.len) errorf(c, "TypeError", "%s() got some positional-only arguments passed as keyword arguments: '%s'", name, names.data);
             else {
@@ -18779,7 +18811,7 @@ static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, S
                 const char *near = NULL;
                 size_t distance = SIZE_MAX, candidates = 0;
                 for (Node *param = params; param; param = param->next)
-                    if (param->op == P_POSITIONAL || param->op == P_KWONLY) { candidates++; suggest(keyword, param->text, &near, &distance); }
+                    if (param->op == P_POSITIONAL || param->op == P_KWONLY) { candidates++; suggest(keyword, param->name.text, &near, &distance); }
                 unexpected_keyword(c, name, keyword, candidates < SUGGEST_MAX_ITEMS ? near : NULL);
             }
             mem_free(names.data); return -1;
@@ -18805,7 +18837,7 @@ static int bind_rest(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc) {
         int64_t required = (int64_t)positional - (int64_t)default_count;
         size_t kwonly = 0;
         for (Node *arg = params; arg; arg = arg->next)
-            if (arg->op == P_KWONLY && bound_local(env, arg->text)) kwonly++;
+            if (arg->op == P_KWONLY && bound_local(env, arg->name.text)) kwonly++;
         char expected[80], given[120];
         if (!default_count) snprintf(expected, sizeof(expected), "%zu", positional);
         else snprintf(expected, sizeof(expected), "from %lld to %zu", (long long)required, positional);
@@ -18819,15 +18851,15 @@ static int bind_rest(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc) {
     }
     for (Node *arg = params; arg; arg = arg->next) {
         if (arg->op != P_POSITIONAL && arg->op != P_POSONLY) continue;
-        if (!bound_local(env, arg->text) && index + default_count >= positional &&
-            name_set(c, env, arg->text, defaults->as.seq.items[index + default_count - positional])) return -1;
+        if (!bound_local(env, arg->name.text) && index + default_count >= positional &&
+            name_set(c, env, arg->name.text, defaults->as.seq.items[index + default_count - positional])) return -1;
         index++;
     }
     if (missing_arguments(c, fn, env, 0)) return -1;
     for (Node *arg = params; arg; arg = arg->next) {
-        if (arg->op != P_KWONLY || bound_local(env, arg->text)) continue;
-        SPYValue *value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->text) : NULL;
-        if (value && name_set(c, env, arg->text, value)) return -1;
+        if (arg->op != P_KWONLY || bound_local(env, arg->name.text)) continue;
+        SPYValue *value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->name.text) : NULL;
+        if (value && name_set(c, env, arg->name.text, value)) return -1;
     }
     if (missing_arguments(c, fn, env, 1)) return -1;
     /* Parameters of replace()d code bind under the body's names for their slots. */
@@ -18839,7 +18871,7 @@ static int bind_rest(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc) {
     for (Node *arg = fn->as.function.signature; arg; arg = arg->next, at++) {
         slots[at] = -1;
         for (size_t i = 0; arg->local && i < env->as.map.len && slots[at] < 0; i++)
-            if (map_items(env)[i].key->type == SPY_STRING && !strcmp(map_items(env)[i].key->as.string.data, arg->text))
+            if (map_items(env)[i].key->type == SPY_STRING && !strcmp(map_items(env)[i].key->as.string.data, arg->name.text))
                 slots[at] = (ptrdiff_t)i;
     }
     at = 0;
@@ -18903,7 +18935,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
             if (j + len >= scope->positionals) value = defaults->as.seq.items[j + len - scope->positionals];
         } else {
             if (!kwdefaults) kwdefaults = name_local(fn->as.function.metadata, "__kwdefaults__");
-            value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->text) : NULL;
+            value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->name.text) : NULL;
         }
         if (!value) break;
         spy_release(items[j].value); items[j].value = spy_retain(value);
@@ -18974,7 +19006,7 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
             failed = !(rest->value = spy_tuple(c, argc - fit, argv + fit));
         }
         if (!failed && open_parameters(c, fn, env, fit, kw, kwc)) failed = bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
-        if (take) release_all(argc - fit, argv + fit);
+        if (take && argc > fit) release_all(argc - fit, argv + fit);
     } else {
         failed = !plain ? bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords) || declare_locals(c, env) :
             declare_locals(c, env) ? -1 : bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
@@ -21061,7 +21093,7 @@ static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only
                 spy_release(full);
             }
             Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
-            if (value) name_set(c, f->env, binding->text, value);
+            if (value) name_set(c, f->env, binding->name.text, value);
             spy_release(value);
         }
         return c->error_type[0] ? -1 : 0;
@@ -21084,7 +21116,7 @@ static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only
             value = attr ? lazy_new(c, root, attr, NULL) : NULL;
             spy_release(attr);
         }
-        if (value) name_set(c, f->env, item->b ? item->b->text : item->a->text, value);
+        if (value) name_set(c, f->env, item->b ? item->b->name.text : item->a->name.text, value);
         spy_release(value);
     }
     mem_free(name); spy_release(text); spy_release(fromlist); spy_release(root);
@@ -21300,7 +21332,7 @@ static ALWAYS_INLINE void entry_store(SPYContext *c, SPYValue *env, Entry *entry
  * trace function watches; else NULL. */
 static ALWAYS_INLINE Entry *stored_entry(SPYContext *c, Frame *f, Node *n) {
     SPYValue *env = f->env;
-    return n->kind != N_NAME || c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
+    return n->kind != N_NAME || c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, &n->name) : remembered_local(env, &n->name);
 }
 /* Store value to target n; with calls, a machine step's store, which
  * returns 1, storing nothing, for a Python __setitem__ (store_call). */
@@ -21353,10 +21385,10 @@ static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, cons
  * would not store at once, calls a Python setter on the machine: then
  * store_call enters c->entering_init with the descriptor c->fallback. */
 static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
-    SPYValue *descriptor = NULL, *function = setter_object(object) ? setter_function(c, object, n->b->text, &descriptor, 0) : NULL;
+    SPYValue *descriptor = NULL, *function = setter_object(object) ? setter_function(c, object, n->b->name.text, &descriptor, 0) : NULL;
     /* A class's __bases__, whose MROs a metaclass's Python mro() may
      * rebuild, too (bases_go): c->unbound. */
-    if (!function && object->type == SPY_CLASS && !strcmp(n->b->text, "__bases__")) function = object->ctx->unbound;
+    if (!function && object->type == SPY_CLASS && !strcmp(n->b->name.text, "__bases__")) function = object->ctx->unbound;
     if (!function) return 0;
     c->entering_init = function; c->fallback = spy_retain(descriptor);
     return 1;
@@ -21389,7 +21421,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
         }
     }
     if (n->kind == N_NAME) {
-        Entry *entry = name_slot(f->env, n);
+        Entry *entry = name_slot(f->env, &n->name);
         if (!entry) return calls && name_mapping(c, f->env, node_name(n)) ? 1 : name_bind(c, f->env, node_name(n), value);
         SPYValue *old = entry->value;
         class_changed(f->env);
@@ -21675,7 +21707,7 @@ static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n, Machine *m) {
         }
     }
     {
-        SPYValue *local = container ? NULL : name_fast(f->env, n->a);
+        SPYValue *local = container ? NULL : name_fast(f->env, &n->a->name);
         old = container ? (key ? get_index(c, container, key) : node_attribute(c, container, n->a, 0)) :
             local ? spy_retain(local) : name_find(c, f->env, node_name(n->a));
         if (!old) goto done;
@@ -21687,7 +21719,7 @@ static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n, Machine *m) {
         Node *t = n->a;
         if ((old->type == SPY_STRING || old->type == SPY_BYTES) && rhs->type == old->type && n->op == T_ADDEQ && local == old &&
             old->refs == 2 && env->type == V_ENV && !env->as.map.namespace &&
-            t->slot_scope == env->as.map.scope && t->slot < map_used(env) && env->as.map.items[t->slot].value == old)
+            t->name.slot_scope == env->as.map.scope && t->name.slot < map_used(env) && env->as.map.items[t->name.slot].value == old)
             value = string_append(c, old, rhs);
         else if (!(value = number_fast(c, operators[n->op - T_ADDEQ].token, old, rhs, 1)) && !c->error_type[0])
             value = augmented(c, n->op, old, rhs);
@@ -22936,7 +22968,7 @@ static SPYValue *type_param_made(SPYContext *c, Machine *m, SPYValue *state, SPY
     SPYValue *env = state->as.seq.items[0], *params = state->as.seq.items[1];
     Node *param = env->as.map.scope->owner->args;
     for (size_t i = 0; i < params->as.seq.len; i++) param = param->next;
-    if (!value || name_set(c, env, param->text, value) || sequence_append(c, params, value)) {
+    if (!value || name_set(c, env, param->name.text, value) || sequence_append(c, params, value)) {
         spy_release(value);
         return k_resume(c, m, state, NULL);
     }
@@ -23028,7 +23060,7 @@ static NO_INLINE void execute_class(SPYContext *c, Frame *f, Node *n) {
     SPYValue *decorators = eval_decorators(c, f, n);
     if (!decorators) return;
     SPYValue *cls = apply_decorators(c, decorators, build_class(c, f, n, NULL, NULL));
-    if (cls) name_set(c, f->env, n->a->text, cls);
+    if (cls) name_set(c, f->env, n->a->name.text, cls);
     spy_release(cls); spy_release(decorators);
 }
 /* type NAME[params] = value (BC_CLASS 11): the TypeAliasType of the
@@ -24594,24 +24626,24 @@ static NO_INLINE int delete_target(SPYContext *c, Frame *f, Node *n) {
         return 0;
     }
     if (n->kind == N_NAME) {
-        SPYValue *owner = binding_env(c, f->env, name_of(n->text));
+        SPYValue *owner = binding_env(c, f->env, name_of(n->name.text));
         if (owner->as.map.namespace && owner->as.map.namespace->type != SPY_DICT && owner->as.map.flags != 3) {
-            int status = clear_binding(c, owner, n->text);
+            int status = clear_binding(c, owner, n->name.text);
             if (status) {
                 spy_clear_error(c);
-                name_error(c, n->text, 0);
+                name_error(c, n->name.text, 0);
             }
             return status;
         }
-        SPYValue *value = name_local(owner, n->text);
+        SPYValue *value = name_local(owner, n->name.text);
         if (!value || value->type == V_UNBOUND) {
-            if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->text);
+            if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->name.text);
             else if (value && owner->type == V_ENV && ((owner->as.map.scope && owner->as.map.scope->kind != S_MODULE) || owner->as.map.flags == 4))
-                name_error(c, n->text, 1);
-            else name_error(c, n->text, 0);
+                name_error(c, n->name.text, 1);
+            else name_error(c, n->name.text, 0);
             return -1;
         }
-        return clear_binding(c, f->env, n->text);
+        return clear_binding(c, f->env, n->name.text);
     }
     SPYValue *object = eval(c, f, n->a);
     if (!object) return -1;
@@ -24622,7 +24654,7 @@ static NO_INLINE int delete_target(SPYContext *c, Frame *f, Node *n) {
 }
 /* Delete the attribute or item a target names, its object and key evaluated. */
 static void delete_evaluated(SPYContext *c, Node *n, SPYValue *object, SPYValue *key) {
-    if (n->kind == N_ATTR) { delete_attribute(c, object, n->b->text); return; }
+    if (n->kind == N_ATTR) { delete_attribute(c, object, n->b->name.text); return; }
     SPYValue *base = builtin_base(c, object, "__delitem__", NULL);
     delete_index(c, base ? base : object, key);
 }
@@ -25231,7 +25263,7 @@ static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
             spy_release(rest); rest = remaining;
             if (!match) continue;
             spy_release(handled); c->handled = handled = match;
-            if (h->c) name_set(c, f->env, h->c->text, match);
+            if (h->c) name_set(c, f->env, h->c->name.text, match);
             Result body = execute(c, f, h->b);
             spy_release(body.value);
             if (body.flow == FLOW_ERROR) {
@@ -25240,7 +25272,7 @@ static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
                 if (raised->as.seq.len == 1) line = inner.line;
                 spy_release(inner.value);
             }
-            if (h->c) clear_binding(c, f->env, h->c->text);
+            if (h->c) clear_binding(c, f->env, h->c->name.text);
         }
         materialize_error(c);
         c->handled = outer;
@@ -25292,11 +25324,11 @@ static NO_INLINE Result execute_try(SPYContext *c, Frame *f, Node *n) {
             if (match < 0) break;
             if (!match) continue;
             caught = 1;
-            if (h->c) name_set(c, f->env, h->c->text, error.value);
+            if (h->c) name_set(c, f->env, h->c->name.text, error.value);
             spy_release(r.value); r = execute(c, f, h->b);
             materialize_error(c);
             if (h->c) {
-                clear_binding(c, f->env, h->c->text);
+                clear_binding(c, f->env, h->c->name.text);
             }
             break;
         }
@@ -25437,8 +25469,8 @@ static SPYValue *annotation_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPY
  * there (name_walk). */
 static NO_INLINE SPYValue *record_annotation(SPYContext *c, Machine *m, Frame *f, Node *n) {
     int future = (n->flags & F_FUTURE) != 0, conditional = (n->flags & F_CONDITIONAL) != 0;
-    SPYValue *items[] = {future ? spy_string(c, n->a->text, strlen(n->a->text)) : spy_none(c),
-                         future ? spy_string(c, n->b->text, (size_t)n->b->op) : spy_none(c),
+    SPYValue *items[] = {future ? spy_string(c, n->a->name.text, strlen(n->a->name.text)) : spy_none(c),
+                         future ? spy_string(c, n->b->name.text, (size_t)n->b->op) : spy_none(c),
                          spy_retain(conditional ? conditional_env(f) : c->none), conditional ? spy_int(c, n->op) : spy_none(c)};
     SPYValue *ctx = items[0] && items[1] && items[3] ? spy_tuple(c, 4, items) : NULL;
     release_all(4, items);
@@ -25481,7 +25513,7 @@ static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n
         SPYValue *value = eval(c, f, entry->a);
         /* A lazy type-parameter value returns its single expression. */
         if (n->op == 1 && value) { spy_release(result); spy_release(executed); return value; }
-        SPYValue *key = value ? spy_string(c, entry->text, strlen(entry->text)) : NULL;
+        SPYValue *key = value ? spy_string(c, entry->name.text, strlen(entry->name.text)) : NULL;
         if (key) map_set(c, result, key, value);
         spy_release(key); spy_release(value);
     }
@@ -25532,7 +25564,7 @@ static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, 
     if (entry->a->kind == N_STAR) spy_release(machine_pop(m));
     SPYValue *result = machine_pop(m);
     if (ins->arg == 15) { spy_release(result); return value; }
-    SPYValue *key = spy_string(c, entry->text, strlen(entry->text));
+    SPYValue *key = spy_string(c, entry->name.text, strlen(entry->name.text));
     int status = key ? map_set(c, result, key, value) : -1;
     spy_release(key); spy_release(value);
     if (status) { spy_release(result); return NULL; }
@@ -25591,7 +25623,6 @@ static int module_program(SPYContext *c, SPYValue *unit) {
     c->code_work++;
     /* The body starts by binding its annotation names (annotation_step);
      * like a class body's, its bindings may go through a mapping. */
-    namespace_bindings(body);
     if (unit->as.unit.annotate || unit->as.unit.conditional_annotations) { emit(c, p, BC_CLASS, NULL, 17); emit(c, p, BC_POP, NULL, 0); }
     for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
     if (last->kind == N_EXPR && !p->display) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
@@ -26251,7 +26282,7 @@ static void bindings_truncate(SPYValue *bindings, size_t len) {
     }
 }
 static int bind_capture(SPYContext *c, SPYValue *bindings, Node *name, SPYValue *value) {
-    SPYValue *key = spy_string(c, name->text, strlen(name->text));
+    SPYValue *key = spy_string(c, name->name.text, strlen(name->name.text));
     int status = key ? map_set(c, bindings, key, value) : -1;
     spy_release(key);
     return status;
@@ -26323,7 +26354,7 @@ static int match_class(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYV
         } else {
             Node *keyword = n->c;
             for (size_t k = positional; k < index; k++) keyword = keyword->next;
-            name = keyword->text;
+            name = keyword->name.text;
         }
         for (size_t j = 0; j < seen_count; j++)
             if (!strcmp(seen[j], name)) { errorf(c, "TypeError", "%s() got multiple sub-patterns for attribute '%s'", cls_name, name); goto collected; }
@@ -26632,7 +26663,7 @@ static NO_INLINE void import_statement(SPYContext *c, Frame *f, Node *n, Node *o
                 part = end + 1;
             }
         }
-        if (value) name_set(c, f->env, binding->text, value);
+        if (value) name_set(c, f->env, binding->name.text, value);
         spy_release(value);
     }
     spy_release(module);
@@ -26723,7 +26754,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
             SPYValue *decorators = eval_decorators(c, f, n);
             if (!decorators) break;
             SPYValue *fn = apply_decorators(c, decorators, make_function(c, f, n));
-            if (fn) name_set(c, f->env, n->a->text, fn);
+            if (fn) name_set(c, f->env, n->a->name.text, fn);
             spy_release(fn); spy_release(decorators); break;
         }
         case N_IF: {
@@ -26868,7 +26899,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     while (m->len > b.depth) spy_release(machine_pop(m));
     if (b.kind == BLOCK_HANDLER || b.kind == BLOCK_CLEANUP) {
         spy_release(c->handled); c->handled = b.handled; b.handled = NULL;
-        if (b.name) clear_binding(c, f->env, b.name->text);
+        if (b.name) clear_binding(c, f->env, b.name->name.text);
     }
     if (b.consumer && b.consumer->target) {
         /* An unfinished list.sort leaves its list as it was. */
@@ -30674,7 +30705,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     /* An exporter argument, or a list or tuple of them a join takes, too (buffer_argument). */
     if (index_arguments(c, callee, method, argc, argv) ||
         (argc <= INDEX_MOST && buffer_arguments(c, callee, method, argc, argv))) {
-        result = indexed_call(c, m, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc, argv);
+        result = indexed_call(c, m, callee, method, method >= 0 ? n->a->b->name.global_key : NULL, argc, argv);
         spy_release(callee);
         return result;
     }
@@ -30801,7 +30832,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     if (id < 0 && !init && method < 0 && !c->error_type[0] && (is_builtin(callee, B_EXEC) || is_builtin(callee, B_EVAL)))
         return builtin_call(c, m, n, callee, argc, argv, env);
     if (id >= 0)
-        consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
+        consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->name.global_key : NULL, argc ? spy_retain(argv[0]) : NULL,
                        argc > 3 ? set_rest(c, argc, argv) : argc > 1 ? spy_retain(argv[1]) : NULL, argc > 3 ? c->unbound : argc > 2 ? argv[2] : NULL);
     /* A class whose __new__ is read first is called on m (class_described). */
     if (id < 0 && !init && method < 0 && callee->type == SPY_CLASS && !c->error_type[0] &&
@@ -32081,7 +32112,7 @@ static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, 
     if (UNLIKELY(c->annotating == 2)) {
         /* Its __dict__ searched on m first (dict_searches, method_searched). */
         c->annotating = 0;
-        SPYValue *count = int_value(c, stacked), *result = count ? search_begin(c, m, object, attr->b->text, count, method_searched) : NULL;
+        SPYValue *count = int_value(c, stacked), *result = count ? search_begin(c, m, object, attr->b->name.text, count, method_searched) : NULL;
         spy_release(count); spy_release(object);
         if (!result && !c->k_fn) method_drop(m, stacked);
         return result;
@@ -32089,13 +32120,13 @@ static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, 
     if (UNLIKELY(c->annotating == 3)) {
         /* A computed attribute (wrapper_computes) read on m, then called (method_got). */
         c->annotating = 0;
-        SPYValue *count = int_value(c, stacked), *key = spy_string(c, attr->b->text, strlen(attr->b->text));
+        SPYValue *count = int_value(c, stacked), *key = spy_string(c, attr->b->name.text, strlen(attr->b->name.text));
         SPYValue *state = count && key ? spy_tuple(c, 4, (SPYValue *[]){object, c->none, key, count}) : NULL;
         spy_release(count); spy_release(key);
         if (!state) { spy_release(object); method_drop(m, stacked); return NULL; }
-        return wrapper_computed(c, m, object, attr->b->text, method_got, state);
+        return wrapper_computed(c, m, object, attr->b->name.text, method_got, state);
     }
-    return method_getter_of(c, m, attr->b->text, c->fallback ? c->fallback : spy_retain(attr->attr_method), object, stacked);
+    return method_getter_of(c, m, attr->b->name.text, c->fallback ? c->fallback : spy_retain(attr->attr_method), object, stacked);
 }
 /* method_getter's call of function, which it takes, the getter for name
  * of object, which it owns. */
@@ -32851,7 +32882,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         memcpy(args, argv + 1, argc * sizeof(*argv));
         spy_release(argv[0]);
         m->len -= argc + 1;
-        result = indexed_call(c, m, callee, method, n->a->b->global_key, argc, args);
+        result = indexed_call(c, m, callee, method, n->a->b->name.global_key, argc, args);
         spy_release(callee);
         return result;
     }
@@ -32904,7 +32935,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
                  calls && UNLIKELY(anext_steps(callee, method)) ? step_native(c, m, callee, method, n, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-    if (id >= 0) consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start, traceback);
+    if (id >= 0) consume_traced(c, m, id, callee, method, method >= 0 ? n->a->b->name.global_key : NULL, generator, start, traceback);
     spy_release(callee); if (traceback != c->unbound) spy_release(traceback);
     return result;
 }
@@ -32990,8 +33021,8 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     for (Node *a = n->args; a; a = a->next) {
         if (a->kind != N_KEYWORD) { positional++; continue; }
         Name name = node_name(a);
-        if (!a->global_key && !(a->global_key = spy_string(c, name.text, name.len))) goto done;
-        kw[kwc] = (Entry){a->global_key, argv[positional + kwc], name.hash};
+        if (!a->name.global_key && !(a->name.global_key = spy_string(c, name.text, name.len))) goto done;
+        kw[kwc] = (Entry){a->name.global_key, argv[positional + kwc], name.hash};
         kwc++;
     }
     for (SPYValue *wrapped; calls && (wrapped = static_called(c, callee));) {
@@ -37062,19 +37093,17 @@ static SPYValue *name_deleted(SPYContext *c, Machine *m, SPYValue *state, SPYVal
  * __delitem__ is m's call (callk, name_deleted); else delete_target's.
  * None, or NULL. */
 static NO_INLINE SPYValue *name_delete(SPYContext *c, Machine *m, Frame *f, Node *n) {
-    SPYValue *owner = binding_env(c, f->env, name_of(n->text)), *namespace = owner->as.map.namespace;
+    SPYValue *owner = binding_env(c, f->env, name_of(n->name.text)), *namespace = owner->as.map.namespace;
     SPYValue *function = namespace && namespace->type != SPY_DICT && owner->as.map.flags != 3 ? store_function(c, namespace, "__delitem__") : NULL;
     if (!function) return delete_target(c, f, n) ? NULL : spy_none(c);
-    SPYValue *name = spy_string(c, n->text, strlen(n->text));
+    SPYValue *name = spy_string(c, n->name.text, strlen(n->name.text));
     return name ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(name)}, name_deleted, name) : NULL;
 }
-/* BC_CLASS 10: name n loaded in a class body or exec() and eval() code,
- * whose namespaces' Python __getitem__ are m's calls (name_walk). */
-static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, Node *n) {
-    SPYValue *value = leaf_operand(f, n);
-    if (value) return spy_retain(value);
+/* BC_NAME past its cache: namespace __getitem__ and key comparisons run
+ * on the machine, including loads outside class and exec bodies. */
+static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, NameOperand *n) {
     if (!strcmp(n->text, "__debug__")) return spy_bool(c, 1);
-    return name_walk(c, m, f->env, f->env, node_name(n), 1, 0, NULL, unchanged, NULL);
+    return name_walk(c, m, f->env, f->env, operand_name(n), 1, 0, NULL, unchanged, NULL);
 }
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 /* Store step ins's end after its call (CALL_STORE), ins NULL for m's
@@ -37142,11 +37171,11 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         int deleting = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = ins->op == BC_SAVE_TARGET ? machine_pop(m) : NULL, *object = machine_pop(m), *function, *descriptor;
         if (deleting) {
-            function = setter_object(object) ? setter_function(c, object, n->b->text, &descriptor, 1) : NULL;
+            function = setter_object(object) ? setter_function(c, object, n->b->name.text, &descriptor, 1) : NULL;
             spy_retain(function ? descriptor : NULL);
         } else { function = c->entering_init; descriptor = c->fallback; c->fallback = NULL; }
         relocate(c, n);
-        if (!function) { delete_attribute(c, object, n->b->text); spy_release(object); return NULL; }
+        if (!function) { delete_attribute(c, object, n->b->name.text); spy_release(object); return NULL; }
         if (function->type == SPY_PROPERTY) {
             /* A missing setter or deleter (setter_function). */
             property_missingk(c, m, function, object, deleting ? 2 : 1);
@@ -37160,7 +37189,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
             if (state) bases_go(c, m, state, ins);
             return NULL;
         }
-        SPYValue *name = descriptor ? NULL : spy_string(c, n->b->text, strlen(n->b->text));
+        SPYValue *name = descriptor ? NULL : spy_string(c, n->b->name.text, strlen(n->b->name.text));
         SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : object, descriptor ? object : name,
                             deleting ? NULL : value ? value : m->stack[m->len - 1]};
         size_t skip = descriptor && descriptor->type == SPY_PROPERTY;
@@ -37194,7 +37223,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     }
     if (n->kind == N_NAME) {
         /* A name bound through its namespace's Python __setitem__ (name_mapping). */
-        args[0] = spy_retain(name_mapping(c, f->env, node_name(n))); args[1] = spy_string(c, n->text, strlen(n->text));
+        args[0] = spy_retain(name_mapping(c, f->env, node_name(n))); args[1] = spy_string(c, n->name.text, strlen(n->name.text));
         args[2] = spy_retain(m->stack[m->len - 1]);
         if (!args[1]) { release_all(3, args); return NULL; }
     } else if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
@@ -37372,7 +37401,7 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
                 spy_release(value);
                 if (!(value = import_missing(c, module, source_name(item->a), 1))) goto failed;
             }
-                name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->text;
+                name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->name.text;
             goto bind;
         case IM_IMPORTED:
             /* import a.b.c as d binds what a's b, then that's c, gives
@@ -37382,14 +37411,14 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
                 index = 1; stage = IM_PART;
                 continue;
             }
-            name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->text;
+            name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->name.text;
             goto bind;
         case IM_PART: {
             const char *part = source_name(item->a);
             for (int64_t i = 0; part && i < index; i++) part = strchr(part, '.') ? strchr(part, '.') + 1 : NULL;
             if (!part) {
                 value = module; module = spy_none(c);
-                name = item->b->text;
+                name = item->b->name.text;
                 goto bind;
             }
             const char *end = strchr(part, '.');
@@ -37854,14 +37883,14 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     if (UNLIKELY(c->annotating == 2)) {
         /* A __dict__ search on m (dict_searches), the read going on after it (attribute_searched). */
         c->annotating = 0;
-        SPYValue *result = search_begin(c, m, v, n->b->text, c->none, attribute_searched);
+        SPYValue *result = search_begin(c, m, v, n->b->name.text, c->none, attribute_searched);
         spy_release(v);
         if (result) machine_push(c, m, result);
         return NULL;
     }
     if (UNLIKELY(c->annotating == 3)) {
         c->annotating = 0;
-        SPYValue *result = wrapper_computed(c, m, v, n->b->text, wrapper_value, NULL);
+        SPYValue *result = wrapper_computed(c, m, v, n->b->name.text, wrapper_value, NULL);
         if (result) machine_push(c, m, result);
         return NULL;
     }
@@ -37877,7 +37906,7 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     size_t argc = 1;
     c->fallback = NULL;
     c->entering_kind = CALL_MACHINE;
-    if (function) return getter_enter(c, m, v, n->b->text, function, env);
+    if (function) return getter_enter(c, m, v, n->b->name.text, function, env);
     function = getter_bound(c, spy_retain(n->attr_method->as.property.get), argv, &argc);
     if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
     spy_release(function);
@@ -38220,7 +38249,6 @@ static NO_INLINE SPYValue *header_step(SPYContext *c, Machine *m, Frame *f, Inst
     return NULL;
 }
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
-    if (ins->arg == 10) return name_load(c, m, f, ins->node);
     if (ins->arg == 11) return alias_step(c, m, f, ins->node);
     if (ins->arg >= 18) return header_step(c, m, f, ins);
     if (ins->arg >= 12) return annotation_step(c, m, f, ins);
@@ -38770,7 +38798,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
             size_t at = m->len - (below == c->defaulting ? 3 : 2);
             spy_clear_error(c);
             args[0] = spy_retain(m->stack[getattr ? at : m->len - 1]);
-            args[1] = getattr ? spy_retain(m->stack[at - 1]) : spy_string(c, ins->node->b->text, strlen(ins->node->b->text));
+            args[1] = getattr ? spy_retain(m->stack[at - 1]) : spy_string(c, ins->node->b->name.text, strlen(ins->node->b->name.text));
             SPYValue *env = NULL, *function = args[1] ? special_env(c, m, fallback, args[0], args[1], NULL, &env) : NULL;
             spy_release(args[0]); spy_release(args[1]); spy_release(fallback);
             Call *call = function ? call_enter(c, function, env, m) : NULL;
@@ -38799,7 +38827,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     }
     if (!result) {
         /* As attribute: an AttributeError names the attribute and object. */
-        if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], ins->node->b->text);
+        if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], ins->node->b->name.text);
         /* So does getattr() (getattr_call). */
         else if (m->stack[m->len - 1] == c->unbound) {
             SPYValue *saved = c->attribute_name;
@@ -38915,7 +38943,7 @@ static NO_INLINE int assign_step(SPYContext *c, Machine *m, Frame *f, Node *n) {
  * function watches, sum in place of the assignment. */
 static NO_INLINE void increment_step(SPYContext *c, Frame *f, Node *n) {
     SPYValue *env = f->env, *x, *y, *value;
-    Entry *entry = c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, n->a) : remembered_local(env, n->a);
+    Entry *entry = c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, &n->a->name) : remembered_local(env, &n->a->name);
     x = entry ? entry->value : NULL;
     y = x && x->type == SPY_INT && !x->as.integer_data.big ? leaf_operand(f, n->b) : NULL;
     int64_t sum;
@@ -40241,10 +40269,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             machine_push(c, m, value);
             NEXT;
+        CASE(BC_NAME)
+            value = name_fast(f.env, ins->name);
+            value = value ? spy_retain(value) : name_load(c, m, &f, ins->name);
+            if (UNLIKELY(!value && c->k_fn)) goto enter_k;
+            goto load_push;
         CASE(BC_LOAD)
-            /* A literal or a name found along the fast path, without eval. */
-            value = leaf_operand(&f, n);
-            machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n)); NEXT;
+            value = spy_retain(ins->constant);
+        load_push: /* One dispatch for both loads keeps clang's dispatch sites apart. */
+            machine_push(c, m, value); NEXT;
         CASE(BC_EXEC) {
             /* An assignment, ticked as this step, needs no statement dispatch. */
             if (n->kind == N_ASSIGN) {
@@ -40340,7 +40373,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             a = machine_pop(m);
             SPYValue *keywords = m->stack[m->len - 1], *args = m->stack[m->len - 2], *fn = m->stack[m->len - 3];
             if (ins->arg == N_KEYWORD) {
-                b = spy_string(c, n->text, strlen(n->text));
+                b = spy_string(c, n->name.text, strlen(n->name.text));
                 if (!b || !UNLIKELY(eq_keyed(keywords))) {
                     if (b && merge_keyword(c, m, keywords, b, a, fn) && c->k_fn) { spy_release(a); spy_release(b); a = b = NULL; goto enter_k; }
                     break;
@@ -40519,7 +40552,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* A comprehension binds its target in the enclosing scope. */
             SPYValue *env = f.env;
             while (env->type == V_ENV && env->as.map.flags == 2) env = env->as.map.parent;
-            name_set(c, env, n->text, m->stack[m->len - 1]); break;
+            name_set(c, env, n->name.text, m->stack[m->len - 1]); break;
         }
         CASE(BC_JUMP)
             /* A backward jump shows a trace function its line again. */
@@ -40786,7 +40819,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             SPYValue *raised = ins->op == BC_STAR_CAUGHT && inner->error ? spy_retain(inner->error->value) : NULL;
             pop_block(c, m, &f);
             /* A namespace's handler unbound its name itself. */
-            if (n->c && !ins->arg) clear_binding(c, f.env, n->c->text);
+            if (n->c && !ins->arg) clear_binding(c, f.env, n->c->name.text);
             Block *outer = &m->blocks[m->block_len - 1];
             if (raised) sequence_append(c, outer->value->as.seq.items[1], raised);
             spy_release(raised);
@@ -41881,7 +41914,7 @@ static SPYValue *implicit_super(SPYContext *c, Machine *m) {
     Node *first = scope && scope->kind == S_FUNCTION ? scope->owner->args : NULL;
     if (!first || (first->op != P_POSITIONAL && first->op != P_POSONLY))
         return spy_error(c, "RuntimeError", "super(): no arguments");
-    SPYValue *self = name_local(env, first->text);
+    SPYValue *self = name_local(env, first->name.text);
     if (!self || self->type == V_UNBOUND) return spy_error(c, "RuntimeError", "super(): arg[0] deleted");
     Symbol *symbol = scope_symbol(scope, "__class__");
     if (symbol && (symbol->flags & (S_LOCAL | S_PARAM | S_GLOBAL)) && !(symbol->flags & S_NONLOCAL))

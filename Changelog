@@ -12,6 +12,7 @@ Unreleased (0.10.0):
 - spyc programs write sys.stderr to stderr
 - spyc -D PKG.* adds the modules in name order
 - the unicode_escape codec
+- -O and -OO preserve generator functions whose yield occurs in an assertion
 - a generator that dies while its frame lives on is gone to weak references
 - the asend, athrow and anext awaitable types define their methods, so
   they are awaitable to type-based checks

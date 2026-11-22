@@ -278,6 +278,153 @@ The engine computes at the same speed on every transport.
 
 ## Reproducing
 
+### Compiler migration measurements
+
+`make bench/compiler` builds a development benchmark using the public C API.
+It measures two operations independently, using C11 `clock()` CPU time:
+
+- `compile`: call the `compile` builtin and release its returned code object.
+- `execute`: call `exec` repeatedly with one compiled code object and one
+  namespace. Compilation and a warmup execution precede the timer.
+
+Both exclude process launch, source-file I/O, context creation and shutdown.
+The output callback discards Python output. Each workload checks its result;
+a syntax error, runtime error, failed assertion or invalid timing aborts the
+comparison. Compilation currently generates function instructions eagerly
+but module instructions on first execution. Its timing therefore does not
+yet represent a complete source-to-bytecode compiler.
+
+Build the same harness against each revision's library, then run:
+
+```sh
+cc -O2 -std=c11 -Wall -Wextra -Wpedantic bench/compiler.c /path/to/old/libspy.a -lm -o /tmp/compiler-before
+make bench/compiler
+python3 bench/compiler.py before=/tmp/compiler-before after=bench/compiler \
+    --rounds 9 --iterations 1000 --report /tmp/compiler-comparison.json
+```
+
+The driver alternates engine order every round and prints median CPU
+microseconds per operation. The JSON retains every sample. These measurements
+complement the end-to-end wall times above; neither replaces the other.
+See [compiler-migration.md](compiler-migration.md) for the unfinished migration
+and its validation requirements.
+
+#### Constant operands checkpoint, 2026-11-22
+
+Before: `2b03b143`. After: `spy.c` SHA-256
+`73d2241240c493469ac5e6bcf9b261b506e4c08cef53a0012c0a7b66087f2ade`.
+Apple M2, 8 GiB RAM, Darwin 25.5.0 arm64; Apple Clang 17.0.0,
+`-O2 -std=c11 -Wall -Wextra -Wpedantic`. Linux verification was paused for
+the measurements. Both CLI executables are 2,453,440 bytes.
+
+Nine alternating rounds, 1,000 operations per sample; CPU microseconds:
+
+| Workload | Phase | Before | After |
+| --- | --- | ---: | ---: |
+| definitions | compile and release | 94.88 | 94.50 |
+| definitions | execute compiled code | 27.87 | 26.89 |
+| constants | compile and release | 10.16 | 10.03 |
+| constants | execute compiled code | 48.19 | 47.47 |
+| closures | compile and release | 6.59 | 6.57 |
+| closures | execute compiled code | 64.71 | 64.93 |
+| branches | compile and release | 7.05 | 7.01 |
+| branches | execute compiled code | 7.07 | 7.02 |
+
+The programs in `bench/programs` were also run using `bench/compare.py`'s
+`run` function, alternating the two CLIs for seven rounds per program
+(30 for startup). Every output matched the pinned CPython 3.15.2 oracle.
+Median wall milliseconds, including process launch, parsing and shutdown:
+
+| Program | Before | After |
+| --- | ---: | ---: |
+| bigint | 7.765 | 8.036 |
+| classes | 93.097 | 91.047 |
+| dicts | 78.491 | 78.681 |
+| fib | 29.735 | 29.819 |
+| generators | 81.684 | 82.499 |
+| loop | 137.744 | 137.928 |
+| nbody | 259.446 | 258.464 |
+| sort | 37.392 | 37.443 |
+| startup | 2.660 | 2.664 |
+| strings | 110.271 | 107.847 |
+
+These results do not establish a general speedup. Compile medians changed
+by less than 1.5%; end-to-end changes range from 2.2% faster to 3.5% slower,
+including a slower bigint program. This checkpoint still constructs and
+walks syntax trees. The larger compiler migration remains unmeasured.
+
+[Raw samples and source fingerprints](compiler-benchmark.json) include
+peak resident memory for each CLI run. The inherited Python intrinsics were
+not moved into C: `intrinsics.py` SHA-256 is
+`f6d361745ae9c5e8c943b0a7ba651d72ff17e0cb5eb92a65b80fe03f2e742809`,
+`spy-intrinsics.h` is
+`5b5217e27cef756c0b049b96f65dceb84f64c3b3b49f8f45f2facd3e35681904`,
+and `spy-unicode.h` is
+`2e5202343207dc7472bf643be387a6708d000197dbb905b67a2a59f8475fb960`.
+
+#### Scope properties during parsing, 2026-11-22
+
+Before: `e01f2494`. After: `spy.c` SHA-256
+`945d59f661a1117bcc3fa29ac157ec77aac2f32d7293d07addad6f387ced7ea9`.
+Apple M2, 8 GiB RAM, Darwin 25.5.0 arm64; Apple Clang 17.0.0,
+`-O2 -std=c11 -Wall -Wextra -Wpedantic -Werror`. Verification jobs were
+idle during these measurements. CLI size changed from 2,453,440 to
+2,453,376 bytes.
+
+The parser now records generator classification, valued-return locations
+and namespace writes, removing their later tree walks. The compiler still
+builds trees for binding analysis and instruction generation. These are
+measurements of that intermediate compiler, not a completed single-pass
+implementation.
+
+Nine alternating rounds, 1,000 operations per sample, using
+`bench/compiler.py`; median CPU microseconds:
+
+| Workload | Phase | Before | After |
+| --- | --- | ---: | ---: |
+| definitions | compile and release | 94.14 | 93.26 |
+| definitions | execute compiled code | 26.84 | 26.95 |
+| function_body | compile and release | 73.80 | 72.34 |
+| function_body | execute compiled code | 3.34 | 3.34 |
+| namespace | compile and release | 63.37 | 62.33 |
+| namespace | execute compiled code | 14.27 | 14.34 |
+| constants | compile and release | 10.02 | 9.92 |
+| constants | execute compiled code | 45.69 | 46.33 |
+| closures | compile and release | 6.20 | 6.12 |
+| closures | execute compiled code | 61.48 | 61.02 |
+| branches | compile and release | 6.57 | 6.51 |
+| branches | execute compiled code | 6.62 | 6.63 |
+
+Compile medians fell 0.9–2.0% across these workloads. Execution differences
+were small and mixed; this is not evidence of a general runtime speedup.
+
+The end-to-end comparison used `bench/compare.py`'s `run` function, with
+two warmups per engine and 15 alternating rounds per program (30 for
+startup). Each result matched the pinned CPython 3.15.2 oracle. Median wall
+milliseconds include process launch, parsing, execution and shutdown:
+
+| Program | Before | After |
+| --- | ---: | ---: |
+| bigint | 6.695 | 6.719 |
+| classes | 94.009 | 94.853 |
+| dicts | 82.002 | 81.681 |
+| fib | 30.313 | 30.242 |
+| generators | 78.061 | 77.795 |
+| loop | 131.642 | 132.961 |
+| nbody | 255.431 | 255.951 |
+| sort | 38.846 | 38.878 |
+| startup | 2.739 | 2.721 |
+| strings | 112.704 | 112.861 |
+
+Changes range from 0.7% faster to 1.0% slower. An initial comparison without
+warmups had large first-launch outliers; it is not used to establish a
+performance difference. [Raw samples and source fingerprints](compiler-scope-benchmark.json)
+include every measured CPU and wall sample, per-process peak memory, and
+both inherited intrinsics fingerprints. The intrinsics implementation is
+unchanged.
+
+### Other implementations
+
 The comparison engines are not dependencies of this repository. On macOS:
 
 ```sh
