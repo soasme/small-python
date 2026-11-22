@@ -19848,7 +19848,7 @@ static ALWAYS_INLINE SPYValue *class_allocate(SPYContext *c, SPYValue *fn, SPYVa
 /* The instance a call of class cls makes before its __init__ (class_init)
  * enters: object.__new__'s for a plain class, else its builtin __new__'s
  * of the arguments, an instance of cls (plain_init). */
-static SPYValue *init_instance(SPYContext *c, SPYValue *cls, int plain, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+static ALWAYS_INLINE SPYValue *init_instance(SPYContext *c, SPYValue *cls, int plain, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     return plain ? new_instance(c, cls) : class_allocate(c, cls, native_slot_new(c, cls), argc, argv, keywords);
 }
 /* init_instance for a call of positional arguments argv and keywords kw. */
@@ -30588,7 +30588,7 @@ static int anext_steps(SPYValue *callee, int method) {
 /* A class call enters its __init__ (CALL_INIT) with the new instance,
  * which is the call's value on the stack, in the slot before argv:
  * callee, which the call step then takes, or NULL. */
-static SPYValue *init_enter(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *init, int plain, size_t argc, SPYValue **argv, SPYValue **env) {
+static ALWAYS_INLINE SPYValue *init_enter(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *init, int plain, size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *self = init_instance(c, callee, plain, argc, argv, NULL);
     if (!self) release_all(argc, argv);
     else if (machine_push(c, m, spy_retain(self))) { spy_release(self); release_all(argc, argv); }
