@@ -91,12 +91,18 @@ enum { ENV_FORWARD = 6 };
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
+/* An import statement's operands (17.4), owned by its code: a
+ * from-import's module, "" for none, and level; each item's dotted name,
+ * "*" for a star, the name it binds, NULL for a star, and whether it has
+ * an alias. lazy and compat: F_LAZY and F_LAZY_COMPAT. */
+typedef struct { const char *name, *bind; int as; } ImportItem;
+typedef struct ImportRecord { struct ImportRecord *next; const char *module; int from, level, lazy, compat; size_t count; ImportItem items[]; } ImportRecord;
 #define NO_STEP UINT32_MAX /* No instruction: the end of a list of linked sites. */
 /* A body or suite being parsed: its program, which its statements at
  * depth are compiled into as each ends (body_statements), the first and
  * the last compiled; whether the last parsed waits for the body's end, as
  * a module's does, and whether the first may be a docstring. */
-typedef struct { Program *program; Node *head, *done; size_t depth; int holds, docs; } Body;
+typedef struct { Program *program; Node *head, *done; size_t depth; int holds, docs, tries; } Body;
 /* A try statement's shape and its instructions to patch (try_begin). */
 typedef struct { size_t final, handler, skip, first, rest; int has_final, excepts, star, otherwise; } Try;
 typedef struct Machine Machine;
@@ -6775,7 +6781,7 @@ static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
     if (!emits) return suite_after(p, what, line);
     Body outer = p->body;
     Node *start = p->unit->as.unit.nodes;
-    p->body = (Body){outer.program, NULL, NULL, p->depth + 1, 0, 0};
+    p->body = (Body){outer.program, NULL, NULL, p->depth + 1, 0, 0, outer.tries};
     Node *body = suite_after(p, what, line);
     int failed = !body || (!p->body.done && nodes_finish(p, start)) || body_statements(p, body, NULL);
     p->body = outer;
@@ -7723,6 +7729,7 @@ static Node *statement_body(Parser *p) {
         n = node(p, N_TRY);
         if (!n || (emits && header_ready(p, start))) return NULL;
         if (emits) try_begin(p->ctx, program, n, &t);
+        p->body.tries++;
         if (!(n->a = suite_of(p, "'try' statement", line, emits))) return NULL;
         if (emits) try_handlers(p->ctx, program, n, &t);
         /* Bindings still follow source order. For return diagnostics the
@@ -7812,6 +7819,7 @@ static Node *statement_body(Parser *p) {
         if (take_word(p, "finally") && !(n->c = suite_of(p, "'finally' statement", keyword_line(p), emits))) return NULL;
         if (!p->return_line) p->return_line = handler_return;
         if (!n->args && !n->c) return syntax(p, "expected 'except' or 'finally' block");
+        p->body.tries--;
         if (emits) { try_end(p->ctx, program, &t); n->flags |= F_EMITTED; }
         return n;
     }
@@ -7974,6 +7982,9 @@ static Node *statement_body(Parser *p) {
             syntax_span(p, start, end + 1, "Did you mean to use 'from ... import ...' instead?");
             p->error_end--; return NULL;
         }
+        /* __lazy_modules__ may make a module-level import outside try lazy. */
+        if (!lazy && n->args->kind != N_STAR && !p->body.tries && p->body.program && p->body.program == p->unit->as.unit.flat)
+            n->flags |= F_LAZY_COMPAT;
         return n;
     }
     n = node(p, N_EXPR);
@@ -8466,8 +8477,6 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
             if (where) { errorf(c, "SyntaxError", "lazy %s not allowed inside %s", what, where); return -1; }
             if (n->args->kind == N_STAR) { spy_error(c, "SyntaxError", "lazy from ... import * is not allowed"); return -1; }
         }
-        /* __lazy_modules__ may make a module-level import outside try lazy. */
-        else if (scope->kind == S_MODULE && !scope->tries && n->args->kind != N_STAR) n->flags |= F_LAZY_COMPAT;
         if (n->args->kind == N_STAR) {
             if (scope->kind != S_MODULE) { node_error(c, n->args); spy_error(c, "SyntaxError", "import * only allowed at module level"); return -1; }
             return 0;
@@ -15925,6 +15934,7 @@ typedef struct {
         struct { uint32_t target, other; };
         SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit. */
         NameOperand *name; /* BC_NAME: spelling and lookup cache, borrowed from the source unit. */
+        const ImportRecord *import; /* BC_STORE of an import statement (arg 2): its program's. */
     };
     Node *node; /* Source location; some older instructions also execute this tree. */
 } Instruction;
@@ -15938,7 +15948,7 @@ typedef struct {
  * names load through mappings (name_load): no fused step takes them. */
 /* plain, while a fused operator's plain steps compile (compile_operator);
  * tested, one past the last fused truth test, whose BC_FALSE may follow. */
-struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; };
+struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; ImportRecord *imports; };
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -16094,7 +16104,9 @@ static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
            spy_retain(m->operation ? m->operation : m->awaited ? m->awaited : m->delegate) : spy_none(c);
 }
 static void free_program(Program *code) {
-    if (code) { mem_free(code->items); mem_free(code); }
+    if (!code) return;
+    for (ImportRecord *r = code->imports, *next; r; r = next) { next = r->next; mem_free(r); }
+    mem_free(code->items); mem_free(code);
 }
 static void machine_edges(Machine *m, Visit visit, void *data) {
     for (size_t i = 0; i < m->len; i++) visit(m->stack[i], data);
@@ -16832,6 +16844,39 @@ static void try_end(SPYContext *c, Program *p, Try *t) {
     if (t->has_final) emit(c, p, BC_END_FINALLY, NULL, 0);
 }
 static size_t program_len(Program *p) { return p->len; }
+/* Text s copied to *at, which moves past it. */
+static const char *place_text(char **at, const char *s) {
+    size_t len = strlen(s) + 1;
+    char *placed = memcpy(*at, s, len);
+    *at += len;
+    return placed;
+}
+/* Import statement n's steps: None stored by its record (import_step). */
+static void emit_import(SPYContext *c, Program *p, Node *n) {
+    size_t count = 0, size = 0;
+    const char *module = n->kind == N_FROM && n->a ? source_name(n->a) : "";
+    for (Node *item = n->args; item; item = item->next, count++) {
+        if (item->kind == N_STAR) { size += 2; continue; }
+        Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
+        size += strlen(source_name(item->a)) + strlen(binding->name.text) + 2;
+    }
+    ImportRecord *r = allocate(c, sizeof(*r) + count * sizeof(ImportItem) + strlen(module) + 1 + size);
+    if (!r) return;
+    char *text = (char *)&r->items[count];
+    *r = (ImportRecord){p->imports, place_text(&text, module), n->kind == N_FROM, n->op, !!(n->flags & F_LAZY), !!(n->flags & F_LAZY_COMPAT), count};
+    p->imports = r;
+    ImportItem *each = r->items;
+    for (Node *item = n->args; item; item = item->next, each++) {
+        if (item->kind == N_STAR) { *each = (ImportItem){place_text(&text, "*"), NULL, 0}; continue; }
+        Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
+        each->name = place_text(&text, source_name(item->a));
+        each->bind = place_text(&text, binding->name.text);
+        each->as = item->b != NULL;
+    }
+    emit(c, p, BC_NONE, n, 0);
+    size_t pc = emit(c, p, BC_STORE, n, 2);
+    if (pc != SIZE_MAX) p->items[pc].import = r;
+}
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end;
     if (assigns_at_hand(p, n)) { compile_assignment(c, p, n); return; }
@@ -16936,7 +16981,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         emit(c, p, BC_ASSERT, n, n->b != NULL); patch(p, end, p->len); break;
     case N_DELETE: compile_delete(c, p, n->a); break;
     /* A store of None by the statement (import_step). */
-    case N_IMPORT: case N_FROM: emit(c, p, BC_NONE, n, 0); emit(c, p, BC_STORE, n, 1); break;
+    case N_IMPORT: case N_FROM: emit_import(c, p, n); break;
     /* The alias (alias_step), stored as a name. */
     case N_TYPEALIAS: emit(c, p, BC_CLASS, n, 11); emit(c, p, BC_STORE, n->a, 1); break;
     case N_GLOBAL: case N_NONLOCAL: break;
@@ -16986,7 +17031,7 @@ static Body body_begin(Parser *p, Node *n, size_t depth) {
     SPYContext *c = p->ctx;
     Body enclosing = p->body;
     Program *program = allocate(c, sizeof(*program));
-    p->body = (Body){program, NULL, NULL, depth, !n, 1};
+    p->body = (Body){program, NULL, NULL, depth, !n, 1, 0};
     if (!program) return enclosing;
     program->calls = c->pausing ? PAUSING : BODY;
     program->namespace = n && n->kind == N_CLASS;
@@ -21105,45 +21150,44 @@ static SPYValue *lazy_reifyk(SPYContext *c, Machine *m, SPYValue *env, const cha
 }
 /* Bind each name of a lazy import statement, as _PyImport_LazyImportModuleLevelObject
  * and _PyEval_LazyImportFrom: a loaded module's concrete attribute binds directly. */
-static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only) {
+static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, const ImportRecord *r, const ImportItem *only) {
     SPYValue *globals = module_env(c, f->env);
     SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
-    if (n->kind == N_IMPORT) {
-        for (Node *item = only ? only : n->args; item && !c->error_type[0]; item = only ? NULL : item->next) {
-            const char *name = source_name(item->a);
+    if (!r->from) {
+        for (const ImportItem *item = only ? only : r->items; item < (only ? only + 1 : r->items + r->count) && !c->error_type[0]; item++) {
+            const char *name = item->name;
             SPYValue *text = spy_string(c, name, strlen(name));
             SPYValue *value = text ? lazy_new(c, text, c->none, builtins) : NULL;
             spy_release(text);
             /* import a.b.c as d replays the attribute lookups b and c. */
-            for (const char *part = strchr(name, '.'); value && item->b && part; part = strchr(part + 1, '.')) {
+            for (const char *part = strchr(name, '.'); value && item->as && part; part = strchr(part + 1, '.')) {
                 const char *end = strchr(part + 1, '.');
                 SPYValue *attr = spy_string(c, part + 1, end ? (size_t)(end - part - 1) : strlen(part + 1));
                 SPYValue *next = attr ? lazy_new(c, value, attr, NULL) : NULL;
                 spy_release(attr); spy_release(value); value = next;
             }
             /* import a.b.c binds a and leaves a.b.c to be found as an attribute. */
-            if (value && !item->b && strchr(name, '.') && !name_local(c->modules, name)) {
+            if (value && !item->as && strchr(name, '.') && !name_local(c->modules, name)) {
                 SPYValue *full = lazy_registry(c) ? spy_string(c, name, strlen(name)) : NULL;
                 if (!full || set_add(c, c->lazy_modules, full)) { spy_release(value); value = NULL; }
                 spy_release(full);
             }
-            Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
-            if (value) name_set(c, f->env, binding->name.text, value);
+            if (value) name_set(c, f->env, item->bind, value);
             spy_release(value);
         }
         return c->error_type[0] ? -1 : 0;
     }
-    char *name = absolute_name(c, n->a ? source_name(n->a) : "", namespace_map(globals), n->op);
+    char *name = absolute_name(c, r->module, namespace_map(globals), r->level);
     SPYValue *text = name ? spy_string(c, name, strlen(name)) : NULL, *fromlist = text ? value_new(c, SPY_TUPLE) : NULL;
-    for (Node *item = n->args; fromlist && item && !c->error_type[0]; item = item->next) {
-        SPYValue *attr = spy_string(c, source_name(item->a), strlen(source_name(item->a)));
+    for (const ImportItem *item = r->items; fromlist && item < r->items + r->count && !c->error_type[0]; item++) {
+        SPYValue *attr = spy_string(c, item->name, strlen(item->name));
         if (!attr || sequence_append(c, fromlist, attr)) spy_error(c, "MemoryError", "allocation failed");
         spy_release(attr);
     }
     SPYValue *root = fromlist && !c->error_type[0] ? lazy_new(c, text, fromlist, builtins) : NULL;
     SPYValue *loaded = root ? name_local(c->modules, name) : NULL;
-    for (Node *item = n->args; root && item && !c->error_type[0]; item = item->next) {
-        const char *attr_name = source_name(item->a);
+    for (const ImportItem *item = r->items; root && item < r->items + r->count && !c->error_type[0]; item++) {
+        const char *attr_name = item->name;
         SPYValue *current = loaded && loaded->type == SPY_MODULE ? name_local(loaded, attr_name) : NULL, *value;
         if (current && current->type != SPY_LAZY_IMPORT) value = spy_retain(current);
         else {
@@ -21151,7 +21195,7 @@ static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only
             value = attr ? lazy_new(c, root, attr, NULL) : NULL;
             spy_release(attr);
         }
-        if (value) name_set(c, f->env, item->b ? item->b->name.text : item->a->name.text, value);
+        if (value) name_set(c, f->env, item->bind, value);
         spy_release(value);
     }
     mem_free(name); spy_release(text); spy_release(fromlist); spy_release(root);
@@ -21163,21 +21207,20 @@ static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only
  * then make it eager, given the importer, the absolute module name, and the
  * from-list. The container given (import_statement) is the one listed.
  * Returns 1, 0, or -1 with an error set. */
-static NO_INLINE int lazy_import(SPYContext *c, Frame *f, Node *n, Node *item, SPYValue *given) {
+static NO_INLINE int lazy_import(SPYContext *c, Frame *f, const ImportRecord *r, const ImportItem *item, SPYValue *given) {
     SPYValue *globals = module_env(c, f->env);
-    int module_level = (n->flags & F_LAZY_COMPAT) && namespace_map(f->env) == namespace_map(globals);
+    int module_level = r->compat && namespace_map(f->env) == namespace_map(globals);
     SPYValue *listed = !module_level ? NULL : !given ? name_local(globals, "__lazy_modules__") : given == c->unbound ? NULL : given;
-    if (!(n->flags & F_LAZY) && !listed && !(module_level && c->settings[SET_LAZY_IMPORTS])) return 0;
-    char *name = item ? copy_text(c, source_name(item->a), strlen(source_name(item->a))) :
-        absolute_name(c, n->a ? source_name(n->a) : "", namespace_map(globals), n->op);
+    if (!r->lazy && !listed && !(module_level && c->settings[SET_LAZY_IMPORTS])) return 0;
+    char *name = item ? copy_text(c, item->name, strlen(item->name)) : absolute_name(c, r->module, namespace_map(globals), r->level);
     SPYValue *text = name ? spy_string(c, name, strlen(name)) : NULL;
     mem_free(name);
-    int lazy = !text ? -1 : (n->flags & F_LAZY) || (module_level && c->settings[SET_LAZY_IMPORTS]) ? 1 : contains(c, listed, text);
+    int lazy = !text ? -1 : r->lazy || (module_level && c->settings[SET_LAZY_IMPORTS]) ? 1 : contains(c, listed, text);
     SPYValue *filter = c->settings[SET_LAZY_FILTER];
     if (lazy > 0 && filter) {
         SPYValue *fromlist = item ? spy_retain(c->none) : value_new(c, SPY_TUPLE);
-        for (Node *each = item ? NULL : n->args; fromlist && each && !c->error_type[0]; each = each->next) {
-            SPYValue *part = spy_string(c, source_name(each->a), strlen(source_name(each->a)));
+        for (size_t i = 0; !item && fromlist && i < r->count && !c->error_type[0]; i++) {
+            SPYValue *part = spy_string(c, r->items[i].name, strlen(r->items[i].name));
             if (part) sequence_append(c, fromlist, part);
             spy_release(part);
         }
@@ -26279,34 +26322,32 @@ static NO_INLINE int pattern_step(SPYContext *c, Machine *m, Frame *f, Node *n, 
 /* Run import statement n (17.1, 17.4), or of an import only its module
  * only, the __lazy_modules__ its globals list given in listed (c->unbound
  * for none) or else read from their storage. */
-static NO_INLINE void import_statement(SPYContext *c, Frame *f, Node *n, Node *only, SPYValue *listed) {
-    if (n->kind == N_FROM) {
-        int lazy = lazy_import(c, f, n, NULL, listed);
-        if (lazy) { if (lazy > 0) lazy_statement(c, f, n, NULL); return; }
+static NO_INLINE void import_statement(SPYContext *c, Frame *f, const ImportRecord *r, const ImportItem *only, SPYValue *listed) {
+    if (r->from) {
+        int lazy = lazy_import(c, f, r, NULL, listed);
+        if (lazy) { if (lazy > 0) lazy_statement(c, f, r, NULL); return; }
     }
-    SPYValue *fromlist = n->kind == N_FROM ? value_new(c, SPY_TUPLE) : NULL;
-    if (n->kind == N_FROM && !fromlist) return;
-    if (fromlist) for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
-        const char *name = item->kind == N_STAR ? "*" : source_name(item->a);
-        SPYValue *text = spy_string(c, name, strlen(name));
+    SPYValue *fromlist = r->from ? value_new(c, SPY_TUPLE) : NULL;
+    if (r->from && !fromlist) return;
+    if (fromlist) for (size_t i = 0; i < r->count && !c->error_type[0]; i++) {
+        SPYValue *text = spy_string(c, r->items[i].name, strlen(r->items[i].name));
         if (text) sequence_append(c, fromlist, text);
         spy_release(text);
     }
-    SPYValue *module = fromlist && !c->error_type[0] ? call_import(c, f, n->a ? source_name(n->a) : "", fromlist, n->op) : NULL;
+    SPYValue *module = fromlist && !c->error_type[0] ? call_import(c, f, r->module, fromlist, r->level) : NULL;
     spy_release(fromlist);
     /* A future statement is a compiler directive; without a __future__
      * module to import it binds nothing. */
-    if (!module && n->kind == N_FROM && !n->op && !strcmp(source_name(n->a), "__future__") &&
+    if (!module && r->from && !r->level && !strcmp(r->module, "__future__") &&
         error_is(c, "ModuleNotFoundError")) { spy_clear_error(c); return; }
-    if (n->kind == N_FROM && !module) return;
-    for (Node *item = only ? only : n->args; item && !c->error_type[0]; item = only ? NULL : item->next) {
-        if (module && item->kind == N_STAR) { import_star(c, f, module); continue; }
-        int lazy = module ? 0 : lazy_import(c, f, n, item, listed);
-        if (lazy) { if (lazy > 0) lazy_statement(c, f, n, item); continue; }
-        Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
-        SPYValue *value = module ? import_from(c, module, source_name(item->a), 1) : call_import(c, f, source_name(item->a), NULL, 0);
-        if (value && !module && item->b && item->a->a) {
-            const char *part = strchr(source_name(item->a), '.') + 1;
+    if (r->from && !module) return;
+    for (const ImportItem *item = only ? only : r->items; item < (only ? only + 1 : r->items + r->count) && !c->error_type[0]; item++) {
+        if (module && !item->bind) { import_star(c, f, module); continue; }
+        int lazy = module ? 0 : lazy_import(c, f, r, item, listed);
+        if (lazy) { if (lazy > 0) lazy_statement(c, f, r, item); continue; }
+        SPYValue *value = module ? import_from(c, module, item->name, 1) : call_import(c, f, item->name, NULL, 0);
+        if (value && !module && item->as && strchr(item->name, '.')) {
+            const char *part = strchr(item->name, '.') + 1;
             while (*part && value) {
                 const char *end = strchr(part, '.');
                 char *name = copy_text(c, part, end ? (size_t)(end - part) : strlen(part));
@@ -26316,7 +26357,7 @@ static NO_INLINE void import_statement(SPYContext *c, Frame *f, Node *n, Node *o
                 part = end + 1;
             }
         }
-        if (value) name_set(c, f->env, binding->name.text, value);
+        if (value) name_set(c, f->env, item->bind, value);
         spy_release(value);
     }
     spy_release(module);
@@ -36585,7 +36626,7 @@ static NO_INLINE SPYValue *name_load(SPYContext *c, Machine *m, Frame *f, NameOp
     if (!strcmp(n->text, "__debug__")) return spy_bool(c, 1);
     return name_walk(c, m, f->env, f->env, operand_name(n), 1, 0, NULL, unchanged, NULL);
 }
-static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
+static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, const ImportRecord *, SPYValue **);
 /* Store step ins's end after its call (CALL_STORE), ins NULL for m's
  * last: the value it leaves goes for an assignment of exec() or a loop's,
  * or BC_STORE 1's. */
@@ -36637,8 +36678,8 @@ static SPYValue *frame_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue
     return failed ? NULL : store_ended(c, m, NULL);
 }
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
+    if (ins->op == BC_STORE && ins->arg == 2) return import_step(c, m, f, ins->import, env);
     Node *n = ins->op == BC_NEXT ? ins->node->args : ins->node;
-    if (n->kind == N_IMPORT || n->kind == N_FROM) return import_step(c, m, f, n, env);
     c->entering_kind = CALL_STORE;
     SPYValue *args[3];
     if (n->kind == N_ATTR) {
@@ -36774,15 +36815,14 @@ static SPYValue *import_listed(SPYContext *, Machine *, SPYValue *, SPYValue *);
  * that module with what it read (import_listed), atop m's stack (a tuple
  * of the module's position, and the container if read) in place of the
  * None or the module's position; NULL after the last import, taking it. */
-static NO_INLINE SPYValue *import_listing(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue *globals, SPYValue *function) {
+static NO_INLINE SPYValue *import_listing(SPYContext *c, Machine *m, Frame *f, const ImportRecord *r, SPYValue *globals, SPYValue *function) {
     SPYValue *top = m->stack[m->len - 1];
     int64_t at = top->type == SPY_NONE ? 0 : top->type == SPY_INT ? top->as.integer_data.small : top->as.seq.items[0]->as.integer_data.small;
     if (top->type == SPY_TUPLE) {
-        Node *item = n->kind == N_IMPORT ? n->args : NULL;
-        for (int64_t i = 0; item && i < at; i++) item = item->next;
-        import_statement(c, f, n, item, top->as.seq.len > 1 ? top->as.seq.items[1] : c->unbound);
+        const ImportItem *item = r->from ? NULL : &r->items[at];
+        import_statement(c, f, r, item, top->as.seq.len > 1 ? top->as.seq.items[1] : c->unbound);
         spy_release(machine_pop(m));
-        if (c->error_type[0] || !item || !item->next || machine_push(c, m, int_value(c, ++at))) return NULL;
+        if (c->error_type[0] || !item || (size_t)at + 1 == r->count || machine_push(c, m, int_value(c, ++at))) return NULL;
     }
     SPYValue *key = spy_string(c, "__lazy_modules__", 16);
     return key ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(globals->as.map.namespace), key}, import_listed, spy_retain(m->stack[m->len - 1])) : NULL;
@@ -36834,7 +36874,7 @@ static SPYValue *import_resumed(SPYContext *c, Machine *m, SPYValue *progress, S
  * attribute's getter, a star's __getitem__, a namespace's __setitem__) is
  * m's (callk), import_resumed giving its result; NULL after the
  * statement ran, taking the operand; c->stepped when the call returned. */
-static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Node *n) {
+static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, const ImportRecord *r) {
     SPYValue **p = m->stack[m->len - 1]->as.seq.items;
     int stage = (int)p[0]->as.integer_data.small, keys = p[5] == c->booleans[1];
     int64_t index = p[3]->as.integer_data.small, at = p[4]->as.integer_data.small;
@@ -36842,21 +36882,19 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
     SPYValue *function = NULL, *args[5] = {NULL};
     size_t argc = 0;
     char *owned = NULL;
-    Node *item = n->args;
-    for (int64_t i = 0; item && i < at; i++) item = item->next;
+    const ImportItem *item = (size_t)at < r->count ? &r->items[at] : NULL;
     for (;;) {
         const char *name = NULL;
         switch (stage) {
         case IM_START: {
-            if (n->kind == N_IMPORT) { stage = IM_ITEM; continue; }
+            if (!r->from) { stage = IM_ITEM; continue; }
             SPYValue *fromlist = value_new(c, SPY_TUPLE);
-            for (Node *each = n->args; fromlist && each && !c->error_type[0]; each = each->next) {
-                const char *text = each->kind == N_STAR ? "*" : source_name(each->a);
-                SPYValue *string = spy_string(c, text, strlen(text));
+            for (size_t i = 0; fromlist && i < r->count && !c->error_type[0]; i++) {
+                SPYValue *string = spy_string(c, r->items[i].name, strlen(r->items[i].name));
                 if (string) sequence_append(c, fromlist, string);
                 spy_release(string);
             }
-            function = fromlist && !c->error_type[0] ? import_hook(c, f, n->a ? source_name(n->a) : "", fromlist, n->op, args) : NULL;
+            function = fromlist && !c->error_type[0] ? import_hook(c, f, r->module, fromlist, r->level, args) : NULL;
             spy_release(fromlist);
             if (!function) goto failed;
             argc = 5; stage = IM_MODULE;
@@ -36868,37 +36906,37 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
             continue;
         case IM_ITEM:
             if (!item) goto done;
-            if (n->kind == N_IMPORT) {
-                if (!(function = import_hook(c, f, source_name(item->a), NULL, 0, args))) goto failed;
+            if (!r->from) {
+                if (!(function = import_hook(c, f, item->name, NULL, 0, args))) goto failed;
                 argc = 5; stage = IM_IMPORTED;
                 break;
             }
-            if (item->kind == N_STAR) { stage = IM_STAR; continue; }
-            name = source_name(item->a); stage = IM_VALUE;
+            if (!item->bind) { stage = IM_STAR; continue; }
+            name = item->name; stage = IM_VALUE;
             break;
         case IM_VALUE:
             if (value == c->unbound) {
                 spy_release(value);
-                if (!(value = import_missing(c, module, source_name(item->a), 1))) goto failed;
+                if (!(value = import_missing(c, module, item->name, 1))) goto failed;
             }
-                name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->name.text;
+            name = item->bind;
             goto bind;
         case IM_IMPORTED:
             /* import a.b.c as d binds what a's b, then that's c, gives
              * (import_from), the module slot holding each in turn. */
-            if (item->b && item->a->a) {
+            if (item->as && strchr(item->name, '.')) {
                 spy_release(module); module = value; value = NULL;
                 index = 1; stage = IM_PART;
                 continue;
             }
-            name = (item->b ? item->b : item->a->a ? item->a->a : item->a)->name.text;
+            name = item->bind;
             goto bind;
         case IM_PART: {
-            const char *part = source_name(item->a);
+            const char *part = item->name;
             for (int64_t i = 0; part && i < index; i++) part = strchr(part, '.') ? strchr(part, '.') + 1 : NULL;
             if (!part) {
                 value = module; module = spy_none(c);
-                name = item->b->name.text;
+                name = item->bind;
                 goto bind;
             }
             const char *end = strchr(part, '.');
@@ -36908,7 +36946,7 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
         }
         case IM_PART_VALUE:
             if (value == c->unbound) {
-                const char *part = source_name(item->a);
+                const char *part = item->name;
                 for (int64_t i = 0; i < index; i++) part = strchr(part, '.') + 1;
                 const char *end = strchr(part, '.');
                 char *text = copy_text(c, part, end ? (size_t)(end - part) : strlen(part));
@@ -36923,7 +36961,7 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
         case IM_BOUND:
             spy_release(value); value = NULL;
             if (all->type != SPY_NONE) { index++; stage = IM_INDEX; continue; }
-            item = item->next; at++; stage = IM_ITEM;
+            item = (size_t)++at < r->count ? &r->items[at] : NULL; stage = IM_ITEM;
             continue;
         case IM_STAR:
             name = "__all__"; stage = IM_ALL;
@@ -36959,7 +36997,7 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, Nod
             if (key == c->unbound) {
                 spy_release(key); key = spy_none(c);
                 spy_release(all); all = spy_none(c);
-                item = item->next; at++; stage = IM_ITEM;
+                item = (size_t)++at < r->count ? &r->items[at] : NULL; stage = IM_ITEM;
                 continue;
             }
             SPYValue *text = builtin_value(c, key, SPY_STRING);
@@ -37056,24 +37094,24 @@ failed:
 }
 /* import_stage until the statement ends or a call is left to m: a call
  * that returned here (callk's) gives the next stage at once. */
-static SPYValue *import_go(SPYContext *c, Machine *m, Frame *f, Node *n) {
+static SPYValue *import_go(SPYContext *c, Machine *m, Frame *f, const ImportRecord *r) {
     SPYValue *result;
-    while ((result = import_stage(c, m, f, n)) == c->stepped) m->pc++;
+    while ((result = import_stage(c, m, f, r)) == c->stepped) m->pc++;
     return result;
 }
-static NO_INLINE SPYValue *import_step(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
+static NO_INLINE SPYValue *import_step(SPYContext *c, Machine *m, Frame *f, const ImportRecord *r, SPYValue **env) {
     SPYValue *globals = module_env(c, f->env), *listing;
-    if (m->stack[m->len - 1]->type == SPY_TUPLE && m->stack[m->len - 1]->as.seq.len == 8) return import_go(c, m, f, n);
-    if ((n->flags & F_LAZY_COMPAT) && !(n->flags & F_LAZY) && namespace_map(f->env) == namespace_map(globals) && (listing = name_getitem(c, globals)))
-        return import_listing(c, m, f, n, globals, listing);
+    if (m->stack[m->len - 1]->type == SPY_TUPLE && m->stack[m->len - 1]->as.seq.len == 8) return import_go(c, m, f, r);
+    if (r->compat && !r->lazy && namespace_map(f->env) == namespace_map(globals) && (listing = name_getitem(c, globals)))
+        return import_listing(c, m, f, r, globals, listing);
     SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
     SPYValue *function = name_local(builtins, "__import__");
-    const char *source = n->kind == N_IMPORT ? source_name(n->args->a) : n->a ? source_name(n->a) : "";
-    char *name = (n->flags & F_LAZY) || (n->kind == N_IMPORT && n->args->next) || !function || function->type != SPY_NATIVE ||
+    const char *source = r->from ? r->module : r->items[0].name;
+    char *name = r->lazy || (!r->from && r->count > 1) || !function || function->type != SPY_NATIVE ||
                  function->as.native.call != builtin || function->as.native.data != (void *)(intptr_t)B_IMPORT ||
-                 ((n->flags & F_LAZY_COMPAT) && (c->settings[SET_LAZY_IMPORTS] || name_local(globals, "__lazy_modules__"))) ||
-                 (n->kind == N_FROM && !n->op && !strcmp(source, "__future__")) ? NULL :
-                 absolute_name(c, source, namespace_map(globals), n->kind == N_FROM ? n->op : 0);
+                 (r->compat && (c->settings[SET_LAZY_IMPORTS] || name_local(globals, "__lazy_modules__"))) ||
+                 (r->from && !r->level && !strcmp(source, "__future__")) ? NULL :
+                 absolute_name(c, source, namespace_map(globals), r->level);
     spy_clear_error(c);
     SPYValue *unit = NULL, *parent = NULL, *module = NULL;
     for (char *end = name; end && !unit && !c->error_type[0];) {
@@ -37095,19 +37133,19 @@ static NO_INLINE SPYValue *import_step(SPYContext *c, Machine *m, Frame *f, Node
     if (c->error_type[0]) return NULL;
     /* An eager statement goes on as import_go; a lazy one, or a future
      * statement, runs here. */
-    if (!unit && !(n->flags & F_LAZY) && !((n->flags & F_LAZY_COMPAT) && (c->settings[SET_LAZY_IMPORTS] || name_local(globals, "__lazy_modules__"))) &&
-        !(n->kind == N_FROM && !n->op && !strcmp(source, "__future__"))) {
+    if (!unit && !r->lazy && !(r->compat && (c->settings[SET_LAZY_IMPORTS] || name_local(globals, "__lazy_modules__"))) &&
+        !(r->from && !r->level && !strcmp(source, "__future__"))) {
         SPYValue *items[8] = {int_value(c, IM_START), c->none, c->none, int_value(c, 0), int_value(c, 0), c->booleans[0], c->none, c->none};
         SPYValue *progress = items[0] && items[3] ? spy_tuple(c, 8, items) : NULL;
         spy_release(items[0]); spy_release(items[3]); spy_release(items[4]);
         if (!progress) return NULL;
         spy_release(machine_pop(m));
         machine_push(c, m, progress);
-        return import_go(c, m, f, n);
+        return import_go(c, m, f, r);
     }
     if (!unit) {
         spy_release(machine_pop(m));
-        import_statement(c, f, n, NULL, NULL);
+        import_statement(c, f, r, NULL, NULL);
         return NULL;
     }
     m->stack[m->len++] = parent ? parent : spy_none(c);
