@@ -7978,9 +7978,11 @@ static Node *statements(Parser *p) {
     return head;
 }
 static SPYValue *number_literal(SPYContext *, Node *);
-/* A number's, str's or bytes's literal value, made once. */
+/* A literal's value, made once. */
 static SPYValue *literal_value(SPYContext *c, Node *n) {
     if (n->constant) return n->constant;
+    if (n->kind == N_BOOL || n->kind == N_NONE || n->kind == N_ELLIPSIS)
+        return n->constant = n->kind == N_BOOL ? spy_bool(c, n->op) : n->kind == N_NONE ? spy_none(c) : spy_retain(c->ellipsis);
     if (n->kind == N_STRING || n->kind == N_BYTES)
         return n->constant = n->kind == N_STRING ? spy_string(c, n->name.text, (size_t)n->op) : spy_bytes(c, n->name.text, (size_t)n->op);
     c->line = n->line;
@@ -8557,7 +8559,8 @@ static void invalid_expression_error(Parser *p) {
     c->line = head->line; p->error_start = head->start; p->error_end = last->start + last->len;
 }
 static int at_hand(Node *n) {
-    return (n->kind == N_NAME && !(n->flags & F_LOADED)) || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING || n->kind == N_BYTES;
+    return (n->kind == N_NAME && !(n->flags & F_LOADED)) || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING ||
+           n->kind == N_BYTES || n->kind == N_BOOL || n->kind == N_NONE || n->kind == N_ELLIPSIS;
 }
 static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)) || (n->kind == N_ATTR && n->a->kind == N_NAME && at_hand(n->a)); }
 /* Whether n is an operand at hand, or arithmetic or a comparison of such. */
@@ -16132,11 +16135,21 @@ static void compile_stacked(SPYContext *c, Program *p, Node *n, int truth) {
 }
 /* An expression whose truth the next instruction tests: an and/or evaluated
  * at once passes on the truth it computed (BC_EVAL with arg 1). */
+static void compile_test(SPYContext *, Program *, Node *);
+/* The test of n and the BC_FALSE at at after it, returned: a not is no
+ * step, its BC_FALSE jumping on a true operand instead (arg 1). */
+static size_t compile_branch(SPYContext *c, Program *p, Node *n, Node *at) {
+    int negated = 0;
+    for (; n->kind == N_UNARY && n->op == O_NOT; n = n->a) negated ^= 1;
+    compile_test(c, p, n);
+    if (negated) p->tested = 0;
+    return emit(c, p, BC_FALSE, at, negated);
+}
 static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (n && !expands(n, p->calls) && operator_right(n)) compile_operator(c, p, n, 1);
     else if (n && !expands(n, p->calls) && stacked_right(n)) compile_stacked(c, p, n, 1);
-    else if (n && !expands(n, p->calls) && n->kind != N_COMPARE) emit(c, p, BC_EVAL, n, 1);
+    else if (n && !expands(n, p->calls) && n->kind == N_BINARY && (n->op == O_AND || n->op == O_OR)) emit(c, p, BC_EVAL, n, 1);
     else compile_expr(c, p, n);
 }
 /* A call's or class header's arguments, each added by BC_ARG: the
@@ -16227,7 +16240,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); compile_expr(c, p, n->c);
         emit(c, p, BC_SLICE, n, 0); break;
     case N_COND:
-        compile_test(c, p, n->b); branch = emit(c, p, BC_FALSE, n, 0);
+        branch = compile_branch(c, p, n->b, n);
         compile_expr(c, p, n->a); end = emit(c, p, BC_JUMP, n, 0);
         patch(p, branch, p->len); compile_expr(c, p, n->c); patch(p, end, p->len); break;
     case N_COMPARE: compile_expr(c, p, n->a); compile_operation(c, p, n); break;
@@ -16342,8 +16355,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
         return;
     }
     if (clause->kind == N_IF) {
-        compile_test(c, p, clause->a);
-        size_t end = emit(c, p, BC_FALSE, clause, 0);
+        size_t end = compile_branch(c, p, clause->a, clause);
         compile_comprehension_clause(c, p, n, clause->b); patch(p, end, p->len);
         return;
     }
@@ -16586,7 +16598,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a);
         for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
             size_t fail = emit(c, p, BC_PATTERN, item, 0), guard = SIZE_MAX;
-            if (item->b) { compile_test(c, p, item->b); guard = emit(c, p, BC_FALSE, item->b, 0); }
+            if (item->b) guard = compile_branch(c, p, item->b, item->b);
             emit(c, p, BC_POP, item, 0);
             compile_body(c, p, item->c);
             end = emit(c, p, BC_JUMP, item, 0);
@@ -16621,12 +16633,12 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a); compile_expr(c, p, n->b);
         emit(c, p, BC_RAISE, n, n->b != NULL); break;
     case N_ASSERT:
-        compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0);
+        branch = compile_branch(c, p, n->a, n);
         end = emit(c, p, BC_JUMP, n, 0); patch(p, branch, p->len);
         if (n->b) compile_expr(c, p, n->b);
         emit(c, p, BC_ASSERT, n, n->b != NULL); patch(p, end, p->len); break;
     case N_IF:
-        compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0);
+        branch = compile_branch(c, p, n->a, n);
         compile_body(c, p, n->b); end = emit(c, p, BC_JUMP, n, 0);
         patch(p, branch, p->len); compile_body(c, p, n->c); patch(p, end, p->len); break;
     case N_FOR: case N_WHILE:
@@ -16637,7 +16649,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         if (n->kind == N_FOR) {
             branch = compile_next(c, p, n, n->args);
         }
-        else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
+        else branch = compile_branch(c, p, n->a, n);
         compile_body(c, p, n->b);
         /* A body of one step that a loop's step stores into runs in it: 3
          * a walker statement, 4 an assignment at hand. */
@@ -38701,7 +38713,7 @@ static SPYValue *converted_result(SPYContext *c, SPYValue *v, const char *method
  * test jumps when false; the and/or jumps keeping the value atop m, its
  * truth plus one in *known for the test it lands on, or pops it. */
 static void short_or_false(Machine *m, Instruction *ins, int truth, size_t *pc, int *known) {
-    if (ins->op == BC_FALSE) { if (!truth) *pc = ins->target; }
+    if (ins->op == BC_FALSE) { if (!truth == !ins->arg) *pc = ins->target; }
     else if ((ins->arg == O_OR) == truth) { *pc = ins->target; *known = truth + 1; }
     else spy_release(machine_pop(m));
 }
@@ -40763,7 +40775,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_FALSE)
             a = machine_pop(m);
             if (a->type != SPY_BOOL && (a->type == SPY_INSTANCE || metaclassed(a)) && !truth_known) goto bool_step;
-            if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a))) pc = ins->target;
+            if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a)) == !ins->arg) pc = ins->target;
             NEXT_RELEASE;
         CASE(BC_SHORT) {
             if ((m->stack[m->len - 1]->type == SPY_INSTANCE || metaclassed(m->stack[m->len - 1])) && !truth_known) {
