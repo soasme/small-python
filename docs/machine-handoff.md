@@ -137,6 +137,11 @@ pinned CPython oracle), then fix what they show.
   - `LA([1]) *= 2` with a list subclass defining `__mul__`: CPython calls
     `__mul__`; spy and the standard (7.6.3 step 3) keep list's `__imul__`.
     The standard is wrong; fix it, then spy.
+  - A trace function sees a `line` event for a function's docstring, and
+    under `-OO` for a class's removed docstring; CPython reports neither.
+    A function body compiles its docstring as an expression statement, and
+    `-OO` turns a removed docstring into `pass`. Without `-OO` both report
+    a class's docstring, which stores `__doc__`.
 
 ## 5 How each fix is made
 
