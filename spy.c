@@ -15738,7 +15738,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_WITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK) X(BC_INCREMENT) X(BC_DISPLAY) X(BC_ASSIGN)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_INCREMENT) X(BC_DISPLAY) X(BC_ASSIGN) X(BC_STACKED) X(BC_STACKED_TEST)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
@@ -16059,7 +16059,8 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
      * BC_FALSE, or to its target, which patch gives both. */
     size_t test = op == BC_FALSE && p->tested && p->items[p->tested - 1].target == pc ? p->tested : 0;
     if (test) {
-        p->items[test - 1].op = BC_TEST; p->items[test - 1].step = c->steps ? c->steps[BC_TEST] : NULL;
+        int tested = p->items[test - 1].op == BC_STACKED ? BC_STACKED_TEST : BC_TEST;
+        p->items[test - 1].op = tested; p->items[test - 1].step = c->steps ? c->steps[tested] : NULL;
         p->items[test - 1].other = (uint32_t)pc + 1;
     }
     if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
@@ -16076,32 +16077,56 @@ static void patch(Program *p, size_t pc, size_t target) {
 }
 static void compile_expr(SPYContext *, Program *, Node *);
 /* The shape of an operand at hand (item_at_hand), as its plain steps take
- * it: a literal, a name, an item of those, or a name's attribute. */
-enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR };
+ * it: a literal, a name, an item of those, or a name's attribute; a left
+ * operand not at hand is atop the stack (compile_stacked). */
+enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED };
 static int operand_shape(SPYContext *c, Node *n) {
     if (n->kind == N_INDEX) { operand_shape(c, n->a); operand_shape(c, n->b); return SHAPE_ITEM; }
     if (n->kind == N_ATTR || n->kind == N_NAME) return n->kind == N_ATTR ? SHAPE_ATTR : SHAPE_NAME;
     literal_value(c, n);
     return SHAPE_LOAD;
 }
-/* Operator n on operands at hand (operator_right): a fused step that takes
- * them from n's plain steps after it and jumps past those when it computes
- * n without running Python code, else lets them run; with truth, its
- * value is tested, and a BC_FALSE after them makes it a BC_TEST. Its arg
- * holds truth, the operands' shapes, and the right one's first step after
- * it: 1, 2 or 3 past the left's. */
-static void compile_operator(SPYContext *c, Program *p, Node *n, int truth) {
-    int left = operand_shape(c, n->a), right = operand_shape(c, operator_right(n));
-    size_t fused = emit(c, p, BC_OPERATE, n, truth | left << 1 | right << 3 | (left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1) << 5);
-    p->plain++; compile_expr(c, p, n); p->plain--;
+static void compile_operation(SPYContext *, Program *, Node *);
+/* The fused step of operator n, whose left operand, of shape left, is at
+ * hand or atop the stack, and its plain steps: those after the left's
+ * value when it is on the stack, else all of n's. The step jumps past
+ * them when it computes n without running Python code, else lets them
+ * run; with truth, its value is tested, and a BC_FALSE after them makes
+ * it a BC_TEST. Its arg holds truth, the operands' shapes, and from bit 6
+ * the right one's first step after it: 1, 2 or 3 past an operand at
+ * hand's, at once past the stack's. */
+static void compile_fused(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth) {
+    int shape = operand_shape(c, right), steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
+    size_t fused = emit(c, p, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6);
+    p->plain++;
+    if (left == SHAPE_STACK) compile_operation(c, p, n);
+    else compile_expr(c, p, n);
+    p->plain--;
     patch(p, fused, p->len);
     if (truth && fused != SIZE_MAX) p->tested = fused + 1;
+}
+/* Operator n on operands at hand (operator_right). */
+static void compile_operator(SPYContext *c, Program *p, Node *n, int truth) {
+    compile_fused(c, p, n, operand_shape(c, n->a), operator_right(n), truth);
+}
+/* The right operand of n when n is arithmetic or a single comparison whose
+ * right operand is at hand and left one not, else NULL. */
+static Node *stacked_right(Node *n) {
+    Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a : n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
+    return right && item_at_hand(right) && !item_at_hand(n->a) ? right : NULL;
+}
+/* Operator n whose left operand is not at hand: its steps, then a fused
+ * step taking it atop the stack. */
+static void compile_stacked(SPYContext *c, Program *p, Node *n, int truth) {
+    compile_expr(c, p, n->a);
+    compile_fused(c, p, n, SHAPE_STACK, stacked_right(n), truth);
 }
 /* An expression whose truth the next instruction tests: an and/or evaluated
  * at once passes on the truth it computed (BC_EVAL with arg 1). */
 static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (n && !expands(n, p->calls) && operator_right(n)) compile_operator(c, p, n, 1);
+    else if (n && !expands(n, p->calls) && stacked_right(n)) compile_stacked(c, p, n, 1);
     else if (n && !expands(n, p->calls) && n->kind != N_COMPARE) emit(c, p, BC_EVAL, n, 1);
     else compile_expr(c, p, n);
 }
@@ -16125,7 +16150,7 @@ static int loads_name(Node *);
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
-    if (n->constant) { emit(c, p, BC_LOAD, n, 0); return; }
+    if (n->constant || ((n->kind == N_STRING || n->kind == N_BYTES) && literal_value(c, n))) { emit(c, p, BC_LOAD, n, 0); return; }
     if (n->kind == N_NAME) { emit(c, p, BC_NAME, n, 0); return; }
     /* What cannot suspend is evaluated whole, a leaf or an operator on
      * leaves in one step; a comparison of other operands costs less as
@@ -16135,6 +16160,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (!p->plain && !expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
         !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
         if (operator_right(n)) compile_operator(c, p, n, 0);
+        else if (stacked_right(n)) compile_stacked(c, p, n, 0);
         else emit(c, p, BC_EVAL, n, 0);
         return;
     }
@@ -16180,14 +16206,11 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a);
         emit(c, p, n->kind == N_UNARY ? BC_UNARY : BC_ATTR, n, n->op); break;
     case N_BINARY:
-        if (n->op == O_AND || n->op == O_OR) compile_test(c, p, n->a);
-        else compile_expr(c, p, n->a);
         if (n->op == O_AND || n->op == O_OR) {
+            compile_test(c, p, n->a);
             branch = emit(c, p, BC_SHORT, n, n->op);
             compile_expr(c, p, n->b); patch(p, branch, p->len);
-        } else {
-            compile_expr(c, p, n->b); emit(c, p, BC_BINARY, n, n->op);
-        }
+        } else { compile_expr(c, p, n->a); compile_operation(c, p, n); }
         break;
     case N_INDEX:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INDEX, n, 0); break;
@@ -16198,25 +16221,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         compile_test(c, p, n->b); branch = emit(c, p, BC_FALSE, n, 0);
         compile_expr(c, p, n->a); end = emit(c, p, BC_JUMP, n, 0);
         patch(p, branch, p->len); compile_expr(c, p, n->c); patch(p, end, p->len); break;
-    case N_COMPARE: {
-        if (!n->args->next && (n->args->op == O_IN || n->args->op == O_NOTIN ||
-                               (p->calls == PAUSING && (n->args->op == T_EQ || n->args->op == T_NE)))) {
-            /* A lone in is a BC_BINARY, whose container may be a
-             * generator, and so while pausing is a lone == or !=, whose
-             * operands' items may compare by a Python __eq__
-             * (binary_operand). */
-            compile_expr(c, p, n->a); compile_expr(c, p, n->args->a); emit(c, p, BC_BINARY, n->args, n->args->op);
-            break;
-        }
-        size_t first = p->len;
-        compile_expr(c, p, n->a);
-        for (Node *cmp = n->args; cmp; cmp = cmp->next) {
-            compile_expr(c, p, cmp->a); emit(c, p, BC_COMPARE, cmp, cmp->next != NULL);
-        }
-        for (size_t i = first; i < p->len; i++)
-            if (p->items[i].op == BC_COMPARE && !p->items[i].target) p->items[i].target = p->len;
-        break;
-    }
+    case N_COMPARE: compile_expr(c, p, n->a); compile_operation(c, p, n); break;
     case N_LIST: case N_TUPLE: case N_SET: case N_DICT:
         emit(c, p, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT);
         for (Node *a = n->args; a; a = a->next) {
@@ -16394,6 +16399,24 @@ static void compile_delete(SPYContext *c, Program *p, Node *n) {
     if (p->calls == PAUSING) emit(c, p, BC_SET_TARGET, n, 1);
     else emit(c, p, BC_DELETE, n, n->kind == N_INDEX ? 2 : 1);
 }
+/* The steps of arithmetic or a comparison n after its left operand's. */
+static void compile_operation(SPYContext *c, Program *p, Node *n) {
+    if (n->kind == N_BINARY) { compile_expr(c, p, n->b); emit(c, p, BC_BINARY, n, n->op); return; }
+    if (!n->args->next && (n->args->op == O_IN || n->args->op == O_NOTIN ||
+                           (p->calls == PAUSING && (n->args->op == T_EQ || n->args->op == T_NE)))) {
+        /* A lone in is a BC_BINARY, whose container may be a generator,
+         * and so while pausing is a lone == or !=, whose operands' items
+         * may compare by a Python __eq__ (binary_operand). */
+        compile_expr(c, p, n->args->a); emit(c, p, BC_BINARY, n->args, n->args->op);
+        return;
+    }
+    size_t first = p->len;
+    for (Node *cmp = n->args; cmp; cmp = cmp->next) {
+        compile_expr(c, p, cmp->a); emit(c, p, BC_COMPARE, cmp, cmp->next != NULL);
+    }
+    for (size_t i = first; i < p->len; i++)
+        if (p->items[i].op == BC_COMPARE && !p->items[i].target) p->items[i].target = p->len;
+}
 static void compile_statement(SPYContext *, Program *, Node *);
 static void compile_body(SPYContext *, Program *, Node *);
 /* The body of handler h; with unbinds, a namespace's, it stores the
@@ -16412,15 +16435,7 @@ static void compile_handler(SPYContext *c, Program *p, Node *h, int unbinds, int
     emit(c, p, BC_END_FINALLY, NULL, 0);
 }
 static void compile_body(SPYContext *c, Program *p, Node *body) {
-    /* The statements after the last that expands are one walker step,
-     * BC_BLOCK, when there are more than one, but in a class body, whose
-     * namespace's Python __setitem__ each may call (assign_step). */
-    Node *rest = body;
-    for (Node *n = body; n; n = n->next) if (expands(n, p->calls)) rest = n->next;
-    for (Node *n = body; n != rest && !c->error_type[0]; n = n->next) compile_statement(c, p, n);
-    if (rest && rest->next && !p->namespace) emit(c, p, BC_BLOCK, rest, 0);
-    else if (rest && rest->next) for (Node *n = rest; n && !c->error_type[0]; n = n->next) compile_statement(c, p, n);
-    else if (rest) compile_statement(c, p, rest);
+    for (Node *n = body; n && !c->error_type[0]; n = n->next) compile_statement(c, p, n);
 }
 /* Whether statement n adds a name or constant to a name, or subtracts it:
  * a counter's or an accumulator's step. */
@@ -16464,13 +16479,13 @@ static int assigns_at_hand(Program *p, Node *n) {
 /* Assignment n at hand: a fused step that stores its value when no step
  * of it runs Python code, and jumps past n's plain steps after it; else
  * those run. Its arg holds whether the target is an item, whether n is
- * augmented, the value's shape (4 a fused operator), and from bit 5 the
+ * augmented, the value's shape (SHAPE_FUSED a fused operator), and from bit 5 the
  * value's first step after it; other, an augmented n's operator. */
 static void compile_assignment(SPYContext *c, Program *p, Node *n) {
     Node *t = n->a;
     int item = t->kind == N_INDEX, augmented = n->op != '=';
     if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
-    int shape = operator_right(n->b) ? 4 : operand_shape(c, n->b);
+    int shape = operator_right(n->b) ? SHAPE_FUSED : operand_shape(c, n->b);
     size_t fused = emit(c, p, BC_ASSIGN, n, item | augmented << 1 | shape << 2 | (augmented ? item ? 3 : 1 : 0) << 5);
     if (fused != SIZE_MAX && augmented) p->items[fused].other = (uint32_t)operators[n->op - T_ADDEQ].token;
     if (augmented) {
@@ -16607,12 +16622,12 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         }
         else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
         compile_body(c, p, n->b);
-        /* A body of one walker step that a loop's step stores into runs
-         * in it: 2 a block, 3 a statement, 4 an assignment at hand. */
+        /* A body of one step that a loop's step stores into runs in it: 3
+         * a walker statement, 4 an assignment at hand. */
         if (n->kind == N_FOR && branch != SIZE_MAX && p->items[branch].other && p->len > branch + 1 &&
-            (p->len == branch + 2 ? p->items[branch + 1].op == BC_BLOCK || p->items[branch + 1].op == BC_EXEC :
+            (p->len == branch + 2 ? p->items[branch + 1].op == BC_EXEC :
              p->items[branch + 1].op == BC_ASSIGN && p->items[branch + 1].target == p->len))
-            p->items[branch].other = p->items[branch + 1].op == BC_BLOCK ? 2 : p->items[branch + 1].op == BC_EXEC ? 3 : 4;
+            p->items[branch].other = p->items[branch + 1].op == BC_EXEC ? 3 : 4;
         patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
         patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
         compile_body(c, p, n->c); patch(p, loop, p->len); break;
@@ -39002,15 +39017,34 @@ static NO_INLINE SPYValue *operate_native(SPYContext *c, Instruction *ins, SPYVa
                       y->type == SPY_DICT && x->type == SPY_DICT ? c->unbound : NULL;
     return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
 }
-/* The value of fused operator step ins computed at hand, owned; else
- * NULL, with an error or for its plain steps to run. */
-static ALWAYS_INLINE SPYValue *fused_value(SPYContext *c, Frame *f, Instruction *ins) {
-    Node *n = ins->node;
-    SPYValue *x = n->flags & F_OPERATOR ? step_operand(c, f, ins + 1, ins->arg >> 1 & 3) : NULL;
-    SPYValue *y = x ? step_operand(c, f, ins + 1 + (ins->arg >> 5), ins->arg >> 3 & 3) : NULL;
+/* The value of fused operator step ins, of node n, on x, its left
+ * operand, and its right one at hand, owned; else NULL, with an error or
+ * for its plain steps to run. */
+static ALWAYS_INLINE SPYValue *fused_on(SPYContext *c, Frame *f, Instruction *ins, Node *n, SPYValue *x) {
+    SPYValue *y = step_operand(c, f, ins + 1 + (ins->arg >> 6), ins->arg >> 4 & 3);
     SPYValue *value = y ? operator_fast(c, n, x, y) : NULL;
     if (UNLIKELY(!value) && y && !c->error_type[0] && (value = operate_native(c, ins, x, y)) == c->unbound) value = NULL;
     return value;
+}
+/* The truth of fused test step ins, of node n, on operands x and y: 0 or
+ * 1; 2 for a value not a bool, owned in *value; -1 with an error or for
+ * its plain steps to run. A comparison of numbers makes no bool. */
+static ALWAYS_INLINE int fused_truth(SPYContext *c, Instruction *ins, Node *n, SPYValue *x, SPYValue *y, SPYValue **value) {
+    int truth = n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
+    if (truth >= 0) return truth;
+    SPYValue *v = operator_fast(c, n, x, y);
+    if (!v && !c->error_type[0]) v = operate_native(c, ins, x, y);
+    if (!v || v == c->unbound) return -1;
+    if (v->type != SPY_BOOL) { *value = v; return 2; }
+    truth = (int)v->as.integer_data.small;
+    spy_release(v);
+    return truth;
+}
+/* The value of fused operator step ins on operands at hand (fused_on). */
+static ALWAYS_INLINE SPYValue *fused_value(SPYContext *c, Frame *f, Instruction *ins) {
+    Node *n = ins->node;
+    SPYValue *x = n->flags & F_OPERATOR ? step_operand(c, f, ins + 1, ins->arg >> 1 & 7) : NULL;
+    return x ? fused_on(c, f, ins, n, x) : NULL;
 }
 /* The slot of an exact list x at an int y within it; else NULL. */
 static SPYValue **list_slot(SPYValue *x, SPYValue *y) {
@@ -39027,7 +39061,7 @@ static SPYValue **list_slot(SPYValue *x, SPYValue *y) {
 static NO_INLINE int assign_fused(SPYContext *c, Frame *f, Instruction *code, size_t pc, Instruction *ins) {
     int arg = ins->arg, shape = arg >> 2 & 7;
     Instruction *at = &code[pc + (arg >> 5)];
-    SPYValue *value = shape == 4 ? fused_value(c, f, at) : spy_retain(step_operand(c, f, at, shape)), *result;
+    SPYValue *value = shape == SHAPE_FUSED ? fused_value(c, f, at) : spy_retain(step_operand(c, f, at, shape)), *result;
     if (!value) return c->error_type[0] != 0;
     if (!(arg & 1)) {
         Entry *entry = stored_entry(c, f, code[ins->target - 1].node);
@@ -40350,6 +40384,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
         }
         SPYValue *a = NULL, *b = NULL, *value = NULL, *x, *y; /* a and b are owned; x and y, borrowed operands */
+        int truth;
         SPYValue *callee_env; /* With value, a call to enter on the machine, both owned. */
         /* A step that owns no operand continues past their release. */
 #if THREADED
@@ -40367,9 +40402,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* Its operands taken at hand from its plain steps, which run when
              * it cannot compute n natively (compile_operator). */
             if (!(value = quiet(c, &f) ? fused_value(c, &f, ins) : NULL)) continue;
+        operated: /* One dispatch for both fused operators keeps clang's dispatch sites apart. */
             pc = ins->target;
             machine_push(c, m, value);
             NEXT;
+        CASE(BC_STACKED)
+            /* BC_OPERATE on the left operand atop the stack, which it takes. */
+            if (!(value = quiet(c, &f) ? fused_on(c, &f, ins, n, m->stack[m->len - 1]) : NULL)) continue;
+            spy_release(machine_pop(m));
+            goto operated;
         CASE(BC_ASSIGN)
             if (quiet(c, &f) && assign_fused(c, &f, code, pc, ins)) pc = ins->target;
             continue;
@@ -40393,10 +40434,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             continue;
         }
 
-        CASE(BC_BLOCK)
-            flow = execute_statements(c, &f, n, 0);
-            if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
-            continue;
         CASE(BC_NONE) machine_push(c, m, spy_none(c)); NEXT;
         CASE(BC_ANNOTATE)
             value = record_annotation(c, m, &f, n);
@@ -40673,24 +40710,25 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!matched) pc = ins->target;
             break;
         }
-        CASE(BC_TEST) {
+        CASE(BC_STACKED_TEST)
+            /* BC_TEST on the left operand atop the stack, which it takes. */
+            x = quiet(c, &f) ? m->stack[m->len - 1] : NULL;
+            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 6)], ins->arg >> 4 & 3) : NULL;
+            if ((truth = y ? fused_truth(c, ins, n, x, y, &value) : -1) < 0) continue;
+            spy_release(machine_pop(m));
+            if (truth > 1) { pc = ins->other - 1; machine_push(c, m, value); break; }
+            goto tested;
+        CASE(BC_TEST)
             /* A fused operator and the BC_FALSE after its plain steps, at
-             * other - 1, sharing its target: a comparison of numbers makes
-             * no bool; a value not a bool is left to that BC_FALSE. */
-            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 3) : NULL;
-            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 5)], ins->arg >> 3 & 3) : NULL;
-            int truth = y && n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
-            if (truth < 0) {
-                value = y ? operator_fast(c, n, x, y) : NULL;
-                if (!value && y && !c->error_type[0]) value = operate_native(c, ins, x, y);
-                if (!value || value == c->unbound) { value = NULL; continue; }
-                if (value->type != SPY_BOOL) { pc = ins->other - 1; machine_push(c, m, value); break; }
-                truth = (int)value->as.integer_data.small;
-                spy_release(value);
-            }
+             * other - 1, sharing its target; a value not a bool is left to
+             * that BC_FALSE. */
+            x = n->flags & F_OPERATOR && quiet(c, &f) ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 7) : NULL;
+            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 6)], ins->arg >> 4 & 3) : NULL;
+            if ((truth = y ? fused_truth(c, ins, n, x, y, &value) : -1) < 0) continue;
+            if (truth > 1) { pc = ins->other - 1; machine_push(c, m, value); break; }
+        tested:
             pc = truth ? ins->other : ins->target;
             NEXT;
-        }
         CASE(BC_FALSE)
             a = machine_pop(m);
             if (a->type != SPY_BOOL && (a->type == SPY_INSTANCE || metaclassed(a)) && !truth_known) goto bool_step;
@@ -40844,7 +40882,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     if (UNLIKELY(store_into(c, &f, n->args, a, 1) > 0)) { machine_push(c, m, a); a = NULL; goto loop_stored; }
                     /* The body and the jump back, while no pass is counted or
                      * watched and the iterator steps itself without raising. */
-                    if (ins->other >= 2 && !watched(c)) {
+                    if (ins->other >= 3 && !watched(c)) {
                         Node *body = code[pc].node;
                         int left = 0;
                         while (quiet(c, &f)) {
@@ -40854,7 +40892,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                                 /* Its plain steps run when it declines. */
                                 if (!assign_fused(c, &f, code, pc + 1, &code[pc])) { pc++; break; }
                             } else if (ins->other == 3 && body->kind == N_ASSIGN) assign_step(c, NULL, &f, body);
-                            else flow = execute_statements(c, &f, body, ins->other == 3);
+                            else flow = execute_statements(c, &f, body, 1);
                             if (flow.flow != FLOW_NORMAL || c->error_type[0]) { left = 1; break; }
                             spy_release(flow.value); flow.value = NULL;
                             if (watched(c) || !quiet(c, &f) || !iterator_fast(c, iterator, &a)) { pc--; break; }
@@ -41329,7 +41367,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
          * (CALL_CHECKED). */
         callee_env = NULL;
         if ((value = bool_call(c, m, a, &callee_env))) { spy_release(a); special = CALL_CHECKED; goto enter_special; }
-        int truth = truthy(a);
+        truth = truthy(a);
         if (!c->error_type[0]) short_or_false(m, ins, truth, &pc, &known);
         spy_release(a);
         continue;

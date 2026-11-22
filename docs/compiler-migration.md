@@ -22,7 +22,7 @@ the original node.
 This is preparation for a different compiler, not its completion. The parser
 still builds `Node` trees. Scope analysis, `compile_expr`, `compile_body`,
 metadata queries and several instruction implementations still walk them.
-`BC_EVAL`, `BC_EXEC` and `BC_BLOCK` still execute trees. No claim of a
+`BC_EVAL` and `BC_EXEC` still execute trees. No claim of a
 single-pass compiler or general speedup follows from this checkpoint.
 
 The second stage records three code properties during parsing: whether the
@@ -84,6 +84,18 @@ body of one walker step did. These assignments no longer execute their
 tree with `BC_EXEC`. A counter's `+=` or `-=` by a literal or name stays
 `BC_INCREMENT`. `tests/spec/statements/assignment_operands_once.py`
 checks single evaluation along each fall-through.
+
+The sixth stage removes `BC_BLOCK`, the step that ran the statements after
+a body's last call as one tree. Each statement now compiles to its own
+steps. An operator whose left operand is an operator and whose right one
+is at hand compiles the left operand's steps, then `BC_STACKED`, which
+takes that value from the stack, or `BC_STACKED_TEST` when it is tested;
+both fall through to the plain steps as `BC_OPERATE` and `BC_TEST` do.
+String and bytes literals load as constants. Assignments whose values
+are not at hand, and `BC_EVAL` values that are neither operators nor
+names, still execute their trees.
+`tests/spec/expressions/computed_left_operand.py` reaches both steps'
+computed, fall-through and non-bool paths.
 
 ## Remaining stages
 
