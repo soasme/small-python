@@ -19323,6 +19323,17 @@ static int plain_arguments(size_t argc, SPYValue *const *argv) {
                                                      UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BOOL | UINT64_C(1) << SPY_NONE)) i++;
     return i == argc;
 }
+/* Whether callee is a builtin function that, given one plain argument
+ * (plain_arguments), runs no Python code and nothing on the machine. */
+static ALWAYS_INLINE int pure_builtin(SPYValue *callee) {
+    _Static_assert(B_LEN < 64 && B_ABS < 64 && B_ORD < 64 && B_CHR < 64 && B_HASH < 64 && B_ID < 64 && B_CALLABLE < 64 &&
+                   B_BIN < 64 && B_OCT < 64 && B_HEX < 64, "builtin mask");
+    uintptr_t id = (uintptr_t)callee->as.native.data;
+    return callee->type == SPY_NATIVE && callee->as.native.call == builtin && id < 64 &&
+           (UINT64_C(1) << id & (UINT64_C(1) << B_LEN | UINT64_C(1) << B_ABS | UINT64_C(1) << B_ORD | UINT64_C(1) << B_CHR |
+                                 UINT64_C(1) << B_HASH | UINT64_C(1) << B_ID | UINT64_C(1) << B_CALLABLE | UINT64_C(1) << B_BIN |
+                                 UINT64_C(1) << B_OCT | UINT64_C(1) << B_HEX));
+}
 /* Whether T() of argc arguments argv may run Python code. */
 static int built_calls(size_t argc, SPYValue *const *argv) {
     return argc <= COMPARE_ARGS && !plain_arguments(argc, argv);
@@ -32360,6 +32371,12 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return stack_method_call(c, m, n, argc, calls, env);
     }
     relocate(c, n);
+    if (argc == 1 && pure_builtin(callee) && plain_arguments(argc, argv)) {
+        /* len() and the like of a plain argument call nothing on m. */
+        result = step_call(c, m, callee, -1, n, argc, argv);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        return result;
+    }
 again:
     if (calls && machine_function(c, callee)) {
         /* A call on the machine takes the arguments and the callee from the stack. */
