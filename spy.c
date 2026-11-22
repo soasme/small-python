@@ -91,6 +91,10 @@ enum { ENV_FORWARD = 6 };
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
+/* A body being parsed: its program, which its statements at depth are
+ * compiled into as each ends (body_statements), the last compiled, and
+ * whether the last parsed waits for the body's end, as a module's does. */
+typedef struct { Program *program; Node *done; size_t depth; int holds; } Body;
 typedef struct Machine Machine;
 /* callk's continuation (as Lua's lua_KFunction): given its context and
  * what the call callk asked for returned (NULL with an error), both
@@ -4519,6 +4523,7 @@ typedef struct {
     Node *annotations, **annotations_tail;
     int awaits; /* The awaits and async for clauses parsed (comprehension). */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
+    Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
 } Parser;
 static Scope *scope_new(SPYContext *, Scope *, int);
@@ -5239,6 +5244,9 @@ static const char *expression_name(Node *);
 static Node *comprehension(Parser *, Node *, int);
 static Node *statements(Parser *);
 static Node *suite_after(Parser *, const char *, size_t);
+static Body body_begin(Parser *, Node *, size_t);
+static int body_end(Parser *, Node *, Node *, Body);
+static int body_statements(Parser *, Node *, Node *);
 static Node *missing_block(Parser *, const char *, size_t);
 static size_t keyword_line(Parser *);
 static Node *subscript(Parser *p) {
@@ -7585,9 +7593,11 @@ static Node *statement_body(Parser *p) {
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
         Annotations annotations = collect_begin(p, 1, 0);
-        n->b = suite_after(p, "class definition", n->line);
+        Node *start = p->unit->as.unit.nodes;
+        Body enclosing = body_begin(p, n, p->depth + 1);
+        n->b = p->body.program ? suite_after(p, "class definition", n->line) : NULL;
         p->definition = definition; p->return_line = return_line;
-        if (collect_end(p, n, &n->annotate, annotations) || !n->b) return NULL;
+        if (body_end(p, n->b, start, enclosing) || collect_end(p, n, &n->annotate, annotations)) return NULL;
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
         return n->b ? n : NULL;
@@ -7729,11 +7739,13 @@ static Node *statement_body(Parser *p) {
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
         int collecting = p->collecting;
         p->collecting = 0;
-        n->b = suite_after(p, "function definition", n->line);
+        Node *start = p->unit->as.unit.nodes;
+        Body enclosing = body_begin(p, n, p->depth + 1);
+        n->b = p->body.program ? suite_after(p, "function definition", n->line) : NULL;
         size_t first_return = p->return_line;
         p->definition = definition; p->return_line = return_line; p->collecting = collecting;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
-        if (!n->b || !(n->scope = scope_new(p->ctx, NULL, S_FUNCTION))) return NULL;
+        if (body_end(p, n->b, start, enclosing) || !(n->scope = scope_new(p->ctx, NULL, S_FUNCTION))) return NULL;
         n->scope->return_line = first_return;
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
         return n;
@@ -7999,21 +8011,22 @@ static int nodes_finish(Parser *p, Node *start) {
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
         if (n->flags & F_FINISHED) continue;
         n->flags |= F_FINISHED;
-        if (c->optimize > 1 && (n->kind == N_DEF || n->kind == N_CLASS)) drop_docstring(n->b);
         if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
         if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
     }
     return c->error_type[0] ? -1 : 0;
 }
 static Node *statements(Parser *p) {
-    Node *head = NULL, **tail = &head;
+    Node *head = NULL, **tail = &head, *last = NULL;
+    int body = p->body.program && p->depth == p->body.depth;
     while (!at(p, T_END) && !at(p, T_DEDENT)) {
         if (take(p, T_NL)) continue;
         Node *start = p->unit->as.unit.nodes, *n = line_statements(p);
         if (!n || nodes_finish(p, start)) return NULL;
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
-        while (*tail) tail = &(*tail)->next;
+        while (*tail) { last = *tail; tail = &(*tail)->next; }
+        if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
     }
     return head;
 }
@@ -8662,7 +8675,7 @@ static int keyword_plain_call(Node *n) {
     }
     return keywords > 0;
 }
-static int module_program(SPYContext *, SPYValue *, int);
+static int module_body_finish(Parser *, SPYValue *);
 static SPYValue *parse_normalized(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
@@ -8688,7 +8701,10 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
     if (unit->as.unit.filename && !failed) {
         size_t failures = c->allocation_failures;
         Annotations annotations = collect_begin(&p, 1, 1);
-        unit->as.unit.body = statements(&p);
+        body_begin(&p, NULL, 0);
+        unit->as.unit.body = p.body.program ? statements(&p) : NULL;
+        Body module = p.body;
+        p.body = (Body){0};
         if (c->allocation_failures != failures && !error_is(c, "MemoryError")) {
             spy_clear_error(c);
             spy_error(c, "MemoryError", "allocation failed");
@@ -8791,9 +8807,9 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (p.deferred_node && p.deferred_node->spanned) { p.error_start = p.deferred_node->start; p.error_end = p.deferred_node->end; }
             spy_error(c, "SyntaxError", p.deferred);
         }
-        /* Last, the module's body, of the input mode the parse read. */
         unit->as.unit.expression = c->eval_input;
-        if (!c->error_type[0] && unit->as.unit.body) module_program(c, unit, c->interactive_input);
+        p.body = module;
+        if (!c->error_type[0] && unit->as.unit.body) module_body_finish(&p, unit);
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
@@ -16811,23 +16827,81 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
 }
 /* A generator's, function's or class's body, on the machine: even a body
  * without a call may call Python through an operator or attribute. */
+/* Compile the statements of the body that head begins into its program,
+ * from the first not yet compiled up to stop; under -OO its docstring
+ * becomes pass first. */
+static int body_statements(Parser *p, Node *head, Node *stop) {
+    SPYContext *c = p->ctx;
+    for (Node *s = p->body.done ? p->body.done->next : head; s != stop && !c->error_type[0]; s = s->next) {
+        if (s == head && c->optimize > 1) drop_docstring(s);
+        compile_statement(c, p->body.program, s);
+        p->body.done = s;
+    }
+    return c->error_type[0] ? -1 : 0;
+}
+/* Begin the body of def or class n, or with n NULL the module's, whose
+ * statements follow at depth, returning the enclosing body. Its program
+ * begins with what a body binds first: a class's implicit names, a
+ * module's annotation names (module_body_finish). */
+static Body body_begin(Parser *p, Node *n, size_t depth) {
+    SPYContext *c = p->ctx;
+    Body enclosing = p->body;
+    Program *program = allocate(c, sizeof(*program));
+    p->body = (Body){program, NULL, depth, !n};
+    if (!program) return enclosing;
+    program->calls = c->pausing ? PAUSING : BODY;
+    program->namespace = n && n->kind == N_CLASS;
+    program->unbinds = !n || program->namespace;
+    program->loads = program->namespace || c->string_source;
+    program->display = !n && (c->interactive_input || c->eval_input == 2);
+    if (n) n->flat = program;
+    else p->unit->as.unit.flat = program;
+    if (n && n->kind == N_CLASS) { emit(c, program, BC_CLASS, n, 9); emit(c, program, BC_POP, n, 0); }
+    if (!n) { emit(c, program, BC_CLASS, NULL, 17); emit(c, program, BC_POP, NULL, 0); }
+    return enclosing;
+}
+/* End a def's or class's body, head, whose nodes follow start: a suite
+ * on the header's line, whose statements no statement end finished or
+ * compiled, is finished and compiled now. Then the enclosing body
+ * resumes. */
+static int body_end(Parser *p, Node *head, Node *start, Body enclosing) {
+    int failed = !head || (!p->body.done && nodes_finish(p, start)) || body_statements(p, head, NULL);
+    p->body = enclosing;
+    return failed;
+}
+/* End the module body of unit, which has statements: its last, which
+ * gives the body's value when it is an expression and nothing displays
+ * it, and its return. Its annotation names start it, unless it has none. */
+static int module_body_finish(Parser *p, SPYValue *unit) {
+    SPYContext *c = p->ctx;
+    Program *program = p->body.program;
+    Node *body = unit->as.unit.body, *last = body;
+    while (last->next) last = last->next;
+    if (!unit->as.unit.annotate && !unit->as.unit.conditional_annotations) program->entry = 2;
+    if (body_statements(p, body, last)) return -1;
+    if (last->kind == N_EXPR && !program->display) { compile_expr(c, program, last->a); emit(c, program, BC_FLOW, last, FLOW_RETURN); }
+    else { compile_statement(c, program, last); emit(c, program, BC_NONE, NULL, 0); emit(c, program, BC_FLOW, NULL, FLOW_RETURN); }
+    return c->error_type[0] ? -1 : 0;
+}
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS)), mode = c->pausing ? PAUSING : BODY;
-    if (!generator && !n->b) return 0;
-    Program *p = allocate(c, sizeof(*p));
-    if (!p) return -1;
-    p->calls = mode; p->namespace = p->unbinds = n->kind == N_CLASS; p->loads = p->namespace || c->string_source;
-    if (generator) n->code = p;
-    else n->flat = p;
+    /* A parsed def's or class's statements were compiled as they were
+     * parsed (body_begin); a lambda's body, an __annotate__ function's or
+     * a lazy value's is compiled now. */
+    Program *p = n->flat;
+    if (!p) {
+        if (!(p = allocate(c, sizeof(*p)))) return -1;
+        p->calls = mode; p->loads = c->string_source != 0;
+        n->flat = p;
+        compile_body(c, p, n->b);
+    }
+    if (generator) { n->code = p; n->flat = NULL; }
     c->code_work++;
-    /* A class body first binds its implicit names (class_names_before). */
-    if (n->kind == N_CLASS) { emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
-    compile_body(c, p, n->b);
     if (n->kind == N_CLASS && n->params && n->args) {
         /* A generic class's bases and keywords, in its type parameters'
          * frame (header_step). */
         Program *header = allocate(c, sizeof(*header));
-        if (!header) return -1;
+        if (!header) { c->code_work--; return -1; }
         header->calls = mode; header->loads = c->string_source != 0; n->params->flat = header;
         emit(c, header, BC_CLASS, n, 18); emit(c, header, BC_ARGS, n, 0);
         compile_arguments(c, header, n->args);
@@ -18897,7 +18971,7 @@ static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env
 static int setup_annotations(SPYContext *, Frame *, int);
 static int start_annotations(SPYContext *, Frame *, Node *, const char *);
 /* Enter the frame of unit, whose module body is on the machine
- * (module_program), in env, called from the machine caller; it takes both
+ * (module_body_finish), in env, called from the machine caller; it takes both
  * references, releasing them when it fails. The body's instructions of no
  * node tick on its first statement; the first binds its annotation names
  * (annotation_step). */
@@ -25044,31 +25118,6 @@ static Result module_end(SPYContext *c, Machine *m, SPYValue *outer, Result r) {
     }
     c->eval_env = outer;
     return r;
-}
-/* Compile unit's body, which has statements, for the machine, as its
- * parse ends: -1 on an error. An interactive unit's displays its
- * expression statements. */
-static int module_program(SPYContext *c, SPYValue *unit, int interactive) {
-    Program *p = allocate(c, sizeof(*p));
-    if (!p) return -1;
-    p->calls = c->pausing ? PAUSING : BODY; p->display = interactive || unit->as.unit.expression == 2; p->unbinds = 1;
-    p->loads = unit->as.unit.string_source;
-    /* The body's value is its last statement's, when that is an expression. */
-    Node *body = unit->as.unit.body, *last = body;
-    while (last->next) last = last->next;
-    c->code_work++;
-    /* The body starts by binding its annotation names (annotation_step);
-     * like a class body's, its bindings may go through a mapping. Without
-     * annotations it starts past that step. */
-    emit(c, p, BC_CLASS, NULL, 17); emit(c, p, BC_POP, NULL, 0);
-    if (!unit->as.unit.annotate && !unit->as.unit.conditional_annotations) p->entry = 2;
-    for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
-    if (last->kind == N_EXPR && !p->display) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
-    else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
-    c->code_work--;
-    if (c->error_type[0]) { free_program(p); return -1; }
-    unit->as.unit.flat = p;
-    return 0;
 }
 static Result module_body(SPYContext *c, Frame *f) {
     /* The body a pausable call runs first (eval_source). */
