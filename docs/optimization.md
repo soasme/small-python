@@ -1747,6 +1747,22 @@ unchanged.
 Instructions (M2 counters): that loop 1,322.9 M -> 1,105.1 M (0.8.0:
 1,116.7 M); `strings` 1,732.9 M -> 1,687.2 M (0.8.0: 1,713.5 M).
 
+### A fused step asks once whether it may run
+
+A fused step (an operator, assignment, test or call that reads its
+operands where they lie) runs only while no tick would record the plain
+steps that follow it: no trace function, no counted step, no pending
+finalizer. Each fused step asked this itself, though the dispatch loop
+had already asked to decide between its threaded jump and its tick. The
+loop now skips a fused step whenever it ticks, so its plain steps run,
+and the fused steps no longer ask. What runs, and in what order, is
+unchanged.
+
+Instructions (clang -O2 -flto, callgrind), before -> after (0.9.0):
+`fib` 472.3 M -> 461.8 M (466.8 M); `loop` 2,093.6 M -> 2,036.6 M
+(2,302.6 M); `classes` 1,492.9 M -> 1,461.7 M (1,647.1 M); every
+program 0.2% to 2.7% fewer; startup unchanged.
+
 ## Tried and left out
 
 - **A builtin found past the module's dictionary without the walk.**

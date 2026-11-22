@@ -31516,10 +31516,10 @@ static ALWAYS_INLINE SPYValue *operand_callee(SPYContext *c, Frame *f, Node *n, 
     *method = -1; argv[0] = NULL;
     if (n->a->kind == N_ATTR) {
         Node *object = n->a->a;
-        SPYValue *found = object->kind == N_NAME && quiet(c, f) ? name_fast(f->env, &object->name) : NULL;
+        SPYValue *found = object->kind == N_NAME ? name_fast(f->env, &object->name) : NULL;
         if (found) a = method_of(c, n->a, spy_retain(found), argv, method, 1);
         done = argv[0] != NULL;
-    } else if (quiet(c, f) && (a = name_fast(f->env, &n->a->name))) spy_retain(a);
+    } else if ((a = name_fast(f->env, &n->a->name))) spy_retain(a);
     if (!a) return NULL;
     for (Node *arg = n->args; arg; arg = arg->next) {
         SPYValue *value = NULL;
@@ -38302,6 +38302,10 @@ static NO_INLINE int increment_step(SPYContext *c, Frame *f, Node *n) {
     }
     return c->error_type[0] != 0;
 }
+/* Whether op is a fused step, which its plain steps follow. */
+static int fused(int op) {
+    return op == BC_OPERATE || op == BC_STACKED || op == BC_ASSIGN || op == BC_TEST || op == BC_STACKED_TEST || op == BC_CALLF;
+}
 /* The hot machine steps end in their own dispatch, so that each predicts
  * its successor; any other step, and any tick with work, takes the loop. */
 #if defined(__GNUC__) /* Labels as values. */
@@ -39581,6 +39585,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     m->pc = pc - 1; c->paused_at = m;
                     return (Result){FLOW_PAUSE, NULL};
                 }
+                /* A fused step runs only quiet, where no tick would record
+                 * its plain steps; NEXT dispatches only then. */
+                if (fused(ins->op)) continue;
             } else relocate(c, n);
         } else if (!quiet(c, &f)) {
             /* An instruction of no node ticks on the definition, keeping the
@@ -39602,18 +39609,18 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_OPERATE)
             /* Its operands taken at hand from its plain steps, which run when
              * it cannot compute n natively (compile_operator). */
-            if (!(value = quiet(c, &f) ? fused_value(c, &f, ins) : NULL)) continue;
+            if (!(value = fused_value(c, &f, ins))) continue;
         operated: /* One dispatch for both fused operators keeps clang's dispatch sites apart. */
             pc = ins->target;
             machine_push(c, m, value);
             NEXT;
         CASE(BC_STACKED)
             /* BC_OPERATE on the left operand atop the stack, which it takes. */
-            if (!(value = quiet(c, &f) ? fused_on(c, &f, ins, n, m->stack[m->len - 1]) : NULL)) continue;
+            if (!(value = fused_on(c, &f, ins, n, m->stack[m->len - 1]))) continue;
             spy_release(machine_pop(m));
             goto operated;
         CASE(BC_ASSIGN)
-            if (quiet(c, &f) && assign_fused(c, &f, code, pc, ins)) pc = ins->target;
+            if (assign_fused(c, &f, code, pc, ins)) pc = ins->target;
             continue;
         CASE(BC_NAME)
             value = name_fast(f.env, ins->name);
@@ -39907,8 +39914,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_STACKED_TEST)
             /* BC_TEST on the left operand atop the stack, which it takes. */
-            x = quiet(c, &f) ? m->stack[m->len - 1] : NULL;
-            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 6)], ins->arg >> 4 & 3) : NULL;
+            x = m->stack[m->len - 1];
+            y = step_operand(c, &f, &code[pc + (ins->arg >> 6)], ins->arg >> 4 & 3);
             if ((truth = y ? fused_truth(c, ins, n, x, y, &value) : -1) < 0) continue;
             spy_release(machine_pop(m));
             if (truth > 1) { pc = ins->other - 1; machine_push(c, m, value); break; }
@@ -39917,7 +39924,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* A fused operator and the BC_FALSE after its plain steps, at
              * other - 1, sharing its target; a value not a bool is left to
              * that BC_FALSE. */
-            x = n->flags & F_OPERATOR && quiet(c, &f) ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 7) : NULL;
+            x = n->flags & F_OPERATOR ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 7) : NULL;
             y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 6)], ins->arg >> 4 & 3) : NULL;
             if ((truth = y ? fused_truth(c, ins, n, x, y, &value) : -1) < 0) continue;
             if (truth > 1) { pc = ins->other - 1; machine_push(c, m, value); break; }
