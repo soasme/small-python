@@ -8572,6 +8572,13 @@ static int operands_at_hand(Node *n) {
     return item_at_hand(n) || (n->kind == N_UNARY && operands_at_hand(n->a)) ||
            (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR && operands_at_hand(n->a) && operands_at_hand(n->b));
 }
+/* Whether n is a list or tuple display of items none starred. */
+static int packed(Node *n) {
+    if ((n->kind != N_LIST && n->kind != N_TUPLE) || !n->args) return 0;
+    int count = 0;
+    for (Node *a = n->args; a; a = a->next) if (a->kind == N_STAR || ++count > 1 << 20) return 0;
+    return 1;
+}
 /* The right operand of n when n is an index whose operands are literals or
  * names, or arithmetic or a single comparison whose operands are those, an
  * index of those, or an attribute of a name, else NULL. The compiler marks
@@ -16184,7 +16191,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         if (operator_right(n)) { compile_operator(c, p, n, 0); return; }
         if (stacked_right(n)) { compile_stacked(c, p, n, 0); return; }
         /* Arithmetic on arithmetic takes its steps. */
-        if (!operands_at_hand(n)) { emit(c, p, BC_EVAL, n, 0); return; }
+        if (!operands_at_hand(n) && !packed(n)) { emit(c, p, BC_EVAL, n, 0); return; }
     }
     size_t branch, end, parts;
     switch (n->kind) {
@@ -16245,6 +16252,13 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         patch(p, branch, p->len); compile_expr(c, p, n->c); patch(p, end, p->len); break;
     case N_COMPARE: compile_expr(c, p, n->a); compile_operation(c, p, n); break;
     case N_LIST: case N_TUPLE: case N_SET: case N_DICT:
+        if (packed(n)) {
+            /* BC_NEW takes the items atop the stack, as many as arg's count. */
+            int count = 0;
+            for (Node *a = n->args; a; a = a->next, count++) compile_expr(c, p, a);
+            emit(c, p, BC_NEW, n, (n->kind == N_LIST ? SPY_LIST : SPY_TUPLE) | count << 8);
+            break;
+        }
         emit(c, p, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT);
         for (Node *a = n->args; a; a = a->next) {
             if (a->kind == N_STAR || a->kind == N_MAPPING) {
@@ -16497,11 +16511,12 @@ static int assigns_at_hand(Program *p, Node *n) {
     return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) &&
            (item_at_hand(n->b) || operator_right(n->b));
 }
-/* Whether n is an assignment as assigns_at_hand takes, of arithmetic. */
+/* Whether n is an assignment as assigns_at_hand takes, of arithmetic or a
+ * list or tuple display. */
 static int assigns_steps(Program *p, Node *n) {
     if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, p->calls)) return 0;
     Node *t = n->a;
-    return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) && operands_at_hand(n->b);
+    return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) && (operands_at_hand(n->b) || packed(n->b));
 }
 /* Assignment n at hand: a fused step that stores its value when no step
  * of it runs Python code, and jumps past n's plain steps after it; else
@@ -16837,6 +16852,15 @@ static SPYValue *display_new(SPYContext *c, Node *node, int type) {
             size++;
         }
     return value_alloc(c, type, size);
+}
+/* A list or tuple of the count items atop m's stack, which it takes; or
+ * NULL, the items left. */
+static SPYValue *display_pack(SPYContext *c, Machine *m, int type, size_t count) {
+    SPYValue *v = value_alloc(c, type, count);
+    if (!v || sequence_grow(c, v, count)) { spy_release(v); return NULL; }
+    memcpy(v->as.seq.items, &m->stack[m->len - count], count * sizeof(*v->as.seq.items));
+    v->as.seq.len = count; m->len -= count;
+    return v;
 }
 static int display_add(SPYContext *c, SPYValue *result, SPYValue *item) {
     if (result->type != SPY_SET && result->type != SPY_FROZENSET) return sequence_append(c, result, item);
@@ -40524,7 +40548,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             machine_push(c, m, value); NEXT_RELEASE;
         }
-        CASE(BC_NEW) machine_push(c, m, display_new(c, n, ins->arg)); break;
+        CASE(BC_NEW) machine_push(c, m, ins->arg >> 8 ? display_pack(c, m, ins->arg & 255, (size_t)ins->arg >> 8) : display_new(c, n, ins->arg)); break;
         CASE(BC_ADD) CASE(BC_EXTEND)
             a = machine_pop(m);
             if (ins->op == BC_EXTEND) {
