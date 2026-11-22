@@ -91,10 +91,14 @@ enum { ENV_FORWARD = 6 };
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
-/* A body being parsed: its program, which its statements at depth are
- * compiled into as each ends (body_statements), the last compiled, and
- * whether the last parsed waits for the body's end, as a module's does. */
-typedef struct { Program *program; Node *done; size_t depth; int holds; } Body;
+#define NO_STEP UINT32_MAX /* No instruction: the end of a list of linked sites. */
+/* A body or suite being parsed: its program, which its statements at
+ * depth are compiled into as each ends (body_statements), the first and
+ * the last compiled; whether the last parsed waits for the body's end, as
+ * a module's does, and whether the first may be a docstring. */
+typedef struct { Program *program; Node *head, *done; size_t depth; int holds, docs; } Body;
+/* A try statement's shape and its instructions to patch (try_begin). */
+typedef struct { size_t final, handler, skip, first, rest; int has_final, excepts, star, otherwise; } Try;
 typedef struct Machine Machine;
 /* callk's continuation (as Lua's lua_KFunction): given its context and
  * what the call callk asked for returned (NULL with an error), both
@@ -131,6 +135,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048, F_FINISHED = 4096 /* Seen by nodes_finish. */,
+       F_EMITTED = 8192 /* A statement compiled in place as it was parsed (at_body). */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
@@ -5247,6 +5252,26 @@ static Node *suite_after(Parser *, const char *, size_t);
 static Body body_begin(Parser *, Node *, size_t);
 static int body_end(Parser *, Node *, Node *, Body);
 static int body_statements(Parser *, Node *, Node *);
+static size_t if_begin(SPYContext *, Program *, Node *);
+static size_t if_else(SPYContext *, Program *, Node *, size_t);
+static int nodes_finish(Parser *, Node *);
+static size_t loop_begin(SPYContext *, Program *, Node *, size_t *);
+static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
+static void patch(Program *, size_t, size_t);
+static size_t program_len(Program *);
+static uint32_t with_begin(SPYContext *, Program *, Node *, int);
+static size_t case_begin(SPYContext *, Program *, Node *, size_t *);
+static void case_end(SPYContext *, Program *, Node *, size_t, size_t, uint32_t *);
+static void match_end(SPYContext *, Program *, Node *, uint32_t);
+static void try_begin(SPYContext *, Program *, Node *, Try *);
+static void try_handlers(SPYContext *, Program *, Node *, Try *);
+static size_t except_begin(SPYContext *, Program *, Node *, Try *, size_t *);
+static void except_end(SPYContext *, Program *, Node *, Try *, size_t, size_t);
+static void try_else(SPYContext *, Program *, Node *, Try *);
+static void try_finally(SPYContext *, Program *, Try *);
+static void try_end(SPYContext *, Program *, Try *);
+static void compile_expr(SPYContext *, Program *, Node *);
+static void with_end(SPYContext *, Program *, uint32_t, int);
 static Node *missing_block(Parser *, const char *, size_t);
 static size_t keyword_line(Parser *);
 static Node *subscript(Parser *p) {
@@ -6704,21 +6729,79 @@ static Node *comprehension(Parser *p, Node *n, int awaits) {
     if (n->op == N_TUPLE) p->awaits = awaits + outer;
     return n;
 }
-static Node *if_statement(Parser *p) {
-    Node *n = node(p, N_IF);
+/* Whether token i is the keyword s. */
+static int word_at(Parser *p, size_t i, const char *s) {
+    Token *t = &p->tokens[i];
+    return i < p->len && t->kind == T_NAME && strlen(s) == t->len && !memcmp(s, t->start, t->len);
+}
+/* The token after the clause whose header holds token i: past its line
+ * and the indented block after it. */
+static size_t clause_end(Parser *p, size_t i) {
+    while (i < p->len && p->tokens[i].kind != T_NL && p->tokens[i].kind != T_END) i++;
+    while (i < p->len && p->tokens[i].kind == T_NL) i++;
+    for (size_t depth = 0; i < p->len && (depth || p->tokens[i].kind == T_INDENT); i++) {
+        if (p->tokens[i].kind == T_INDENT) depth++;
+        if (p->tokens[i].kind == T_DEDENT) depth--;
+        if (p->tokens[i].kind == T_END) break;
+    }
+    while (i < p->len && p->tokens[i].kind == T_NL) i++;
+    return i;
+}
+/* The shape of the try statement whose body starts at the parser's ':',
+ * read ahead from the clauses that follow the body. */
+static Try try_shape(Parser *p) {
+    Try t = {0};
+    size_t i = clause_end(p, p->pos);
+    for (; word_at(p, i, "except"); i = clause_end(p, i)) {
+        if (!t.excepts) t.star = i + 1 < p->len && p->tokens[i + 1].kind == '*';
+        t.excepts = 1;
+    }
+    if (word_at(p, i, "else")) { t.otherwise = 1; i = clause_end(p, i); }
+    t.has_final = word_at(p, i, "finally");
+    return t;
+}
+/* Whether the statement being parsed is compiled in place, among the
+ * statements of the body or suite whose program is open. */
+static int at_body(Parser *p) { return p->body.program && p->depth == p->body.depth; }
+/* Before a compound statement's header, whose nodes follow start, is
+ * compiled in place: its nodes finished, and a statement the body held
+ * back compiled first. */
+static int header_ready(Parser *p, Node *start) {
+    return nodes_finish(p, start) || body_statements(p, p->body.head, NULL);
+}
+/* A compound statement's suite after its header; with emits, its
+ * statements compiled in place, as a body's are (body_end). */
+static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
+    if (!emits) return suite_after(p, what, line);
+    Body outer = p->body;
+    Node *start = p->unit->as.unit.nodes;
+    p->body = (Body){outer.program, NULL, NULL, p->depth + 1, 0, 0};
+    Node *body = suite_after(p, what, line);
+    int failed = !body || (!p->body.done && nodes_finish(p, start)) || body_statements(p, body, NULL);
+    p->body = outer;
+    return failed ? NULL : body;
+}
+/* if_stmt or elif_stmt after its keyword; with emits, compiled in place:
+ * the test before its suite, the jump past the rest after it (if_begin). */
+static Node *if_statement(Parser *p, int emits) {
+    Node *start = p->unit->as.unit.nodes, *n = node(p, N_IF);
     if (!n) return NULL;
-    size_t line = keyword_line(p);
+    size_t line = keyword_line(p), branch = 0, end = 0;
     const char *what = p->tokens[p->pos - 1].len == 4 ? "'elif' statement" : "'if' statement";
     size_t condition = p->pos;
     n->a = expression(p, 0);
     if (n->a && at(p, '=')) return condition_equals_error(p, condition);
-    if (!n->a || !(n->b = suite_after(p, what, line))) return NULL;
+    if (!n->a || (emits && header_ready(p, start))) return NULL;
+    if (emits) branch = if_begin(p->ctx, p->body.program, n);
+    if (!(n->b = suite_of(p, what, line, emits))) return NULL;
+    if (emits) end = if_else(p->ctx, p->body.program, n, branch);
     if (take_word(p, "elif")) {
         if (++p->depth > 128) { p->depth--; return syntax(p, "too many elif clauses"); }
-        n->c = if_statement(p); p->depth--;
+        n->c = if_statement(p, emits); p->depth--;
         if (!n->c) return NULL;
     }
-    else if (take_word(p, "else")) { n->c = suite_after(p, "'else' statement", keyword_line(p)); if (!n->c) return NULL; }
+    else if (take_word(p, "else")) { n->c = suite_of(p, "'else' statement", keyword_line(p), emits); if (!n->c) return NULL; }
+    if (emits) { patch(p->body.program, end, program_len(p->body.program)); n->flags |= F_EMITTED; }
     return n;
 }
 /* Build the hidden __annotate__(format, /) function for an owner. */
@@ -7321,11 +7404,15 @@ static Node *case_header(Parser *p) {
     return item;
 }
 static Node *match_statement(Parser *p) {
-    Node *n = node(p, N_MATCH);
+    /* With emits compiled in place, as compile_statement does (case_begin). */
+    Node *start = p->unit->as.unit.nodes, *n = node(p, N_MATCH);
+    int emits = at_body(p);
+    uint32_t exits = NO_STEP;
     if (!n) return NULL;
     p->pos++;
     size_t line = keyword_line(p);
-    if (!(n->a = expression_items(p, 0, 1))) return NULL;
+    if (!(n->a = expression_items(p, 0, 1)) || (emits && header_ready(p, start))) return NULL;
+    if (emits) compile_expr(p->ctx, p->body.program, n->a);
     if (!expect(p, ':', at(p, T_NL) ? "expected ':'" : "invalid syntax") || !expect(p, T_NL, "invalid syntax")) return NULL;
     while (take(p, T_NL)) {}
     if (!take(p, T_INDENT)) return missing_block(p, "'match' statement", line);
@@ -7334,12 +7421,16 @@ static Node *match_statement(Parser *p) {
         if (take(p, T_NL)) continue;
         if (!keyword(p, "case")) return syntax(p, "invalid syntax");
         p->pos++;
-        size_t case_line = keyword_line(p);
-        Node *item = case_header(p);
-        if (!item || !(item->c = suite_after(p, "'case' statement", case_line))) return NULL;
+        size_t case_line = keyword_line(p), fail = 0, guard = 0;
+        Node *before = p->unit->as.unit.nodes, *item = case_header(p);
+        if (!item || (emits && header_ready(p, before))) return NULL;
+        if (emits) fail = case_begin(p->ctx, p->body.program, item, &guard);
+        if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) return NULL;
+        if (emits) case_end(p->ctx, p->body.program, item, fail, guard, &exits);
         *tail = item; tail = &item->next;
     }
     if (!n->args) return syntax(p, "expected 'case' block");
+    if (emits) { match_end(p->ctx, p->body.program, n, exits); n->flags |= F_EMITTED; }
     /* Compile-time checks run once all cases are known, like CPython's. */
     for (Node *item = n->args; item; item = item->next) {
         const char *names[256], *bad = "";
@@ -7519,6 +7610,8 @@ static Node *statement_body(Parser *p) {
     if (!asynchronous && !p->inline_suite && keyword(p, "match") && line_ends_block(p)) return match_statement(p);
     if (!asynchronous && type_alias_start(p)) return type_alias(p);
     if (take_word(p, "with")) {
+        Node *start = p->unit->as.unit.nodes;
+        int emits = at_body(p);
         n = node(p, N_WITH);
         if (!n) return NULL;
         n->op = asynchronous;
@@ -7556,8 +7649,13 @@ static Node *statement_body(Parser *p) {
             if (!grouped && at(p, ':')) { p->pos--; return syntax(p, "the last 'with' item has a trailing comma"); }
         } while (!grouped || !at(p, ')'));
         if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
-        n->b = suite_after(p, "'with' statement", n->line);
-        return n->b ? n : NULL;
+        /* With emits compiled in place, as compile_statement does (with_begin). */
+        uint32_t last = NO_STEP;
+        if (emits && header_ready(p, start)) return NULL;
+        if (emits) last = with_begin(p->ctx, p->body.program, n->args, n->op);
+        if (!(n->b = suite_of(p, "'with' statement", n->line, emits))) return NULL;
+        if (emits) { with_end(p->ctx, p->body.program, last, n->op); n->flags |= F_EMITTED; }
+        return n;
     }
     if (take_word(p, "del")) {
         n = node(p, N_DELETE);
@@ -7616,9 +7714,17 @@ static Node *statement_body(Parser *p) {
         return n;
     }
     if (take_word(p, "try")) {
+        /* With emits compiled in place, as compile_statement does (try_begin). */
         size_t line = keyword_line(p);
+        Node *start = p->unit->as.unit.nodes;
+        int emits = at_body(p);
+        Program *program = p->body.program;
+        Try t = emits ? try_shape(p) : (Try){0};
         n = node(p, N_TRY);
-        if (!n || !(n->a = suite_after(p, "'try' statement", line))) return NULL;
+        if (!n || (emits && header_ready(p, start))) return NULL;
+        if (emits) try_begin(p->ctx, program, n, &t);
+        if (!(n->a = suite_of(p, "'try' statement", line, emits))) return NULL;
+        if (emits) try_handlers(p->ctx, program, n, &t);
         /* Bindings still follow source order. For return diagnostics the
          * compiler visits else and finally before exception handlers. */
         size_t body_return = p->return_line;
@@ -7641,7 +7747,7 @@ static Node *statement_body(Parser *p) {
                 return is_star ? syntax_span(p, except_at, p->pos, message) : (p->pos = except_at, syntax(p, message));
             }
             star = is_star;
-            Node *handler = node(p, N_EXCEPT);
+            Node *before = p->unit->as.unit.nodes, *handler = node(p, N_EXCEPT);
             if (!handler) return NULL;
             if (is_star && (at(p, ':') || at(p, T_NL))) return syntax(p, "expected one or more exception types");
             if (at(p, T_NL)) return syntax(p, "expected ':'");
@@ -7683,29 +7789,38 @@ static Node *statement_body(Parser *p) {
                 }
             } else { bare = 1; bare_at = except_at; }
             int saved = p->star;
+            size_t match = 0, final = 0;
+            if (emits && header_ready(p, before)) return NULL;
+            if (emits) match = except_begin(p->ctx, program, handler, &t, &final);
             if (is_star) p->star = p->loops + 1;
-            handler->b = suite_after(p, is_star ? "'except*' statement" : "'except' statement", except_line);
+            handler->b = suite_of(p, is_star ? "'except*' statement" : "'except' statement", except_line, emits);
             p->star = saved;
             if (!handler->b) return NULL;
+            if (emits) except_end(p->ctx, program, handler, &t, match, final);
             span_block(p, handler, except_at);
             *tail = handler; tail = &handler->next;
         }
         size_t handler_return = p->return_line;
         p->return_line = body_return;
         if (star == 1) n->flags |= F_STAR;
+        if (emits) try_else(p->ctx, program, n, &t);
         if (take_word(p, "else")) {
             if (!n->args) { p->pos--; return syntax(p, "expected 'except' or 'finally' block"); }
-            if (!(n->b = suite_after(p, "'else' statement", keyword_line(p)))) return NULL;
+            if (!(n->b = suite_of(p, "'else' statement", keyword_line(p), emits))) return NULL;
         }
-        if (take_word(p, "finally") && !(n->c = suite_after(p, "'finally' statement", keyword_line(p)))) return NULL;
+        if (emits) try_finally(p->ctx, program, &t);
+        if (take_word(p, "finally") && !(n->c = suite_of(p, "'finally' statement", keyword_line(p), emits))) return NULL;
         if (!p->return_line) p->return_line = handler_return;
-        return n->args || n->c ? n : syntax(p, "expected 'except' or 'finally' block");
+        if (!n->args && !n->c) return syntax(p, "expected 'except' or 'finally' block");
+        if (emits) { try_end(p->ctx, program, &t); n->flags |= F_EMITTED; }
+        return n;
     }
-    if (take_word(p, "if")) return if_statement(p);
+    if (take_word(p, "if")) return if_statement(p, at_body(p));
     if (keyword(p, "while") || keyword(p, "for")) {
-        int is_for = take_word(p, "for");
+        int is_for = take_word(p, "for"), emits = at_body(p);
         if (!is_for) p->pos++;
-        size_t line = keyword_line(p);
+        size_t line = keyword_line(p), loop = 0, branch = 0;
+        Node *start = p->unit->as.unit.nodes;
         n = node(p, is_for ? N_FOR : N_WHILE);
         if (!n) return NULL;
         n->op = asynchronous;
@@ -7718,9 +7833,14 @@ static Node *statement_body(Parser *p) {
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
         if (!n->a) return NULL;
         if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
-        p->loops++; n->b = suite_after(p, is_for ? "'for' statement" : "'while' statement", line); p->loops--;
+        /* With emits compiled in place, as compile_statement does (loop_begin). */
+        if (emits && header_ready(p, start)) return NULL;
+        if (emits) branch = loop_begin(p->ctx, p->body.program, n, &loop);
+        p->loops++; n->b = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
         if (!n->b) return NULL;
-        if (take_word(p, "else")) { n->c = suite_after(p, "'else' statement", keyword_line(p)); if (!n->c) return NULL; }
+        if (emits) loop_else(p->ctx, p->body.program, n, loop, branch);
+        if (take_word(p, "else")) { n->c = suite_of(p, "'else' statement", keyword_line(p), emits); if (!n->c) return NULL; }
+        if (emits) { patch(p->body.program, loop, program_len(p->body.program)); n->flags |= F_EMITTED; }
         return n;
     }
     if (take_word(p, "def")) {
@@ -8026,6 +8146,7 @@ static Node *statements(Parser *p) {
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
+        if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
     }
     return head;
@@ -15807,7 +15928,6 @@ typedef struct {
     };
     Node *node; /* Source location; some older instructions also execute this tree. */
 } Instruction;
-#define NO_STEP UINT32_MAX
 /* calls: BODY for a function body whose calls run on the machine (expands). */
 /* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
 /* namespace: a class body's, whose loops store their names by BC_STORE,
@@ -16441,7 +16561,11 @@ static int compile_comprehension(SPYContext *c, Node *n) {
     emit(c, n->code, BC_FLOW, n, FLOW_RETURN);
     return c->error_type[0] ? -1 : 0;
 }
-static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int asynchronous) {
+/* The items of a with statement, entered in order, which the parser
+ * compiles before its suite (with_statement): the last item's cleanup
+ * site, linked to the one before; then after the suite, each item's exit
+ * in reverse order. */
+static uint32_t with_begin(SPYContext *c, Program *p, Node *item, int asynchronous) {
     uint32_t last = NO_STEP;
     for (; item && !c->error_type[0]; item = item->next) {
         compile_expr(c, p, item->a);
@@ -16450,13 +16574,15 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
             emit(c, p, BC_DELEGATE, item, DELEGATE_AENTER);
         }
         size_t start = emit(c, p, asynchronous ? BC_AWITH : BC_WITH, item, 0);
-        if (start == SIZE_MAX) return;
+        if (start == SIZE_MAX) return NO_STEP;
         if (item->b) compile_target(c, p, item->b);
         emit(c, p, BC_POP, item, 0);
         /* Link cleanup sites while compiling, then patch them in reverse. */
         p->items[start].other = last; last = start;
     }
-    compile_body(c, p, body);
+    return last;
+}
+static void with_end(SPYContext *c, Program *p, uint32_t last, int asynchronous) {
     while (last != NO_STEP && !c->error_type[0]) {
         size_t start = last;
         last = p->items[start].other;
@@ -16504,17 +16630,20 @@ static void compile_operation(SPYContext *c, Program *p, Node *n) {
 }
 static void compile_statement(SPYContext *, Program *, Node *);
 static void compile_body(SPYContext *, Program *, Node *);
-/* The body of handler h; with unbinds, a namespace's, it stores the
- * exception atop the stack in its name and, however it ends, stores None
- * there and deletes it, as a finally block (15.4.1) that keeps the
+/* Around the body of handler h; with unbinds, a namespace's, it stores
+ * the exception atop the stack in its name and, however it ends, stores
+ * None there and deletes it, as a finally block (15.4.1) that keeps the
  * clause's exception handled, other 2 for except*'s; 1, for except's,
  * hands back the previous one first unless the block raised. */
-static void compile_handler(SPYContext *c, Program *p, Node *h, int unbinds, int star) {
-    if (!unbinds) { compile_body(c, p, h->b); return; }
+static size_t handler_begin(SPYContext *c, Program *p, Node *h, int unbinds, int star) {
+    if (!unbinds) return SIZE_MAX;
     emit(c, p, BC_STORE, h->c, 1);
     size_t final = emit(c, p, BC_FINALLY, h, 0);
     if (final != SIZE_MAX) p->items[final].other = 1 + (unsigned)star;
-    compile_body(c, p, h->b);
+    return final;
+}
+static void handler_end(SPYContext *c, Program *p, Node *h, int unbinds, size_t final) {
+    if (!unbinds) return;
     emit(c, p, BC_LEAVE, NULL, 0); patch(p, final, p->len);
     emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_STORE, h->c, 1); emit(c, p, BC_DELETE, h->c, 3); emit(c, p, BC_POP, NULL, 0);
     emit(c, p, BC_END_FINALLY, NULL, 0);
@@ -16591,8 +16720,120 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
     } else { compile_expr(c, p, n->b); emit(c, p, BC_STORE, t, 1); }
     patch(p, fused, p->len);
 }
+/* The clauses of an if statement n, which the parser compiles as it
+ * parses them (if_statement): the test, whose branch skips the suite;
+ * after the suite, the jump past the rest, where the branch goes on. */
+static size_t if_begin(SPYContext *c, Program *p, Node *n) { return compile_branch(c, p, n->a, n); }
+static size_t if_else(SPYContext *c, Program *p, Node *n, size_t branch) {
+    size_t end = emit(c, p, BC_JUMP, n, 0);
+    patch(p, branch, p->len);
+    return end;
+}
+/* The clauses of a for or while statement n, compiled as the parser
+ * parses them: its block, at loop, and its step, whose branch leaves the
+ * suite; after the suite, the jump back to the step, and the block's end
+ * before an else suite. */
+static size_t loop_begin(SPYContext *c, Program *p, Node *n, size_t *loop) {
+    if (n->kind == N_FOR) compile_expr(c, p, n->a);
+    *loop = emit(c, p, BC_LOOP, n, n->kind == N_FOR ? 1 + n->op : 0);
+    if (*loop != SIZE_MAX) p->items[*loop].other = (uint32_t)p->len;
+    return n->kind == N_FOR ? compile_next(c, p, n, n->args) : compile_branch(c, p, n->a, n);
+}
+static void loop_else(SPYContext *c, Program *p, Node *n, size_t loop, size_t branch) {
+    /* A body of one assignment at hand that a loop's step stores into
+     * runs in it (4). */
+    if (n->kind == N_FOR && branch != SIZE_MAX && p->items[branch].other && p->len > branch + 1 &&
+        p->items[branch + 1].op == BC_ASSIGN && p->items[branch + 1].target == p->len)
+        p->items[branch].other = 4;
+    if (loop != SIZE_MAX) patch(p, emit(c, p, BC_JUMP, NULL, 0), p->items[loop].other);
+    patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
+}
+/* The cases of a match statement, whose subject stays on the stack until
+ * a case is chosen, compiled as the parser parses them (match_statement):
+ * a case's pattern and guard, whose failures skip its suite; after the
+ * suite, its jump past the rest, linked to the earlier cases' in exits;
+ * after the last, the subject's pop, where those jumps go. */
+static size_t case_begin(SPYContext *c, Program *p, Node *item, size_t *guard) {
+    size_t fail = emit(c, p, BC_PATTERN, item, 0);
+    *guard = item->b ? compile_branch(c, p, item->b, item->b) : SIZE_MAX;
+    emit(c, p, BC_POP, item, 0);
+    return fail;
+}
+static void case_end(SPYContext *c, Program *p, Node *item, size_t fail, size_t guard, uint32_t *exits) {
+    size_t end = emit(c, p, BC_JUMP, item, 0);
+    if (end != SIZE_MAX) { p->items[end].other = *exits; *exits = (uint32_t)end; }
+    patch(p, fail, p->len); patch(p, guard, p->len);
+}
+static void match_end(SPYContext *c, Program *p, Node *n, uint32_t exits) {
+    emit(c, p, BC_POP, n, 0);
+    while (exits != NO_STEP && !c->error_type[0]) {
+        uint32_t next = p->items[exits].other;
+        patch(p, exits, p->len); exits = next;
+    }
+}
+/* The clauses of a try statement n, compiled as the parser parses them
+ * (try_statement), whose shape it knows first: with final a finally
+ * block, with excepts its handlers', star for except*. After the body,
+ * the jump past the handlers, skip, to an else suite placed after them,
+ * or to the end; then each handler, a plain one's jumps to the end
+ * patched once the else suite is placed (try_else). */
+static void try_begin(SPYContext *c, Program *p, Node *n, Try *t) {
+    t->final = t->has_final ? emit(c, p, BC_FINALLY, n, 0) : SIZE_MAX;
+    t->handler = t->excepts ? emit(c, p, BC_EXCEPT, n, 0) : SIZE_MAX;
+    t->rest = SIZE_MAX;
+}
+static void try_handlers(SPYContext *c, Program *p, Node *n, Try *t) {
+    /* Leaving a plain block reports no line of its own. */
+    if (t->excepts) emit(c, p, BC_POP_BLOCK, t->star ? n : NULL, 0);
+    t->skip = emit(c, p, BC_JUMP, t->star ? n : NULL, 0);
+    patch(p, t->handler, p->len);
+    if (t->star) emit(c, p, BC_STAR_BEGIN, n, 0);
+    t->first = p->len;
+}
+/* Handler h's test, before its body, and the handler's end after it. */
+static size_t except_begin(SPYContext *c, Program *p, Node *h, Try *t, size_t *final) {
+    /* A namespace's handler binds and unbinds its name by instructions
+     * (BC_MATCH 2 leaves the exception; handler_begin). */
+    int unbinds = p->unbinds && h->c;
+    if (h->a) compile_expr(c, p, h->a);
+    size_t match = t->star ? emit(c, p, BC_STAR_MATCH, h, unbinds) : emit(c, p, BC_MATCH, h, (h->a != NULL) | unbinds << 1);
+    *final = handler_begin(c, p, h, unbinds, t->star);
+    return match;
+}
+static void except_end(SPYContext *c, Program *p, Node *h, Try *t, size_t match, size_t final) {
+    int unbinds = p->unbinds && h->c;
+    handler_end(c, p, h, unbinds, final);
+    if (!t->star) {
+        emit(c, p, BC_POP_BLOCK, NULL, 0);
+        emit(c, p, BC_JUMP, NULL, 1); patch(p, match, p->len);
+        return;
+    }
+    /* Each matched except* clause runs inside an inner block that collects its error. */
+    size_t done = emit(c, p, BC_STAR_DONE, h, unbinds);
+    if (match != SIZE_MAX) p->items[match].other = (uint32_t)p->len;
+    emit(c, p, BC_STAR_CAUGHT, h, unbinds);
+    patch(p, match, p->len); patch(p, done, p->len);
+}
+/* After the handlers: the else suite's place, then the end. */
+static void try_else(SPYContext *c, Program *p, Node *n, Try *t) {
+    if (t->star) emit(c, p, BC_STAR_RERAISE, n, 0);
+    else if (t->excepts) emit(c, p, BC_RERAISE, NULL, 0);
+    /* The handled rest of an except* group skips the else suite. */
+    if (t->star && t->otherwise) t->rest = emit(c, p, BC_JUMP, NULL, 0);
+    patch(p, t->skip, p->len);
+}
+static void try_finally(SPYContext *c, Program *p, Try *t) {
+    for (size_t i = t->first; !t->star && i < p->len; i++)
+        if (p->items[i].op == BC_JUMP && p->items[i].arg && !p->items[i].target) p->items[i].target = p->len;
+    patch(p, t->rest, p->len);
+    if (t->has_final) { emit(c, p, BC_LEAVE, NULL, 0); patch(p, t->final, p->len); }
+}
+static void try_end(SPYContext *c, Program *p, Try *t) {
+    if (t->has_final) emit(c, p, BC_END_FINALLY, NULL, 0);
+}
+static size_t program_len(Program *p) { return p->len; }
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
-    size_t branch, end, start, loop;
+    size_t branch, end;
     if (assigns_at_hand(p, n)) { compile_assignment(c, p, n); return; }
     /* A starred annotation unpacks on the machine (annotation_step); an
      * assignment of arithmetic to a target at hand takes its steps. */
@@ -16665,26 +16906,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         }
         if (n->flags & (F_FUTURE | F_CONDITIONAL)) { emit(c, p, BC_ANNOTATE, n, 0); emit(c, p, BC_POP, n, 0); }
         break;
-    case N_MATCH: {
-        /* The subject stays on the stack until a case is chosen. */
-        uint32_t exits = NO_STEP;
-        compile_expr(c, p, n->a);
-        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
-            size_t fail = emit(c, p, BC_PATTERN, item, 0), guard = SIZE_MAX;
-            if (item->b) guard = compile_branch(c, p, item->b, item->b);
-            emit(c, p, BC_POP, item, 0);
-            compile_body(c, p, item->c);
-            end = emit(c, p, BC_JUMP, item, 0);
-            if (end != SIZE_MAX) { p->items[end].other = exits; exits = end; }
-            patch(p, fail, p->len); patch(p, guard, p->len);
-        }
-        emit(c, p, BC_POP, n, 0);
-        while (exits != NO_STEP && !c->error_type[0]) {
-            uint32_t next = p->items[exits].other;
-            patch(p, exits, p->len); exits = next;
-        }
-        break;
-    }
     case N_ANNOTATIONS:
         /* An annotation function's dict, then each entry that ran stored
          * in it (annotation_step); a lazy value's returns its value. */
@@ -16713,88 +16934,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         end = emit(c, p, BC_JUMP, n, 0); patch(p, branch, p->len);
         if (n->b) compile_expr(c, p, n->b);
         emit(c, p, BC_ASSERT, n, n->b != NULL); patch(p, end, p->len); break;
-    case N_IF:
-        branch = compile_branch(c, p, n->a, n);
-        compile_body(c, p, n->b); end = emit(c, p, BC_JUMP, n, 0);
-        patch(p, branch, p->len); compile_body(c, p, n->c); patch(p, end, p->len); break;
-    case N_FOR: case N_WHILE:
-        if (n->kind == N_FOR) compile_expr(c, p, n->a);
-        loop = emit(c, p, BC_LOOP, n, n->kind == N_FOR ? 1 + n->op : 0);
-        start = p->len;
-        if (loop != SIZE_MAX) p->items[loop].other = start;
-        if (n->kind == N_FOR) {
-            branch = compile_next(c, p, n, n->args);
-        }
-        else branch = compile_branch(c, p, n->a, n);
-        compile_body(c, p, n->b);
-        /* A body of one assignment at hand that a loop's step stores into
-         * runs in it (4). */
-        if (n->kind == N_FOR && branch != SIZE_MAX && p->items[branch].other && p->len > branch + 1 &&
-            p->items[branch + 1].op == BC_ASSIGN && p->items[branch + 1].target == p->len)
-            p->items[branch].other = 4;
-        patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
-        patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
-        compile_body(c, p, n->c); patch(p, loop, p->len); break;
-    case N_TRY: {
-        size_t final = n->c ? emit(c, p, BC_FINALLY, n, 0) : SIZE_MAX;
-        if (n->flags & F_STAR) {
-            /* The handler block keeps [unhandled rest, raised list]; each
-             * matched clause runs inside an inner block that collects its error. */
-            size_t handler = emit(c, p, BC_EXCEPT, n, 0);
-            compile_body(c, p, n->a);
-            emit(c, p, BC_POP_BLOCK, n, 0);
-            compile_body(c, p, n->b);
-            end = emit(c, p, BC_JUMP, n, 0);
-            patch(p, handler, p->len);
-            emit(c, p, BC_STAR_BEGIN, n, 0);
-            for (Node *h = n->args; h; h = h->next) {
-                compile_expr(c, p, h->a);
-                /* As a namespace's except handler (compile_handler). */
-                int unbinds = p->unbinds && h->c;
-                size_t match = emit(c, p, BC_STAR_MATCH, h, unbinds);
-                compile_handler(c, p, h, unbinds, 1);
-                size_t done = emit(c, p, BC_STAR_DONE, h, unbinds);
-                if (match != SIZE_MAX) p->items[match].other = p->len;
-                emit(c, p, BC_STAR_CAUGHT, h, unbinds);
-                patch(p, match, p->len); patch(p, done, p->len);
-            }
-            emit(c, p, BC_STAR_RERAISE, n, 0);
-            patch(p, end, p->len);
-            if (n->c) {
-                emit(c, p, BC_LEAVE, NULL, 0); patch(p, final, p->len);
-                compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, NULL, 0);
-            }
-            break;
-        }
-        /* Leaving a block reports no line of its own. */
-        size_t handler = n->args ? emit(c, p, BC_EXCEPT, n, 0) : SIZE_MAX;
-        compile_body(c, p, n->a);
-        if (n->args) emit(c, p, BC_POP_BLOCK, NULL, 0);
-        compile_body(c, p, n->b);
-        end = emit(c, p, BC_JUMP, NULL, 0);
-        patch(p, handler, p->len);
-        size_t first = p->len;
-        for (Node *h = n->args; h; h = h->next) {
-            if (h->a) compile_expr(c, p, h->a);
-            /* A namespace's handler binds and unbinds its name by
-             * instructions (BC_MATCH 2 leaves the exception; compile_handler). */
-            int unbinds = p->unbinds && h->c;
-            branch = emit(c, p, BC_MATCH, h, (h->a != NULL) | unbinds << 1);
-            compile_handler(c, p, h, unbinds, 0);
-            emit(c, p, BC_POP_BLOCK, NULL, 0);
-            emit(c, p, BC_JUMP, NULL, 1); patch(p, branch, p->len);
-        }
-        if (n->args) emit(c, p, BC_RERAISE, NULL, 0);
-        for (size_t i = first; i < p->len; i++)
-            if (p->items[i].op == BC_JUMP && p->items[i].arg && !p->items[i].target) p->items[i].target = p->len;
-        patch(p, end, p->len);
-        if (n->c) {
-            emit(c, p, BC_LEAVE, NULL, 0); patch(p, final, p->len);
-            compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, NULL, 0);
-        }
-        break;
-    }
-    case N_WITH: compile_with(c, p, n->args, n->b, n->op); break;
     case N_DELETE: compile_delete(c, p, n->a); break;
     /* A store of None by the statement (import_step). */
     case N_IMPORT: case N_FROM: emit(c, p, BC_NONE, n, 0); emit(c, p, BC_STORE, n, 1); break;
@@ -16833,8 +16972,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
 static int body_statements(Parser *p, Node *head, Node *stop) {
     SPYContext *c = p->ctx;
     for (Node *s = p->body.done ? p->body.done->next : head; s != stop && !c->error_type[0]; s = s->next) {
-        if (s == head && c->optimize > 1) drop_docstring(s);
-        compile_statement(c, p->body.program, s);
+        if (s == head && p->body.docs && c->optimize > 1) drop_docstring(s);
+        if (!(s->flags & F_EMITTED)) compile_statement(c, p->body.program, s);
         p->body.done = s;
     }
     return c->error_type[0] ? -1 : 0;
@@ -16847,7 +16986,7 @@ static Body body_begin(Parser *p, Node *n, size_t depth) {
     SPYContext *c = p->ctx;
     Body enclosing = p->body;
     Program *program = allocate(c, sizeof(*program));
-    p->body = (Body){program, NULL, depth, !n};
+    p->body = (Body){program, NULL, NULL, depth, !n, 1};
     if (!program) return enclosing;
     program->calls = c->pausing ? PAUSING : BODY;
     program->namespace = n && n->kind == N_CLASS;
@@ -16880,7 +17019,10 @@ static int module_body_finish(Parser *p, SPYValue *unit) {
     if (!unit->as.unit.annotate && !unit->as.unit.conditional_annotations) program->entry = 2;
     if (body_statements(p, body, last)) return -1;
     if (last->kind == N_EXPR && !program->display) { compile_expr(c, program, last->a); emit(c, program, BC_FLOW, last, FLOW_RETURN); }
-    else { compile_statement(c, program, last); emit(c, program, BC_NONE, NULL, 0); emit(c, program, BC_FLOW, NULL, FLOW_RETURN); }
+    else {
+        if (!(last->flags & F_EMITTED)) compile_statement(c, program, last);
+        emit(c, program, BC_NONE, NULL, 0); emit(c, program, BC_FLOW, NULL, FLOW_RETURN);
+    }
     return c->error_type[0] ? -1 : 0;
 }
 static int compile_generator(SPYContext *c, Node *n) {

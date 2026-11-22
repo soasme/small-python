@@ -165,14 +165,40 @@ comprehension as the statement holding it ends, and the module's body as
 the parse ends. Compiling `compile()` of the benchmark programs' sources
 costs the same number of instructions as before.
 
+The twelfth stage makes statements the unit of emission. A def's or
+class's header opens its body's program, and the module's opens at the
+parse's start; each simple statement is compiled into the open program as
+it ends, and the module holds its last one back until the parse ends,
+since an expression there gives the body's value. A compound statement
+compiles itself as its clauses are parsed:
+
+- `if` and `elif` emit their test after the condition, their suite as it
+  is parsed, and the jump past the rest before the next clause.
+- `while` and `for` emit their block and step before the suite, and the
+  jump back and the block's end after it.
+- `with` enters its items before the suite and exits them after it.
+- `match` keeps its subject on the stack and emits each case's pattern and
+  guard before the case's suite.
+- `try` reads ahead over the token stream to the keywords that follow each
+  clause, so it knows before its body whether it has handlers, `except*`
+  handlers, an `else` suite or a `finally` block. The `else` suite, parsed
+  after the handlers, is placed after them, where the jump past the
+  handlers reaches it.
+
+A class body starts its set of conditional annotations in
+`class_body_begin`, and a module program begins at its annotation step only
+when it has annotations (`Program.entry`), so no body's opening
+instructions wait for its end. Expressions are still compiled from their
+trees when their statement or clause header ends.
+
 ## Remaining stages
 
 1. Separate the remaining executable operands and definition records from
    source-location metadata. Preserve the existing fast paths while moving
    their operands out of tree links. Put constants and names in storage
    owned and traced by their code, including failure cleanup.
-2. Emit expressions and statements from the parser, in place of the
-   finished statement's compile. Collect bindings and
+2. Emit expressions from the parser, in place of the finished
+   statement's or clause header's compile. Collect bindings and
    declaration locations as each scope is parsed; resolve forward local,
    global, nonlocal and cell references by patching instructions. Branches
    use labels, and assignment parsing keeps target descriptors. Deferred
