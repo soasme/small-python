@@ -237,9 +237,6 @@ stack. Calls between Python functions whose bodies run on the machine
 already do ([Toward bytecode](#toward-bytecode)). What still holds a Python
 frame under a C frame:
 
-- bodies and statements the tree walker evaluates (a body without a call,
-  the statements after a body's last call, a `for` whose only call is its
-  iterable);
 - calls that C makes: special methods (`__eq__`, `__hash__`, operators,
   `__init__` and other class-call steps, iteration protocols), sort keys,
   builtins that call Python, trace callbacks, and host functions that
@@ -518,14 +515,10 @@ commit reports before and after timings.
 
 ### Toward bytecode
 
-Ordinary code is evaluated by walking the syntax tree; generators run on an
-instruction list that hands every expression that cannot suspend back to the
-walker. Move node kinds onto machine instructions one at a time, each only
-once it measures faster than the walker, then revisit locals in slots,
-which pay only once a machine step costs well under a walker node. A body
-that holds a call already runs on the machine, so that its calls do not
-recurse in C. The walker's remaining bodies and the calls C makes follow,
-so that any frame can pause
+All code runs on the instruction machine; nothing walks the syntax tree to
+execute it. Locals in slots are next, now that a machine step costs well
+under what a walker node did. The calls C makes follow, so that any frame
+can pause
 ([Resumable execution](#resumable-execution)); each step keeps every
 benchmark at least as fast as before. The plan and its measurements are in
 [docs/optimization.md](docs/optimization.md#toward-bytecode).
@@ -540,7 +533,7 @@ their trees hold 2.9 MB of the context's 4.7 MB (9,448 nodes, 64-bit macOS,
 `-O1`). Code that points into a tree cannot be saved in a snapshot or copied
 in from a prebuilt image either. In order, each step useful alone:
 
-1. The walker evaluates no body (above), so nothing needs a tree to run.
+1. Done: no body is evaluated by walking its tree.
 2. A code object holds everything it runs on: instructions, constants,
    names, slots, a line and column table, and no node pointers. The tree is
    freed once its unit is compiled.

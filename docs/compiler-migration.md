@@ -22,7 +22,7 @@ the original node.
 This is preparation for a different compiler, not its completion. The parser
 still builds `Node` trees. Scope analysis, `compile_expr`, `compile_body`,
 metadata queries and several instruction implementations still walk them.
-`BC_EVAL` and `BC_EXEC` still execute trees. No claim of a
+At this stage `BC_EVAL` and `BC_EXEC` still executed trees. No claim of a
 single-pass compiler or general speedup follows from this checkpoint.
 
 The second stage records three code properties during parsing: whether the
@@ -104,6 +104,46 @@ than evaluating it whole.
 `tests/spec/statements/computed_assignment.py` checks their evaluation
 order and single evaluation.
 
+The eighth stage loads `True`, `False`, `None` and `...` as constants, so
+operators on them fuse, and compiles a condition's `not` to no step: its
+`BC_FALSE` jumps on a true operand instead. A list or tuple display without
+starred items compiles its items' steps, then `BC_NEW` with the count,
+which takes them from the stack. `tests/spec/compound/negated_conditions.py`
+and `tests/spec/expressions/display_items_order.py` cover both.
+
+The ninth stage compiles the last statements handed whole to the walker,
+a bare `raise`, `pass`, `break`, `continue`, `global` and `nonlocal`, to
+steps of their own. With them `BC_EVAL` and `BC_EXEC` are gone: the
+specification tests run neither.
+
+The tenth stage removes the tree walker. `eval`, `execute_statements` and
+the statement and call evaluators behind them are deleted, so no statement
+or general expression runs from its tree. The paths that still reached
+them now run on the machine, except match patterns:
+
+- A fused call step (`BC_CALLF`) finds its callee and arguments only
+  where no code runs; otherwise its plain steps run, as an operator's do.
+  A method call's plain steps read the method before any argument other
+  than a literal, so its getter runs before an argument's `NameError`.
+- `BC_INCREMENT` and a `return` or `yield` of a name fall back to plain
+  steps in the same way.
+- `BC_STORE` stores only into a name, or, outside a class body and code
+  that can pause, an attribute or item of names and literals, which it
+  looks up itself (`store_operand`). Every other target is evaluated as
+  steps before `BC_SET_TARGET`.
+- Every class body, module body, interactive input and `eval` expression
+  runs as a machine program. A class's bases and keywords are always
+  argument steps. `exec` of a class body's code calls the body on the
+  machine.
+- A `del` of an attribute or item evaluates its operands as steps.
+- A pattern's value, class and key expressions, which are literals or
+  dotted names, are still read from their nodes, by `pattern_value`, as
+  the match reaches them.
+
+Instruction counts (clang -O2 -flto, callgrind, Linux arm64) against 0.9.0
+are lower for every benchmark program except `fib`, which is 1.18% higher;
+against the ninth stage they are within 0.26%.
+
 ## Remaining stages
 
 1. Separate the remaining executable operands and definition records from
@@ -116,11 +156,7 @@ order and single evaluation.
    use labels, and assignment parsing keeps target descriptors. Deferred
    annotations, comprehension bodies and reordered argument evaluation need
    instruction fragments that can be placed in their execution order.
-3. Move the remaining executable subtrees onto the instruction machine,
-   including interactive and expression input. Preserve heap frames and
-   cleanup stacks for every call, generator, coroutine and comprehension.
-   Remove tree execution instructions and their walker implementations.
-4. Build code metadata from code records and recorded symbol uses. Remove
+3. Build code metadata from code records and recorded symbol uses. Remove
    executable tree allocation, scope tree walks and node-based code caches.
    Keep source spans and definition identity without retaining a tree.
 

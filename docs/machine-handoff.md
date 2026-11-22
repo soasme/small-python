@@ -59,12 +59,12 @@ rather than duplicate:
 The census is a lower bound. These still run Python from C, either by
 design or because no spec test reaches them on the probe:
 
-- **The walker.** Interactive units (`spy_eval_interactive`) and
-  expression units run on the tree walker, not the machine, and never
-  pause. Without pausing compiled in (BODY mode), a function whose body
-  holds no call or loop also runs on the walker. The probe compiles with
-  pausing, so BODY-mode walker nesting is invisible to it. Compiling
-  everything as PAUSING costs about 80% on loops, so it is not the fix.
+- **Reads in C.** There is no tree walker: every body, interactive and
+  expression units included, runs on the machine. Two reads still run in
+  C: a match pattern's dotted value (`pattern_value`), whose attribute
+  getter is called from C, and the names of a store target of names or
+  literals (`store_name`), which a globals mapping's `__getitem__`
+  answers from C.
 - **By design.** A host function's `spy_call` (its `spy_callk` runs on the
   machine); trace and profile functions (`sys.settrace`, `sys.setprofile`),
   which `comparek` and the call paths call in C; the once-per-context load

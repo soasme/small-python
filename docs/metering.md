@@ -548,16 +548,11 @@ subscript assignment's or a target list's `__setitem__` and a deletion's
 `zip` or `map` or one taking from another iterator beside it, the
 comparisons of the items an `in` searches, a host function's `spy_call`
 (its `spy_callk` call runs on the machine and pauses),
-the metaclass call that makes a class, an import, `exec` and `eval`, and
-a call from what the walker evaluates whole. Without pausing compiled
-in, the walker runs a function whose body holds no call or loop, which
-ends within a bounded number of steps, and, inside a function on the
-machine, an assignment of one operator on operands at hand and
-arithmetic on names and literals, so an operator method such an
-expression reaches nests. The engine counts
+the metaclass call that makes a class, an import, `exec` and `eval`, an
+attribute getter a match pattern's dotted value reads, and a globals
+mapping's `__getitem__` that a store target's name reads. The engine counts
 the activations and pauses only in the outermost one, so a pause due
-inside native code waits until that code returns. Interactive and
-expression units run on the walker and do not pause.
+inside native code waits until that code returns.
 
 While a call is paused, other outermost calls run as usual and stop
 rather than pause. Freeing the context stops a paused call: it unwinds
