@@ -18,6 +18,10 @@ import tempfile
 def workloads():
     definitions = "\n".join(f"def f{i}(x):\n    return x + {i}" for i in range(64))
     yield "definitions", definitions + "\nassert f63(1) == 64\n"
+    body = "\n".join(f"    x += {i}" for i in range(128))
+    yield "function_body", "def run(x):\n" + body + "\n    return x\nassert run(1) == 8129\n"
+    namespace = "\n".join(f"    a{i} = b{i} = {i}" for i in range(64))
+    yield "namespace", "class Values:\n" + namespace + "\nassert Values.a63 == Values.b63 == 63\n"
     yield "constants", """def sink(first, x):
     return x
 def zero():

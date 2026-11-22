@@ -119,7 +119,7 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * statics chain its methods' self.attr stores through static_next; its
  * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
  * its first build. */
-struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -133,7 +133,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
-       F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */ };
+       F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */,
+       F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -4493,6 +4494,8 @@ typedef struct {
     const char *error_start, *error_end;
     int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1; 3: also a 0-based offset; 4: a 0-based offset, end offset 0). */
     SPYValue *unit;
+    Node *definition; /* The current function, lambda or class body; NULL at module level. */
+    size_t return_line; /* First valued return in the compiler's diagnostic order. */
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
     Node *deferred_node; /* When set, the deferred error covers this node. */
@@ -4519,6 +4522,7 @@ typedef struct {
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
+static Scope *scope_new(SPYContext *, Scope *, int);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
     if (grow(p->ctx, (void **)&p->tokens, &p->cap, p->len + 1, sizeof(Token))) return -1;
     p->tokens[p->len++] = (Token){kind, s, n, line, 0};
@@ -5758,7 +5762,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
     if (puts_buffer(&text, "(") || append(&text, start, (size_t)(end - start)) || puts_buffer(&text, "\n)")) {
         mem_free(text.data); return NULL;
     }
-    Parser inner = {.ctx = p->ctx, .unit = p->unit, .private_name = p->private_name,
+    Parser inner = {.ctx = p->ctx, .unit = p->unit, .definition = p->definition, .private_name = p->private_name,
                     .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
     Node *result = NULL;
     const char *copy = text.data + 1, *copy_end = copy + (end - start);
@@ -5936,6 +5940,7 @@ static Node *yield_expression(Parser *p) {
     }
     Node *n = node(p, N_YIELD);
     if (!n) return NULL;
+    if (p->definition && p->definition->kind != N_CLASS) p->definition->flags |= F_YIELDS;
     if (outside) p->deferred_node = n;
     if (take_word(p, "from")) {
         n->op = 1;
@@ -6255,7 +6260,9 @@ static Node *expression_inner(Parser *p, int min, int named) {
         left->b = node(p, N_RETURN);
         if (!left->b) return NULL;
         int async_function = p->async_function; p->async_function = 0; p->functions++;
+        Node *definition = p->definition; p->definition = left;
         left->b->a = plain_expression(p, 0);
+        p->definition = definition;
         p->functions--; p->async_function = async_function;
         if (!left->b->a) return NULL;
         goto assignment_expression;
@@ -7455,6 +7462,11 @@ static Node *statement(Parser *p) {
     p->statement_level++;
     Node *n = statement_body(p);
     p->statement_level--;
+    /* Namespace stores are known when the statement's body finishes. A
+     * nested definition has restored the enclosing parser context here. */
+    if (n && (!p->definition || p->definition->kind == N_CLASS) &&
+        (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) ||
+         n->kind == N_DELETE || (n->kind == N_ASSIGN && n->op == '=' && n->args))) n->flags |= F_NAMESPACE;
     if (n && misplaced) p->deferred_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
     if (n && !n->spanned) span_block(p, n, (size_t)(first - p->tokens));
     if (!p->statement_level) {
@@ -7559,10 +7571,14 @@ static Node *statement_body(Parser *p) {
             if (call_arguments(p, n)) return NULL;
         }
         int loops = p->loops, functions = p->functions, async_function = p->async_function, star = p->star;
+        Node *definition = p->definition;
+        size_t return_line = p->return_line;
+        p->definition = n; p->return_line = 0;
         const char *private_name = p->private_name;
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
         n->b = suite_after(p, "class definition", n->line);
+        p->definition = definition; p->return_line = return_line;
         if (n->b && body_annotations(p, n, n->b, &n->annotate)) return NULL;
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
@@ -7585,6 +7601,10 @@ static Node *statement_body(Parser *p) {
         size_t line = keyword_line(p);
         n = node(p, N_TRY);
         if (!n || !(n->a = suite_after(p, "'try' statement", line))) return NULL;
+        /* Bindings still follow source order. For return diagnostics the
+         * compiler visits else and finally before exception handlers. */
+        size_t body_return = p->return_line;
+        p->return_line = 0;
         Node **tail = &n->args;
         int bare = 0, star = -1;
         size_t bare_at = 0;
@@ -7652,12 +7672,15 @@ static Node *statement_body(Parser *p) {
             span_block(p, handler, except_at);
             *tail = handler; tail = &handler->next;
         }
+        size_t handler_return = p->return_line;
+        p->return_line = body_return;
         if (star == 1) n->flags |= F_STAR;
         if (take_word(p, "else")) {
             if (!n->args) { p->pos--; return syntax(p, "expected 'except' or 'finally' block"); }
             if (!(n->b = suite_after(p, "'else' statement", keyword_line(p)))) return NULL;
         }
         if (take_word(p, "finally") && !(n->c = suite_after(p, "'finally' statement", keyword_line(p)))) return NULL;
+        if (!p->return_line) p->return_line = handler_return;
         return n->args || n->c ? n : syntax(p, "expected 'except' or 'finally' block");
     }
     if (take_word(p, "if")) return if_statement(p);
@@ -7692,10 +7715,18 @@ static Node *statement_body(Parser *p) {
         if (take(p, T_ARROW) && !(n->c = expression(p, 0))) return NULL;
         if (function_annotations(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
+        Node *definition = p->definition;
+        size_t return_line = p->return_line;
+        p->definition = n; p->return_line = 0;
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
         n->b = suite_after(p, "function definition", n->line);
+        size_t first_return = p->return_line;
+        p->definition = definition; p->return_line = return_line;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
-        return n->b ? n : NULL;
+        if (!n->b || !(n->scope = scope_new(p->ctx, NULL, S_FUNCTION))) return NULL;
+        n->scope->return_line = first_return;
+        if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
+        return n;
     }
     if (keyword(p, "global") || keyword(p, "nonlocal")) {
         n = node(p, keyword(p, "global") ? N_GLOBAL : N_NONLOCAL);
@@ -7719,6 +7750,7 @@ static Node *statement_body(Parser *p) {
         if (outside) p->deferred_node = n;
         if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
         if (keyword(p, "for")) return syntax(p, "invalid syntax");
+        if (n->a && !p->return_line) p->return_line = n->line;
         return n;
     }
     if (keyword(p, "break") || keyword(p, "continue")) {
@@ -8297,7 +8329,10 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         Scope *outer = n->params ? scope_generic(c, scope, n->params) : scope;
         if (!outer) return -1;
         if (n->kind == N_CLASS && scope_walk(c, outer, n->args)) return -1;
-        n->scope = scope_new(c, outer, n->kind == N_CLASS ? S_CLASS : S_FUNCTION);
+        /* A parsed def already owns its compile-time properties. Lambdas,
+         * classes and synthesized annotation functions get their scope here. */
+        if (n->scope) n->scope->parent = outer;
+        else n->scope = scope_new(c, outer, n->kind == N_CLASS ? S_CLASS : S_FUNCTION);
         if (!n->scope) return -1;
         n->scope->owner = n;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
@@ -16595,18 +16630,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     }
     }
 }
-static int check_async_return(SPYContext *c, Node *n) {
-    for (; n; n = n->next) {
-        if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) continue;
-        if (n->kind == N_RETURN && n->a) {
-            c->line = n->line;
-            spy_error(c, "SyntaxError", "'return' with value in async generator"); return -1;
-        }
-        if (check_async_return(c, n->a) || check_async_return(c, n->b) ||
-            check_async_return(c, n->c) || check_async_return(c, n->args)) return -1;
-    }
-    return 0;
-}
 /* Whether statements body hold a loop, a comprehension's too, outside
  * the definitions among them. */
 static int loops(Node *body) {
@@ -16617,24 +16640,15 @@ static int loops(Node *body) {
     }
     return 0;
 }
-/* Flag the statements of class or module body n that bind names through
- * its namespace (F_NAMESPACE), outside the definitions among them. */
-static void namespace_bindings(Node *n) {
-    for (; n; n = n->next) {
-        if (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) || n->kind == N_DELETE ||
-            (n->kind == N_ASSIGN && n->op == '=' && n->args))
-            n->flags |= F_NAMESPACE;
-        /* A type alias's value is a function of its own. */
-        if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_TYPEALIAS) continue;
-        namespace_bindings(n->a); namespace_bindings(n->b); namespace_bindings(n->c); namespace_bindings(n->args);
-    }
-}
 /* A generator's, function's or class's body, on the machine: even a body
  * without a call may call Python through an operator or attribute. */
 static int compile_generator(SPYContext *c, Node *n) {
-    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
+    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS)), mode = c->pausing ? PAUSING : BODY;
     if (!generator && !n->b) return 0;
-    if (n->op == 2 && check_async_return(c, n->b)) return -1;
+    if (n->op == 2 && n->scope && n->scope->return_line) {
+        c->line = n->scope->return_line;
+        spy_error(c, "SyntaxError", "'return' with value in async generator"); return -1;
+    }
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
     p->calls = mode; p->namespace = p->unbinds = n->kind == N_CLASS;
@@ -16643,7 +16657,7 @@ static int compile_generator(SPYContext *c, Node *n) {
     c->code_work++;
     /* A class body first binds its implicit names, then the set of its
      * executed conditional annotations (class_part). */
-    if (n->kind == N_CLASS) { namespace_bindings(n->b); emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
+    if (n->kind == N_CLASS) { emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
     if (UNLIKELY(n->kind == N_CLASS && (n->flags & F_CONDITIONAL))) { emit(c, p, BC_CLASS, n, 8); emit(c, p, BC_POP, n, 0); }
     compile_body(c, p, n->b);
     if (n->kind == N_CLASS && n->params && n->args) {
@@ -25570,7 +25584,6 @@ static int module_program(SPYContext *c, SPYValue *unit) {
     c->code_work++;
     /* The body starts by binding its annotation names (annotation_step);
      * like a class body's, its bindings may go through a mapping. */
-    namespace_bindings(body);
     if (unit->as.unit.annotate || unit->as.unit.conditional_annotations) { emit(c, p, BC_CLASS, NULL, 17); emit(c, p, BC_POP, NULL, 0); }
     for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
     if (last->kind == N_EXPR && !p->display) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }

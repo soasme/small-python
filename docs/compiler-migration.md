@@ -25,6 +25,23 @@ metadata queries and several instruction implementations still walk them.
 `BC_EVAL`, `BC_EXEC` and `BC_BLOCK` still execute trees. No claim of a
 single-pass compiler or general speedup follows from this checkpoint.
 
+The second stage records three code properties during parsing: whether the
+current function contains a yield, the location of its first valued return
+in compiler diagnostic order, and whether a statement writes through a
+module or class namespace. Function bodies get their scope record before
+binding analysis; binding analysis fills that record and resolves its parent.
+Decorators and defaults remain in the enclosing parser context, while
+nested function, lambda and class bodies have their own context. Formatted
+string fields inherit that context.
+
+This removes the recursive `namespace_bindings` and `check_async_return`
+walkers and the generator-detection walk from `compile_generator`. The
+return diagnostic still follows binding errors and preserves Python 3.15's
+ordering between try suites and handlers. Recording yields before dropping
+optimized assertions also fixes generator classification under `-O` and
+`-OO`. Symbol binding and instruction emission still traverse trees; this
+stage does not claim to have completed the direct compiler.
+
 ## Remaining stages
 
 1. Separate the remaining executable operands and definition records from
@@ -95,6 +112,22 @@ under MemorySanitizer against the 4,090 retained corpus files. Both runs
 used the source fingerprint recorded in the benchmark report. Full
 `make sanitize` targets, ThreadSanitizer and full engine coverage have not
 been completed for this checkpoint; the checks above do not establish them.
+
+The parser-property stage passed 1,041 specification tests, all 158 TLA+
+models, the C API and metering probes, and all 205 allocation-failure
+programs plus intrinsic initialization on macOS arm64. All 33 standalone
+build tests passed, with their oracle checks. The new function-scope test
+fails on the saved pre-change engine's optimized generator classification
+and passes on this engine and the pinned oracle. Its `FunctionScopes`
+model checks 128 states and replays 64 transitions, including optimized
+assertions, nested function bodies and yields in defaults.
+
+The same 1,041 specification tests passed under Clang 18 AddressSanitizer
+and UndefinedBehaviorSanitizer on native Linux arm64. The longer fuzz,
+replay and full sanitizer runs for this second stage are not yet complete.
+Its alternating compilation measurements are 0.9–2.0% lower; end-to-end
+execution changes range from 0.7% faster to 1.0% slower. These small, mixed
+execution differences do not establish a general runtime improvement.
 
 `bench/compiler.c` and `bench/compiler.py` measure compilation separately
 from repeated execution. See [benchmark.md](benchmark.md) for the method
