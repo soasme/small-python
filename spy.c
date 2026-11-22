@@ -129,7 +129,6 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
-       F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
 /* A text operand and its name-lookup cache. Literal nodes use only text.
  * Instructions can borrow this record without inspecting a syntax tree. */
@@ -201,7 +200,7 @@ struct SPYValue {
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags; } unit;
+        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
@@ -8294,11 +8293,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         }
         if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = 2;
         return scope_node(c, scope, n->a);
-    case N_NAME:
-        /* So does code exec() and eval() run, whose locals and globals may
-         * be a mapping, its functions' too (name_load). */
-        if (scope->kind == S_CLASS || c->string_source) n->flags |= F_LOADED;
-        return scope_record(c, scope, n, S_USE);
+    case N_NAME: return scope_record(c, scope, n, S_USE);
     case N_STRING: return n->annotate ? scope_string_annotation(c, n) : 0;
     case N_GLOBAL: case N_NONLOCAL:
         for (Node *name = n->args; name; name = name->next)
@@ -8326,9 +8321,6 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         }
         return 0;
     case N_ASSIGN:
-        /* An augmented assignment's name is loaded too. */
-        if ((scope->kind == S_CLASS || c->string_source) && n->op != '=' && n->a->kind == N_NAME)
-            n->a->flags |= F_LOADED;
         if (scope_node(c, scope, n->b) || scope_target(c, scope, n->a, 1)) return -1;
         for (Node *target = n->args; target; target = target->next) if (scope_target(c, scope, target, 1)) return -1;
         return 0;
@@ -8571,7 +8563,7 @@ static void invalid_expression_error(Parser *p) {
     c->line = head->line; p->error_start = head->start; p->error_end = last->start + last->len;
 }
 static int at_hand(Node *n) {
-    return (n->kind == N_NAME && !(n->flags & F_LOADED)) || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING ||
+    return n->kind == N_NAME || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING ||
            n->kind == N_BYTES || n->kind == N_BOOL || n->kind == N_NONE || n->kind == N_ELLIPSIS;
 }
 static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)) || (n->kind == N_ATTR && n->a->kind == N_NAME && at_hand(n->a)); }
@@ -8746,6 +8738,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         }
         parsing = c->error_type[0] != 0;
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
+        unit->as.unit.string_source = c->string_source != 0;
         c->node_start = c->node_end = NULL;
         if (!c->error_type[0]) collect_end(&p, NULL, &unit->as.unit.annotate, annotations);
         if (!c->error_type[0]) nodes_finish(&p);
@@ -15776,9 +15769,11 @@ typedef struct {
  * which may call its namespace's __setitem__. */
 /* unbinds: a class or module body's, whose handlers unbind their names by
  * instructions, through a namespace mapping (15.4.1). */
+/* loads: a class body's, or code of a string exec() or eval() runs, whose
+ * names load through mappings (name_load): no fused step takes them. */
 /* plain, while a fused operator's plain steps compile (compile_operator);
  * tested, one past the last fused truth test, whose BC_FALSE may follow. */
-struct Program { Instruction *items; size_t len, cap, tested; int calls, display, namespace, unbinds, plain; };
+struct Program { Instruction *items; size_t len, cap, tested; int calls, display, namespace, unbinds, plain, loads; };
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -15999,8 +15994,10 @@ static Machine *machine_new(SPYContext *c, Program *code, SPYValue *env, SPYValu
  * is an if or a return, or an expression other than arithmetic on names
  * and literals (arithmetic) or an operator on operands at hand
  * (operator_right), whose special methods its steps call. */
-enum { CALLS = 1, BODY = 2, PAUSING = 3 };
+enum { CALLS = 1, BODY = 2, PAUSING = 3, LOADS = 4 /* expands' mode bit: Program.loads */ };
 static int expands(Node *n, int calls);
+/* The mode a program's nodes expand in (expands). */
+static int modes(Program *p) { return p->calls | (p->loads ? LOADS : 0); }
 /* Whether n is a list, tuple or set display with a starred item. */
 static int starred(Node *n) {
     if (n->kind != N_LIST && n->kind != N_TUPLE && n->kind != N_SET) return 0;
@@ -16027,15 +16024,18 @@ static int arithmetic(Node *n) {
 }
 static int expands(Node *n, int calls) {
     if (!n) return 0;
+    int loads = calls & LOADS;
+    calls &= ~LOADS;
     /* A class body binds and loads names through its namespace, and exec()
      * and eval() code loads them through its namespaces, whose Python
      * methods are calls (store_call, name_delete, name_load); a load is
      * no yield. */
-    if ((calls && (n->flags & F_LOADED)) || (calls >= BODY && (n->flags & F_NAMESPACE))) return 1;
+    if ((calls && loads && n->kind == N_NAME) || (calls >= BODY && (n->flags & F_NAMESPACE))) return 1;
     /* So does an annotation's record (record_annotation). */
     if (calls >= BODY && n->kind == N_ANNASSIGN && (n->flags & (F_FUTURE | F_CONDITIONAL))) return 1;
-    if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
+    if (calls == BODY && !loads && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
         (operator_right(n) || arithmetic(n))) return 0;
+    int mode = calls | loads;
     /* An import runs a module of source as a call (import_step), and a
      * raise may call the exception's class (raise_step). */
     if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && (n->kind == N_CALL || n->kind == N_IMPORT || n->kind == N_FROM)) ||
@@ -16050,18 +16050,18 @@ static int expands(Node *n, int calls) {
      * code holding it, which can pause in its body; while calls can pause,
      * so does a generator expression's iter() of its source. */
     if (n->kind == N_COMPREHENSION)
-        return (calls && n->op != N_TUPLE) || calls == PAUSING || expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
+        return (calls && n->op != N_TUPLE) || calls == PAUSING || expands(n->a->a, mode) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
     /* A loop whose iterable alone holds a call makes that call once. */
-    if (calls && n->kind == N_FOR && !expands(n->args, calls) && !list_expands(n->b, calls) && !list_expands(n->c, calls))
+    if (calls && n->kind == N_FOR && !expands(n->args, mode) && !list_expands(n->b, mode) && !list_expands(n->c, mode))
         return expands(n->a, 0);
     /* Applying a decorator is a call, and so is a class statement, whose
      * __build_class__, metaclass and body run on the machine (class_part). */
     if (n->kind == N_TYPEALIAS) return calls;
     if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS)
         return (calls && (n->decorators || n->params || n->kind == N_CLASS)) ||
-               list_expands(n->args, calls) || list_expands(n->decorators, calls);
-    return list_expands(n->a, calls) || list_expands(n->b, calls) || list_expands(n->c, calls) || list_expands(n->args, calls);
+               list_expands(n->args, mode) || list_expands(n->decorators, mode);
+    return list_expands(n->a, mode) || list_expands(n->b, mode) || list_expands(n->c, mode) || list_expands(n->args, mode);
 }
 static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     size_t pc = p->len;
@@ -16145,8 +16145,8 @@ static size_t compile_branch(SPYContext *c, Program *p, Node *n, Node *at) {
 }
 static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
-    if (n && !expands(n, p->calls) && operator_right(n)) compile_operator(c, p, n, 1);
-    else if (n && !expands(n, p->calls) && stacked_right(n)) compile_stacked(c, p, n, 1);
+    if (n && !expands(n, modes(p)) && operator_right(n)) compile_operator(c, p, n, 1);
+    else if (n && !expands(n, modes(p)) && stacked_right(n)) compile_stacked(c, p, n, 1);
     else compile_expr(c, p, n);
 }
 /* A call's or class header's arguments, each added by BC_ARG: the
@@ -16195,7 +16195,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
      * machine steps. */
     /* While calls can pause, a name's dictionary may hold a key with a
      * Python __eq__ (name_load): an expression loading one takes steps. */
-    if (!p->plain && !expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
+    if (!p->plain && !expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) &&
         !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
         if (operator_right(n)) { compile_operator(c, p, n, 0); return; }
         if (stacked_right(n)) { compile_stacked(c, p, n, 0); return; }
@@ -16285,7 +16285,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         }
         break;
     case N_CALL:
-        if (plain_call(n) && (at_hand(n->a) || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls) &&
+        if (plain_call(n) && (n->a->kind == N_ATTR || at_hand(n->a)) && !expands(n->a->kind == N_ATTR ? n->a->a : n->a, modes(p)) && !list_expands(n->args, modes(p)) &&
             !sort_call(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
             /* The fused call, then its plain steps. */
             size_t fused = emit(c, p, BC_CALLF, n, 0);
@@ -16319,7 +16319,7 @@ static void compile_target(SPYContext *, Program *, Node *);
  * cannot pause, when a Python __setitem__ or setter is BC_SET_TARGET's. */
 static int store_at_hand(Program *p, Node *n) {
     if (n->kind == N_NAME) return 1;
-    return (n->kind == N_ATTR || (n->kind == N_INDEX && at_hand(n->b))) && at_hand(n->a) && !p->namespace && p->calls != PAUSING;
+    return (n->kind == N_ATTR || (n->kind == N_INDEX && at_hand(n->b))) && at_hand(n->a) && !p->loads && p->calls != PAUSING;
 }
 static void compile_store(SPYContext *c, Program *p, Node *n, Node *at) {
     if (store_at_hand(p, n)) emit(c, p, BC_STORE, n, 1);
@@ -16390,7 +16390,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
 static int compile_comprehension(SPYContext *c, Node *n) {
     n->code = allocate(c, sizeof(*n->code));
     if (!n->code) return -1;
-    n->code->calls = c->pausing ? PAUSING : BODY;
+    n->code->calls = c->pausing ? PAUSING : BODY; n->code->loads = c->string_source != 0;
     compile_comprehension_clause(c, n->code, n, n->a);
     if (n->op == N_TUPLE) emit(c, n->code, BC_NONE, n, 0);
     emit(c, n->code, BC_FLOW, n, FLOW_RETURN);
@@ -16511,17 +16511,17 @@ static int pausing_loads(Program *p, Node *n) {
  * operator on such, outside a class body and while no name load takes
  * steps (pausing_loads); a counter's is BC_INCREMENT's. */
 static int assigns_at_hand(Program *p, Node *n) {
-    if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, p->calls)) return 0;
+    if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, modes(p))) return 0;
     Node *t = n->a;
-    return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) &&
+    return (t->kind == N_NAME || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) &&
            (item_at_hand(n->b) || operator_right(n->b));
 }
 /* Whether n is an assignment as assigns_at_hand takes, of arithmetic or a
  * list or tuple display. */
 static int assigns_steps(Program *p, Node *n) {
-    if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, p->calls)) return 0;
+    if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, modes(p))) return 0;
     Node *t = n->a;
-    return ((t->kind == N_NAME && !(t->flags & F_LOADED)) || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) && (operands_at_hand(n->b) || packed(n->b));
+    return (t->kind == N_NAME || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) && (operands_at_hand(n->b) || packed(n->b));
 }
 /* Assignment n at hand: a fused step that stores its value when no step
  * of it runs Python code, and jumps past n's plain steps after it; else
@@ -16551,7 +16551,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     if (assigns_at_hand(p, n)) { compile_assignment(c, p, n); return; }
     /* A starred annotation unpacks on the machine (annotation_step); an
      * assignment of arithmetic to a target at hand takes its steps. */
-    if (!expands(n, p->calls) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR) && !pausing_loads(p, n) &&
+    if (!expands(n, modes(p)) && !unpacks_annotation(n) && !(p->display && n->kind == N_EXPR) && !pausing_loads(p, n) &&
         !(assigns_steps(p, n))) {
         if (increment(n) && !p->namespace) {
             /* The sum, past the plain steps that run when it declines (increment_step). */
@@ -16656,7 +16656,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         /* A return of a name or literal returns it in its own step, before
          * the plain steps that run when the name is not at hand; one through
          * a namespace, or any while calls can pause, takes those alone. */
-        if (n->a && ((n->a->kind == N_NAME && !(n->a->flags & F_LOADED) && p->calls != PAUSING) || n->a->constant)) emit(c, p, BC_RETURN, n, 0);
+        if (n->a && ((n->a->kind == N_NAME && !p->loads && p->calls != PAUSING) || n->a->constant)) emit(c, p, BC_RETURN, n, 0);
         compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     case N_RAISE:
         /* A bare raise takes no operands (arg 2). */
@@ -16791,7 +16791,7 @@ static int compile_generator(SPYContext *c, Node *n) {
     }
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = mode; p->namespace = p->unbinds = n->kind == N_CLASS;
+    p->calls = mode; p->namespace = p->unbinds = n->kind == N_CLASS; p->loads = p->namespace || c->string_source;
     if (generator) n->code = p;
     else n->flat = p;
     c->code_work++;
@@ -16805,7 +16805,7 @@ static int compile_generator(SPYContext *c, Node *n) {
          * frame (header_step). */
         Program *header = allocate(c, sizeof(*header));
         if (!header) return -1;
-        header->calls = mode; n->params->flat = header;
+        header->calls = mode; header->loads = c->string_source != 0; n->params->flat = header;
         emit(c, header, BC_CLASS, n, 18); emit(c, header, BC_ARGS, n, 0);
         compile_arguments(c, header, n->args);
         emit(c, header, BC_CLASS, n, 19); emit(c, header, BC_FLOW, NULL, FLOW_RETURN);
@@ -25053,6 +25053,7 @@ static int module_program(SPYContext *c, SPYValue *unit, int interactive) {
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
     p->calls = c->pausing ? PAUSING : BODY; p->display = interactive || unit->as.unit.expression == 2; p->unbinds = 1;
+    p->loads = unit->as.unit.string_source;
     /* The body's value is its last statement's, when that is an expression. */
     Node *body = unit->as.unit.body, *last = body;
     while (last->next) last = last->next;
