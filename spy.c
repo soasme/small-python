@@ -21113,29 +21113,6 @@ static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value
     return unpack_values(c, f, n, value, count, star);
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls);
-static ALWAYS_INLINE int store_target(SPYContext *, Frame *, Node *, SPYValue *);
-/* Store value's items in target list n. An exact tuple or list with an
- * item for each target and no star, as CPython's UNPACK_SEQUENCE takes it,
- * is read in place; its items are held first, since a store may change it. */
-static NO_INLINE int store_items(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
-    SPYValue *held[8];
-    size_t count = 0;
-    int star = 0;
-    for (Node *item = n->args; item; item = item->next) { count++; star |= item->kind == N_STAR; }
-    if (!star && count <= 8 && (value->type == SPY_TUPLE || value->type == SPY_LIST) && value->as.seq.len == count) {
-        for (size_t i = 0; i < count; i++) held[i] = spy_retain(value->as.seq.items[i]);
-        size_t i = 0;
-        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) store_target(c, f, item, held[i++]);
-        while (count) spy_release(held[--count]);
-        return c->error_type[0] ? -1 : 0;
-    }
-    SPYValue *items = unpack_target(c, f, n, value);
-    if (!items) return -1;
-    size_t index = 0;
-    for (Node *item = n->args; item && !c->error_type[0]; item = item->next)
-        store_target(c, f, item->kind == N_STAR ? item->a : item, items->as.seq.items[index++]);
-    spy_release(items); return c->error_type[0] ? -1 : 0;
-}
 /* A name stored in its remembered slot cannot fail, so it skips the step
  * bookkeeping unless a trace function watches, as eval's names do. */
 /* Store value, taking it, in the entry of env remembered for a name. */
@@ -21250,16 +21227,14 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
         spy_release(object); spy_release(key);
         return status;
     }
-    if (n->kind == N_NAME) {
-        Entry *entry = name_slot(f->env, &n->name);
-        if (!entry) return calls && name_mapping(c, f->env, node_name(n)) ? 1 : name_bind(c, f->env, node_name(n), value);
-        SPYValue *old = entry->value;
-        class_changed(f->env);
-        entry->value = spy_retain(value);
-        spy_release(old);
-        return 0;
-    }
-    return store_items(c, f, n, value);
+    /* Else a name. */
+    Entry *entry = name_slot(f->env, &n->name);
+    if (!entry) return calls && name_mapping(c, f->env, node_name(n)) ? 1 : name_bind(c, f->env, node_name(n), value);
+    SPYValue *old = entry->value;
+    class_changed(f->env);
+    entry->value = spy_retain(value);
+    spy_release(old);
+    return 0;
 }
 static SPYValue *machine_pop(Machine *);
 static Result run_machine(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
