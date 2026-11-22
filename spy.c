@@ -8756,6 +8756,11 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         }
         for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated) {
             if (scope_resolve(c, n->scope)) break;
+            /* The compiler's error, after every symbol table error. */
+            if (n->kind == N_DEF && n->op == 2 && n->scope->return_line) {
+                c->line = n->scope->return_line;
+                spy_error(c, "SyntaxError", "'return' with value in async generator"); break;
+            }
             if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
             if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
         }
@@ -16785,10 +16790,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS)), mode = c->pausing ? PAUSING : BODY;
     if (!generator && !n->b) return 0;
-    if (n->op == 2 && n->scope && n->scope->return_line) {
-        c->line = n->scope->return_line;
-        spy_error(c, "SyntaxError", "'return' with value in async generator"); return -1;
-    }
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
     p->calls = mode; p->namespace = p->unbinds = n->kind == N_CLASS; p->loads = p->namespace || c->string_source;
