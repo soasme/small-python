@@ -21313,6 +21313,15 @@ static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, SPYValue *
 static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, value, 0); }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 static int store_hooked(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+static int store_collides(SPYContext *, SPYValue *, SPYValue *);
+/* store_hooked of a machine step's item store: an exact dict's of an int
+ * or str key, whose hash and comparison are C's, calls only to compare
+ * with a key the dict holds that may call Python (eq_keyed). */
+static ALWAYS_INLINE int store_calls(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
+    if (object->type == SPY_DICT && (key->type == SPY_INT || key->type == SPY_STRING))
+        return UNLIKELY(eq_keyed(object)) && store_collides(c, object, key);
+    return store_hooked(c, object, key, value);
+}
 /* The function the data descriptor *descriptor that owner gives
  * attribute name calls to store it, or with deleting to delete it: a
  * property's setter or deleter, or an instance's class's __set__ or
@@ -40411,7 +40420,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(a); spy_release(b); a = b = NULL;
             goto enter_k;
         CASE(BC_SET_TARGET)
-            if (ins->arg || (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) goto store_step;
+            if (ins->arg || (n->kind == N_INDEX && store_calls(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) goto store_step;
             if (n->kind == N_INDEX && UNLIKELY(slice_source(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) {
                 if (slice_listing(c, m)) goto consume_generator;
                 break;
@@ -40431,7 +40440,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 node_attribute(c, m->stack[m->len - 1], n, 0);
             machine_push(c, m, value); break;
         CASE(BC_SAVE_TARGET)
-            if (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 3], m->stack[m->len - 2], m->stack[m->len - 1])) goto store_step;
+            if (n->kind == N_INDEX && store_calls(c, m->stack[m->len - 3], m->stack[m->len - 2], m->stack[m->len - 1])) goto store_step;
             value = machine_pop(m);
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
