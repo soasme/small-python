@@ -127,10 +127,6 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048,
-       F_PLAIN_CALL = 4096 /* A call of at most eight positional arguments, none starred. */,
-       F_NAMED_CALLEE = 8192 /* A call of a name, until the fast path misses it. */,
-       F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
-       F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
        F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_LOADED = 262144 /* A class body's, or exec() and eval() code's, load of a name: through its namespace (name_load). */,
@@ -7965,23 +7961,16 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
 static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
 static SPYValue *literal_value(SPYContext *, Node *);
 static Node *operator_right(Node *);
-static int direct_operand(Node *);
-static int plain_call(Node *);
-static int paired_items(Node *, Node *);
 static SPYValue *unary(SPYContext *, int, SPYValue *);
 /* The nodes parsed since the last statement's, newest first: a number's
- * value, the properties the machine reads, then a negated number as a
- * constant, as CPython folds it, an inner negation before its outer. */
+ * value, F_OPERATOR, then a negated number as a constant, as CPython
+ * folds it, an inner negation before its outer. */
 static int nodes_finish(Parser *p) {
     SPYContext *c = p->ctx;
     Node *newest = p->unit->as.unit.nodes;
     for (Node *n = newest; n != p->finished && !c->error_type[0]; n = n->allocated) {
         if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) literal_value(c, n);
         if (operator_right(n)) n->flags |= F_OPERATOR;
-        if (n->kind == N_BINARY && n->a && n->b && (direct_operand(n->a) || direct_operand(n->b))) n->flags |= F_DIRECT_OPERAND;
-        if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL | (n->a->kind == N_NAME ? F_NAMED_CALLEE : 0);
-        if (n->kind == N_ASSIGN && n->op == '=' && !n->args && n->a->kind == N_TUPLE && n->b->kind == N_TUPLE &&
-            paired_items(n->a->args, n->b->args)) n->flags |= F_PAIRED;
     }
     for (Node *n = newest; n != p->finished && !c->error_type[0]; n = n->allocated)
         if (n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
@@ -8612,15 +8601,6 @@ static Node *operator_right(Node *n) {
         n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     return right && item_at_hand(n->a) && item_at_hand(right) ? right : NULL;
 }
-/* Whether tuples a and b have the same number of items, at most 8, and
- * neither has a starred one. */
-static int paired_items(Node *a, Node *b) {
-    size_t count = 0;
-    for (; a && b && a->kind != N_STAR && b->kind != N_STAR && count < 8; a = a->next, b = b->next) count++;
-    return !a && !b;
-}
-/* An operand eval_operand can take without a second eval. */
-static int direct_operand(Node *n) { return n->kind == N_CALL || (n->kind == N_ATTR && n->a->kind == N_NAME); }
 static int plain_call(Node *n) {
     size_t argc = 0;
     for (Node *arg = n->args; arg; arg = arg->next, argc++)
