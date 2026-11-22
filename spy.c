@@ -544,6 +544,7 @@ struct SPYContext {
     SPYValue *splitting;
     /* The code unit_enter runs in place of its unit's body: a generic class's header (header_step). */
     Program *k_code;
+    int interactive_input; /* eval_source parses interactive input, whose expression statements display their values. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -8661,6 +8662,7 @@ static int keyword_plain_call(Node *n) {
     }
     return keywords > 0;
 }
+static int module_program(SPYContext *, SPYValue *, int);
 static SPYValue *parse_normalized(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
@@ -8789,6 +8791,9 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (p.deferred_node && p.deferred_node->spanned) { p.error_start = p.deferred_node->start; p.error_end = p.deferred_node->end; }
             spy_error(c, "SyntaxError", p.deferred);
         }
+        /* Last, the module's body, of the input mode the parse read. */
+        unit->as.unit.expression = c->eval_input;
+        if (!c->error_type[0] && unit->as.unit.body) module_program(c, unit, c->interactive_input);
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
@@ -25066,10 +25071,10 @@ static Result module_end(SPYContext *c, Machine *m, SPYValue *outer, Result r) {
     c->eval_env = outer;
     return r;
 }
-/* Compile unit's body, which has statements, for the machine once: -1 on
- * an error. An interactive unit's displays its expression statements. */
+/* Compile unit's body, which has statements, for the machine, as its
+ * parse ends: -1 on an error. An interactive unit's displays its
+ * expression statements. */
 static int module_program(SPYContext *c, SPYValue *unit, int interactive) {
-    if (unit->as.unit.flat) return 0;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
     p->calls = c->pausing ? PAUSING : BODY; p->display = interactive || unit->as.unit.expression == 2; p->unbinds = 1;
@@ -25090,12 +25095,11 @@ static int module_program(SPYContext *c, SPYValue *unit, int interactive) {
     return 0;
 }
 static Result module_body(SPYContext *c, Frame *f) {
-    /* The body a pausable call runs first (eval_source), compiled while
-     * its entry may still pause (halt). */
+    /* The body a pausable call runs first (eval_source). */
     int pausable = c->pause_entry;
     SPYValue *unit = f->unit;
     Node *body = unit->as.unit.body;
-    Machine *m = !body || module_program(c, unit, f->interactive) ? NULL : machine_new(c, unit->as.unit.flat, f->env, unit);
+    Machine *m = body ? machine_new(c, unit->as.unit.flat, f->env, unit) : NULL;
     c->pause_entry = 0;
     if (!m) return (Result){body ? FLOW_ERROR : FLOW_NORMAL, NULL};
     m->owner = body; m->frame.interactive = f->interactive;
@@ -31055,13 +31059,13 @@ static SPYValue *indexed_call(SPYContext *c, Machine *m, SPYValue *callee, int m
     return result;
 }
 /* Prepare unit, a module body with statements, to run in env on the
- * machine: its docstring stored and its body compiled; -1 on an error. */
+ * machine: its docstring stored; -1 on an error. */
 static int unit_call(SPYContext *c, SPYValue *unit, SPYValue *env) {
     /* A module's docstring is its first statement's store to __doc__. */
     SPYValue *doc = unit->as.unit.expression ? NULL : docstring(c, unit->as.unit.body);
     int status = doc ? name_set(c, env, "__doc__", doc) : c->error_type[0] ? -1 : 0;
     spy_release(doc);
-    return status || module_program(c, unit, 0);
+    return status;
 }
 /* exec() or eval(), callee, given argc arguments argv, which it takes, from
  * a step of the machine: the unit of source or of a module's code is a
@@ -51938,7 +51942,9 @@ static SPYValue *eval_source(SPYContext *c, const char *source, const char *file
     spy_clear_error(c);
     /* An outermost call pauses while no other is paused. */
     int pausable = c->pause_entry = !interactive && c->entries == 1 && c->pausing && !c->pause_root;
+    c->interactive_input = interactive;
     SPYValue *unit = parse(c, source, strlen(source), filename ? filename : "<string>");
+    c->interactive_input = 0;
     Frame frame = {c->globals, unit, interactive};
     Result result = unit ? execute_module(c, &frame) : (Result){FLOW_ERROR, NULL};
     c->pause_entry = 0;
