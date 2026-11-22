@@ -31865,8 +31865,8 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        callee->as.native.kwcall == set_method ||
                                                        (((argv[1]->type == SPY_TUPLE && argv[1]->listed) || argv[1]->type == SPY_FROZENDICT) && callee->as.native.kwcall == set_item_method) ||
                                                        /* dict.__getitem__ of a subclass's instance (native_entered) */
-                                                       ((walk_operand(argv[1]) || argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_SLICE) &&
-                                                        callee->as.native.kwcall == slot_call) ||
+                                                       (callee->as.native.kwcall == slot_call &&
+                                                        (walk_operand(argv[1]) || argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_SLICE)) ||
                                                        /* a bytes join of exporters (buffer_argument), or choices (buffered_choice) */
                                                        ((argv[1]->type == SPY_LIST || argv[1]->type == SPY_TUPLE) && bytes_joining(callee)) ||
                                                        /* bytearray.extend given its bytearray (consumer_of) */
