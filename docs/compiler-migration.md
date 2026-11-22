@@ -57,6 +57,21 @@ on arm64. Other instructions and the parser still depend on trees. The
 next ownership change must move these records into code-owned storage
 before those nodes can be removed.
 
+The fourth stage removes tree reads from fused operators. An operator on
+operands at hand (a literal, a name, an item of those, or a name's
+attribute) compiles to a fused `BC_OPERATE` followed by its plain steps:
+the operands' loads and the operator's `BC_BINARY`, `BC_COMPARE` or
+`BC_INDEX`. The fused step reads its operands from those loads' operands,
+and jumps past them when it computes the result without running Python
+code. Otherwise it falls through, and the plain steps evaluate the
+operator on the machine. A truth test fuses with the `BC_FALSE` after the
+plain steps into `BC_TEST`, sharing its target. Neither step evaluates a
+tree or calls Python code, so the machine paths that resumed them after a
+call are gone. Literal constants are made when an operand first compiles,
+since a comprehension may compile before the pass that makes the rest.
+`tests/spec/expressions/operator_operands_once.py` checks that operands
+and special methods run once along every fall-through.
+
 ## Remaining stages
 
 1. Separate the remaining executable operands and definition records from

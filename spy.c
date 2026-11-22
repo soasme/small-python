@@ -7978,6 +7978,14 @@ static Node *statements(Parser *p) {
     return head;
 }
 static SPYValue *number_literal(SPYContext *, Node *);
+/* A number's, str's or bytes's literal value, made once. */
+static SPYValue *literal_value(SPYContext *c, Node *n) {
+    if (n->constant) return n->constant;
+    if (n->kind == N_STRING || n->kind == N_BYTES)
+        return n->constant = n->kind == N_STRING ? spy_string(c, n->name.text, (size_t)n->op) : spy_bytes(c, n->name.text, (size_t)n->op);
+    c->line = n->line;
+    return n->constant = number_literal(c, n);
+}
 /* The name node in target n that binds name, if any. */
 static Node *target_name(Node *n, const char *name) {
     if (n->kind == N_NAME) return strcmp(n->name.text, name) ? NULL : n;
@@ -8733,10 +8741,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (scope_resolve(c, n->scope)) break;
             if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
             if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
-            if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) {
-                c->line = n->line;
-                n->constant = number_literal(c, n);
-            }
+            if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) literal_value(c, n);
             if (operator_right(n)) n->flags |= F_OPERATOR;
             if (n->kind == N_BINARY && n->a && n->b && (direct_operand(n->a) || direct_operand(n->b))) n->flags |= F_DIRECT_OPERAND;
             if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL | (n->a->kind == N_NAME ? F_NAMED_CALLEE : 0);
@@ -15757,7 +15762,9 @@ typedef struct {
  * which may call its namespace's __setitem__. */
 /* unbinds: a class or module body's, whose handlers unbind their names by
  * instructions, through a namespace mapping (15.4.1). */
-struct Program { Instruction *items; size_t len, cap; int calls, display, namespace, unbinds; };
+/* plain, while a fused operator's plain steps compile (compile_operator);
+ * tested, one past the last fused truth test, whose BC_FALSE may follow. */
+struct Program { Instruction *items; size_t len, cap, tested; int calls, display, namespace, unbinds, plain; };
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -16048,24 +16055,54 @@ static int expands(Node *n, int calls) {
 }
 static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     size_t pc = p->len;
-    /* A test's operator step and its jump are one step, BC_TEST. */
-    if (op == BC_FALSE && pc && p->items[pc - 1].op == BC_OPERATE && p->items[pc - 1].arg) { op = BC_TEST; pc--; }
-    else if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
-    else p->items[p->len++] = (Instruction){.node = n, .arg = arg};
+    /* A fused truth test whose plain steps end here jumps past this
+     * BC_FALSE, or to its target, which patch gives both. */
+    size_t test = op == BC_FALSE && p->tested && p->items[p->tested - 1].target == pc ? p->tested : 0;
+    if (test) {
+        p->items[test - 1].op = BC_TEST; p->items[test - 1].step = c->steps ? c->steps[BC_TEST] : NULL;
+        p->items[test - 1].other = (uint32_t)pc + 1;
+    }
+    if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
+    else p->items[p->len++] = (Instruction){.node = n, .arg = arg, .other = (uint32_t)test};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     if (op == BC_LOAD) p->items[pc].constant = n->constant;
     if (op == BC_NAME) p->items[pc].name = &n->name;
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
-    if (pc != SIZE_MAX) p->items[pc].target = target;
+    if (pc == SIZE_MAX) return;
+    p->items[pc].target = target;
+    if (p->items[pc].op == BC_FALSE && p->items[pc].other) p->items[p->items[pc].other - 1].target = target;
 }
 static void compile_expr(SPYContext *, Program *, Node *);
+/* The shape of an operand at hand (item_at_hand), as its plain steps take
+ * it: a literal, a name, an item of those, or a name's attribute. */
+enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR };
+static int operand_shape(SPYContext *c, Node *n) {
+    if (n->kind == N_INDEX) { operand_shape(c, n->a); operand_shape(c, n->b); return SHAPE_ITEM; }
+    if (n->kind == N_ATTR || n->kind == N_NAME) return n->kind == N_ATTR ? SHAPE_ATTR : SHAPE_NAME;
+    literal_value(c, n);
+    return SHAPE_LOAD;
+}
+/* Operator n on operands at hand (operator_right): a fused step that takes
+ * them from n's plain steps after it and jumps past those when it computes
+ * n without running Python code, else lets them run; with truth, its
+ * value is tested, and a BC_FALSE after them makes it a BC_TEST. Its arg
+ * holds truth, the operands' shapes, and the right one's first step after
+ * it: 1, 2 or 3 past the left's. */
+static void compile_operator(SPYContext *c, Program *p, Node *n, int truth) {
+    int left = operand_shape(c, n->a), right = operand_shape(c, operator_right(n));
+    size_t fused = emit(c, p, BC_OPERATE, n, truth | left << 1 | right << 3 | (left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1) << 5);
+    p->plain++; compile_expr(c, p, n); p->plain--;
+    patch(p, fused, p->len);
+    if (truth && fused != SIZE_MAX) p->tested = fused + 1;
+}
 /* An expression whose truth the next instruction tests: an and/or evaluated
  * at once passes on the truth it computed (BC_EVAL with arg 1). */
 static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
-    if (n && !expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n))) emit(c, p, operator_right(n) ? BC_OPERATE : BC_EVAL, n, 1);
+    if (n && !expands(n, p->calls) && operator_right(n)) compile_operator(c, p, n, 1);
+    else if (n && !expands(n, p->calls) && n->kind != N_COMPARE) emit(c, p, BC_EVAL, n, 1);
     else compile_expr(c, p, n);
 }
 /* A call's or class header's arguments, each added by BC_ARG: the
@@ -16095,9 +16132,10 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
      * machine steps. */
     /* While calls can pause, a name's dictionary may hold a key with a
      * Python __eq__ (name_load): an expression loading one takes steps. */
-    if (!expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
+    if (!p->plain && !expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n)) &&
         !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
-        emit(c, p, operator_right(n) ? BC_OPERATE : BC_EVAL, n, 0);
+        if (operator_right(n)) compile_operator(c, p, n, 0);
+        else emit(c, p, BC_EVAL, n, 0);
         return;
     }
     size_t branch, end, parts;
@@ -17760,9 +17798,7 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     if (tick(c, f, n)) return NULL;
     SPYValue *a = NULL, *b = NULL, *result = NULL;
     switch (n->kind) {
-    case N_STRING: case N_BYTES:
-        if (!n->constant) n->constant = n->kind == N_STRING ? spy_string(c, n->name.text, (size_t)n->op) : spy_bytes(c, n->name.text, (size_t)n->op);
-        return spy_retain(n->constant);
+    case N_STRING: case N_BYTES: return spy_retain(literal_value(c, n));
     case N_TEMPLATE: {
         SPYValue *parts = value_new(c, SPY_LIST);
         if (!parts) return NULL;
@@ -17917,11 +17953,27 @@ static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
 }
 /* An attribute of a name found in a plain instance's own entries, as
  * node_attribute finds it, borrowed. */
-static NO_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *v = name_fast(f->env, &n->a->name);
+static NO_INLINE SPYValue *attr_found(SPYContext *c, SPYValue *v, Node *n) {
     int kind = v && plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
     Entry *e = kind == ATTR_OWN || kind == ATTR_METHOD ? dict_slot(v, &n->b->name) : NULL;
     return e ? e->value : NULL;
+}
+static ALWAYS_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) { return attr_found(c, name_fast(f->env, &n->a->name), n); }
+/* A leaf's value at hand from its plain step ins: BC_LOAD's constant or
+ * BC_NAME's name along the fast path, borrowed. */
+static ALWAYS_INLINE SPYValue *leaf_step(Frame *f, Instruction *ins) {
+    return ins->op == BC_LOAD ? ins->constant : name_fast(f->env, ins->name);
+}
+static NO_INLINE SPYValue *item_step(Frame *f, Instruction *ins) {
+    SPYValue *x = leaf_step(f, ins), *y = x ? leaf_step(f, ins + 1) : NULL;
+    return y ? sequence_item(x, y) : NULL;
+}
+/* The operand of shape whose plain steps start at ins, found without
+ * running code (operand), borrowed; else NULL. */
+static ALWAYS_INLINE SPYValue *step_operand(SPYContext *c, Frame *f, Instruction *ins, int shape) {
+    if (shape == SHAPE_LOAD) return ins->constant;
+    if (shape == SHAPE_NAME) return name_fast(f->env, ins->name);
+    return shape == SHAPE_ITEM ? item_step(f, ins) : attr_found(c, name_fast(f->env, ins->name), ins[1].node);
 }
 /* An operand found along the fast path, borrowed: a literal, a name, an
  * item of a list or tuple they index, or an instance's attribute. Finding
@@ -36063,40 +36115,33 @@ static int truth_index(SPYContext *c, Machine *m, SPYValue *v, SPYValue *y, SPYV
     else if (!callk(c, m, index, 1, (SPYValue *[]){result}, truth_indexed, state) && c->k_fn) c->consuming = 1;
     return 1;
 }
-/* The truth a test's or a chained comparison's call (truth_call) returned
- * in result, which it takes, into step ins: the test jumps when false;
- * the chain goes on with its right operand when true, else jumps out with
- * the comparison's result. The machine, at its pc. */
+/* The truth a chained comparison's call (truth_call) returned in result,
+ * which it takes, into step ins: the chain goes on with its right operand
+ * when true, else jumps out with the comparison's result. The machine, at
+ * its pc. */
 static NO_INLINE Machine *truth_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
-    SPYValue *marker = machine_pop(m), *v = machine_pop(m), *y = ins->op == BC_COMPARE ? machine_pop(m) : NULL;
+    SPYValue *marker = machine_pop(m), *v = machine_pop(m), *y = machine_pop(m);
     if (result == c->missing) {
         /* An absent __bool__'s truth is __len__'s (truth_length). */
         spy_release(marker); spy_release(result);
-        if (y && machine_push(c, m, y)) { spy_release(v); return m; }
+        if (machine_push(c, m, y)) { spy_release(v); return m; }
         if (!(result = truth_length(c, m, v))) return m;
-        marker = machine_pop(m); v = machine_pop(m); y = y ? machine_pop(m) : NULL;
+        marker = machine_pop(m); v = machine_pop(m); y = machine_pop(m);
     }
     if (result && marker == c->booleans[0] && truth_index(c, m, v, y, result)) { release_all(3, (SPYValue *[]){marker, v, y}); return m; }
     int truth = !result ? 0 : marker == c->missing ? truth_of(result) : truth_result(c, v, marker == c->booleans[1], result);
     spy_release(marker);
     if (c->error_type[0]) { spy_release(v); spy_release(y); return m; }
-    if (truth && y) { machine_push(c, m, y); y = NULL; }
-    else if (!truth) { m->pc = ins->target; if (y) { machine_push(c, m, v); v = NULL; } }
+    if (truth) { machine_push(c, m, y); y = NULL; }
+    else { m->pc = ins->target; machine_push(c, m, v); v = NULL; }
     spy_release(v); spy_release(y);
     return m;
 }
 /* Operator step ins ends with value, which it takes, its right operand y:
- * a test jumps on its truth, a comparison in a chain goes on with y or
+ * a comparison in a chain goes on with y or
  * jumps out, a Python __bool__ or __len__ a call (truth_call); others push
  * it. The pc to run next. */
 static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *ins, SPYValue *y, SPYValue *value, size_t pc) {
-    if (ins->op == BC_TEST) {
-        if (!value) return pc;
-        if (value->type != SPY_BOOL && truth_call(c, m, value, NULL)) return pc;
-        int truth = value->type == SPY_BOOL ? (int)value->as.integer_data.small : truthy(value);
-        spy_release(value);
-        return truth ? pc : ins->target;
-    }
     if (ins->op == BC_COMPARE) {
         SPYValue *kept = NULL;
         if (m->len && m->stack[m->len - 1] == c->keeping) { spy_release(machine_pop(m)); y = kept = machine_pop(m); }
@@ -38766,7 +38811,7 @@ static SPYValue *length_indexed(SPYContext *c, Machine *m, SPYValue *state, SPYV
 static int next_ended(SPYContext *, SPYValue *);
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
-    if ((ins->op == BC_TEST || ins->op == BC_COMPARE) &&
+    if (ins->op == BC_COMPARE &&
         (m->stack[m->len - 1] == c->booleans[0] || m->stack[m->len - 1] == c->booleans[1] || m->stack[m->len - 1] == c->missing))
         return truth_returned(c, m, ins, result);
     if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
@@ -38887,9 +38932,6 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     spy_release(v);
     return m;
 }
-/* BC_OPERATE's or BC_TEST's operator on its operands x and y: its value;
- * or, for an instance's Python special method, the call to enter
- * (operator_call). */
 /* Test ins of x in or not in y, a list or tuple: its value, or c->unbound
  * for the machine to search (sequence_contains); of x == y or x != y, NULL
  * for the native comparison, or c->unbound for the machine's (python_pair). */
@@ -38908,34 +38950,15 @@ static NO_INLINE SPYValue *sequence_test(SPYContext *c, Instruction *ins, SPYVal
     int found = sequence_contains(c, x, y, 1);
     return found == 2 ? c->unbound : found < 0 ? NULL : spy_bool(c, (op == O_IN) == found);
 }
-static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
-    int op = 0;
-    if (UNLIKELY(x->type == SPY_MAPPINGPROXY) && step_operation(ins, &op) == OPERATE_COMPARE && (op == T_EQ || op == T_NE)) {
-        /* A mappingproxy's == and != compare its mapping (proxy_compared). */
-        SPYValue *compared = proxy_compared(c, spy_retain(x), y), *value = compared ? operate_step(c, m, ins, compared, y, env) : NULL;
-        spy_release(compared);
-        return value;
-    }
-    /* Builtin operands call no Python method on the machine but the items'
-     * an in searches in a list or tuple (sequence_test) or an iterator. */
-    if (x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && y->type != SPY_ITERATOR) {
-        SPYValue *value = y->type == SPY_LIST || y->type == SPY_TUPLE ? sequence_test(c, ins, x, y) :
-                          y->type == SPY_DICT && x->type == SPY_DICT ? c->unbound : NULL;
-        if (value != c->unbound) return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
-    }
-    if (UNLIKELY(!c->intrinsics) && operator_intrinsic(c, ins, x, y)) {
-        /* Its intrinsic's module loads first, the step taking its operands again (intrinsics_step). */
-        SPYValue *unit = intrinsics_step(c, m, NULL, NULL, env);
-        c->entering_kind = CALL_INTRINSICS;
-        return unit;
-    }
-    SPYValue *function = operator_call(c, m, ins, x, y, env);
-    if (function == c->unbound && c->k_fn) return NULL;
-    if (function || c->error_type[0]) return function;
-    if (c->looked) return looked(c);
-    /* An operand's Python __buffer__ or __index__ is a call on m (machine_operand). */
-    SPYValue *value = machine_operand(c, m, ins, x, y);
-    return value == c->unbound ? operate(c, ins->node, x, y) : value;
+/* A fused operator step's ins on operands x and y, computed natively when
+ * that runs no Python code: neither is an instance, nor y an iterator, nor
+ * a sequence's or dict's items compare by Python; else c->unbound for its
+ * plain steps to run. */
+static NO_INLINE SPYValue *operate_native(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y) {
+    if (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE || y->type == SPY_ITERATOR || x->type == SPY_MAPPINGPROXY) return c->unbound;
+    SPYValue *value = y->type == SPY_LIST || y->type == SPY_TUPLE ? sequence_test(c, ins, x, y) :
+                      y->type == SPY_DICT && x->type == SPY_DICT ? c->unbound : NULL;
+    return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
 }
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Machine *m, Frame *f, Node *n) { return assign(c, f, n, m); }
@@ -40257,16 +40280,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             } else machine_push(c, m, eval(c, &f, n));
             NEXT;
         CASE(BC_OPERATE)
-            /* Its operands taken at hand, as on eval's operator fast path. */
-            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(c, &f, n->a) : NULL;
-            y = x ? operand(c, &f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            /* Its operands taken at hand from its plain steps, which run when
+             * it cannot compute n natively (compile_operator). */
+            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 3) : NULL;
+            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 5)], ins->arg >> 3 & 3) : NULL;
             value = y ? operator_fast(c, n, x, y) : NULL;
-            if (!value && !c->error_type[0]) {
-                callee_env = NULL;
-                value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
-                if (callee_env) { special = c->entering_kind; goto enter_special; }
-                if (UNLIKELY(!value && c->k_fn)) goto enter_k;
+            if (UNLIKELY(!value)) {
+                if (y && !c->error_type[0]) value = operate_native(c, ins, x, y);
+                if (!value || value == c->unbound) { value = NULL; continue; }
             }
+            pc = ins->target;
             machine_push(c, m, value);
             NEXT;
         CASE(BC_NAME)
@@ -40568,23 +40591,22 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             break;
         }
         CASE(BC_TEST) {
-            /* BC_OPERATE then BC_FALSE, a comparison of numbers making no bool. */
-            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(c, &f, n->a) : NULL;
-            y = x ? operand(c, &f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            /* A fused operator and the BC_FALSE after its plain steps, at
+             * other - 1, sharing its target: a comparison of numbers makes
+             * no bool; a value not a bool is left to that BC_FALSE. */
+            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 3) : NULL;
+            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 5)], ins->arg >> 3 & 3) : NULL;
             int truth = y && n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
             if (truth < 0) {
                 value = y ? operator_fast(c, n, x, y) : NULL;
-                if (!value && !c->error_type[0]) {
-                    callee_env = NULL;
-                    value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
-                    if (callee_env) { special = c->entering_kind; goto enter_special; }
-                    if (UNLIKELY(!value && c->k_fn)) goto enter_k;
-                }
-                if (!(a = value)) break;
-                truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a);
+                if (!value && y && !c->error_type[0]) value = operate_native(c, ins, x, y);
+                if (!value || value == c->unbound) { value = NULL; continue; }
+                if (value->type != SPY_BOOL) { pc = ins->other - 1; machine_push(c, m, value); break; }
+                truth = (int)value->as.integer_data.small;
+                spy_release(value);
             }
-            if (!truth) pc = ins->target;
-            NEXT_RELEASE;
+            pc = truth ? ins->other : ins->target;
+            NEXT;
         }
         CASE(BC_FALSE)
             a = machine_pop(m);
