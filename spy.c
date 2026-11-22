@@ -4521,6 +4521,7 @@ typedef struct {
      * the statement (a module's are all conditional), the next index. */
     int collecting, conditional, annotation_index;
     Node *annotations, **annotations_tail;
+    Node *finished; /* The newest node nodes_finish saw. */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
@@ -7962,12 +7963,37 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
     return body;
 }
 static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
+static SPYValue *literal_value(SPYContext *, Node *);
+static Node *operator_right(Node *);
+static int direct_operand(Node *);
+static int plain_call(Node *);
+static int paired_items(Node *, Node *);
+static SPYValue *unary(SPYContext *, int, SPYValue *);
+/* The nodes parsed since the last statement's, newest first: a number's
+ * value, the properties the machine reads, then a negated number as a
+ * constant, as CPython folds it, an inner negation before its outer. */
+static int nodes_finish(Parser *p) {
+    SPYContext *c = p->ctx;
+    Node *newest = p->unit->as.unit.nodes;
+    for (Node *n = newest; n != p->finished && !c->error_type[0]; n = n->allocated) {
+        if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) literal_value(c, n);
+        if (operator_right(n)) n->flags |= F_OPERATOR;
+        if (n->kind == N_BINARY && n->a && n->b && (direct_operand(n->a) || direct_operand(n->b))) n->flags |= F_DIRECT_OPERAND;
+        if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL | (n->a->kind == N_NAME ? F_NAMED_CALLEE : 0);
+        if (n->kind == N_ASSIGN && n->op == '=' && !n->args && n->a->kind == N_TUPLE && n->b->kind == N_TUPLE &&
+            paired_items(n->a->args, n->b->args)) n->flags |= F_PAIRED;
+    }
+    for (Node *n = newest; n != p->finished && !c->error_type[0]; n = n->allocated)
+        if (n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
+    p->finished = newest;
+    return c->error_type[0] ? -1 : 0;
+}
 static Node *statements(Parser *p) {
     Node *head = NULL, **tail = &head;
     while (!at(p, T_END) && !at(p, T_DEDENT)) {
         if (take(p, T_NL)) continue;
         Node *n = line_statements(p);
-        if (!n) return NULL;
+        if (!n || nodes_finish(p)) return NULL;
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) tail = &(*tail)->next;
@@ -8742,6 +8768,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         c->node_start = c->node_end = NULL;
         if (!c->error_type[0]) collect_end(&p, NULL, &unit->as.unit.annotate, annotations);
+        if (!c->error_type[0]) nodes_finish(&p);
         if (c->optimize > 1) {
             drop_docstring(unit->as.unit.body);
             for (Node *n = unit->as.unit.nodes; n; n = n->allocated)
@@ -8758,17 +8785,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (scope_resolve(c, n->scope)) break;
             if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
             if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
-            if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) literal_value(c, n);
-            if (operator_right(n)) n->flags |= F_OPERATOR;
-            if (n->kind == N_BINARY && n->a && n->b && (direct_operand(n->a) || direct_operand(n->b))) n->flags |= F_DIRECT_OPERAND;
-            if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL | (n->a->kind == N_NAME ? F_NAMED_CALLEE : 0);
-            if (n->kind == N_ASSIGN && n->op == '=' && !n->args && n->a->kind == N_TUPLE && n->b->kind == N_TUPLE &&
-                paired_items(n->a->args, n->b->args)) n->flags |= F_PAIRED;
         }
-        /* A negated number is a constant, as CPython folds it; the list
-         * runs newest first, so an inner negation folds before its outer. */
-        for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated)
-            if (n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
             c->line = p.deferred_line; p.error_start = p.deferred_start; p.error_end = p.deferred_end;
