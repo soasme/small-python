@@ -15802,7 +15802,7 @@ typedef struct {
  * names load through mappings (name_load): no fused step takes them. */
 /* plain, while a fused operator's plain steps compile (compile_operator);
  * tested, one past the last fused truth test, whose BC_FALSE may follow. */
-struct Program { Instruction *items; size_t len, cap, tested; int calls, display, namespace, unbinds, plain, loads; };
+struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; };
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -16820,10 +16820,8 @@ static int compile_generator(SPYContext *c, Node *n) {
     if (generator) n->code = p;
     else n->flat = p;
     c->code_work++;
-    /* A class body first binds its implicit names, then the set of its
-     * executed conditional annotations (class_part). */
+    /* A class body first binds its implicit names (class_names_before). */
     if (n->kind == N_CLASS) { emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
-    if (UNLIKELY(n->kind == N_CLASS && (n->flags & F_CONDITIONAL))) { emit(c, p, BC_CLASS, n, 8); emit(c, p, BC_POP, n, 0); }
     compile_body(c, p, n->b);
     if (n->kind == N_CLASS && n->params && n->args) {
         /* A generic class's bases and keywords, in its type parameters'
@@ -18909,7 +18907,7 @@ static NO_INLINE Call *unit_enter(SPYContext *c, SPYValue *unit, SPYValue *env, 
         if ((code || !setup_annotations(c, &frame, unit->as.unit.setup_annotations)) &&
             ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c))) {
             Call *call = c->calls[c->calls_len++];
-            call->m.code = code ? code : unit->as.unit.flat; call->m.pc = 0; call->m.owner = unit->as.unit.body;
+            call->m.code = code ? code : unit->as.unit.flat; call->m.pc = call->m.code->entry; call->m.owner = unit->as.unit.body;
             call->m.frame = frame;
             call->caller = caller; call->fn = unit;
             call->caller_env = c->eval_env; c->eval_env = env;
@@ -22178,7 +22176,8 @@ static int class_names_store(SPYContext *c, SPYValue *env, SPYValue *names, size
 /* Before class statement n's body runs in env (16.4.1 step 8): the
  * implicit names, which a body on the machine, unless generic, binds
  * itself through a Python __setitem__ or __getitem__ of its namespace
- * (class_part 9). */
+ * (class_part 9), and the set of its executed conditional annotations,
+ * beside the namespace (conditional_env). */
 static int class_body_begin(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPYValue *type_params, int machine) {
     if (!machine || n->params || !hooked_namespace(c, env)) {
         SPYValue *module = name_get(c, env, "__name__");
@@ -22189,7 +22188,7 @@ static int class_body_begin(SPYContext *c, SPYValue *unit, Node *n, SPYValue *en
     env->as.map.scope = n->scope;
     env->as.map.unit = spy_retain(unit);
     declare_locals(c, env);
-    return c->error_type[0] ? -1 : 0;
+    return c->error_type[0] || start_conditional(c, &(Frame){env, unit, 0}, n->flags & F_CONDITIONAL) ? -1 : 0;
 }
 /* The names class statement n's body binds after its statements in frame
  * f (16.4.1 step 10), as a list of names and values in order:
@@ -25059,8 +25058,10 @@ static int module_program(SPYContext *c, SPYValue *unit, int interactive) {
     while (last->next) last = last->next;
     c->code_work++;
     /* The body starts by binding its annotation names (annotation_step);
-     * like a class body's, its bindings may go through a mapping. */
-    if (unit->as.unit.annotate || unit->as.unit.conditional_annotations) { emit(c, p, BC_CLASS, NULL, 17); emit(c, p, BC_POP, NULL, 0); }
+     * like a class body's, its bindings may go through a mapping. Without
+     * annotations it starts past that step. */
+    emit(c, p, BC_CLASS, NULL, 17); emit(c, p, BC_POP, NULL, 0);
+    if (!unit->as.unit.annotate && !unit->as.unit.conditional_annotations) p->entry = 2;
     for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
     if (last->kind == N_EXPR && !p->display) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
     else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
@@ -25077,6 +25078,7 @@ static Result module_body(SPYContext *c, Frame *f) {
     Machine *m = body ? machine_new(c, unit->as.unit.flat, f->env, unit) : NULL;
     c->pause_entry = 0;
     if (!m) return (Result){body ? FLOW_ERROR : FLOW_NORMAL, NULL};
+    m->pc = m->code->entry;
     m->owner = body; m->frame.interactive = f->interactive;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
@@ -37662,7 +37664,6 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     if (ins->arg == 9)
         /* The body's implicit names that class_body_begin left (class_names_call). */
         return n->params || !hooked_namespace(c, f->env) ? spy_none(c) : class_names_call(c, m, f, NULL, spy_none(c));
-    if (ins->arg == 8) return start_conditional(c, f, n->flags & F_CONDITIONAL) ? NULL : spy_none(c);
     if (ins->arg == 6) {
         /* The body's end, in its env, whose scope's owner is the class
          * statement, its line traced (trace_class_line). */
