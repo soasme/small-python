@@ -91,6 +91,10 @@ enum { ENV_FORWARD = 6 };
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
+/* A function's parameter: its name, its kind (P_POSITIONAL and the rest)
+ * and, for replace()d code, the body's name for its slot. A signature is
+ * an array of them that one with no name ends. */
+typedef struct { char *name, *local; int kind; } Parameter;
 /* An import statement's operands (17.4), owned by its code: a
  * from-import's module, "" for none, and level; each item's dotted name,
  * "*" for a star, the name it binds, NULL for a star, and whether it has
@@ -187,6 +191,7 @@ struct Node {
     Node *static_next; /* A self.attr store's next one in its class's statics. */
     Program *code;
     Program *flat; /* A function body that holds a call and cannot suspend, on the machine. */
+    Parameter *signature; /* A function's or lambda's parameters, args', their names borrowed. */
     Scope *scope;
     SPYValue *code_value;
     SPYValue *constant; /* A literal's value, made once. */
@@ -223,9 +228,9 @@ struct SPYValue {
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
-        /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
-        struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
+        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; Parameter *signature; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
+        /* signature: the parameters of a replace()d __code__, owned by it; else def->signature. */
+        struct { SPYValue *unit, *env, *attributes, *metadata; Node *def; Parameter *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
         /* host: 1 made by spy_define or spy_native (host_call); 2 an
          * engine native whose C code may leave a call to its step (step_native). */
@@ -622,7 +627,7 @@ static SPYValue *call_module_code(SPYContext *, SPYValue *, size_t, SPYValue *co
 static int body_arguments(SPYContext *, SPYValue *, size_t, SPYValue *);
 static SPYValue *class_env(SPYContext *, SPYValue *, SPYValue *);
 static int class_body_begin(SPYContext *, SPYValue *, Node *, SPYValue *, SPYValue *, int);
-static Node *replaced_signature(SPYValue *);
+static Parameter *replaced_signature(SPYValue *);
 static SPYValue *forward_env(SPYContext *, Node *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *closure_names(SPYContext *, Node *, int);
@@ -1571,7 +1576,9 @@ static void free_value(SPYValue *v) {
         mem_free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->name.text); mem_free(n->original); mem_free(n->local); mem_free(n); n = next; }
+        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->signature); mem_free(n->name.text); mem_free(n->original); mem_free(n->local); mem_free(n); n = next; }
+        for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
+        mem_free(v->as.unit.signature);
         free_scope(v->as.unit.scope);
         free_program(v->as.unit.flat);
         if (c->filename_from == v) c->filename_from = c->quiet_unit = NULL;
@@ -13090,8 +13097,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             int64_t flags = unit->as.unit.future_flags;
             if (def && def->kind != N_CLASS) {
                 flags |= 0x3;
-                for (Node *arg = def->kind != N_COMPREHENSION ? def->args : NULL; arg; arg = arg->next)
-                    flags |= arg->op == P_VARARGS ? 0x4 : arg->op == P_KWARGS ? 0x8 : 0;
+                for (Parameter *arg = def->signature; arg && arg->name; arg++)
+                    flags |= arg->kind == P_VARARGS ? 0x4 : arg->kind == P_KWARGS ? 0x8 : 0;
                 Scope *parent = def->scope ? def->scope->parent : NULL;
                 while (parent && parent->owner && parent->owner->kind == N_GENERIC) parent = parent->parent;
                 if (parent && (parent->kind == S_FUNCTION || parent->kind == S_COMPREHENSION)) flags |= 0x10;
@@ -13112,9 +13119,9 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             if (iterable && names && sequence_append(c, names, iterable)) { spy_release(names); names = NULL; }
             spy_release(iterable);
             for (int pass = 0; pass < 3; pass++)
-            for (Node *arg = def && def->kind != N_COMPREHENSION && def->kind != N_CLASS ? def->args : NULL; names && arg; arg = arg->next) {
-                if ((arg->op == P_VARARGS) != (pass == 1) || (arg->op == P_KWARGS) != (pass == 2)) continue;
-                SPYValue *text = spy_string(c, arg->name.text, strlen(arg->name.text));
+            for (Parameter *arg = def ? def->signature : NULL; names && arg && arg->name; arg++) {
+                if ((arg->kind == P_VARARGS) != (pass == 1) || (arg->kind == P_KWARGS) != (pass == 2)) continue;
+                SPYValue *text = spy_string(c, arg->name, strlen(arg->name));
                 if (!text || sequence_append(c, names, text)) { spy_release(text); spy_release(names); return NULL; }
                 spy_release(text);
             }
@@ -13139,10 +13146,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_argcount") || !strcmp(name, "co_posonlyargcount") || !strcmp(name, "co_kwonlyargcount")) {
             if (def && def->kind == N_COMPREHENSION) return spy_int(c, !strcmp(name, "co_argcount"));
             int64_t count = 0;
-            for (Node *arg = def ? def->args : NULL; arg; arg = arg->next)
-                count += !strcmp(name, "co_kwonlyargcount") ? arg->op == P_KWONLY :
-                         !strcmp(name, "co_posonlyargcount") ? arg->op == P_POSONLY :
-                         arg->op == P_POSITIONAL || arg->op == P_POSONLY;
+            for (Parameter *arg = def ? def->signature : NULL; arg && arg->name; arg++)
+                count += !strcmp(name, "co_kwonlyargcount") ? arg->kind == P_KWONLY :
+                         !strcmp(name, "co_posonlyargcount") ? arg->kind == P_POSONLY :
+                         arg->kind == P_POSITIONAL || arg->kind == P_POSONLY;
             return spy_int(c, count);
         }
     }
@@ -15045,26 +15052,26 @@ static SPYValue *method_arity_error(SPYContext *c, SPYValue *self, int method, S
  * first posonly positional-only), then *args, keyword-only, and **kwargs as
  * flags and kwonly say, named by varnames; each keeps the name the body has
  * for its slot, from the definition's own co_varnames. */
-static Node *code_signature(SPYContext *c, SPYValue *varnames, SPYValue *locals, int64_t argcount, int64_t posonly,
-                            int64_t kwonly, int64_t flags) {
-    Node *head = NULL, **tail = &head;
+static Parameter *code_signature(SPYContext *c, SPYValue *varnames, SPYValue *locals, int64_t argcount, int64_t posonly,
+                                 int64_t kwonly, int64_t flags) {
     size_t slots[4][2] = {{0, (size_t)argcount}, {(size_t)(argcount + kwonly), flags & 0x4 ? 1 : 0},
                           {(size_t)argcount, (size_t)kwonly}, {(size_t)(argcount + kwonly + (flags & 0x4 ? 1 : 0)), flags & 0x8 ? 1 : 0}};
+    size_t count = 0;
+    for (int group = 0; group < 4; group++) count += slots[group][1];
+    Parameter *head = allocate(c, (count + 1) * sizeof(*head)), *arg = head;
+    if (!head) return NULL;
+    memset(head, 0, (count + 1) * sizeof(*head));
     for (int group = 0; group < 4; group++)
-        for (size_t i = slots[group][0]; i < slots[group][0] + slots[group][1] && !c->error_type[0]; i++) {
-            Node *arg = allocate(c, sizeof(*arg));
-            if (!arg) break;
-            *tail = arg; tail = &arg->next;
-            arg->kind = N_NAME;
-            arg->op = group == 1 ? P_VARARGS : group == 2 ? P_KWONLY : group == 3 ? P_KWARGS : (int64_t)i < posonly ? P_POSONLY : P_POSITIONAL;
+        for (size_t i = slots[group][0]; i < slots[group][0] + slots[group][1] && !c->error_type[0]; i++, arg++) {
+            arg->kind = group == 1 ? P_VARARGS : group == 2 ? P_KWONLY : group == 3 ? P_KWARGS : (int64_t)i < posonly ? P_POSONLY : P_POSITIONAL;
             SPYValue *name = varnames->as.seq.items[i];
             const char *local = i < locals->as.seq.len ? locals->as.seq.items[i]->as.string.data : NULL;
-            if ((arg->name.text = copy_text(c, name->as.string.data, name->as.string.len)) && local && strcmp(local, arg->name.text))
+            if ((arg->name = copy_text(c, name->as.string.data, name->as.string.len)) && local && strcmp(local, arg->name))
                 arg->local = copy_text(c, local, strlen(local));
         }
-    for (Node *arg = head; arg; arg = arg->next) arg->allocated = arg->next;
     if (c->error_type[0]) {
-        for (Node *arg = head, *next; arg; arg = next) { next = arg->next; mem_free(arg->name.text); mem_free(arg->local); mem_free(arg); }
+        for (arg = head; arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
+        mem_free(head);
         return NULL;
     }
     return head;
@@ -15143,7 +15150,7 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
     /* Function code with another signature binds through its own parameters. */
     if (signature && def && (def->kind == N_DEF || def->kind == N_LAMBDA)) {
         SPYValue *locals = attribute(c, base, "co_varnames");
-        if (locals) copy->as.unit.nodes = code_signature(c, varnames, locals, argcount, posonly, kwonly, flags);
+        if (locals) copy->as.unit.signature = code_signature(c, varnames, locals, argcount, posonly, kwonly, flags);
         spy_release(locals);
         if (c->error_type[0]) { spy_release(copy); copy = NULL; }
     }
@@ -17384,7 +17391,20 @@ static int module_body_finish(Parser *p, SPYValue *unit) {
     }
     return c->error_type[0] ? -1 : 0;
 }
+/* The signature of function or lambda n, its parameters' names borrowed
+ * from them; NULL with an error. */
+static Parameter *definition_signature(SPYContext *c, Node *n) {
+    size_t count = 0;
+    for (Node *arg = n->args; arg; arg = arg->next) count++;
+    Parameter *signature = allocate(c, (count + 1) * sizeof(*signature));
+    if (!signature) return NULL;
+    count = 0;
+    for (Node *arg = n->args; arg; arg = arg->next) signature[count++] = (Parameter){arg->name.text, NULL, arg->op};
+    signature[count] = (Parameter){0};
+    return signature;
+}
 static int compile_generator(SPYContext *c, Node *n) {
+    if (n->kind != N_CLASS && n->kind != N_COMPREHENSION && !n->signature && !(n->signature = definition_signature(c, n))) return -1;
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS)), mode = c->pausing ? PAUSING : BODY;
     /* A parsed def's or class's statements were compiled as they were
      * parsed (body_begin); a lambda's body, an __annotate__ function's or
@@ -18131,11 +18151,11 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     }
     SPYValue **items = w.names->as.seq.items;
     size_t front = 0;
-    for (int pass = 0; cells && def->kind != N_CLASS && def->kind != N_COMPREHENSION && pass < 3; pass++)
-        for (Node *arg = def->args; arg; arg = arg->next) {
-            if ((arg->op == P_VARARGS) != (pass == 1) || (arg->op == P_KWARGS) != (pass == 2)) continue;
+    for (int pass = 0; cells && pass < 3; pass++)
+        for (Parameter *arg = def->signature; arg && arg->name; arg++) {
+            if ((arg->kind == P_VARARGS) != (pass == 1) || (arg->kind == P_KWARGS) != (pass == 2)) continue;
             for (size_t i = front; i < w.names->as.seq.len; i++)
-                if (!strcmp(items[i]->as.string.data, arg->name.text)) {
+                if (!strcmp(items[i]->as.string.data, arg->name)) {
                     SPYValue *item = items[i]; memmove(items + front + 1, items + front, (i - front) * sizeof(*items)); items[front++] = item;
                     break;
                 }
@@ -18993,11 +19013,11 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
     }
 }
 /* The parameters of a replace()d code object whose signature changed, or NULL. */
-static Node *replaced_signature(SPYValue *code) {
-    return code->as.unit.owner && code->as.unit.definition ? code->as.unit.nodes : NULL;
+static Parameter *replaced_signature(SPYValue *code) {
+    return code->as.unit.owner && code->as.unit.definition ? code->as.unit.signature : NULL;
 }
-static Node *function_parameters(SPYValue *fn) {
-    return fn->as.function.signature ? fn->as.function.signature : fn->as.function.def->args;
+static Parameter *function_parameters(SPYValue *fn) {
+    return fn->as.function.signature ? fn->as.function.signature : fn->as.function.def->signature;
 }
 /* A parameter's value in env, or NULL while it is unbound. */
 static SPYValue *bound_local(SPYValue *env, const char *name) {
@@ -19006,16 +19026,16 @@ static SPYValue *bound_local(SPYValue *env, const char *name) {
 }
 static int missing_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, int keyword_only) {
     size_t missing = 0, index = 0;
-    for (Node *arg = function_parameters(fn); arg; arg = arg->next)
-        if ((keyword_only ? arg->op == P_KWONLY : arg->op == P_POSITIONAL || arg->op == P_POSONLY) &&
-            !bound_local(env, arg->name.text)) missing++;
+    for (Parameter *arg = function_parameters(fn); arg->name; arg++)
+        if ((keyword_only ? arg->kind == P_KWONLY : arg->kind == P_POSITIONAL || arg->kind == P_POSONLY) &&
+            !bound_local(env, arg->name)) missing++;
     if (!missing) return 0;
     Buffer names = {.ctx = c};
-    for (Node *arg = function_parameters(fn); arg && !c->error_type[0]; arg = arg->next) {
-        if (!(keyword_only ? arg->op == P_KWONLY : arg->op == P_POSITIONAL || arg->op == P_POSONLY) ||
-            bound_local(env, arg->name.text)) continue;
+    for (Parameter *arg = function_parameters(fn); arg->name && !c->error_type[0]; arg++) {
+        if (!(keyword_only ? arg->kind == P_KWONLY : arg->kind == P_POSITIONAL || arg->kind == P_POSONLY) ||
+            bound_local(env, arg->name)) continue;
         if (index) puts_buffer(&names, index + 1 == missing ? (missing == 2 ? " and " : ", and ") : ", ");
-        puts_buffer(&names, "'"); puts_buffer(&names, arg->name.text); puts_buffer(&names, "'"); index++;
+        puts_buffer(&names, "'"); puts_buffer(&names, arg->name); puts_buffer(&names, "'"); index++;
     }
     SPYValue *name = name_text(fn->as.function.metadata, "__qualname__");
     errorf(c, "TypeError", "%s() missing %zu required %s argument%s: %s", name->as.string.data,
@@ -19030,7 +19050,7 @@ static int keyword_matches(SPYContext *c, SPYValue *key, const char *name) {
     spy_release(text);
     return match;
 }
-static int bind_named(SPYContext *, SPYValue *, SPYValue *, size_t, SPYValue *, size_t, Node *, int);
+static int bind_named(SPYContext *, SPYValue *, SPYValue *, size_t, SPYValue *, size_t, Parameter *, int);
 static int bind_rest(SPYContext *, SPYValue *, SPYValue *, size_t);
 static SPYValue *parts_tuple(SPYContext *, size_t, SPYValue **);
 static SPYValue *keyword_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
@@ -19039,29 +19059,29 @@ static SPYValue *hash_function(SPYContext *, SPYValue *);
 /* Bind fn's arguments into env: 0, or -1 with an error, or 2 when a
  * keyword's binding goes on on the machine (keyword_call_k). */
 static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    Node *params = function_parameters(fn);
+    Parameter *params = function_parameters(fn);
     /* The common call passes exactly the positional parameters, by position. */
     if (!keywords || !keywords->as.map.len) {
         size_t count = 0;
-        Node *arg = params;
-        for (; arg && (arg->op == P_POSITIONAL || arg->op == P_POSONLY) && !arg->local; arg = arg->next) count++;
-        if (!arg && count == argc) {
-            for (arg = params, count = 0; arg; arg = arg->next, count++)
-                if (name_set(c, env, arg->name.text, argv[count])) return -1;
+        Parameter *arg = params;
+        for (; arg->name && (arg->kind == P_POSITIONAL || arg->kind == P_POSONLY) && !arg->local; arg++) count++;
+        if (!arg->name && count == argc) {
+            for (arg = params, count = 0; arg->name; arg++, count++)
+                if (name_set(c, env, arg->name, argv[count])) return -1;
             return 0;
         }
     }
     size_t positional = 0;
-    for (Node *arg = params; arg; arg = arg->next) {
-        if (arg->op == P_POSITIONAL || arg->op == P_POSONLY) {
-            if (positional < argc && name_set(c, env, arg->name.text, argv[positional])) return -1;
+    for (Parameter *arg = params; arg->name; arg++) {
+        if (arg->kind == P_POSITIONAL || arg->kind == P_POSONLY) {
+            if (positional < argc && name_set(c, env, arg->name, argv[positional])) return -1;
             positional++;
-        } else if (arg->op == P_VARARGS || arg->op == P_KWARGS) {
-            SPYValue *value = value_new(c, arg->op == P_VARARGS ? SPY_TUPLE : SPY_DICT);
+        } else if (arg->kind == P_VARARGS || arg->kind == P_KWARGS) {
+            SPYValue *value = value_new(c, arg->kind == P_VARARGS ? SPY_TUPLE : SPY_DICT);
             if (!value) return -1;
-            if (arg->op == P_VARARGS)
+            if (arg->kind == P_VARARGS)
                 for (size_t i = positional; i < argc && !c->error_type[0]; i++) sequence_append(c, value, argv[i]);
-            int status = name_set(c, env, arg->name.text, value);
+            int status = name_set(c, env, arg->name, value);
             spy_release(value);
             if (status || c->error_type[0]) return -1;
         }
@@ -19096,14 +19116,13 @@ static int keyword_call_k(SPYContext *c, Machine *m, SPYValue *function, size_t 
  * keyword i of keywords, a str subclass's instance, with parameter arg by
  * its Python __eq__ on the call step's machine (keyword_compared): 1, the
  * binding going on there, or with an error; else 0. */
-static NO_INLINE int keyword_compare(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i, Node *arg) {
+static NO_INLINE int keyword_compare(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i, Parameter *arg) {
     Machine *m = binding_machine(c, fn);
     SPYValue *key = map_items(keywords)[i].key, *text, *function;
     if (!m || key->type != SPY_INSTANCE) return 0;
-    if (!(text = spy_string(c, arg->name.text, strlen(arg->name.text)))) return 1;
+    if (!(text = spy_string(c, arg->name, strlen(arg->name)))) return 1;
     if (!(function = rich_function(c, key, text, R_EQ))) { spy_release(text); return 0; }
-    int64_t at = 0;
-    for (Node *param = function_parameters(fn); param != arg; param = param->next) at++;
+    int64_t at = arg - function_parameters(fn);
     return keyword_call_k(c, m, function, 2, (SPYValue *[]){spy_retain(key), spy_retain(text)}, keyword_compared, fn, env, argc, keywords, i, at, text);
 }
 /* Whether binding fn into env after argc positional arguments hashes
@@ -19118,7 +19137,7 @@ static NO_INLINE int keyword_hash(SPYContext *c, SPYValue *fn, SPYValue *env, si
 }
 /* The **kwargs dict of fn binding into env, borrowed, or NULL. */
 static SPYValue *kwargs_of(SPYValue *fn, SPYValue *env) {
-    for (Node *arg = function_parameters(fn); arg; arg = arg->next) if (arg->op == P_KWARGS) return bound_local(env, arg->name.text);
+    for (Parameter *arg = function_parameters(fn); arg->name; arg++) if (arg->kind == P_KWARGS) return bound_local(env, arg->name);
     return NULL;
 }
 static int map_scan(SPYContext *, SPYValue *, SPYValue *, int64_t, MapCursor *, ptrdiff_t *);
@@ -19152,26 +19171,26 @@ static int keyword_put(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, 
  * from the first when from is NULL. 0 when they are bound, -1 with an
  * error; 2 when a keyword's comparison or hash goes on on the machine
  * (keyword_call_k). */
-static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i, Node *from, int matched) {
-    Node *params = function_parameters(fn);
+static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords, size_t i, Parameter *from, int matched) {
+    Parameter *params = function_parameters(fn);
     const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
     SPYValue *extra = kwargs_of(fn, env);
     /* Validate keywords in call order before argument counts or defaults. */
     for (; keywords && i < keywords->as.map.len; i++, from = NULL, matched = 0) {
         Entry *entry = &map_items(keywords)[i];
         const char *keyword = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
-        Node *arg = matched ? from : from ? from->next : params;
-        for (; !matched && arg && !c->error_type[0]; arg = arg->next) {
-            if (arg->op != P_POSITIONAL && arg->op != P_KWONLY) continue;
+        Parameter *arg = matched ? from : from ? from + 1 : params;
+        for (; !matched && arg->name && !c->error_type[0]; arg++) {
+            if (arg->kind != P_POSITIONAL && arg->kind != P_KWONLY) continue;
             if (entry->key->type != SPY_STRING && keyword_compare(c, fn, env, argc, keywords, i, arg)) return c->error_type[0] ? -1 : 2;
-            if (keyword_matches(c, entry->key, arg->name.text)) break;
+            if (keyword_matches(c, entry->key, arg->name)) break;
         }
         if (c->error_type[0]) return -1;
-        if (arg) {
-            if (bound_local(env, arg->name.text)) {
+        if (arg->name) {
+            if (bound_local(env, arg->name)) {
                 errorf(c, "TypeError", "%s() got multiple values for argument '%s'", name, keyword); return -1;
             }
-            if (name_set(c, env, arg->name.text, entry->value)) return -1;
+            if (name_set(c, env, arg->name, entry->value)) return -1;
         } else if (extra) {
             int64_t hash;
             if (entry->key->type != SPY_STRING && keyword_hash(c, fn, env, argc, keywords, i)) return c->error_type[0] ? -1 : 2;
@@ -19180,18 +19199,18 @@ static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, S
             if (status) return status;
         } else {
             Buffer names = {.ctx = c};
-            for (Node *param = params; param && param->op == P_POSONLY; param = param->next)
-                if (name_local(keywords, param->name.text)) {
+            for (Parameter *param = params; param->name && param->kind == P_POSONLY; param++)
+                if (name_local(keywords, param->name)) {
                     if (names.len) puts_buffer(&names, ", ");
-                    puts_buffer(&names, param->name.text);
+                    puts_buffer(&names, param->name);
                 }
             if (names.len) errorf(c, "TypeError", "%s() got some positional-only arguments passed as keyword arguments: '%s'", name, names.data);
             else {
                 /* CPython suggests among the parameters a keyword can name. */
                 const char *near = NULL;
                 size_t distance = SIZE_MAX, candidates = 0;
-                for (Node *param = params; param; param = param->next)
-                    if (param->op == P_POSITIONAL || param->op == P_KWONLY) { candidates++; suggest(keyword, param->name.text, &near, &distance); }
+                for (Parameter *param = params; param->name; param++)
+                    if (param->kind == P_POSITIONAL || param->kind == P_KWONLY) { candidates++; suggest(keyword, param->name, &near, &distance); }
                 unexpected_keyword(c, name, keyword, candidates < SUGGEST_MAX_ITEMS ? near : NULL);
             }
             mem_free(names.data); return -1;
@@ -19202,22 +19221,22 @@ static int bind_named(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, S
 /* bind_arguments's argument counts and defaults, once the positional
  * arguments, argc of them, and the keywords are bound into env. */
 static int bind_rest(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc) {
-    Node *params = function_parameters(fn);
+    Parameter *params = function_parameters(fn);
     SPYValue *defaults = name_local(fn->as.function.metadata, "__defaults__");
     SPYValue *kwdefaults = name_local(fn->as.function.metadata, "__kwdefaults__");
     const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
     size_t positional = 0, index = 0;
     size_t default_count = defaults->type == SPY_TUPLE ? defaults->as.seq.len : 0;
     int varargs = 0;
-    for (Node *arg = params; arg; arg = arg->next) {
-        if (arg->op == P_POSITIONAL || arg->op == P_POSONLY) positional++;
-        else if (arg->op == P_VARARGS) varargs = 1;
+    for (Parameter *arg = params; arg->name; arg++) {
+        if (arg->kind == P_POSITIONAL || arg->kind == P_POSONLY) positional++;
+        else if (arg->kind == P_VARARGS) varargs = 1;
     }
     if (!varargs && argc > positional) {
         int64_t required = (int64_t)positional - (int64_t)default_count;
         size_t kwonly = 0;
-        for (Node *arg = params; arg; arg = arg->next)
-            if (arg->op == P_KWONLY && bound_local(env, arg->name.text)) kwonly++;
+        for (Parameter *arg = params; arg->name; arg++)
+            if (arg->kind == P_KWONLY && bound_local(env, arg->name)) kwonly++;
         char expected[80], given[120];
         if (!default_count) snprintf(expected, sizeof(expected), "%zu", positional);
         else snprintf(expected, sizeof(expected), "from %lld to %zu", (long long)required, positional);
@@ -19229,33 +19248,33 @@ static int bind_rest(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc) {
                argc == 1 && !kwonly ? "was" : "were");
         return -1;
     }
-    for (Node *arg = params; arg; arg = arg->next) {
-        if (arg->op != P_POSITIONAL && arg->op != P_POSONLY) continue;
-        if (!bound_local(env, arg->name.text) && index + default_count >= positional &&
-            name_set(c, env, arg->name.text, defaults->as.seq.items[index + default_count - positional])) return -1;
+    for (Parameter *arg = params; arg->name; arg++) {
+        if (arg->kind != P_POSITIONAL && arg->kind != P_POSONLY) continue;
+        if (!bound_local(env, arg->name) && index + default_count >= positional &&
+            name_set(c, env, arg->name, defaults->as.seq.items[index + default_count - positional])) return -1;
         index++;
     }
     if (missing_arguments(c, fn, env, 0)) return -1;
-    for (Node *arg = params; arg; arg = arg->next) {
-        if (arg->op != P_KWONLY || bound_local(env, arg->name.text)) continue;
-        SPYValue *value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->name.text) : NULL;
-        if (value && name_set(c, env, arg->name.text, value)) return -1;
+    for (Parameter *arg = params; arg->name; arg++) {
+        if (arg->kind != P_KWONLY || bound_local(env, arg->name)) continue;
+        SPYValue *value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->name) : NULL;
+        if (value && name_set(c, env, arg->name, value)) return -1;
     }
     if (missing_arguments(c, fn, env, 1)) return -1;
     /* Parameters of replace()d code bind under the body's names for their slots. */
     size_t count = 0;
-    for (Node *arg = fn->as.function.signature; arg; arg = arg->next) count++;
+    for (Parameter *arg = fn->as.function.signature; arg && arg->name; arg++) count++;
     ptrdiff_t *slots = count ? allocate(c, count * sizeof(*slots)) : NULL;
     if (count && !slots) return -1;
     size_t at = 0;
-    for (Node *arg = fn->as.function.signature; arg; arg = arg->next, at++) {
+    for (Parameter *arg = fn->as.function.signature; arg && arg->name; arg++, at++) {
         slots[at] = -1;
         for (size_t i = 0; arg->local && i < env->as.map.len && slots[at] < 0; i++)
-            if (map_items(env)[i].key->type == SPY_STRING && !strcmp(map_items(env)[i].key->as.string.data, arg->name.text))
+            if (map_items(env)[i].key->type == SPY_STRING && !strcmp(map_items(env)[i].key->as.string.data, arg->name))
                 slots[at] = (ptrdiff_t)i;
     }
     at = 0;
-    for (Node *arg = fn->as.function.signature; arg && !c->error_type[0]; arg = arg->next, at++) {
+    for (Parameter *arg = fn->as.function.signature; arg && arg->name && !c->error_type[0]; arg++, at++) {
         if (slots[at] < 0) continue;
         Entry *entry = &map_items(env)[slots[at]];
         SPYValue *key = spy_string(c, arg->local, strlen(arg->local));
@@ -19285,7 +19304,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     Entry *items = env->as.map.items;
     size_t count = scope->parameters, posonly = 0, i, j;
     size_t kwargs = count + (scope->stars & 1), end = kwargs + (scope->stars >> 1);
-    for (Node *arg = fn->as.function.def->args; arg && arg->op == P_POSONLY; arg = arg->next) posonly++;
+    for (Parameter *arg = fn->as.function.def->signature; arg->name && arg->kind == P_POSONLY; arg++) posonly++;
     if ((scope->stars & 1) && items[count].value == c->unbound) { spy_release(items[count].value); items[count].value = value_new(c, SPY_TUPLE); }
     if (scope->stars & 2) { spy_release(items[kwargs].value); items[kwargs].value = value_new(c, SPY_DICT); }
     for (i = 0; i < kwc; i++) {
@@ -19305,17 +19324,17 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     }
     SPYValue *defaults = NULL, *kwdefaults = NULL;
     j = 0;
-    for (Node *arg = fn->as.function.def->args; arg && i == kwc; arg = arg->next, j++) {
-        if (arg->op == P_VARARGS || arg->op == P_KWARGS) { j--; continue; }
+    for (Parameter *arg = fn->as.function.def->signature; arg->name && i == kwc; arg++, j++) {
+        if (arg->kind == P_VARARGS || arg->kind == P_KWARGS) { j--; continue; }
         if (items[j].value != c->unbound) continue;
         SPYValue *value = NULL;
-        if (arg->op != P_KWONLY) {
+        if (arg->kind != P_KWONLY) {
             if (!defaults) defaults = name_local(fn->as.function.metadata, "__defaults__");
             size_t len = defaults->type == SPY_TUPLE ? defaults->as.seq.len : 0;
             if (j + len >= scope->positionals) value = defaults->as.seq.items[j + len - scope->positionals];
         } else {
             if (!kwdefaults) kwdefaults = name_local(fn->as.function.metadata, "__kwdefaults__");
-            value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->name.text) : NULL;
+            value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->name) : NULL;
         }
         if (!value) break;
         spy_release(items[j].value); items[j].value = spy_retain(value);
@@ -31668,7 +31687,7 @@ static SPYValue *step_env(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, 
 /* Keyword state's binding goes on from keyword i (bind_named), matched to
  * from when found, entering the function at last (method_called), or its
  * next call on m. State taken. */
-static SPYValue *keyword_resume(SPYContext *c, Machine *m, SPYValue *state, size_t i, Node *from, int found) {
+static SPYValue *keyword_resume(SPYContext *c, Machine *m, SPYValue *state, size_t i, Parameter *from, int found) {
     SPYValue **items = state->as.seq.items, *fn = items[0], *env = spy_retain(items[1]);
     Machine *machine = c->bind_machine;
     size_t entries = c->bind_entries;
@@ -31688,8 +31707,7 @@ static SPYValue *keyword_resume(SPYContext *c, Machine *m, SPYValue *state, size
  * (keyword_resume). */
 static SPYValue *keyword_matched(SPYContext *c, Machine *m, SPYValue *state, int found) {
     SPYValue **items = state->as.seq.items;
-    Node *arg = function_parameters(items[0]);
-    for (int64_t at = items[4]->as.integer_data.small; at; at--) arg = arg->next;
+    Parameter *arg = function_parameters(items[0]) + items[4]->as.integer_data.small;
     return keyword_resume(c, m, state, (size_t)items[3]->as.integer_data.small, arg, found);
 }
 /* The Python __hash__ of a keyword's name that keyword_hash called
