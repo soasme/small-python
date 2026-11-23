@@ -38626,16 +38626,17 @@ static NO_INLINE int assign_fused(SPYContext *c, Frame *f, Instruction *code, si
     spy_release(value);
     return result != NULL || c->error_type[0];
 }
-/* BC_INCREMENT: small integers in a remembered slot, while no trace
- * function watches, sum in place of the assignment; 0 when they do not. */
-static NO_INLINE int increment_step(SPYContext *c, Frame *f, Node *n) {
+/* BC_INCREMENT ins: small integers in a remembered slot, while no trace
+ * function watches, sum in place of the assignment; 0 when they do not.
+ * Its plain steps load the name and the operand, then BC_INPLACE. */
+static NO_INLINE int increment_step(SPYContext *c, Frame *f, Instruction *ins) {
     SPYValue *env = f->env, *x, *y, *value;
-    Entry *entry = c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, &n->a->name) : remembered_local(env, &n->a->name);
+    Entry *entry = c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, ins[1].name) : remembered_local(env, ins[1].name);
     x = entry ? entry->value : NULL;
-    y = x && x->type == SPY_INT && !x->as.integer_data.big ? leaf_operand(f, n->b) : NULL;
+    y = x && x->type == SPY_INT && !x->as.integer_data.big ? leaf_step(f, &ins[2]) : NULL;
     int64_t sum;
     if (y && y->type == SPY_INT && !y->as.integer_data.big &&
-        !(n->op == T_ADDEQ ? int_add : int_sub)(x->as.integer_data.small, y->as.integer_data.small, &sum) &&
+        !(ins[3].arg == T_ADDEQ ? int_add : int_sub)(x->as.integer_data.small, y->as.integer_data.small, &sum) &&
         (value = int_value(c, sum))) {
         entry_store(c, env, entry, value);
         return 1;
@@ -40633,7 +40634,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             special = CALL_ENTER;
             goto enter_special;
-        CASE(BC_INCREMENT) if (increment_step(c, &f, n)) pc = ins->target; continue;
+        CASE(BC_INCREMENT) if (increment_step(c, &f, ins)) pc = ins->target; continue;
         }
         if (a) spy_release(a);
         if (b) spy_release(b);
