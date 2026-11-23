@@ -16840,7 +16840,6 @@ static void patch(Program *p, size_t pc, size_t target) {
     if (p->items[pc].op == BC_FALSE && p->items[pc].other) p->items[p->items[pc].other - 1].target = target;
 }
 static void compile_expr(SPYContext *, Program *, Node *);
-static void compile_node(SPYContext *, Program *, Node *, int);
 /* The shape of an operand at hand (item_at_hand), as its plain steps take
  * it: a literal, a name, an item of those, or a name's attribute; a left
  * operand not at hand is atop the stack (compile_stacked). */
@@ -16874,28 +16873,11 @@ static void fuse_steps(SPYContext *c, Program *p, Node *n, int left, Node *right
     patch(p, fused, p->len);
     if (truth && fused != SIZE_MAX) p->tested = fused + 1;
 }
-static void compile_fused(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth) {
-    size_t start = p->len;
-    if (left == SHAPE_STACK) compile_operation(c, p, n);
-    else compile_node(c, p, n, 0);
-    fuse_steps(c, p, n, left, right, truth, start);
-}
-/* Operator n on operands at hand (operator_right). */
-static void compile_operator(SPYContext *c, Program *p, Node *n, int truth) {
-    compile_fused(c, p, n, operand_shape(c, n->a), operator_right(n), truth);
-}
 /* The right operand of n when n is arithmetic or a single comparison whose
  * right operand is at hand and left one not, else NULL. */
 static Node *stacked_right(Node *n) {
     Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a : n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     return right && item_at_hand(right) && !item_at_hand(n->a) ? right : NULL;
-}
-/* Operator n whose left operand is not at hand: its steps, then a fused
- * step taking it atop the stack. */
-static void compile_stacked(SPYContext *c, Program *p, Node *n, int truth) {
-    compile_expr(c, p, n->a);
-    p->split = p->len;
-    compile_fused(c, p, n, SHAPE_STACK, stacked_right(n), truth);
 }
 /* An expression whose truth the next instruction tests: an and/or passes
  * on the truth its BC_SHORT computed. */
@@ -17004,9 +16986,7 @@ static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
     if (method && call != SIZE_MAX) p->items[call].attribute = attribute_operand(c, p, n->a);
     if (!plain && call != SIZE_MAX) p->items[call].constant = keyword_names(c, p, n);
 }
-static void compile_expr(SPYContext *c, Program *p, Node *n) { compile_node(c, p, n, 1); }
-/* The steps of n; with fuse, a fused step first where one takes it. */
-static void compile_node(SPYContext *c, Program *p, Node *n, int fuse) {
+static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
     if (n->constant || (at_hand(n) && n->kind != N_NAME)) { SPYValue *value = literal_value(c, n); if (value) emit_value(c, p, n, spy_retain(value)); return; }
@@ -17016,13 +16996,13 @@ static void compile_node(SPYContext *c, Program *p, Node *n, int fuse) {
      * machine steps. */
     /* While calls can pause, a name's dictionary may hold a key with a
      * Python __eq__ (name_load): an expression loading one takes steps. */
-    if (fuse && !expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) &&
-        !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
-        if (operator_right(n)) { compile_operator(c, p, n, 0); return; }
-        if (stacked_right(n)) { compile_stacked(c, p, n, 0); return; }
-        /* Arithmetic on arithmetic takes its steps. */
-    }
-    size_t branch, end, parts;
+    /* Arithmetic on arithmetic takes its steps; an operator on operands at
+     * hand, or on one at hand right of another's value, is fused once its
+     * steps are compiled. */
+    Node *right = NULL, *stacked = NULL;
+    if (!expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) && !(p->calls == PAUSING && loads_name(n)))
+        stacked = (right = operator_right(n)) ? NULL : stacked_right(n);
+    size_t branch, end, parts, start = p->len;
     switch (n->kind) {
     case N_JOINED:
         /* The parts stay on the stack for the join, as many as arg. */
@@ -17146,6 +17126,7 @@ static void compile_node(SPYContext *c, Program *p, Node *n, int fuse) {
         if (!c->error_type[0]) emit_before(c, p, parts, BC_FUNCTION, n, 0);
         break;
     }
+    if (right || stacked) fuse_steps(c, p, n, right ? operand_shape(c, n->a) : SHAPE_STACK, right ? right : stacked, 0, right ? start : p->split);
 }
 static void compile_body(SPYContext *, Program *, Node *);
 static void compile_target(SPYContext *, Program *, Node *);
