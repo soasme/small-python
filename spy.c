@@ -91,10 +91,11 @@ enum { ENV_FORWARD = 6 };
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
-/* A function's parameter: its name, its kind (P_POSITIONAL and the rest)
- * and, for replace()d code, the body's name for its slot. A signature is
- * an array of them that one with no name ends. */
-typedef struct { char *name, *local; int kind; } Parameter;
+/* A function's parameter: its name, its kind (P_POSITIONAL and the rest),
+ * whether its definition gives it a default and, for replace()d code, the
+ * body's name for its slot. A signature is an array of them that one with
+ * no name ends. */
+typedef struct { char *name, *local; int kind, defaulted; } Parameter;
 /* An import statement's operands (17.4), owned by its code: a
  * from-import's module, "" for none, and level; each item's dotted name,
  * "*" for a star, the name it binds, NULL for a star, and whether it has
@@ -15964,7 +15965,7 @@ typedef struct {
     union {
         struct { uint32_t target, other; };
         SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit or its program; BC_CALLK: its keywords' names, its program's. */
-        NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, or a keyword's BC_ARG: spelling and lookup cache, borrowed from the source unit. */
+        NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, a keyword's BC_ARG, or a parameter's BC_DEFAULT: spelling and lookup cache, borrowed from the source unit. */
         const ImportRecord *import; /* BC_IMPORT: its program's. */
         AttributeOperand *attribute; /* BC_ATTR, or an attribute's target step or BC_DELETE, or a method call's BC_CALLN: borrowed from the source unit. */
     };
@@ -16291,7 +16292,7 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     else p->items[p->len++] = (Instruction){.node = n, .arg = arg, .other = (uint32_t)test};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     if (op == BC_LOAD) p->items[pc].constant = n->constant;
-    if (op == BC_NAME || op == BC_INTERPOLATION || ((op == BC_STORE || op == BC_NAMED || op == BC_DELETE) && n->kind == N_NAME) || (op == BC_ARG && arg == N_KEYWORD))
+    if (op == BC_NAME || op == BC_INTERPOLATION || op == BC_DEFAULT || ((op == BC_STORE || op == BC_NAMED || op == BC_DELETE) && n->kind == N_NAME) || (op == BC_ARG && arg == N_KEYWORD))
         p->items[pc].name = &n->name;
     if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET || op == BC_DELETE) && n->kind == N_ATTR)
         p->items[pc].attribute = &n->attribute;
@@ -16568,7 +16569,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     default: /* N_LAMBDA, the last expression that can contain a yield */
         emit(c, p, BC_FUNCTION, n, 0);
         for (Node *a = n->args; a; a = a->next) if (a->a) {
-            compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
+            compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, a->op == P_KWONLY);
         }
         break;
     }
@@ -17261,7 +17262,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         } else {
             emit(c, p, BC_FUNCTION, n, 0);
             for (Node *a = n->args; a; a = a->next) if (a->a) {
-                compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
+                compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, a->op == P_KWONLY);
             }
         }
         compile_decorations(c, p, n->decorators);
@@ -17403,7 +17404,7 @@ static Parameter *definition_signature(SPYContext *c, Node *n) {
     Parameter *signature = allocate(c, (count + 1) * sizeof(*signature));
     if (!signature) return NULL;
     count = 0;
-    for (Node *arg = n->args; arg; arg = arg->next) signature[count++] = (Parameter){arg->name.text, NULL, arg->op};
+    for (Node *arg = n->args; arg; arg = arg->next) signature[count++] = (Parameter){arg->name.text, NULL, arg->op, arg->a != NULL};
     signature[count] = (Parameter){0};
     return signature;
 }
@@ -18268,27 +18269,26 @@ static SPYValue *function_new(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) { spy_release(fn); return NULL; }
     return fn;
 }
-static int function_default(SPYContext *c, SPYValue *fn, Node *arg, SPYValue *value) {
-    const char *name = arg->op == P_KWONLY ? "__kwdefaults__" : "__defaults__";
-    SPYValue *defaults = name_local(fn->as.function.metadata, name);
+/* Give fn value as the default of its next positional parameter, or of
+ * its keyword-only parameter name. */
+static int function_default(SPYContext *c, SPYValue *fn, int keyword, const char *name, SPYValue *value) {
+    const char *field = keyword ? "__kwdefaults__" : "__defaults__";
+    SPYValue *defaults = name_local(fn->as.function.metadata, field);
     if (defaults->type == SPY_NONE) {
-        defaults = value_new(c, arg->op == P_KWONLY ? SPY_DICT : SPY_TUPLE);
+        defaults = value_new(c, keyword ? SPY_DICT : SPY_TUPLE);
         if (!defaults) return -1;
-        int status = name_set(c, fn->as.function.metadata, name, defaults);
+        int status = name_set(c, fn->as.function.metadata, field, defaults);
         spy_release(defaults);
         if (status) return -1;
     }
-    return arg->op == P_KWONLY ? name_set(c, defaults, arg->name.text, value) : sequence_append(c, defaults, value);
+    return keyword ? name_set(c, defaults, name, value) : sequence_append(c, defaults, value);
 }
-/* The function of a type parameter's or alias's lazy value, whose
- * defaults, its format parameter's, are literals. */
+/* The function of a type parameter's or alias's lazy value, whose .format
+ * parameter defaults to 1 (VALUE). */
 static NO_INLINE SPYValue *make_function(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *fn = function_new(c, f, n);
-    if (!fn) return NULL;
-    for (Node *arg = n->args; arg; arg = arg->next) {
-        SPYValue *value = arg->a ? literal_value(c, arg->a) : NULL;
-        if (value && function_default(c, fn, arg, value)) break;
-    }
+    SPYValue *fn = function_new(c, f, n), *one = fn ? spy_int(c, 1) : NULL;
+    if (one) function_default(c, fn, 0, NULL, one);
+    spy_release(one);
     if (c->error_type[0]) { spy_release(fn); return NULL; }
     return fn;
 }
@@ -23230,8 +23230,8 @@ static NO_INLINE SPYValue *generic_function(SPYContext *c, Machine *m, Frame *f,
         Frame frame = {env, f->unit, 0};
         fn = function_new(c, &frame, n);
         size_t i = 0;
-        for (Node *arg = n->args; fn && arg && !c->error_type[0]; arg = arg->next)
-            if (arg->a) function_default(c, fn, arg, defaults->as.seq.items[i++]);
+        for (Parameter *arg = n->signature; fn && arg->name && !c->error_type[0]; arg++)
+            if (arg->defaulted) function_default(c, fn, arg->kind == P_KWONLY, arg->name, defaults->as.seq.items[i++]);
     }
     if (!fn || c->error_type[0]) { spy_release(fn); spy_release(env); return NULL; }
     return make_type_params(c, m, env, generic_function_made, fn);
@@ -40257,7 +40257,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); break;
         CASE(BC_FUNCTION) machine_push(c, m, function_new(c, &f, n)); break;
         CASE(BC_DEFAULT)
-            a = machine_pop(m); function_default(c, m->stack[m->len - 1], n, a); break;
+            a = machine_pop(m); function_default(c, m->stack[m->len - 1], ins->arg, ins->name->text, a); break;
         CASE(BC_COMPREHENSION)
             /* A mappingproxy iterates its mapping (mappingproxy_getiter). */
             if (UNLIKELY(proxies_instance(m->stack[m->len - 1])) && !ins->arg) proxy_mapping(&m->stack[m->len - 1]);
