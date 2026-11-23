@@ -254,24 +254,35 @@ An instruction carries its source line, not a node: a step without one
 runs on the line before it, and a trace function sees no line event for
 a step that ticks on its definition's line.
 
-Still read from trees: annotation records, the closure names a code
-object reports (`closure_names`), and the definition records of
-functions, classes and comprehensions, which their values keep.
+A body's scope is its definition record. It owns the body's programs,
+signature, code object, name and docstring, and carries what run time
+reads of the definition: its line and first decorator's line, its kind,
+generator or comprehension kind, flags, and the scopes of its type
+parameters and `__annotate__` function. Functions, generators,
+machines and the definition steps keep scopes, not nodes. Annotation
+steps carry their names, texts and indexes as operands.
+
+A program owns its operands: the constants it loads, and a copy of each
+name and attribute name a step reads, with its lookup cache. Those name
+operands, in the order their steps were emitted, with what imports and
+match captures bind, are the record of the names its code uses;
+`co_names` reads them, not the tree. Until the nodes go, a name is held
+twice: compiling 20,000 lines of `x = a.b` executes 10% more
+instructions and peaks at 24% more memory.
+
+Still read from trees: the definition node a code object keeps for its
+other metadata (`co_varnames`, `co_consts`, positions and the rest).
 
 ## Remaining stages
 
-1. Separate the remaining executable operands and definition records from
-   source-location metadata. Preserve the existing fast paths while moving
-   their operands out of tree links. Put constants and names in storage
-   owned and traced by their code, including failure cleanup.
-2. Emit expressions from the parser, in place of the finished
+1. Emit expressions from the parser, in place of the finished
    statement's or clause header's compile. Collect bindings and
    declaration locations as each scope is parsed; resolve forward local,
    global, nonlocal and cell references by patching instructions. Branches
    use labels, and assignment parsing keeps target descriptors. Deferred
    annotations, comprehension bodies and reordered argument evaluation need
    instruction fragments that can be placed in their execution order.
-3. Build code metadata from code records and recorded symbol uses. Remove
+2. Build code metadata from code records and recorded symbol uses. Remove
    executable tree allocation, scope tree walks and node-based code caches.
    Keep source spans and definition identity without retaining a tree.
 

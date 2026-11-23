@@ -95,13 +95,14 @@ typedef struct Program Program;
  * whether its definition gives it a default and, for replace()d code, the
  * body's name for its slot. A signature is an array of them that one with
  * no name ends. */
+typedef struct Scope Scope;
 typedef struct { char *name, *local; int kind, defaulted; } Parameter;
 /* A PEP 695 type parameter: its name, as bound and as spelled, its kind
  * (0 TypeVar, 1 TypeVarTuple, 2 ParamSpec), whether its bound is a tuple
  * of constraints, and the definitions of its lazy bound and default, or
  * NULL; all borrowed from its generic's source unit. Its generic scope
  * holds an array of them that one with no name ends. */
-typedef struct { const char *name, *spelling; int kind, constraints; Node *bound, *fallback; } TypeParameter;
+typedef struct { const char *name, *spelling; int kind, constraints; Scope *bound, *fallback; } TypeParameter;
 /* An import statement's operands (17.4), owned by its code: a
  * from-import's module, "" for none, and level; each item's dotted name,
  * "*" for a star, the name it binds, NULL for a star, and whether it has
@@ -131,7 +132,6 @@ typedef struct Machine Machine;
 typedef SPYValue *(*Continuation)(SPYContext *, Machine *, SPYValue *ctx, SPYValue *result);
 typedef struct Call Call;
 typedef struct Pool Pool;
-typedef struct Scope Scope;
 typedef struct { uint64_t len; int sign; uint32_t digits[]; } BigInt; /* One layout on every target. */
 typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]; } IntView;
 enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32, S_CELL = 64 /* a nested scope reads it (closed_locals) */ };
@@ -165,7 +165,7 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * its annotation function's scope, or on that function its owner's;
  * generic is its type parameters' scope, and first_line its first
  * decorator's line or its own (scope_define). */
-struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -246,7 +246,7 @@ struct SPYValue {
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; Parameter *signature; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
+        struct { Node *nodes, *body, *annotate; Scope *definition; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; Parameter *signature; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->signature. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Scope *def; Parameter *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
@@ -643,11 +643,11 @@ static int body_arguments(SPYContext *, SPYValue *, size_t, SPYValue *);
 static SPYValue *class_env(SPYContext *, SPYValue *, SPYValue *);
 static int class_body_begin(SPYContext *, SPYValue *, Scope *, SPYValue *, SPYValue *, int);
 static Parameter *replaced_signature(SPYValue *);
-static SPYValue *forward_env(SPYContext *, Node *, SPYValue *, SPYValue *);
+static SPYValue *forward_env(SPYContext *, Scope *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *closure_names(SPYContext *, Scope *, int);
 static int callable_value(SPYContext *, SPYValue *);
-static SPYValue *code_names(SPYContext *, SPYValue *, Node *);
+static SPYValue *code_names(SPYContext *, SPYValue *, Scope *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
 static SPYValue *hash_function(SPYContext *, SPYValue *);
 static SPYValue *hash_self(SPYValue *);
@@ -1482,7 +1482,9 @@ static void edges(SPYValue *v, Visit visit, void *data) {
 }
 static void free_program(Program *);
 static void free_scope(Scope *scope) {
-    if (scope) { mem_free(scope->name); mem_free(scope->spelling); free_program(scope->code); free_program(scope->flat); mem_free(scope->signature); mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics); mem_free(scope); }
+    if (scope) { mem_free(scope->name); mem_free(scope->spelling); free_program(scope->code); free_program(scope->flat); mem_free(scope->signature); mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics);
+        for (size_t i = 0; i < scope->texts_len; i++) mem_free(scope->texts[i]);
+        mem_free(scope->texts); mem_free(scope); }
 }
 static int weak_push(SPYContext *c, SPYValue ***items, size_t *len, size_t *cap, SPYValue *value) {
     if (*len == *cap) {
@@ -8312,15 +8314,23 @@ static Scope *scope_of(SPYContext *c, Node *n, Scope *parent) {
     return n->scope;
 }
 /* Binds the name n, reporting errors at the node `at` covers. */
+/* A copy of text that s keeps as long as it lives; NULL with an error. */
+static char *scope_text(SPYContext *c, Scope *s, const char *text) {
+    if (grow(c, (void **)&s->texts, &s->texts_cap, s->texts_len + 1, sizeof(*s->texts))) return NULL;
+    char *copy = copy_text(c, text, strlen(text));
+    if (copy) s->texts[s->texts_len++] = copy;
+    return copy;
+}
 static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node *at) {
     if ((flags & (S_LOCAL | S_PARAM)) && !strcmp(n->name.text, "__debug__")) {
         node_error(c, at); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1;
     }
     Symbol *symbol = scope_symbol(scope, n->name.text);
     if (!symbol) {
-        if (grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return -1;
+        const char *name = scope_text(c, scope, n->name.text);
+        if (!name || grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return -1;
         symbol = &scope->symbols[scope->len++];
-        *symbol = (Symbol){n->name.text, 0, n->line, NULL, text_hash(n->name.text, strlen(n->name.text)), NULL};
+        *symbol = (Symbol){name, 0, n->line, NULL, text_hash(name, strlen(name)), NULL};
     }
     if (flags & (S_GLOBAL | S_NONLOCAL)) {
         const char *kind = flags & S_GLOBAL ? "global" : "nonlocal";
@@ -8341,9 +8351,10 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
         while (top->parent) top = top->parent;
         Symbol *global = top->kind == S_MODULE ? scope_symbol(top, n->name.text) : NULL;
         if (top->kind == S_MODULE && !global) {
-            if (grow(c, (void **)&top->symbols, &top->cap, top->len + 1, sizeof(*top->symbols))) return -1;
+            const char *name = scope_text(c, top, n->name.text);
+            if (!name || grow(c, (void **)&top->symbols, &top->cap, top->len + 1, sizeof(*top->symbols))) return -1;
             global = &top->symbols[top->len++];
-            *global = (Symbol){n->name.text, 0, n->line, NULL, text_hash(n->name.text, strlen(n->name.text)), NULL};
+            *global = (Symbol){name, 0, n->line, NULL, text_hash(name, strlen(name)), NULL};
         }
         if (global) global->flags |= S_GLOBAL;
     }
@@ -8375,8 +8386,9 @@ static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
     if (store > 0 && n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self")) {
         for (Scope *outer = scope->parent; outer; outer = outer->parent) {
             if (outer->kind != S_CLASS) continue;
-            if (grow(c, (void **)&outer->statics, &outer->statics_cap, outer->statics_len + 1, sizeof(*outer->statics))) return -1;
-            outer->statics[outer->statics_len++] = source_name(n->b);
+            const char *name = scope_text(c, outer, source_name(n->b));
+            if (!name || grow(c, (void **)&outer->statics, &outer->statics_cap, outer->statics_len + 1, sizeof(*outer->statics))) return -1;
+            outer->statics[outer->statics_len++] = name;
             break;
         }
     }
@@ -8446,7 +8458,11 @@ static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
     for (Node *param = generic->args; param; param = param->next, made++) {
         if (scope_annotations(c, generic->scope, param->b, param->flags & F_CONSTRAINTS ? "a TypeVar constraint" : "a TypeVar bound") ||
             scope_annotations(c, generic->scope, param->c, defaults[param->op])) return NULL;
-        *made = (TypeParameter){param->name.text, source_name(param), (int)param->op, (param->flags & F_CONSTRAINTS) != 0, param->b, param->c};
+        const char *name = scope_text(c, generic->scope, param->name.text);
+        const char *spelling = name ? scope_text(c, generic->scope, source_name(param)) : NULL;
+        if (!spelling) return NULL;
+        *made = (TypeParameter){name, spelling, (int)param->op, (param->flags & F_CONSTRAINTS) != 0,
+                                param->b ? param->b->scope : NULL, param->c ? param->c->scope : NULL};
     }
     *made = (TypeParameter){0};
     return generic->scope;
@@ -8994,7 +9010,10 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (unit->as.unit.scope && unit->as.unit.body) unit->as.unit.scope->line = unit->as.unit.body->line;
             if (unit->as.unit.scope && !unit->as.unit.expression) unit->as.unit.scope->doc = docstring(c, unit->as.unit.body);
             if (unit->as.unit.scope && !scope_walk(c, unit->as.unit.scope, unit->as.unit.body) &&
-                !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) scope_resolve(c, unit->as.unit.scope);
+                !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) {
+                if (unit->as.unit.annotate) unit->as.unit.scope->annotate = unit->as.unit.annotate->scope;
+                scope_resolve(c, unit->as.unit.scope);
+            }
         }
         for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated) {
             if (scope_resolve(c, n->scope)) break;
@@ -12705,7 +12724,7 @@ static SPYValue *definition_code(SPYContext *c, SPYValue *unit, Scope *s) {
         SPYValue *code = value_new(c, SPY_CODE);
         if (!code) return NULL;
         code->as.unit.owner = spy_retain(unit);
-        code->as.unit.definition = s->owner;
+        code->as.unit.definition = s;
         s->code_value = code;
     }
     return spy_retain(s->code_value);
@@ -13106,7 +13125,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (definition) return descriptor_get(c, definition, v, c->types[v->type]);
     }
     if (v->type == SPY_CODE) {
-        Node *def = v->as.unit.definition;
+        Scope *def = v->as.unit.definition;
         SPYValue *unit = v->as.unit.owner ? v->as.unit.owner : v;
         SPYValue *replaced = v->as.unit.replaced ? name_local(v->as.unit.replaced, name) : NULL;
         if (replaced) return spy_retain(replaced);
@@ -13119,7 +13138,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_consts")) {
             /* A function's or module's docstring comes first. */
             SPYValue *consts = value_new(c, SPY_TUPLE);
-            SPYValue *doc = !consts ? NULL : def ? (def->kind == N_DEF ? spy_retain(def->scope->doc) : NULL) :
+            SPYValue *doc = !consts ? NULL : def ? (def->form == N_DEF ? spy_retain(def->doc) : NULL) :
                             unit->as.unit.scope ? spy_retain(unit->as.unit.scope->doc) : NULL;
             if (c->error_type[0] || (doc && sequence_append(c, consts, doc))) { spy_release(consts); consts = NULL; }
             spy_release(doc);
@@ -13128,30 +13147,30 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_names")) return code_names(c, unit, def);
         if (!strcmp(name, "co_filename")) return spy_string(c, unit->as.unit.filename, strlen(unit->as.unit.filename));
         if (!strcmp(name, "co_name") || (!strcmp(name, "co_qualname") && !def)) {
-            const char *text = !def ? "<module>" : def->kind == N_COMPREHENSION ?
-                (def->op == N_TUPLE ? "<genexpr>" : def->op == N_DICT ? "<dictcomp>" : def->op == N_SET ? "<setcomp>" : "<listcomp>") : scope_name(def->scope);
+            const char *text = !def ? "<module>" : def->form == N_COMPREHENSION ?
+                (def->op == N_TUPLE ? "<genexpr>" : def->op == N_DICT ? "<dictcomp>" : def->op == N_SET ? "<setcomp>" : "<listcomp>") : scope_name(def);
             return spy_string(c, text, strlen(text));
         }
-        if (!strcmp(name, "co_qualname")) return qualified_name(c, def->scope);
+        if (!strcmp(name, "co_qualname")) return qualified_name(c, def);
         if (!strcmp(name, "co_freevars") || !strcmp(name, "co_cellvars"))
-            return closure_names(c, def ? def->scope : NULL, name[3] == 'c');
+            return closure_names(c, def, name[3] == 'c');
         if (!strcmp(name, "co_firstlineno")) return spy_int(c, def ? (int64_t)def->line : 1);
         if (!strcmp(name, "co_flags")) {
             /* CO_OPTIMIZED | CO_NEWLOCALS, CO_VARARGS, CO_VARKEYWORDS, CO_NESTED,
              * CO_GENERATOR, CO_COROUTINE, CO_ASYNC_GENERATOR, CO_HAS_DOCSTRING,
              * CO_METHOD, and the compiler's __future__ flags. */
             int64_t flags = unit->as.unit.future_flags;
-            if (def && def->kind != N_CLASS) {
+            if (def && def->form != N_CLASS) {
                 flags |= 0x3;
-                for (Parameter *arg = def->scope->signature; arg && arg->name; arg++)
+                for (Parameter *arg = def->signature; arg && arg->name; arg++)
                     flags |= arg->kind == P_VARARGS ? 0x4 : arg->kind == P_KWARGS ? 0x8 : 0;
-                Scope *parent = def->scope ? def->scope->parent : NULL;
+                Scope *parent = def ? def->parent : NULL;
                 while (parent && parent->form == N_GENERIC) parent = parent->parent;
                 if (parent && (parent->kind == S_FUNCTION || parent->kind == S_COMPREHENSION)) flags |= 0x10;
                 if (parent && parent->kind == S_CLASS) flags |= 0x8000000;
-                if (def->kind == N_COMPREHENSION) flags |= def->op != N_TUPLE ? 0 : def->asynchronous ? 0x200 : 0x20;
-                else if (def->scope->code) flags |= def->op == 2 ? 0x200 : def->op ? 0x80 : 0x20;
-                if (def->kind == N_DEF && def->scope->doc) flags |= 0x4000000;
+                if (def->form == N_COMPREHENSION) flags |= def->op != N_TUPLE ? 0 : def->asynchronous ? 0x200 : 0x20;
+                else if (def->code) flags |= def->op == 2 ? 0x200 : def->op ? 0x80 : 0x20;
+                if (def->form == N_DEF && def->doc) flags |= 0x4000000;
             }
             return spy_int(c, flags);
         }
@@ -13159,20 +13178,20 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             /* Named parameters, then *args and **kwargs, then other local
              * bindings in first-use order. A class body has no fast locals. */
             SPYValue *names = value_new(c, SPY_TUPLE);
-            Scope *scope = def && def->kind != N_CLASS ? def->scope : NULL;
+            Scope *scope = def && def->form != N_CLASS ? def : NULL;
             /* A generator expression's code takes its iterable as ".0". */
-            SPYValue *iterable = def && def->kind == N_COMPREHENSION && def->op == N_TUPLE ? spy_string(c, ".0", 2) : NULL;
+            SPYValue *iterable = def && def->form == N_COMPREHENSION && def->op == N_TUPLE ? spy_string(c, ".0", 2) : NULL;
             if (iterable && names && sequence_append(c, names, iterable)) { spy_release(names); names = NULL; }
             spy_release(iterable);
             for (int pass = 0; pass < 3; pass++)
-            for (Parameter *arg = def ? def->scope->signature : NULL; names && arg && arg->name; arg++) {
+            for (Parameter *arg = def ? def->signature : NULL; names && arg && arg->name; arg++) {
                 if ((arg->kind == P_VARARGS) != (pass == 1) || (arg->kind == P_KWARGS) != (pass == 2)) continue;
                 SPYValue *text = spy_string(c, arg->name, strlen(arg->name));
                 if (!text || sequence_append(c, names, text)) { spy_release(text); spy_release(names); return NULL; }
                 spy_release(text);
             }
             /* Locals that are cells are co_cellvars, not co_varnames (unless parameters). */
-            SPYValue *cells = names && scope ? closure_names(c, def ? def->scope : NULL, 1) : NULL;
+            SPYValue *cells = names && scope ? closure_names(c, def, 1) : NULL;
             for (size_t i = 0; names && scope && cells && i < scope->len; i++) {
                 Symbol *symbol = &scope->symbols[i];
                 if (!(symbol->flags & S_LOCAL) || (symbol->flags & (S_PARAM | S_GLOBAL | S_NONLOCAL))) continue;
@@ -13190,9 +13209,9 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             spy_release(names); return count;
         }
         if (!strcmp(name, "co_argcount") || !strcmp(name, "co_posonlyargcount") || !strcmp(name, "co_kwonlyargcount")) {
-            if (def && def->kind == N_COMPREHENSION) return spy_int(c, !strcmp(name, "co_argcount"));
+            if (def && def->form == N_COMPREHENSION) return spy_int(c, !strcmp(name, "co_argcount"));
             int64_t count = 0;
-            for (Parameter *arg = def ? def->scope->signature : NULL; arg && arg->name; arg++)
+            for (Parameter *arg = def ? def->signature : NULL; arg && arg->name; arg++)
                 count += !strcmp(name, "co_kwonlyargcount") ? arg->kind == P_KWONLY :
                          !strcmp(name, "co_posonlyargcount") ? arg->kind == P_POSONLY :
                          arg->kind == P_POSITIONAL || arg->kind == P_POSONLY;
@@ -15176,8 +15195,8 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
     /* Keep only what differs from the definition's own code, so that equal
      * changes compare equal. */
     SPYValue *owner = code->as.unit.owner ? code->as.unit.owner : code;
-    Node *def = code->as.unit.definition;
-    base = def ? definition_code(c, owner, def->scope) : spy_retain(owner);
+    Scope *def = code->as.unit.definition;
+    base = def ? definition_code(c, owner, def) : spy_retain(owner);
     if (!base || !(replaced = value_new(c, SPY_DICT))) goto done;
     int signature = 0;
     for (size_t i = 0; i < FIELDS && !c->error_type[0]; i++) {
@@ -15194,7 +15213,7 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
     copy->as.unit.definition = def;
     copy->as.unit.replaced = replaced; replaced = NULL;
     /* Function code with another signature binds through its own parameters. */
-    if (signature && def && (def->kind == N_DEF || def->kind == N_LAMBDA)) {
+    if (signature && def && (def->form == N_DEF || def->form == N_LAMBDA)) {
         SPYValue *locals = attribute(c, base, "co_varnames");
         if (locals) copy->as.unit.signature = code_signature(c, varnames, locals, argcount, posonly, kwonly, flags);
         spy_release(locals);
@@ -15789,9 +15808,9 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
                name && name->type == SPY_STRING ? name->as.string.data : "?", have, need);
         return -1;
     }
-    Node *def = code->as.unit.definition;
+    Scope *def = code->as.unit.definition;
     /* Code with other free variables reads f's cells through a forwarding scope. */
-    if (need && (def ? def->scope : NULL) != fn->as.function.def) {
+    if (need && (def) != fn->as.function.def) {
         SPYValue *closure = function_closure(c, fn);
         SPYValue *env = closure ? forward_env(c, def, namespace_map(module_env(c, fn->as.function.env)), closure) : NULL;
         int status = !env || name_set(c, fn->as.function.metadata, "__closure__", closure);
@@ -15801,7 +15820,7 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
     }
     SPYValue *unit = fn->as.function.unit;
     fn->as.function.unit = spy_retain(def ? code->as.unit.owner : code);
-    fn->as.function.def = def ? def->scope : NULL;
+    fn->as.function.def = def;
     fn->as.function.signature = replaced_signature(code);
     spy_release(unit);
     /* Keep a replace()d code object as given. */
@@ -16007,10 +16026,10 @@ typedef struct {
     int op, arg;
     union {
         struct { uint32_t target, other; };
-        SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit or its program; BC_CALLK: its keywords' names, and a future BC_ANNOTATE: its name and text, its program's. */
-        NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, a keyword's BC_ARG, or a parameter's BC_DEFAULT: spelling and lookup cache, borrowed from the source unit. */
+        SPYValue *constant; /* BC_LOAD: its program's; BC_CALLK: its keywords' names, and a future BC_ANNOTATE: its name and text, its program's. */
+        NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, a keyword's BC_ARG, or a parameter's BC_DEFAULT: spelling and lookup cache, its program's. */
         const ImportRecord *import; /* BC_IMPORT: its program's. */
-        AttributeOperand *attribute; /* BC_ATTR, or an attribute's target step or BC_DELETE, or a method call's BC_CALLN: borrowed from the source unit. */
+        AttributeOperand *attribute; /* BC_ATTR, or an attribute's target step or BC_DELETE, or a method call's BC_CALLN: its program's. */
         Scope *definition; /* BC_FUNCTION, BC_GENERIC_FUNCTION, BC_COMPREHENSION and BC_CLASS: the body of the function,
                             * comprehension or class they make, or an alias's value, borrowed from the source unit. */
     };
@@ -16026,10 +16045,19 @@ typedef struct {
  * names load through mappings (name_load): no fused step takes them. */
 /* plain, while a fused operator's plain steps compile (compile_operator);
  * tested, one past the last fused truth test, whose BC_FALSE may follow. */
-struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; ImportRecord *imports; SPYValue **values; size_t values_len, values_cap; };
+/* A name or attribute operand its program owns, with the name's text.
+ * Its program's operands, in the order its steps were emitted, record
+ * the names its code uses (co_names, code_names): use says whether the
+ * name is one it may report as a name (USE_NAME), or always reports
+ * (USE_ALWAYS: an attribute or a name an import reads), or is an
+ * inlined comprehension's, whose program's uses follow (USE_INLINE). */
+enum { USE_NONE, USE_NAME, USE_ALWAYS, USE_INLINE };
+typedef struct Operand { struct Operand *next; int use; Scope *inlined; AttributeOperand attribute; NameOperand name; char text[]; } Operand;
+struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; ImportRecord *imports; Operand *operands, *last; SPYValue **values; size_t values_len, values_cap; };
 /* The values a program owns (emit_value). */
 static void program_edges(Program *code, Visit visit, void *data) {
     for (size_t i = 0; code && i < code->values_len; i++) visit(code->values[i], data);
+    for (Operand *o = code ? code->operands : NULL; o; o = o->next) if (o->name.global_key) visit(o->name.global_key, data);
 }
 typedef struct {
     char type[64], message[256], filename[256];
@@ -16188,6 +16216,7 @@ static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
 static void free_program(Program *code) {
     if (!code) return;
     for (ImportRecord *r = code->imports, *next; r; r = next) { next = r->next; mem_free(r); }
+    for (Operand *o = code->operands, *next; o; o = next) { next = o->next; mem_free(o); }
     mem_free(code->values); mem_free(code->items); mem_free(code);
 }
 static void machine_edges(Machine *m, Visit visit, void *data) {
@@ -16323,6 +16352,26 @@ static int expands(Node *n, int calls) {
     return list_expands(n->a, mode) || list_expands(n->b, mode) || list_expands(n->c, mode) || list_expands(n->args, mode);
 }
 static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line, int arg);
+static void emit_value(SPYContext *, Program *, Node *, SPYValue *);
+/* An operand of text for p, which owns it, put after p's others; NULL
+ * with an error. */
+static Operand *operand_new(SPYContext *c, Program *p, const char *text, int use) {
+    size_t len = strlen(text);
+    Operand *o = allocate(c, sizeof(*o) + len + 1);
+    if (!o) return NULL;
+    memcpy(o->text, text, len + 1);
+    o->use = use; o->name.text = o->text; o->attribute.name = &o->name;
+    if (p->last) p->last->next = o; else p->operands = o;
+    p->last = o;
+    return o;
+}
+/* The operand of attribute node n for p. */
+static AttributeOperand *attribute_operand(SPYContext *c, Program *p, Node *n) {
+    Operand *o = operand_new(c, p, n->attribute.name->text, USE_ALWAYS);
+    if (!o) return NULL;
+    o->attribute.line = n->attribute.line;
+    return &o->attribute;
+}
 /* Emit op with arg, its operands from n, at n's line. */
 static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) { return emit_line(c, p, op, n, n ? n->line : 0, arg); }
 static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line, int arg) {
@@ -16338,14 +16387,18 @@ static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line,
     if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
     else p->items[p->len++] = (Instruction){.line = (uint32_t)line, .arg = arg, .other = (uint32_t)test};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
-    if (op == BC_LOAD) p->items[pc].constant = n->constant;
     if (op == BC_NAME || op == BC_INTERPOLATION || op == BC_DEFAULT || ((op == BC_STORE || op == BC_NAMED || op == BC_DELETE) && n->kind == N_NAME) || (op == BC_ARG && arg == N_KEYWORD))
-        p->items[pc].name = &n->name;
+        { Operand *o = operand_new(c, p, n->name.text, op == BC_NAME || op == BC_STORE || op == BC_NAMED || op == BC_DELETE ? USE_NAME : USE_NONE);
+          p->items[pc].name = o ? &o->name : NULL; }
     if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET || op == BC_DELETE) && n->kind == N_ATTR)
-        p->items[pc].attribute = &n->attribute;
+        p->items[pc].attribute = attribute_operand(c, p, n);
     if (op == BC_FUNCTION || op == BC_GENERIC_FUNCTION || op == BC_COMPREHENSION || op == BC_CLASS)
         p->items[pc].definition = !n ? NULL : n->kind == N_TYPEALIAS ? body_scope(c, n->b) :
                                   n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS || n->kind == N_COMPREHENSION ? body_scope(c, n) : NULL;
+    if (op == BC_COMPREHENSION && n->op != N_TUPLE && p->items[pc].definition) {
+        Operand *o = operand_new(c, p, "", USE_INLINE);
+        if (o) o->inlined = p->items[pc].definition;
+    }
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
@@ -16492,13 +16545,13 @@ static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
     if (method && !literals) emit(c, p, BC_ATTR, n->a, 1);
     for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
     size_t call = emit(c, p, plain ? BC_CALLN : BC_CALLK, n, argc | (method && literals ? CALL_OBJECT : 0));
-    if (method && call != SIZE_MAX) p->items[call].attribute = &n->a->attribute;
+    if (method && call != SIZE_MAX) p->items[call].attribute = attribute_operand(c, p, n->a);
     if (!plain && call != SIZE_MAX) p->items[call].constant = keyword_names(c, p, n);
 }
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
-    if (n->constant || (at_hand(n) && n->kind != N_NAME)) { if (literal_value(c, n)) emit(c, p, BC_LOAD, n, 0); return; }
+    if (n->constant || (at_hand(n) && n->kind != N_NAME)) { SPYValue *value = literal_value(c, n); if (value) emit_value(c, p, n, spy_retain(value)); return; }
     if (n->kind == N_NAME) { emit(c, p, BC_NAME, n, 0); return; }
     /* What cannot suspend is evaluated whole, a leaf or an operator on
      * leaves in one step; a comparison of other operands costs less as
@@ -17154,6 +17207,7 @@ static void case_begin(SPYContext *c, Program *p, Node *item, Case *k) {
     size_t pc = names && !grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)) ? emit_pattern(c, p, item, P_STORE, count) : SIZE_MAX;
     if (pc != SIZE_MAX) { p->values[p->values_len++] = names; p->items[pc].constant = names; }
     else spy_release(names);
+    for (size_t i = 0; pc != SIZE_MAX && i < count; i++) operand_new(c, p, k->names[i], USE_NAME);
     k->guard = item->b ? compile_branch(c, p, item->b, item->b) : SIZE_MAX;
     emit(c, p, BC_POP, item, 0);
 }
@@ -17261,12 +17315,22 @@ static void emit_import(SPYContext *c, Program *p, Node *n) {
     *r = (ImportRecord){p->imports, place_text(&text, module), n->kind == N_FROM, n->op, !!(n->flags & F_LAZY), !!(n->flags & F_LAZY_COMPAT), count};
     p->imports = r;
     ImportItem *each = r->items;
+    /* It uses its module, then each name it imports, a dotted import's
+     * parts when it binds the last, and the name it binds. */
+    if (n->kind == N_FROM) operand_new(c, p, module, USE_ALWAYS);
     for (Node *item = n->args; item; item = item->next, each++) {
         if (item->kind == N_STAR) { *each = (ImportItem){place_text(&text, "*"), NULL, 0}; continue; }
         Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
         each->name = place_text(&text, source_name(item->a));
         each->bind = place_text(&text, binding->name.text);
         each->as = item->b != NULL;
+        operand_new(c, p, each->name, USE_ALWAYS);
+        for (const char *dot = n->kind == N_IMPORT && item->b ? strchr(each->name, '.') : NULL; dot; dot = strchr(dot + 1, '.')) {
+            Operand *part = operand_new(c, p, dot + 1, USE_ALWAYS);
+            char *end = part ? strchr(part->text, '.') : NULL;
+            if (end) *end = 0;
+        }
+        operand_new(c, p, each->bind, USE_NAME);
     }
     emit(c, p, BC_NONE, n, 0);
     size_t pc = emit(c, p, BC_IMPORT, n, 1);
@@ -17477,15 +17541,19 @@ static int module_body_finish(Parser *p, SPYValue *unit) {
     }
     return c->error_type[0] ? -1 : 0;
 }
-/* The signature of function or lambda n, its parameters' names borrowed
- * from them; NULL with an error. */
+/* The signature of function or lambda n, its parameters' names kept by
+ * its scope; NULL with an error. */
 static Parameter *definition_signature(SPYContext *c, Node *n) {
     size_t count = 0;
     for (Node *arg = n->args; arg; arg = arg->next) count++;
     Parameter *signature = allocate(c, (count + 1) * sizeof(*signature));
     if (!signature) return NULL;
     count = 0;
-    for (Node *arg = n->args; arg; arg = arg->next) signature[count++] = (Parameter){arg->name.text, NULL, arg->op, arg->a != NULL};
+    for (Node *arg = n->args; arg; arg = arg->next) {
+        char *name = scope_text(c, n->scope, arg->name.text);
+        if (!name) { mem_free(signature); return NULL; }
+        signature[count++] = (Parameter){name, NULL, arg->op, arg->a != NULL};
+    }
     signature[count] = (Parameter){0};
     return signature;
 }
@@ -17529,9 +17597,9 @@ static int compile_generator(SPYContext *c, Node *n) {
     return c->error_type[0] ? -1 : 0;
 }
 static Result execute_module(SPYContext *, Frame *);
-static int start_annotations(SPYContext *, Frame *, Node *, const char *);
+static int start_annotations(SPYContext *, Frame *, Scope *, const char *);
 static int start_conditional(SPYContext *, Frame *, int);
-static int store_annotate(SPYContext *, Frame *, Node *, const char *);
+static int store_annotate(SPYContext *, Frame *, Scope *, const char *);
 static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, SPYValue *);
 static SPYValue *sentinel_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -18039,7 +18107,7 @@ static SPYValue *qualified_name(SPYContext *c, Scope *scope) {
  * <genexpr> and its __qualname__ comes from the scope of its retained code. */
 static int generator_names(SPYContext *c, SPYValue *v) {
     if (!v->as.generator.name && !(v->as.generator.name = spy_string(c, "<genexpr>", 9))) return -1;
-    if (!v->as.generator.qualname && !(v->as.generator.qualname = qualified_name(c, v->as.generator.code->as.unit.definition->scope))) return -1;
+    if (!v->as.generator.qualname && !(v->as.generator.qualname = qualified_name(c, v->as.generator.code->as.unit.definition))) return -1;
     return 0;
 }
 /* Closures. As CPython's symtable, a name is free in a scope when it resolves
@@ -18109,101 +18177,15 @@ static int code_name_use(ClosureNames *w, Scope *scope, const char *name) {
         return at->kind == S_FUNCTION || at->kind == S_COMPREHENSION ? 0 : code_name_add(w, name);
     return free_binding(w->self, name) ? 0 : code_name_add(w, name);
 }
-static int code_names_walk(ClosureNames *, Scope *, Node *, int);
-static int code_names_clauses(ClosureNames *, Node *, int);
-static int code_names_node(ClosureNames *w, Scope *scope, Node *n, int depth) {
-#define WALK(x) code_names_walk(w, scope, (x), depth + 1)
-#define NODE(x) code_names_walk(w, scope, (x), depth + 1)
-    if (!n || depth >= 1000) return 0;
-    switch (n->kind) {
-    case N_NAME: return n->name.text && strcmp(n->name.text, "__debug__") ? code_name_use(w, scope, n->name.text) : 0; /* __debug__ is a constant */
-    case N_ATTR: return NODE(n->a) || (n->b && n->b->name.text && code_name_add(w, n->b->name.text)) ? -1 : 0;
-    case N_GLOBAL: case N_NONLOCAL: return 0;
-    case N_ASSIGN:
-        /* An augmented target is read first; otherwise the value comes first. */
-        if (n->op != '=') return NODE(n->a) || NODE(n->b) ? -1 : 0;
-        return NODE(n->b) || NODE(n->a) || WALK(n->args) ? -1 : 0;
-    case N_ANNASSIGN: return NODE(n->c) || (n->c || !(n->flags & F_SIMPLE) ? NODE(n->a) : 0) ? -1 : 0;
-    case N_NAMED: return NODE(n->b) || NODE(n->a) ? -1 : 0;
-    case N_FOR: return NODE(n->a) || NODE(n->args) || WALK(n->b) || WALK(n->c) ? -1 : 0;
-    case N_WITH:
-        for (Node *item = n->args; item; item = item->next) if (NODE(item->a) || NODE(item->b)) return -1;
-        return WALK(n->b);
-    case N_EXCEPT: return NODE(n->a) || NODE(n->c) || WALK(n->b) ? -1 : 0;
-    case N_TRY: return WALK(n->a) || WALK(n->args) || WALK(n->b) || WALK(n->c) ? -1 : 0;
-    case N_COND: return NODE(n->b) || NODE(n->a) || NODE(n->c) ? -1 : 0;
-    case N_MATCH:
-        if (NODE(n->a)) return -1;
-        for (Node *item = n->args; item; item = item->next) if (NODE(item->a) || NODE(item->b) || WALK(item->c)) return -1;
-        return 0;
-    case N_PATTERN:
-        switch (n->op) {
-        case PT_AS: return NODE(n->a) || NODE(n->b) ? -1 : 0;
-        case PT_MAPPING:
-            for (Node *entry = n->args; entry; entry = entry->next) if (NODE(entry->a) || NODE(entry->b)) return -1;
-            return NODE(n->c);
-        case PT_CLASS:
-            if (NODE(n->a) || WALK(n->args)) return -1;
-            for (Node *entry = n->c; entry; entry = entry->next) if (NODE(entry->b)) return -1;
-            return 0;
-        case PT_CAPTURE: case PT_STAR: case PT_VALUE: case PT_LITERAL: return NODE(n->a);
-        default: return WALK(n->args);
-        }
-    case N_DICT:
-        for (Node *item = n->args; item; item = item->next) if (NODE(item->a) || NODE(item->b)) return -1;
-        return 0;
-    case N_IMPORT: case N_FROM:
-        /* The module, each name imported, then the name bound. */
-        if (n->kind == N_FROM && code_name_add(w, n->a ? source_name(n->a) : "")) return -1;
-        for (Node *item = n->args; item && item->kind != N_STAR; item = item->next) {
-            const char *text = source_name(item->a);
-            if (code_name_add(w, text)) return -1;
-            for (const char *dot = n->kind == N_IMPORT && item->b ? strchr(text, '.') : NULL; dot; dot = strchr(dot + 1, '.')) {
-                const char *end = strchr(dot + 1, '.');
-                size_t len = end ? (size_t)(end - dot - 1) : strlen(dot + 1);
-                char *part = mem_malloc(w->c, len + 1);
-                if (!part) { spy_error(w->c, "MemoryError", "allocation failed"); return -1; }
-                memcpy(part, dot + 1, len); part[len] = 0;
-                int status = code_name_add(w, part);
-                mem_free(part);
-                if (status) return -1;
-            }
-            Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
-            if (code_name_use(w, scope, source_name(binding))) return -1;
-        }
-        return 0;
-    case N_TYPEALIAS: return NODE(n->a);
-    case N_DEF: case N_LAMBDA: case N_CLASS:
-        /* Decorators, defaults and a plain class's bases are evaluated here,
-         * then the definition is bound. */
-        if (WALK(n->decorators)) return -1;
-        for (Node *param = n->kind != N_CLASS ? n->args : NULL; param; param = param->next) if (NODE(param->a)) return -1;
-        if (n->kind == N_CLASS && !n->params && WALK(n->args)) return -1;
-        return n->kind == N_LAMBDA ? 0 : NODE(n->a);
-    case N_COMPREHENSION:
-        /* The first iterable is evaluated here; an inlined comprehension's
-         * clauses and element run here too. */
-        if (NODE(n->a->a)) return -1;
-        return n->op == N_TUPLE ? 0 : code_names_clauses(w, n, depth);
-    default:
-        return WALK(n->a) || WALK(n->b) || WALK(n->c) || WALK(n->args) || WALK(n->decorators) ? -1 : 0;
+/* The names program p of scope uses, in the order it uses them. */
+static int code_names_program(ClosureNames *w, Scope *scope, Program *p) {
+    for (Operand *o = p ? p->operands : NULL; o; o = o->next) {
+        int status = o->use == USE_ALWAYS ? code_name_add(w, o->text) :
+                     o->use == USE_INLINE ? code_names_program(w, o->inlined, o->inlined->code ? o->inlined->code : o->inlined->flat) :
+                     o->use == USE_NAME && strcmp(o->text, "__debug__") ? code_name_use(w, scope, o->text) : 0; /* __debug__ is a constant */
+        if (status) return -1;
     }
-#undef WALK
-#undef NODE
-}
-static int code_names_walk(ClosureNames *w, Scope *scope, Node *n, int depth) {
-    for (; n; n = n->next) if (code_names_node(w, scope, n, depth)) return -1;
     return 0;
-}
-/* A comprehension's clauses after its first iterable, then its element. */
-static int code_names_clauses(ClosureNames *w, Node *n, int depth) {
-    for (Node *clause = n->a; clause; clause = clause->b)
-        if ((clause != n->a && code_names_walk(w, n->scope, clause->a, depth + 1)) ||
-            (clause->kind == N_FOR && code_names_walk(w, n->scope, clause->args, depth + 1)))
-            return -1;
-    Node *element = n->args;
-    if (n->op == N_DICT) return code_names_walk(w, n->scope, element->a, depth + 1) || code_names_walk(w, n->scope, element->b, depth + 1) ? -1 : 0;
-    return code_names_walk(w, n->scope, element, depth + 1);
 }
 /* Whether class body s has a __classdict__ cell (16.4.1): it has a scope
  * that can see the class namespace, type parameters or a type alias, or,
@@ -18251,10 +18233,10 @@ static SPYValue *closure_names(SPYContext *c, Scope *def, int cells) {
         }
     return w.names;
 }
-static SPYValue *code_names(SPYContext *c, SPYValue *unit, Node *def) {
-    ClosureNames w = {c, def ? def->scope : unit->as.unit.scope, value_new(c, SPY_TUPLE), 0};
-    if (w.names && w.self && (def && def->kind == N_COMPREHENSION ? code_names_clauses(&w, def, 0) : code_names_walk(&w, w.self, def ? def->b : unit->as.unit.body, 0)))
-        { spy_release(w.names); return NULL; }
+static SPYValue *code_names(SPYContext *c, SPYValue *unit, Scope *def) {
+    ClosureNames w = {c, def ? def : unit->as.unit.scope, value_new(c, SPY_TUPLE), 0};
+    Program *p = !def ? unit->as.unit.flat : def->code ? def->code : def->flat;
+    if (w.names && w.self && code_names_program(&w, w.self, p)) { spy_release(w.names); return NULL; }
     return w.names;
 }
 static SPYValue *cell_new(SPYContext *c, SPYValue *env, const char *name, SPYValue *value) {
@@ -19549,7 +19531,7 @@ static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env
     return NULL;
 }
 static int setup_annotations(SPYContext *, Frame *, int);
-static int start_annotations(SPYContext *, Frame *, Node *, const char *);
+static int start_annotations(SPYContext *, Frame *, Scope *, const char *);
 /* Enter the frame of unit, whose module body is on the machine
  * (module_body_finish), in env, called from the machine caller; it takes both
  * references, releasing them when it fails. The body's instructions of no
@@ -23260,10 +23242,10 @@ static SPYValue *type_params_from(SPYContext *c, Machine *m, SPYValue *state) {
     TypeParameter *param = env->as.map.scope->type_params + params->as.seq.len;
     if (!param->name) return k_resume(c, m, state, spy_retain(params));
     Frame frame = {env, env->as.map.unit, 0};
-    SPYValue *lazy = param->bound ? make_function(c, &frame, param->bound->scope) : spy_none(c);
+    SPYValue *lazy = param->bound ? make_function(c, &frame, param->bound) : spy_none(c);
     SPYValue *args[] = {spy_int(c, param->kind), spy_string(c, param->spelling, strlen(param->spelling)),
                         param->constraints ? spy_none(c) : spy_retain(lazy), param->constraints ? spy_retain(lazy) : spy_none(c),
-                        param->fallback ? make_function(c, &frame, param->fallback->scope) : spy_none(c)};
+                        param->fallback ? make_function(c, &frame, param->fallback) : spy_none(c)};
     SPYValue *function = intrinsic(c, "_type_param");
     spy_release(lazy);
     if (!function || !args[0] || !args[1] || !args[2] || !args[3] || !args[4]) { release_all(5, args); return k_resume(c, m, state, NULL); }
@@ -25601,8 +25583,9 @@ static SPYValue *class_names_call(SPYContext *, Machine *, Frame *, SPYValue *, 
  * or NULL on an error. */
 static NO_INLINE SPYValue *module_annotations(SPYContext *c, Machine *m, Frame *f) {
     SPYValue *unit = f->unit;
-    if (!hooked_namespace(c, f->env)) return start_annotations(c, f, unit->as.unit.annotate, "__annotate__") ? NULL : spy_none(c);
-    SPYValue *values[] = {unit->as.unit.annotate ? function_new(c, f, unit->as.unit.annotate->scope) : NULL,
+    Scope *annotate = unit->as.unit.scope->annotate;
+    if (!hooked_namespace(c, f->env)) return start_annotations(c, f, annotate, "__annotate__") ? NULL : spy_none(c);
+    SPYValue *values[] = {annotate ? function_new(c, f, annotate) : NULL,
                           unit->as.unit.conditional_annotations ? value_new(c, SPY_SET) : NULL};
     SPYValue *keys[] = {spy_string(c, "__annotate__", 12), spy_string(c, "__conditional_annotations__", 27)};
     SPYValue *names = c->error_type[0] ? NULL : value_new(c, SPY_LIST);
@@ -25643,9 +25626,9 @@ static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, 
 }
 /* A body with annotations annotate binds its annotation function to
  * name: a module first, a class after its statements. */
-static int store_annotate(SPYContext *c, Frame *f, Node *annotate, const char *name) {
+static int store_annotate(SPYContext *c, Frame *f, Scope *annotate, const char *name) {
     if (!annotate) return 0;
-    SPYValue *fn = function_new(c, f, annotate->scope);
+    SPYValue *fn = function_new(c, f, annotate);
     int status = fn ? name_set(c, f->env, name, fn) : -1;
     spy_release(fn);
     return status;
@@ -25661,7 +25644,7 @@ static int start_conditional(SPYContext *c, Frame *f, int conditional) {
 }
 /* A module's body starts by binding its annotation function, then the
  * set of executed conditional annotations. */
-static int start_annotations(SPYContext *c, Frame *f, Node *annotate, const char *name) {
+static int start_annotations(SPYContext *c, Frame *f, Scope *annotate, const char *name) {
     return store_annotate(c, f, annotate, name) || start_conditional(c, f, f->unit->as.unit.conditional_annotations);
 }
 /* Module machine m ran to r, outer the eval_env before it: a pause keeps
@@ -47841,7 +47824,7 @@ static SPYValue *source_unit(SPYContext *c, Machine *m, int id, size_t argc, SPY
     if (a->type == SPY_CODE && id != B_COMPILE) {
         if (a->as.unit.definition) {
             /* A function's code runs as a call with no arguments. */
-            SPYValue *free = closure_names(c, a->as.unit.definition->scope, 0), *result = NULL;
+            SPYValue *free = closure_names(c, a->as.unit.definition, 0), *result = NULL;
             size_t needed = free ? free->as.seq.len : 0, given = closure && closure->type == SPY_TUPLE ? closure->as.seq.len : 0;
             if (!free) {}
             else if (needed && expression) spy_error(c, "TypeError", "code object passed to eval() may not contain free variables");
@@ -49488,15 +49471,15 @@ static SPYValue *globals_env(SPYContext *c, SPYValue *globals) {
 /* Cells made by cell() hold their own value: give them one new scope of
  * the code's free variables, under the globals, and make each cell a view
  * of its variable there, so the function and the cell share it (28.6). */
-static int bind_free_cells(SPYContext *c, Node *def, SPYValue *globals, SPYValue *closure) {
+static int bind_free_cells(SPYContext *c, Scope *def, SPYValue *globals, SPYValue *closure) {
     for (size_t i = 0; i < closure->as.seq.len; i++)
         if (closure->as.seq.items[i]->as.cell.env) return 0;
-    SPYValue *names = closure_names(c, def ? def->scope : NULL, 0), *outer = names ? globals_env(c, globals) : NULL;
+    SPYValue *names = closure_names(c, def, 0), *outer = names ? globals_env(c, globals) : NULL;
     SPYValue *env = outer ? value_new(c, V_ENV) : NULL;
     int status = !env;
     if (env) {
         env->as.map.parent = outer; outer = NULL;
-        env->as.map.scope = def->scope ? def->scope->parent : NULL;
+        env->as.map.scope = def ? def->parent : NULL;
     }
     for (size_t i = 0; !status && i < closure->as.seq.len && i < names->as.seq.len; i++) {
         SPYValue *cell = closure->as.seq.items[i], *name = names->as.seq.items[i];
@@ -49632,11 +49615,11 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
     spy_release(r.value); return spy_none(c);
 }
 /* A scope under globals whose free variables of def forward to closure's cells. */
-static SPYValue *forward_env(SPYContext *c, Node *def, SPYValue *globals, SPYValue *closure) {
-    SPYValue *names = closure_names(c, def ? def->scope : NULL, 0), *env = names ? value_new(c, V_ENV) : NULL;
+static SPYValue *forward_env(SPYContext *c, Scope *def, SPYValue *globals, SPYValue *closure) {
+    SPYValue *names = closure_names(c, def, 0), *env = names ? value_new(c, V_ENV) : NULL;
     if (env) {
         env->as.map.flags = ENV_FORWARD;
-        env->as.map.scope = def->scope ? def->scope->parent : NULL;
+        env->as.map.scope = def ? def->parent : NULL;
         env->as.map.parent = globals_env(c, globals);
     }
     int status = !env || !env->as.map.parent;
@@ -49650,7 +49633,7 @@ static SPYValue *forward_env(SPYContext *c, Node *def, SPYValue *globals, SPYVal
     return env;
 }
 static SPYValue *function_from_code(SPYContext *c, SPYValue *code, SPYValue *globals, SPYValue *closure) {
-    Node *def = code->as.unit.definition;
+    Scope *def = code->as.unit.definition;
     if (!def) return module_code_function(c, code, globals);
     SPYValue *env = NULL;
     if (closure && closure->type == SPY_TUPLE && closure->as.seq.len && bind_free_cells(c, def, globals, closure)) return NULL;
@@ -49676,7 +49659,7 @@ static SPYValue *function_from_code(SPYContext *c, SPYValue *code, SPYValue *glo
     else env = env ? spy_retain(env) : globals_env(c, globals);
     if (!env) return NULL;
     Frame frame = {env, code->as.unit.owner, 0};
-    SPYValue *fn = function_new(c, &frame, def->scope);
+    SPYValue *fn = function_new(c, &frame, def);
     spy_release(env);
     if (!fn) return NULL;
     SPYValue *module = name_local(globals, "__name__");
@@ -49704,8 +49687,8 @@ static SPYValue *function_construct(SPYContext *c, size_t argc, SPYValue *const 
     if (!is_dict(args[1])) return errorf(c, "TypeError", "function() argument 'globals' must be dict, not %s", type_name(args[1]));
     if (args[2]->type != SPY_NONE && args[2]->type != SPY_STRING) return spy_error(c, "TypeError", "arg 3 (name) must be None or string");
     if (args[3]->type != SPY_NONE && args[3]->type != SPY_TUPLE) return spy_error(c, "TypeError", "arg 4 (defaults) must be None or tuple");
-    Node *def = args[0]->as.unit.definition;
-    SPYValue *free = def ? closure_names(c, def->scope, 0) : value_new(c, SPY_TUPLE);
+    Scope *def = args[0]->as.unit.definition;
+    SPYValue *free = def ? closure_names(c, def, 0) : value_new(c, SPY_TUPLE);
     if (!free) return NULL;
     size_t needed = free->as.seq.len;
     spy_release(free);
@@ -49716,7 +49699,7 @@ static SPYValue *function_construct(SPYContext *c, size_t argc, SPYValue *const 
     if (args[5]->type != SPY_NONE && !is_dict(args[5])) return spy_error(c, "TypeError", "arg 6 (kwdefaults) must be None or dict");
     size_t given = args[4]->type == SPY_TUPLE ? args[4]->as.seq.len : 0;
     if (needed != given) {
-        const char *name = !def ? "<module>" : def->kind == N_LAMBDA ? "<lambda>" : scope_name(def->scope);
+        const char *name = !def ? "<module>" : def->form == N_LAMBDA ? "<lambda>" : scope_name(def);
         return errorf(c, "ValueError", "%s requires closure of length %zu, not %zu", name, needed, given);
     }
     for (size_t i = 0; i < given; i++)
