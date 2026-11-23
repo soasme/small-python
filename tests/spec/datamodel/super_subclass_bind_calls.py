@@ -81,3 +81,14 @@ EXPECTED = [
 assert_eq(len(OUT), len(EXPECTED))
 for got, want in zip(OUT, EXPECTED):
     assert_eq(got, want)
+
+# A subclass without its own __init__ binds as well.
+class PlainBase:
+    def who(self): return "base"
+class PlainDerived(PlainBase):
+    def who(self): return "derived"
+class PlainSuper(super): pass
+PlainDerived.up = PlainSuper(PlainDerived)
+plain_derived = PlainDerived()
+plain_bound = plain_derived.up
+assert_eq([type(plain_bound).__name__, plain_bound.who(), plain_bound.__self__ is plain_derived], ["PlainSuper", "base", True])

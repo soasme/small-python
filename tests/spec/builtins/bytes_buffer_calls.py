@@ -56,3 +56,17 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(copies(), expected)
+
+# A %b of an exporter without __release_buffer__ copies its view.
+del log[:]
+assert_eq((b"<%b>" % (Plain(),), b"%s|%b" % (Plain(), Plain()), log), (b"<plain>", b"plain|plain", [("plain", 284)] * 3))
+
+# A native __bytes__ converts a %b's and %s's value; one giving no bytes is
+# a TypeError.
+class NativeBytes:
+    __bytes__ = b"ok".__bytes__
+class NativeText:
+    __bytes__ = "x".__str__
+assert_eq(b"%b|%s" % (NativeBytes(), NativeBytes()), b"ok|ok")
+with assert_raises(TypeError, message="NativeText.__bytes__() must return a bytes, not str"):
+    b"%b" % NativeText()

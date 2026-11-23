@@ -62,3 +62,12 @@ assert_eq(errors(), [
     ("OverflowError", "cannot fit 'Big' into an index-sized integer"),
     ("OverflowError", "cannot fit 'Big' into an index-sized integer"),
 ] + ["cannot fit 'Big' into an index-sized integer"] * 5 + ["range object index out of range"])
+
+# A repeat count's __index__ too large for an index names the object.
+class RepeatCount:
+    def __index__(self): return 2
+class RepeatHuge:
+    def __index__(self): return 2 ** 70
+assert_eq(["ab" * RepeatCount(), RepeatCount() * [1], (1,) * RepeatCount()], ["abab", [1, 1], (1, 1)])
+with assert_raises(OverflowError, message="cannot fit 'RepeatHuge' into an index-sized integer"):
+    "ab" * RepeatHuge()

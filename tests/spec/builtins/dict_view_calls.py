@@ -95,3 +95,20 @@ assert_eq((k.__eq__(5), k.__ne__([1, 3]), k.__eq__({1, 3}), k.__le__({1: 0, 3: 0
 def gen():
     yield cases()
 assert_eq(next(gen()), expected)
+
+# A stored key's __eq__ declining leaves the probe's reflected Python
+# __eq__, and both declining, identity: False.
+reflect_log = []
+class DeclinedStore:
+    def __hash__(self): return 1
+    def __eq__(self, other): reflect_log.append("stored"); return NotImplemented
+class ReflectedProbe:
+    def __hash__(self): return 1
+    def __eq__(self, other): reflect_log.append("probe"); return True
+class DeclinedProbe:
+    def __hash__(self): return 1
+    def __eq__(self, other): reflect_log.append("declines"); return NotImplemented
+reflect_dict = {DeclinedStore(): "found"}
+reflect_found = [ReflectedProbe() in reflect_dict.keys(), (ReflectedProbe(), "found") in reflect_dict.items(),
+                 reflect_dict.__contains__(ReflectedProbe()), DeclinedProbe() in reflect_dict.keys()]
+assert_eq((reflect_found, reflect_log), ([True, True, True, False], ["stored", "probe"] * 3 + ["stored", "declines"]))

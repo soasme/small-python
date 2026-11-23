@@ -48,3 +48,21 @@ expected = [((3, ["len"]), (3, ["len", "len"])), ((0, ["len"]), (0, ["len"])),
             (2, ["len"]), ((2, ["len"]), (2, ["len"])), (0, []), (0, []), (NotImplemented, [])]
 assert_eq(hints(), expected)
 assert_eq(iter(S(4)).__length_hint__(), 4)
+
+# A native __len__ gives the hint as well, also of an iterable instance
+# that list() and bytes() consume.
+class NativeSized:
+    __len__ = [1, 2, 3].__len__
+    def __getitem__(self, i):
+        if i >= 3: raise IndexError
+        return i
+class NativeSizedIterable:
+    __len__ = [1].__len__
+    def __iter__(self): return iter([5, 6])
+assert_eq([list(iter(NativeSized())), list(reversed(NativeSized())), list(NativeSizedIterable()), bytes(NativeSizedIterable())],
+          [[0, 1, 2], [2, 1, 0], [5, 6], b"\x05\x06"])
+native_it, native_back = iter(NativeSized()), reversed(NativeSized())
+native_hints = [native_it.__length_hint__(), native_back.__length_hint__()]
+next(native_it); next(native_back)
+native_hints += [native_it.__length_hint__(), native_back.__length_hint__()]
+assert_eq(native_hints, [3, 3, 2, 2])

@@ -105,3 +105,18 @@ def errors():
 assert_eq(errors(), ["calling <class '__main__.Plain'> should have returned an instance of BaseException, not <class 'int'>",
                      "__init__() should return None, not 'int'",
                      "calling <class '__main__.Plain'> should have returned an instance of BaseException, not <class 'int'>"])
+
+# A native __new__ makes it as well: an exception of another class, which
+# the class is called with again, or anything else, a TypeError.
+native_table = {}
+class NativeElsewhere(Exception):
+    __new__ = staticmethod(native_table.get)
+native_table[NativeElsewhere] = KeyError("made")
+class NativeNowhere(Exception):
+    __new__ = staticmethod({}.get)
+native_raised = []
+for cls in (NativeElsewhere, NativeNowhere):
+    try: raise cls
+    except BaseException as e: native_raised.append((type(e).__name__, str(e)))
+assert_eq(native_raised, [("KeyError", "'made'"),
+                          ("TypeError", "calling <class '__main__.NativeNowhere'> should have returned an instance of BaseException, not <class 'NoneType'>")])

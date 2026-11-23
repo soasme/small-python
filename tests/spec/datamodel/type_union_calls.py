@@ -50,3 +50,9 @@ assert_eq(cases(), expected)
 assert_eq(next(gen()), expected)
 def main(): return cases()
 assert_eq(main(), expected)
+
+# type's | of a value that joins no union is NotImplemented, and then a
+# TypeError.
+assert_eq([type.__or__(int, 5), type.__ror__(int, 5), type.__or__(int, "x")], [NotImplemented, NotImplemented, NotImplemented])
+with assert_raises(TypeError, message="unsupported operand type(s) for |: 'type' and 'int'"):
+    int | 5

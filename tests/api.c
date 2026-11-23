@@ -1120,6 +1120,29 @@ int main(int argc, char **argv) {
     assert(integer(c, spy_call(c, converted_ok, 3, converted)) == 1);
     for (int i = 0; i < 3; i++) spy_release(converted[i]);
     spy_release(converted_ok); spy_release(two); spy_release(from_numbers);
+    /* So does a float subclass's fromhex(), calling the subclass. */
+    execute(c, "host_fromhex = HostFloat.fromhex\ndef fromhex_ok(h): return 1 if type(h) is HostFloat and h == 3.0 else 0\n");
+    SPYValue *host_fromhex = spy_get_global(c, "host_fromhex"), *hex_text = spy_string(c, "0x1.8p1", 7);
+    SPYValue *from_hex = spy_call(c, host_fromhex, 1, &hex_text), *fromhex_ok = spy_get_global(c, "fromhex_ok");
+    assert(from_hex && integer(c, spy_call(c, fromhex_ok, 1, &from_hex)) == 1);
+    spy_release(from_hex); spy_release(fromhex_ok); spy_release(hex_text); spy_release(host_fromhex);
+    /* The host's store into a list counts a negative index from its end;
+     * one outside it is an IndexError. */
+    SPYValue *stored = spy_eval(c, "[1, 2, 3]", "host.py"), *last = spy_int(c, -1), *far = spy_int(c, 3), *nine = spy_int(c, 9);
+    assert(!spy_set_item(c, stored, last, nine) && integer(c, spy_get_item(c, stored, last)) == 9);
+    assert(spy_set_item(c, stored, far, nine) == -1 && !strcmp(spy_error_type(c), "IndexError") &&
+           !strcmp(spy_error_message(c), "list assignment index out of range"));
+    spy_clear_error(c);
+    spy_release(stored); spy_release(last); spy_release(far); spy_release(nine);
+    /* property() the host calls reads its getter's __doc__ through a
+     * Python getter in C. */
+    execute(c, "class DocGetter:\n    @property\n    def __doc__(self): return 'from getter'\n    def __call__(self, obj): return 1\n"
+               "host_property, doc_getter = property, DocGetter()\n"
+               "def documented(p): return 1 if p.__doc__ == 'from getter' else 0\n");
+    SPYValue *host_property = spy_get_global(c, "host_property"), *doc_getter = spy_get_global(c, "doc_getter");
+    SPYValue *property_made = spy_call(c, host_property, 1, &doc_getter), *documented = spy_get_global(c, "documented");
+    assert(property_made && integer(c, spy_call(c, documented, 1, &property_made)) == 1);
+    spy_release(property_made); spy_release(documented); spy_release(doc_getter); spy_release(host_property);
 
     /* The policy sees each engine event once, with its arguments; a refusal
      * is PermissionError unless the policy raised its own. */
@@ -2360,6 +2383,11 @@ int main(int argc, char **argv) {
                "def subhashed():\n    d, k = Absent(), Hashy(1)\n    d[k] = 1\n    v = d[k] + d[Hashy(2)]\n    del d[k]\n    return v + len(d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "subhashed()", "subhashed.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 4);
+    /* So does a deletion of a FrameLocalsProxy's key hashed by its Python __hash__. */
+    execute(c, "def frame_deleted():\n    try: raise ValueError\n    except ValueError as e: p = e.__traceback__.tb_frame.f_locals\n"
+               "    k = Hashy(1)\n    p[k] = 4\n    del p[k]\n    return 0 if k in p else 7\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "frame_deleted()", "frame_deleted.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does a throw of the GeneratorExit class into a yield from, closing its delegates. */
     execute(c, "def closing():\n    try: yield 1\n    finally:\n        for i in range(3000): pass\n"
                "def exiting():\n    g = (lambda: (yield from closing()))()\n    next(g)\n"

@@ -58,3 +58,15 @@ a = [0, 1, 2, 3]
 a[I(1):I(2)] = [9, 9]
 del a[I(0):I(1)]
 assert_eq((a, log), ([9, 9, 2, 3], [1, 2, 0, 1]))
+
+# A bytearray's slice store converts the parts the same way, then copies a
+# bytes value; a zero step refuses an iterated value before taking it.
+class ByteAt:
+    def __init__(self, n): self.n = n
+    def __index__(self): return self.n
+stored_bytes = bytearray(b"abc")
+stored_bytes[ByteAt(0):ByteAt(1)] = b"xy"
+assert_eq(stored_bytes, bytearray(b"xybc"))
+with assert_raises(ValueError, message="slice step cannot be zero"):
+    stored_bytes[0:2:ByteAt(0)] = (x for x in b"ab")
+assert_eq(stored_bytes, bytearray(b"xybc"))

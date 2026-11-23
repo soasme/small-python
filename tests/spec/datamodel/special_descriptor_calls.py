@@ -125,3 +125,22 @@ def main():
 
 assert_eq(main(), (expected, expected_paused))
 assert_eq((calls(), paused()), (expected, expected_paused))
+
+# A descriptor's __get__, or a property's getter, that cannot take its
+# arguments raises the call's TypeError.
+class NarrowGet:
+    def __get__(self): return lambda: True
+class NarrowBool:
+    __bool__ = NarrowGet()
+class PropertyBool:
+    __bool__ = property(lambda: True)
+class NarrowSized:
+    __len__ = NarrowGet()
+    __iter__ = NarrowGet()
+narrow_errors = []
+for make in (lambda: bool(NarrowBool()), lambda: bool(PropertyBool()), lambda: len(NarrowSized()), lambda: iter(NarrowSized()),
+             lambda: [x for x in NarrowSized()]):
+    try: make()
+    except TypeError as e: narrow_errors.append(str(e))
+narrow = "NarrowGet.__get__() takes 1 positional argument but 3 were given"
+assert_eq(narrow_errors, [narrow, "PropertyBool.<lambda>() takes 0 positional arguments but 1 was given", narrow, narrow, narrow])

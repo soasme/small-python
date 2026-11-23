@@ -129,3 +129,20 @@ log.clear()
 try: athrows().send(None)
 except StopIteration: pass
 assert_eq(repr(log), repr([("elsewhere", ()), ("elsewhere", (KeyError("elsewhere"),)), ("KeyError", ("elsewhere",)), ("LookupError", ("boom",))]))
+
+# A class whose native __new__ gives another class's exception is called
+# again with it, as raise does.
+native_table = {}
+class NativeElsewhere(Exception):
+    __new__ = staticmethod(native_table.get)
+native_table[NativeElsewhere] = KeyError("made")
+def native_catching():
+    while True:
+        try: yield
+        except Exception as e: log.append((type(e).__name__, e.args))
+log.clear()
+native_gen = native_catching(); next(native_gen)
+native_gen.throw(NativeElsewhere)
+native_gen.throw(NativeElsewhere)
+native_gen.close()
+assert_eq(log, [("KeyError", ("made",))] * 2)

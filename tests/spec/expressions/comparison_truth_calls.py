@@ -70,3 +70,27 @@ def errors():
 
 assert_eq(errors(), [("bool",), "Truth.__bool__() must return a bool, not int", "__len__() should return >= 0",
                      "Truth.__bool__() must return a bool, not int"])
+
+# A chain's truth test of a comparison's result calls its __len__, whose
+# result's Python __index__ gives the length; a __bool__ whose descriptor
+# raises AttributeError leaves __len__ to decide.
+class ChainIndex:
+    def __init__(self, n): self.n = n
+    def __index__(self): return self.n
+class ChainSized:
+    def __init__(self, n): self.n = n
+    def __len__(self): return ChainIndex(self.n)
+    def __repr__(self): return "ChainSized(%d)" % self.n
+class ChainMissingBool:
+    def __get__(self, obj, cls): raise AttributeError("no bool")
+class ChainBehind:
+    __bool__ = ChainMissingBool()
+    def __init__(self, n): self.n = n
+    def __len__(self): return self.n
+    def __repr__(self): return "ChainBehind(%d)" % self.n
+class ChainLess:
+    def __init__(self, result): self.result = result
+    def __lt__(self, other): return self.result
+chained = [ChainLess(ChainSized(1)) < ChainLess("end") < "end", ChainLess(ChainSized(0)) < ChainLess("end") < "end",
+           ChainLess(ChainBehind(2)) < ChainLess("end") < "end", ChainLess(ChainBehind(0)) < ChainLess("end") < "end"]
+assert_eq(repr(chained), repr(["end", ChainSized(0), "end", ChainBehind(0)]))

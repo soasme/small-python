@@ -125,3 +125,18 @@ assert_eq(next(gen()), expected)
 def outer():
     return cases()
 assert_eq(outer(), expected)
+
+# A key equal to the name but no str finds it in a globals dict and an
+# instance __dict__; an unequal one is passed over.
+class NamedKey:
+    def __hash__(self): return hash("x")
+    def __eq__(self, other): return other == "x"
+keyed_globals = {NamedKey(): 7, 5: 0}
+exec("found = x", keyed_globals)
+with assert_raises(NameError):
+    exec("missing_name", {5: 0})
+class KeyedPlain: pass
+keyed = KeyedPlain()
+keyed.__dict__[NamedKey()] = 8
+keyed.__dict__[6] = 0
+assert_eq([keyed_globals["found"], keyed.x, hasattr(keyed, "y")], [7, 8, False])

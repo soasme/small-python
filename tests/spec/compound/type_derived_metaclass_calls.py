@@ -51,3 +51,23 @@ EXPECTED = [
 assert_eq(len(OUT), len(EXPECTED))
 for got, want in zip(OUT, EXPECTED):
     assert_eq(got, want)
+
+# type.__new__ given a base of a more derived metaclass calls that
+# metaclass's own __new__, Python or native, with the keywords.
+derived_log = []
+class DerivedNew(type):
+    def __new__(mcls, name, bases, ns, **kw):
+        derived_log.append((mcls.__name__, name, kw))
+        return super().__new__(mcls, name, bases, ns)
+    def __init__(cls, *args, **kw): pass
+class DerivedBase(metaclass=DerivedNew): pass
+derived_log.clear()
+DX = type("DX", (DerivedBase,), {})
+DY = type.__new__(type, "DY", (DerivedBase,), {})
+DZ = type.__new__(type, "DZ", (DerivedBase,), {}, flag=1)
+class NativeNew(type):
+    __new__ = type.__new__
+class NativeBase(metaclass=NativeNew): pass
+DW = type.__new__(type, "DW", (NativeBase,), {})
+assert_eq((derived_log, type(DX), type(DY), type(DZ), type(DW)),
+          ([("DerivedNew", "DX", {}), ("DerivedNew", "DY", {}), ("DerivedNew", "DZ", {"flag": 1})], DerivedNew, DerivedNew, DerivedNew, NativeNew))

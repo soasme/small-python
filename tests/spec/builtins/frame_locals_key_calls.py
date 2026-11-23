@@ -183,3 +183,18 @@ mod = 5
 assert_eq(run(lambda: q[K("mod")]), (5, [('hash', 'mod'), ('eq', 'mod', "'mod'")]))
 assert_eq(run(lambda: K("mod") in q), (True, [('hash', 'mod'), ('eq', 'mod', "'mod'")]))
 assert_eq(run(lambda: q[S("mod")]), (5, [('S.eq', 'mod', "'mod'")]))
+
+# A key with a Python __hash__ but no Python __eq__ compares by its own.
+hashed_only = []
+class HashedName(str):
+    def __hash__(self):
+        hashed_only.append(str(self))
+        return str.__hash__(self)
+class HashedOther:
+    def __hash__(self): hashed_only.append("other"); return hash("x")
+def hashed_body():
+    x = 1
+    try: raise ValueError
+    except ValueError as e: p = e.__traceback__.tb_frame.f_locals
+    return [p[HashedName("x")], HashedName("zz") in p, HashedOther() in p, hashed_only]
+assert_eq(hashed_body(), [1, False, False, ["x", "zz", "other"]])

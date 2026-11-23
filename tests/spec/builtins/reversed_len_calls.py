@@ -69,3 +69,15 @@ assert_eq(calls(), expected)
 log.clear()
 assert_eq([items(reversed(Seq(2))), error(lambda: reversed(Seq(-2)))], [[10, 0], ("ValueError", "__len__() should return >= 0")])
 assert_eq(log, [("len", 2), ("len", -2)])
+
+# A native __getitem__'s IndexError ends it; another error propagates.
+class NativeStops:
+    __len__ = [1, 2].__len__
+    __getitem__ = ["a"].__getitem__
+class NativeFails:
+    __len__ = [1, 2].__len__
+    __getitem__ = {1: "b"}.__getitem__
+native_it = reversed(NativeFails())
+assert_eq([list(reversed(NativeStops())), next(native_it)], [[], "b"])
+with assert_raises(KeyError):
+    next(native_it)
