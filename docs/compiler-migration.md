@@ -127,10 +127,11 @@ them now run on the machine:
   than a literal, so its getter runs before an argument's `NameError`.
 - `BC_INCREMENT` and a `return` or `yield` of a name fall back to plain
   steps in the same way.
-- `BC_STORE` stores only into a name, or, outside a class body and code
-  that can pause, an attribute or item of names and literals, which it
-  looks up itself (`store_operand`). Every other target is evaluated as
-  steps before `BC_SET_TARGET`.
+- `BC_STORE` stores only into a name. Outside a class body and code that
+  can pause, an attribute or item of names and literals is stored by a
+  fused `BC_STORE_AT`, which reads them from its plain steps (the
+  fourteenth stage, below). Every other target is evaluated as steps
+  before `BC_SET_TARGET`.
 - Every class body, module body, interactive input and `eval` expression
   runs as a machine program. A class's bases and keywords are always
   argument steps. `exec` of a class body's code calls the body on the
@@ -210,6 +211,42 @@ that replayed their Python calls, are deleted:
 
 A mixed match program executes 16% fewer instructions than at the twelfth
 stage; a failed value sub-pattern of a class pattern costs 4.5% more.
+
+The fourteenth stage, the first part of stage 1 below, moves operands out
+of tree links into instructions. A step reads what it executes from its
+own fields or from the plain steps after it, and keeps its node only as
+its source location:
+
+- Names and attributes are operand records (`NameOperand`,
+  `AttributeOperand`) that instructions point to: every name load, store,
+  deletion, walrus and keyword argument, and every attribute load, target
+  and deletion. An attribute operand keeps its line for a method's lookup.
+- A fused step reads its operands from the plain steps that follow it.
+  An operator's operation and its operands' shapes are in its arg; an
+  assignment, a return, an increment and a store into an attribute or
+  item of names (`BC_STORE_AT`) read their names, constants and operator
+  from their plain steps.
+- A loop's item and an exception handler's name are stored through the
+  `BC_STORE` after the loop or match step; an import is a `BC_IMPORT` of
+  its record.
+- A method call's `BC_CALLN` holds its attribute and says whether its
+  object stands in its callee's place; a keyword call's `BC_CALLK` holds a
+  tuple of its keywords' names, which its program owns. The call helpers
+  below the call step take the method's attribute, not the call's node.
+- An unpacking holds its count of targets and its star's index, a tuple
+  display its size, a template field its source text and conversion, and
+  a comprehension whether its first clause is async.
+
+Against the thirteenth stage (clang -O2, macOS arm64, instructions
+retired), `loop` executes 1.5% fewer instructions, `generators` 1.3% and
+`nbody` 0.9% fewer; `sort` is 0.02% higher and every other benchmark
+program lower.
+
+Still read from trees: a fused call's callee and arguments
+(`operand_callee`), whose reading from plain steps cost `fib` 3.5% more
+instructions; a yield's operand, where reading its plain step cost
+`loop` 0.2%; annotation records; and the definition records of
+functions, classes and comprehensions, which their values keep.
 
 ## Remaining stages
 
