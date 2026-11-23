@@ -17154,10 +17154,11 @@ static size_t target_count(Node *, size_t *);
 static void compile_targeted(SPYContext *c, Program *p, Node *n, Node *popped) {
     size_t fused = SIZE_MAX, start = p->len;
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
+        int at_hand = store_at_hand(p, n);
         compile_expr(c, p, n->a);
         if (n->kind == N_INDEX) compile_expr(c, p, n->b);
         emit(c, p, BC_SET_TARGET, n, 0);
-        if (store_at_hand(p, n) && !c->error_type[0]) fused = emit_before(c, p, start, BC_STORE_AT, n, popped != NULL);
+        if (at_hand && !c->error_type[0]) fused = emit_before(c, p, start, BC_STORE_AT, n, popped != NULL);
     } else {
         for (Node *item = n->args; item; item = item->next) {
             compile_store(c, p, item->kind == N_STAR ? item->a : item, item);
@@ -17802,10 +17803,10 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         !(assigns_steps(p, n))) {
         if (increment(n) && !p->namespace) {
             /* The sum, past the plain steps that run when it declines (increment_step). */
-            size_t sum = emit(c, p, BC_INCREMENT, n, 0);
+            size_t start = p->len;
             compile_expr(c, p, n->a); compile_expr(c, p, n->b);
             emit(c, p, BC_INPLACE, n, n->op); emit(c, p, BC_STORE, n->a, 1);
-            patch(p, sum, p->len); return;
+            patch(p, c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_INCREMENT, n, 0), p->len); return;
         }
     }
     switch (n->kind) {
@@ -17813,10 +17814,10 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         /* A yield statement drops the sent value rather than popping it (arg 2). */
         if (n->a->kind == N_YIELD && !n->a->op) {
             int leaf = n->a->a && ((n->a->a->kind == N_NAME && p->calls != PAUSING) || n->a->a->constant);
-            size_t fused = leaf ? emit(c, p, BC_YIELD, n->a, 3) : SIZE_MAX;
+            size_t start = p->len;
             compile_expr(c, p, n->a->a);
             emit(c, p, BC_YIELD, n->a, 2);
-            if (leaf) patch(p, fused, p->len);
+            if (leaf && !c->error_type[0]) patch(p, emit_before(c, p, start, BC_YIELD, n->a, 3), p->len);
             break;
         }
         compile_expr(c, p, n->a);
@@ -17838,10 +17839,14 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             else emit(c, p, BC_SAVE_TARGET, target, 0);
             break;
         }
-        compile_expr(c, p, n->b);
+        /* The value is evaluated before its targets are stored. */
+        Mark targets = mark(p);
         Node *target = n->a;
         for (Node *next = n->args; next; target = next, next = next->next) compile_target(c, p, target);
-        compile_store(c, p, target, n); break;
+        compile_store(c, p, target, n);
+        Mark value = mark(p);
+        compile_expr(c, p, n->b);
+        emit_after(p, targets, value, NULL); break;
     case N_DEF:
         for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
         if (n->params) {
@@ -17850,17 +17855,24 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             for (Node *a = n->args; a; a = a->next) if (a->a) { compile_expr(c, p, a->a); count++; }
             emit(c, p, BC_GENERIC_FUNCTION, n, count);
         } else {
-            emit(c, p, BC_FUNCTION, n, 0);
+            size_t start = p->len;
             for (Node *a = n->args; a; a = a->next) if (a->a) {
                 compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, a->op == P_KWONLY);
             }
+            if (!c->error_type[0]) emit_before(c, p, start, BC_FUNCTION, n, 0);
         }
         compile_decorations(c, p, n->decorators);
         emit(c, p, BC_STORE, n->a, 1); break;
     case N_ANNASSIGN:
         /* Without a value, an attribute or subscript target's primary is
          * evaluated, and nothing stored. */
-        if (n->c) { compile_expr(c, p, n->c); compile_store(c, p, n->a, n); }
+        if (n->c) {
+            Mark target = mark(p);
+            compile_store(c, p, n->a, n);
+            Mark value = mark(p);
+            compile_expr(c, p, n->c);
+            emit_after(p, target, value, NULL);
+        }
         else if (n->a->kind != N_NAME) {
             compile_expr(c, p, n->a->a); emit(c, p, BC_POP, n, 0);
             if (n->a->kind == N_INDEX) { compile_expr(c, p, n->a->b); emit(c, p, BC_POP, n, 0); }
@@ -17894,8 +17906,11 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         /* A return of a name or literal returns it in its own step, before
          * the plain steps that run when the name is not at hand; one through
          * a namespace, or any while calls can pause, takes those alone. */
-        if (n->a && ((n->a->kind == N_NAME && !p->loads && p->calls != PAUSING) || n->a->constant)) emit(c, p, BC_RETURN, n, 0);
-        compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
+        branch = n->a && ((n->a->kind == N_NAME && !p->loads && p->calls != PAUSING) || n->a->constant);
+        end = p->len;
+        compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN);
+        if (branch && !c->error_type[0]) emit_before(c, p, end, BC_RETURN, n, 0);
+        break;
     case N_RAISE:
         /* A bare raise takes no operands (arg 2). */
         if (!n->a) { emit(c, p, BC_RAISE, n, 2); break; }
