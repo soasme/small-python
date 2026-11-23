@@ -146,7 +146,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
-       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048, F_FINISHED = 4096 /* Seen by nodes_finish. */,
+       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_FINISHED = 4096 /* Seen by nodes_finish. */,
        F_EMITTED = 8192 /* A statement compiled in place as it was parsed (at_body). */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
@@ -8142,7 +8142,7 @@ static void drop_docstring(Node *body) {
 static int compile_generator(SPYContext *, Node *);
 static int compile_comprehension(SPYContext *, Node *);
 /* The nodes parsed since start, newest first, but those an inner
- * statement's call finished: a number's value, F_OPERATOR, then a negated
+ * statement's call finished: a number's value, then a negated
  * number as a constant, as CPython folds it, an inner negation before its
  * outer; then the instructions of the bodies among them, inner ones
  * first. */
@@ -8152,7 +8152,6 @@ static int nodes_finish(Parser *p, Node *start) {
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
         if (n->flags & F_FINISHED) continue;
         if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) literal_value(c, n);
-        if (operator_right(n)) n->flags |= F_OPERATOR;
     }
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated)
         if (!(n->flags & F_FINISHED) && n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
@@ -8768,13 +8767,19 @@ static int packed(Node *n) {
 }
 /* The right operand of n when n is an index whose operands are literals or
  * names, or arithmetic or a single comparison whose operands are those, an
- * index of those, or an attribute of a name, else NULL. The compiler marks
- * such nodes F_OPERATOR. */
+ * index of those, or an attribute of a name, else NULL. */
 static Node *operator_right(Node *n) {
     if (n->kind == N_INDEX) return at_hand(n->a) && at_hand(n->b) ? n->b : NULL;
     Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a :
         n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     return right && item_at_hand(n->a) && item_at_hand(right) ? right : NULL;
+}
+/* Whether each argument of call n is a leaf or an operator at hand, as
+ * its fused call takes them (call_operands). */
+static int fused_arguments(Node *n) {
+    for (Node *a = n->args; a; a = a->next)
+        if (!a->constant && !at_hand(a) && !operator_right(a)) return 0;
+    return 1;
 }
 static int plain_call(Node *n) {
     size_t argc = 0;
@@ -15940,6 +15945,9 @@ enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
 /* A call step's arg: its count of arguments, and a method call's object in its callee's place. */
 enum { CALL_COUNT = 255, CALL_OBJECT = 256 };
+/* A fused call's arg (call_operands): each argument's kind, from bit 0, then its callee's. */
+enum { CALLF_KINDS = 0xff, CALLF_NAMED = 1 << 16, CALLF_ATTR = 1 << 17, CALLF_METHOD = 1 << 18,
+       CALLF_COUNT = 19, CALLF_DISTANCE = 23 };
 /* step is op's label in the machine (run_steps), which dispatches to it
  * directly. A program's steps number fewer than UINT32_MAX (emit), which
  * marks no step. */
@@ -16388,17 +16396,40 @@ static SPYValue *keyword_names(SPYContext *c, Program *p, Node *n) {
     if (names) p->values[p->values_len++] = names;
     return names;
 }
+/* Whether the arguments of call n are literals, which its plain steps
+ * take after its method's object (compile_stack_call). */
+static int literal_arguments(Node *n) {
+    for (Node *a = n->args; a; a = a->next) {
+        Node *value = a->kind == N_KEYWORD ? a->a : a;
+        if (!at_hand(value) || value->kind == N_NAME) return 0;
+    }
+    return 1;
+}
+/* How fused call step fused of plain call n, whose plain steps end the
+ * program, finds its operands in them (operand_callee): in its arg, from
+ * bit 0, whether each argument is an operator at hand, which begins with
+ * its fused step, rather than a leaf of one step; whether its
+ * callee, or its method's object, is a name, its first step; whether a
+ * method's attribute step follows that; whether it calls a method, its
+ * count of arguments, and how far past it its BC_CALLN is. */
+static void call_operands(Program *p, size_t fused, Node *n) {
+    int method = n->a->kind == N_ATTR, i = 0;
+    Node *callee = method ? n->a->a : n->a;
+    Instruction *ins = &p->items[fused];
+    ins->arg = (callee->kind == N_NAME ? CALLF_NAMED : 0) | (method && !literal_arguments(n) ? CALLF_ATTR : 0) |
+               (method ? CALLF_METHOD : 0) | (int)(p->len - 1 - fused) << CALLF_DISTANCE;
+    for (Node *a = n->args; a; a = a->next, i++) {
+        ins->arg += 1 << CALLF_COUNT;
+        if (!a->constant && !at_hand(a)) ins->arg |= 1 << i;
+    }
+}
 /* Plain or keyword-plain call n as stack steps, BC_CALLN or BC_CALLK
  * taking argc arguments, its arg. A plain method call's BC_CALLN holds
  * its attribute; its object is on the stack in its callee's place
  * (CALL_OBJECT), unless the method must be found before arguments that
  * run code or raise, any but literals. */
 static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
-    int argc = 0, plain = plain_call(n) && !sort_call(n), method = n->a->kind == N_ATTR && plain, literals = 1;
-    for (Node *a = n->args; a; a = a->next) {
-        Node *value = a->kind == N_KEYWORD ? a->a : a;
-        literals &= at_hand(value) && value->kind != N_NAME;
-    }
+    int argc = 0, plain = plain_call(n) && !sort_call(n), method = n->a->kind == N_ATTR && plain, literals = literal_arguments(n);
     compile_expr(c, p, method ? n->a->a : n->a);
     if (method && !literals) emit(c, p, BC_ATTR, n->a, 1);
     for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
@@ -16509,10 +16540,11 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         break;
     case N_CALL:
         if (plain_call(n) && (n->a->kind == N_ATTR || at_hand(n->a)) && !expands(n->a->kind == N_ATTR ? n->a->a : n->a, modes(p)) && !list_expands(n->args, modes(p)) &&
-            !sort_call(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
+            !sort_call(n) && fused_arguments(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
             /* The fused call, then its plain steps. */
             size_t fused = emit(c, p, BC_CALLF, n, 0);
             compile_stack_call(c, p, n);
+            if (fused != SIZE_MAX) call_operands(p, fused, n);
             patch(p, fused, p->len);
             break;
         }
@@ -18313,7 +18345,6 @@ static SPYValue *method_of(SPYContext *c, AttributeOperand *at, SPYValue *object
     spy_release(object);
     return callee;
 }
-static SPYValue *operand(SPYContext *, Frame *, Node *);
 static SPYValue *operator_fast(SPYContext *, int, SPYValue *, SPYValue *);
 /* Call fn as plain call node n, method the native method its callee
  * names (method_of), or -1. A Python function skips call_keywords'
@@ -18336,10 +18367,6 @@ static ALWAYS_INLINE SPYValue *sequence_item(SPYValue *x, SPYValue *y) {
     if (i < 0) i += len;
     return i >= 0 && i < len ? x->as.seq.items[i] : NULL;
 }
-static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
-    SPYValue *x = leaf_operand(f, n->a), *y = x ? leaf_operand(f, n->b) : NULL;
-    return y ? sequence_item(x, y) : NULL;
-}
 /* An attribute of a name found in a plain instance's own entries, as
  * operand_attribute finds it, borrowed. */
 static NO_INLINE SPYValue *attr_found(SPYContext *c, SPYValue *v, AttributeOperand *at) {
@@ -18347,7 +18374,6 @@ static NO_INLINE SPYValue *attr_found(SPYContext *c, SPYValue *v, AttributeOpera
     Entry *e = kind == ATTR_OWN || kind == ATTR_METHOD ? dict_slot(v, at->name) : NULL;
     return e ? e->value : NULL;
 }
-static ALWAYS_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) { return attr_found(c, name_fast(f->env, &n->a->name), &n->attribute); }
 /* A leaf's value at hand from its plain step ins: BC_LOAD's constant or
  * BC_NAME's name along the fast path, borrowed. */
 static ALWAYS_INLINE SPYValue *leaf_step(Frame *f, Instruction *ins) {
@@ -18365,19 +18391,11 @@ static NO_INLINE SPYValue *item_step(Frame *f, Instruction *ins) {
     return !y ? NULL : x->type == SPY_DICT ? dict_item(x, y) : sequence_item(x, y);
 }
 /* The operand of shape whose plain steps start at ins, found without
- * running code (operand), borrowed; else NULL. */
+ * running code, borrowed; else NULL. */
 static ALWAYS_INLINE SPYValue *step_operand(SPYContext *c, Frame *f, Instruction *ins, int shape) {
     if (shape == SHAPE_LOAD) return ins->constant;
     if (shape == SHAPE_NAME) return name_fast(f->env, ins->name);
     return shape == SHAPE_ITEM ? item_step(f, ins) : attr_found(c, name_fast(f->env, ins->name), ins[1].attribute);
-}
-/* An operand found along the fast path, borrowed: a literal, a name, an
- * item of a list or tuple they index, or an instance's attribute. Finding
- * one runs no code. */
-static ALWAYS_INLINE SPYValue *operand(SPYContext *c, Frame *f, Node *n) {
-    if (n->kind == N_INDEX) return item_operand(f, n);
-    SPYValue *v = leaf_operand(f, n);
-    return v || n->kind != N_ATTR ? v : attr_operand(c, f, n);
 }
 /* Operation (fused_operation) on operands x and y, both borrowed, when
  * they are exact small ints, floats, lists and tuples it computes without
@@ -31855,50 +31873,57 @@ static SPYValue *method_getter_of(SPYContext *c, Machine *m, const char *name, S
     spy_release(function);
     return result;
 }
-/* The callee of plain call node n, owned, with its arguments in argv,
+/* The callee of fused call step ins, owned, with its arguments in argv,
  * owned too, after the instance a method call passes first, all found
- * without running code: names, literals, a name's method, and operators
- * on such operands that operator_fast computes; else NULL, with argv[0]
- * the object owned when its method has a Python getter (method_of). With
- * *method set, the callee is the object whose native method n names. */
-static ALWAYS_INLINE SPYValue *operand_callee(SPYContext *c, Frame *f, Node *n, SPYValue **argv, size_t *argc, int *method) {
-    SPYValue *a = NULL;
-    size_t done = 0;
+ * without running code from its plain steps, call the last: names,
+ * literals, a name's method, and operators on such operands that
+ * operator_fast computes (call_operands); else NULL, with argv[0] the
+ * object owned when its method has a Python getter (method_of). With
+ * *method set, the callee is the object whose native method call's
+ * attribute names. */
+static ALWAYS_INLINE SPYValue *operand_callee(SPYContext *c, Frame *f, Instruction *code, Instruction *ins, SPYValue **argv, size_t *argc,
+                                              int *method) {
+    int arg = ins->arg, kinds = arg & CALLF_KINDS;
+    SPYValue *a = arg & CALLF_NAMED ? name_fast(f->env, ins[1].name) : NULL, **out = argv;
     *method = -1; argv[0] = NULL;
-    if (n->a->kind == N_ATTR) {
-        Node *object = n->a->a;
-        SPYValue *found = object->kind == N_NAME ? name_fast(f->env, &object->name) : NULL;
-        if (found) { relocate(c, n->a); a = method_of(c, &n->a->attribute, spy_retain(found), argv, method, 1); }
-        done = argv[0] != NULL;
-    } else if ((a = name_fast(f->env, &n->a->name))) spy_retain(a);
     if (!a) return NULL;
-    for (Node *arg = n->args; arg; arg = arg->next) {
+    if (arg & CALLF_METHOD) {
+        AttributeOperand *at = ins[arg >> CALLF_DISTANCE].attribute;
+        c->line = *c->frame_line = at->line;
+        if (!(a = method_of(c, at, spy_retain(a), argv, method, 1))) return NULL;
+        out += argv[0] != NULL;
+    } else spy_retain(a);
+    Instruction *step = ins + 2 + !!(arg & CALLF_ATTR);
+    for (SPYValue **end = out + (arg >> CALLF_COUNT & 15); out < end; out++, kinds >>= 1) {
         SPYValue *value = NULL;
-        if (arg->constant || arg->kind == N_NAME) { if ((value = leaf_operand(f, arg))) spy_retain(value); }
-        else if (arg->flags & F_OPERATOR) {
-            SPYValue *x = operand(c, f, arg->a), *y = x ? operand(c, f, arg->kind == N_COMPARE ? arg->args->a : arg->b) : NULL;
-            if (y) value = operator_fast(c, fused_operation(arg), x, y);
+        if (!(kinds & 1)) { if ((value = leaf_step(f, step))) spy_retain(value); step++; }
+        else if (step->op == BC_OPERATE) {
+            /* An operator at hand, by its fused step's shapes (compile_fused). */
+            int fused = step->arg;
+            SPYValue *x = step_operand(c, f, step + 1, fused >> 1 & 7);
+            SPYValue *y = x ? step_operand(c, f, step + 1 + (fused >> 6 & 3), fused >> 4 & 3) : NULL;
+            if (y) value = operator_fast(c, fused >> 8, x, y);
+            step = &code[step->target];
         }
-        if (!(argv[done] = value)) {
-            while (done) spy_release(argv[--done]);
+        if (!(*out = value)) {
+            while (out > argv) spy_release(*--out);
             argv[0] = NULL;
             spy_release(a);
             return NULL;
         }
-        done++;
     }
-    *argc = done;
-    relocate(c, n);
+    *argc = (size_t)(out - argv);
+    relocate(c, ins->node);
     return a;
 }
-/* BC_CALLF: plain call node n, whose operands operand_callee finds; else
- * c->unbound, for its plain steps to run, or NULL with no error when a
- * consumer of a generator began on m. */
-static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
+/* BC_CALLF ins, whose operands operand_callee finds; else c->unbound, for its plain steps to run, or NULL
+ * with no error when a consumer of a generator began on m. */
+static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Instruction *code, Instruction *ins, SPYValue **env) {
     SPYValue *slots[10], **argv = slots + 1, *callee;
     size_t argc;
     int method;
-    if ((callee = operand_callee(c, f, n, argv, &argc, &method))) return operand_dispatch(c, m, method >= 0 ? &n->a->attribute : NULL, callee, method, argc, argv, env);
+    if ((callee = operand_callee(c, f, code, ins, argv, &argc, &method)))
+        return operand_dispatch(c, m, method >= 0 ? ins[ins->arg >> CALLF_DISTANCE].attribute : NULL, callee, method, argc, argv, env);
     /* The plain steps call a Python getter of the method. */
     spy_release(argv[0]);
     return c->error_type[0] ? NULL : c->unbound;
@@ -40093,7 +40118,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_CALLF)
             /* Its plain steps run when it cannot find its operands (operand_callee). */
-            callee_env = NULL; value = operand_call(c, m, &f, n, &callee_env);
+            callee_env = NULL; value = operand_call(c, m, &f, code, ins, &callee_env);
             if (value == c->unbound) continue;
             pc = ins->target;
             if (callee_env && value->type == SPY_CLASS) goto enter_init;
