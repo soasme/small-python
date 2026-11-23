@@ -41589,11 +41589,16 @@ static SPYValue *exit_made(SPYContext *c, Machine *m, SPYValue *inheriting, SPYV
     return NULL;
 }
 static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
-    SPYValue *d = m->delegate;
+    SPYValue *d = m->delegate, *value = NULL;
     int ignored = flow.flow == FLOW_YIELD;
     m->delegate = NULL; m->awaiting = AWAIT_NONE;
     spy_release(m->awaited); m->awaited = NULL;
-    if (UNLIKELY(m->operation)) { operation_closed(c, m, d, flow); ignored = 0; flow.value = NULL; }
+    if (UNLIKELY(m->operation)) {
+        operation_closed(c, m, d, flow); ignored = 0; flow.value = NULL;
+        /* An anext() awaitable's close raising StopIteration of its default
+         * gives the await that value, m running on (CLEANUP_THROW). */
+        if (error_is(c, "StopIteration")) value = stop_value(c);
+    }
     else if (flow.flow == FLOW_RETURN) { d->as.generator.returned = 1; generator_close(d); }
     else if (!ignored) { generator_end(c, d, flow); flow.value = NULL; }
     spy_release(flow.value);
@@ -41612,7 +41617,8 @@ static NO_INLINE void delegate_closed(SPYContext *c, Machine *m, Result flow) {
     if (ignored) {
         spy_error(c, "RuntimeError", d->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
         materialize_error(c);
-    } else if (thrown && (thrown->type == SPY_CLASS || thrown->type == SPY_TUPLE) && !c->error_type[0]) {
+    } else if (value) machine_push(c, m, value);
+    else if (thrown && (thrown->type == SPY_CLASS || thrown->type == SPY_TUPLE) && !c->error_type[0]) {
         /* A GeneratorExit class made by Python (thrown_late) is m's call
          * now, of its value's arguments as a throw's (exit_made). */
         SPYValue *k = thrown, *value = c->none, *traceback = c->none;

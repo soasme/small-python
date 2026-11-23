@@ -14,6 +14,8 @@ class Pause:
 
 
 def outcome(p):
+    handled = (KeyError, GeneratorExit) if p["handles"] == "exits" else KeyError
+
     class It:
         def __aiter__(self):
             return self
@@ -21,7 +23,7 @@ def outcome(p):
         async def __anext__(self):
             try:
                 got = await Pause()
-            except KeyError:
+            except handled:
                 if p["after"] == "return":
                     return "caught"
                 if p["after"] == "stop":
@@ -35,7 +37,7 @@ def outcome(p):
         # A generator-based coroutine, as types.coroutine makes one.
         try:
             got = yield from Pause().__await__()
-        except KeyError:
+        except handled:
             if p["after"] == "return":
                 return "caught"
             if p["after"] == "stop":
@@ -54,7 +56,7 @@ def outcome(p):
     async def agen():
         try:
             got = await Pause()
-        except KeyError:
+        except handled:
             if p["after"] == "return":
                 yield "caught"
             if p["after"] == "stop":
@@ -93,8 +95,7 @@ def outcome(p):
     resume = p["resume"]
     try:
         if resume == "close":
-            close()
-            result = "closed"
+            result = "closed %s" % close()
         elif resume == "send":
             send("sent")
             result = "suspended"
@@ -103,7 +104,7 @@ def outcome(p):
             result = "suspended"
     except StopIteration as e:
         result = "value " + e.value
-    except (ValueError, IndexError) as e:
+    except (ValueError, IndexError, RuntimeError) as e:
         result = "raised " + type(e).__name__
     awaiting = co.cr_await is not None if p["via"] == "await" else result == "suspended"
     return "%s awaiting=%s" % (result, awaiting)
