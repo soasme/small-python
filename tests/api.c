@@ -695,6 +695,37 @@ int main(int argc, char **argv) {
     SPYValue *host_str = spy_get_global(c, "host_str"), *host_contains = spy_get_global(c, "host_contains"), *two_held = spy_int(c, 2);
     SPYValue *shown_text = spy_call(c, host_str, 0, NULL), *held_two = spy_call(c, host_contains, 1, &two_held);
     assert(shown_text && !strcmp(spy_as_string(c, shown_text, NULL), "shown") && held_two && spy_truth(c, held_two) == 1);
+    /* dir() of a class whose metaclass has a Python __dir__, an exception
+     * group's split(), and a class body frame's f_code, from the host. */
+    execute(c, "class DirMeta(type):\n    def __dir__(cls): return ['b', 'a']\nclass Dirred(metaclass=DirMeta): pass\n"
+               "class Bodied:\n    try: raise KeyError\n    except KeyError as e: body_frame = e.__traceback__.tb_frame\n"
+               "host_dir, host_split = dir, ExceptionGroup('g', [ValueError(1), KeyError(2)]).split\n"
+               "def dirred(d): return 1 if d == ['a', 'b'] else 0\n"
+               "def split_ok(s): return 1 if [repr(x) for x in s] == [\"ExceptionGroup('g', [ValueError(1)])\", \"ExceptionGroup('g', [KeyError(2)])\"] else 0\n"
+               "def body_code(k): return 1 if k.co_name == 'Bodied' else 0\n");
+    SPYValue *host_dir = spy_get_global(c, "host_dir"), *dirred_class = spy_get_global(c, "Dirred"), *dirred = spy_get_global(c, "dirred");
+    SPYValue *listed_dir = spy_call(c, host_dir, 1, &dirred_class);
+    assert(listed_dir && integer(c, spy_call(c, dirred, 1, &listed_dir)) == 1);
+    SPYValue *host_split = spy_get_global(c, "host_split"), *split_ok = spy_get_global(c, "split_ok"), *value_error = spy_eval(c, "ValueError", "host.py");
+    SPYValue *split = spy_call(c, host_split, 1, &value_error);
+    assert(split && integer(c, spy_call(c, split_ok, 1, &split)) == 1);
+    SPYValue *bodied = spy_get_global(c, "Bodied"), *body_frame = spy_get_attr(c, bodied, "body_frame");
+    SPYValue *body_code_object = body_frame ? spy_get_attr(c, body_frame, "f_code") : NULL, *body_code = spy_get_global(c, "body_code");
+    assert(body_code_object && integer(c, spy_call(c, body_code, 1, &body_code_object)) == 1);
+    SPYValue *dir_values[] = {host_dir, dirred_class, dirred, listed_dir, host_split, split_ok, value_error, split, bodied, body_frame, body_code_object, body_code};
+    for (size_t i = 0; i < sizeof(dir_values) / sizeof(*dir_values); i++) spy_release(dir_values[i]);
+    /* complex() with keywords, and a generator's close() whose generator
+     * raises another exception for GeneratorExit, from the host. */
+    execute(c, "def refusing():\n    try: yield 1\n    except GeneratorExit: raise ValueError('refused')\n"
+               "refused = refusing()\nnext(refused)\nhost_complex, host_close = complex, refused.close\n"
+               "def complex_ok(z): return 1 if z == 1 + 2j else 0\n");
+    SPYValue *host_complex = spy_get_global(c, "host_complex"), *complex_ok = spy_get_global(c, "complex_ok");
+    SPYValue *parts_keywords = spy_eval(c, "{'real': 1, 'imag': 2}", "host.py"), *z = spy_call_keywords(c, host_complex, 0, NULL, parts_keywords);
+    assert(z && integer(c, spy_call(c, complex_ok, 1, &z)) == 1);
+    SPYValue *host_close = spy_get_global(c, "host_close");
+    assert(!spy_call(c, host_close, 0, NULL) && !strcmp(spy_error_type(c), "ValueError"));
+    spy_clear_error(c);
+    spy_release(z); spy_release(parts_keywords); spy_release(complex_ok); spy_release(host_complex); spy_release(host_close);
     /* And type.__new__, which makes the class in C. */
     execute(c, "host_type_new = type.__new__\ndef type_made(k): return 1 if type(k) is type and k.__name__ == 'Made' and k.y == 3 else 0\n");
     SPYValue *host_type_new = spy_get_global(c, "host_type_new"), *type_made = spy_get_global(c, "type_made");
