@@ -5,7 +5,8 @@
 # spec, which then formats the text, or with no conversion when the nested
 # spec is empty; a non-empty spec of a container raises TypeError. An
 # item's error propagates. A container whose repr is being built shows as
-# [...]. Inside functions as at module level.
+# [...], converted with a spec or without one too. Inside functions as at
+# module level.
 from harness import *
 
 log = []
@@ -61,3 +62,10 @@ def recursive():
     return repr(outer), '{!r:{}}'.format(outer, '')
 
 assert_eq(recursive(), ('[  [...]|[...]|  [...]  ]', '[  [...]|[...]|  [...]  ]'))
+
+class Plain:
+    def __repr__(self):
+        return "<{0!r}|{0!r:>8}|{0!a}|{0!s:{1}}>".format(plain, "*^7")
+
+plain = [Plain()]
+assert_eq(repr(plain), "[<[...]|   [...]|[...]|*[...]*>]")
