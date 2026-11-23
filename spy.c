@@ -26466,7 +26466,7 @@ static NO_INLINE SPYValue *pattern_step(SPYContext *c, Machine *m, Frame *f, Ins
         if (*missing == c->unbound) { spy_release(*missing); if (!(*missing = spy_list(c))) { *missing = spy_retain(c->unbound); return NULL; } }
         return callk(c, m, spy_retain(get), 2, (SPYValue *[]){spy_retain(key), spy_retain(*missing)}, pattern_found, spy_retain(*missing));
     }
-    case P_REST: {
+    default: { /* P_REST */
         /* subject, the operand keys: an exact dict's copy runs no Python. */
         if (is_dict(top[-(ptrdiff_t)operand])) return pattern_rest_of(c, operand, top + 1 - operand, builtin(c, 1, top - operand, (void *)(intptr_t)B_DICT));
         SPYValue *args = tuple_of(c, 1, top - operand), *keys = args ? tuple_of(c, operand, top + 1 - operand) : NULL;
@@ -26474,7 +26474,6 @@ static NO_INLINE SPYValue *pattern_step(SPYContext *c, Machine *m, Frame *f, Ins
         return step_callk(c, m, spy_retain(c->types[SPY_DICT]), args, pattern_rest, keys);
     }
     }
-    return NULL;
 }
 /* Run import statement n (17.1, 17.4), or of an import only its module
  * only, the __lazy_modules__ its globals list given in listed (c->unbound
