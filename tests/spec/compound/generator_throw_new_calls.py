@@ -8,7 +8,8 @@
 # another class, is the one argument of a second call of the class, whose
 # exception of any class is thrown. A result that is no exception, or an
 # error from either call's __new__, is thrown into the generator in its
-# place. Inside functions as at module level.
+# place. So does an awaited athrow() of an async generator at its yield.
+# Inside functions as at module level.
 from harness import *
 
 # Exceptions compare by identity, so the logs compare by repr.
@@ -109,3 +110,22 @@ def swapped():
 assert_eq(swapped(), ("Other", True))
 it = swapping(); next(it)
 assert_eq(it.throw(Swaps), ("Other", True))
+
+class Elsewhere(Exception):
+    def __new__(cls, *args):
+        for _ in (): pass
+        log.append(("elsewhere", args))
+        return KeyError("elsewhere")
+async def async_gen():
+    while True:
+        try: yield 1
+        except Exception as e: log.append((type(e).__name__, e.args))
+async def athrows():
+    a = async_gen()
+    await a.asend(None)
+    await a.athrow(Elsewhere)
+    await a.athrow(Boom)
+log.clear()
+try: athrows().send(None)
+except StopIteration: pass
+assert_eq(repr(log), repr([("elsewhere", ()), ("elsewhere", (KeyError("elsewhere"),)), ("KeyError", ("elsewhere",)), ("LookupError", ("boom",))]))

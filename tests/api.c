@@ -132,6 +132,8 @@ static SPYValue *loader(SPYContext *c, void *data, const char *name) {
     (*calls)++;
     if (!strcmp(name, "text")) return spy_string(c, "x = 1", 5);
     if (!strcmp(name, "registered")) { spy_new_module(c, name, fill_registered); return NULL; }
+    if (!strcmp(name, "hostpkg.__init__")) return spy_bytes(c, "", 0);
+    if (!strcmp(name, "hostpkg.part")) return spy_bytes(c, "value = 3", 9);
     if (strcmp(name, "sample")) return NULL;
     const char *source = "answer = 42\ndef add(x):\n    return x + answer\n";
     return spy_bytes(c, source, strlen(source));
@@ -1054,6 +1056,32 @@ int main(int argc, char **argv) {
     execute(c, "import registered\nassert registered.value == 7 and not hasattr(registered, '__file__')\n");
     execute(c, "import registered");
     assert(calls == probes + 2);
+    /* Builtins the host calls run in C: __import__ of a package with a
+     * fromlist imports the submodules it names; compile; int() and float()
+     * of an instance with only __index__. */
+    execute(c, "host_import, host_compile, host_int, host_float = __import__, compile, int, float\n"
+               "class OnlyIndex:\n    def __index__(self): return 7\nonly_index = OnlyIndex()\n"
+               "def package_ok(p): return 1 if p.__name__ == 'hostpkg' and p.part.value == 3 else 0\n"
+               "def code_ok(code): return eval(code)\n"
+               "def numbers_ok(i, f): return 1 if type(i) is int and i == 7 and type(f) is float and f == 7.0 else 0\n");
+    SPYValue *host_import = spy_get_global(c, "host_import"), *fromlist = spy_eval(c, "['part']", "host.py");
+    SPYValue *import_args[] = {spy_string(c, "hostpkg", 7), spy_none(c), spy_none(c), fromlist};
+    SPYValue *package = spy_call(c, host_import, 4, import_args), *package_ok = spy_get_global(c, "package_ok");
+    assert(package && integer(c, spy_call(c, package_ok, 1, &package)) == 1);
+    for (int i = 0; i < 4; i++) spy_release(import_args[i]);
+    spy_release(package); spy_release(package_ok); spy_release(host_import);
+    SPYValue *host_compile = spy_get_global(c, "host_compile"), *code_ok = spy_get_global(c, "code_ok");
+    SPYValue *compile_args[] = {spy_string(c, "40 + 2", 6), spy_string(c, "host.py", 7), spy_string(c, "eval", 4)};
+    SPYValue *code = spy_call(c, host_compile, 3, compile_args);
+    assert(code && integer(c, spy_call(c, code_ok, 1, &code)) == 42);
+    for (int i = 0; i < 3; i++) spy_release(compile_args[i]);
+    spy_release(code); spy_release(code_ok); spy_release(host_compile);
+    SPYValue *only_index = spy_get_global(c, "only_index"), *host_int = spy_get_global(c, "host_int"), *host_float = spy_get_global(c, "host_float");
+    SPYValue *numbers[] = {spy_call(c, host_int, 1, &only_index), spy_call(c, host_float, 1, &only_index)};
+    SPYValue *numbers_ok = spy_get_global(c, "numbers_ok");
+    assert(numbers[0] && numbers[1] && integer(c, spy_call(c, numbers_ok, 2, numbers)) == 1);
+    spy_release(numbers[0]); spy_release(numbers[1]); spy_release(numbers_ok);
+    spy_release(only_index); spy_release(host_int); spy_release(host_float);
 
     /* The policy sees each engine event once, with its arguments; a refusal
      * is PermissionError unless the policy raised its own. */

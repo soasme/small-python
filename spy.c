@@ -48594,7 +48594,6 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         return id == B_POW ? power_slots(c, a, b, modulus) : divmod_declined(c, a, b);
     }
-    case B_COMPILE: return compile_builtin(c, argc, argv, NULL);
     case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
         SPYValue *env = NULL, *unit = source_unit(c, step_machine(c), id, argc, argv, &env);
         return env ? run_source(c, id == B_EVAL, env, unit) : unit;
