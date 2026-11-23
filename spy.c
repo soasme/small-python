@@ -239,7 +239,7 @@ struct SPYValue {
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; Parameter *signature; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->signature. */
-        struct { SPYValue *unit, *env, *attributes, *metadata; Node *def; Parameter *signature; } function;
+        struct { SPYValue *unit, *env, *attributes, *metadata; Scope *def; Parameter *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
         /* host: 1 made by spy_define or spy_native (host_call); 2 an
          * engine native whose C code may leave a call to its step (step_native). */
@@ -296,6 +296,9 @@ struct SPYValue {
         } generator;
     } as;
 };
+/* The definition node of Python function fn, which code with no
+ * definition, a module's, lacks. */
+static Node *function_node(SPYValue *fn) { return fn->as.function.def ? fn->as.function.def->owner : NULL; }
 /* Class flags. CLASS_ABSTRACT is set by assigning a true __abstractmethods__
  * to the class (20.2.8), not by binding it in the class body. */
 /* The intrinsic exception classes the engine itself refers to (exceptions). */
@@ -13284,7 +13287,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         if (!strcmp(name, "__code__")) {
             SPYValue *code = name_local(v->as.function.metadata, "__code__");
-            return code ? spy_retain(code) : definition_code(c, v->as.function.unit, v->as.function.def);
+            return code ? spy_retain(code) : definition_code(c, v->as.function.unit, function_node(v));
         }
         if (!strcmp(name, "__closure__")) return function_closure(c, v);
         if (!strcmp(name, "__dict__")) {
@@ -15763,7 +15766,7 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
     }
     Node *def = code->as.unit.definition;
     /* Code with other free variables reads f's cells through a forwarding scope. */
-    if (need && def != fn->as.function.def) {
+    if (need && (def ? def->scope : NULL) != fn->as.function.def) {
         SPYValue *closure = function_closure(c, fn);
         SPYValue *env = closure ? forward_env(c, def, namespace_map(module_env(c, fn->as.function.env)), closure) : NULL;
         int status = !env || name_set(c, fn->as.function.metadata, "__closure__", closure);
@@ -15773,7 +15776,7 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
     }
     SPYValue *unit = fn->as.function.unit;
     fn->as.function.unit = spy_retain(def ? code->as.unit.owner : code);
-    fn->as.function.def = def;
+    fn->as.function.def = def ? def->scope : NULL;
     fn->as.function.signature = replaced_signature(code);
     spy_release(unit);
     /* Keep a replace()d code object as given. */
@@ -18240,7 +18243,7 @@ static int cell_set(SPYContext *c, SPYValue *cell, SPYValue *value) {
 static SPYValue *function_closure(SPYContext *c, SPYValue *fn) {
     SPYValue *cached = name_local(fn->as.function.metadata, "__closure__");
     if (cached) return spy_retain(cached);
-    Node *def = fn->as.function.def;
+    Node *def = function_node(fn);
     if (!def) return spy_none(c);
     SPYValue *names = closure_names(c, def, 0), *closure = NULL;
     if (!names) return NULL;
@@ -18264,7 +18267,7 @@ static SPYValue *function_closure(SPYContext *c, SPYValue *fn) {
 static SPYValue *function_new(SPYContext *c, Frame *f, Node *n) {
     SPYValue *fn = value_new(c, SPY_FUNCTION);
     if (!fn) return NULL;
-    fn->as.function.def = n;
+    fn->as.function.def = n->scope;
     SPYValue *closure = f->env;
     while (!(n->flags & F_ANNOTATE) && closure->type == V_ENV && closure->as.map.flags == 1)
         closure = closure->as.map.class_cell ? closure->as.map.class_cell : closure->as.map.parent;
@@ -18397,7 +18400,7 @@ static SPYValue *operator_fast(SPYContext *, int, SPYValue *, SPYValue *);
 static ALWAYS_INLINE SPYValue *call_plain(SPYContext *c, SPYValue *fn, int method, AttributeOperand *at, size_t argc, SPYValue *const *argv) {
     if (method >= 0) return call_native_method(c, fn, method, at->name->global_key, argc, argv);
     if (fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def &&
-        fn->as.function.def->kind != N_CLASS && fn->as.function.def->kind != N_COMPREHENSION) {
+        fn->as.function.def->kind != S_CLASS && fn->as.function.def->kind != S_COMPREHENSION) {
         SPYValue *result = call_function(c, fn, argc, argv, NULL);
         if (c->error_type[0]) { spy_release(result); result = NULL; }
         return result;
@@ -19047,7 +19050,7 @@ static Parameter *replaced_signature(SPYValue *code) {
     return code->as.unit.owner && code->as.unit.definition ? code->as.unit.signature : NULL;
 }
 static Parameter *function_parameters(SPYValue *fn) {
-    return fn->as.function.signature ? fn->as.function.signature : fn->as.function.def->scope->signature;
+    return fn->as.function.signature ? fn->as.function.signature : fn->as.function.def->signature;
 }
 /* A parameter's value in env, or NULL while it is unbound. */
 static SPYValue *bound_local(SPYValue *env, const char *name) {
@@ -19334,7 +19337,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     Entry *items = env->as.map.items;
     size_t count = scope->parameters, posonly = 0, i, j;
     size_t kwargs = count + (scope->stars & 1), end = kwargs + (scope->stars >> 1);
-    for (Parameter *arg = fn->as.function.def->scope->signature; arg->name && arg->kind == P_POSONLY; arg++) posonly++;
+    for (Parameter *arg = fn->as.function.def->signature; arg->name && arg->kind == P_POSONLY; arg++) posonly++;
     if ((scope->stars & 1) && items[count].value == c->unbound) { spy_release(items[count].value); items[count].value = value_new(c, SPY_TUPLE); }
     if (scope->stars & 2) { spy_release(items[kwargs].value); items[kwargs].value = value_new(c, SPY_DICT); }
     for (i = 0; i < kwc; i++) {
@@ -19354,7 +19357,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     }
     SPYValue *defaults = NULL, *kwdefaults = NULL;
     j = 0;
-    for (Parameter *arg = fn->as.function.def->scope->signature; arg->name && i == kwc; arg++, j++) {
+    for (Parameter *arg = fn->as.function.def->signature; arg->name && i == kwc; arg++, j++) {
         if (arg->kind == P_VARARGS || arg->kind == P_KWARGS) { j--; continue; }
         if (items[j].value != c->unbound) continue;
         SPYValue *value = NULL;
@@ -19396,15 +19399,15 @@ static int bind_keywords(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc
  * it has argv's references, bound or released. */
 static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv,
                                        const Entry *kw, size_t kwc, SPYValue *keywords, int take) {
-    Scope *scope = fn->as.function.def->scope;
-    if (fn->as.function.def->kind == N_CLASS) {
+    Scope *scope = fn->as.function.def;
+    if (fn->as.function.def->kind == S_CLASS) {
         /* A class body called by its statement runs in the env class_part
          * made; called otherwise, with the globals as its namespace (28.1). */
         SPYValue *env = fn->as.function.attributes;
         if (env && env->type == V_ENV) fn->as.function.attributes = NULL;
         else if (body_arguments(c, fn, argc, kwc ? kw[0].key : NULL) ||
                  !(env = class_env(c, fn->as.function.env, namespace_map(module_env(c, fn->as.function.env)))) ||
-                 class_body_begin(c, fn->as.function.unit, fn->as.function.def, env, NULL, 1)) {
+                 class_body_begin(c, fn->as.function.unit, fn->as.function.def->owner, env, NULL, 1)) {
             spy_release(env); env = NULL;
         }
         if (take) release_all(argc, argv);
@@ -19449,7 +19452,7 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
 /* function_env, inline for the common call of a function whose scope is
  * ordered: exactly the parameters, by position. */
 static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
-    Scope *scope = fn->as.function.def->scope;
+    Scope *scope = fn->as.function.def;
     if (fn->as.function.signature || (keywords && keywords->as.map.len) || !scope->order || scope->positional != argc || scope->kind != S_FUNCTION)
         return keyword_env(c, fn, argc, argv, keywords ? map_items(keywords) : NULL, keywords ? keywords->as.map.len : 0, keywords, take);
     SPYValue *env = kept_env(c, scope);
@@ -19484,7 +19487,7 @@ static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env
     if (!enter_frame(c, env, fn)) {
         if ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c)) {
             Call *call = c->calls[c->calls_len++];
-            call->m.code = fn->as.function.def->scope->flat; call->m.pc = 0; call->m.outermost = !caller;
+            call->m.code = fn->as.function.def->flat; call->m.pc = 0; call->m.outermost = !caller;
             call->m.frame = (Frame){env, fn->as.function.unit, 0};
             call->caller = caller; call->fn = fn;
             call->caller_env = c->eval_env; c->eval_env = env;
@@ -19562,7 +19565,7 @@ static NO_INLINE Call *compare_enter(SPYContext *c, Machine *m, SPYValue *x, SPY
         spy_release(x); spy_release(y);
         return NULL;
     }
-    Node *owner = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : ((Call *)m)->fn->as.function.def;
+    Node *owner = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : function_node(((Call *)m)->fn);
     Call *call = c->calls[c->calls_len++];
     call->m.code = c->compare_code; call->m.pc = 2 * (size_t)rich; call->m.outermost = kind;
     call->m.frame = m->frame; call->m.owner = owner;
@@ -19596,12 +19599,12 @@ static int string_keys(SPYContext *c, SPYValue *keywords) {
 /* A function of this context whose call makes a generator, coroutine or
  * asynchronous generator, running none of its body. */
 static int suspending_function(SPYContext *c, SPYValue *fn) {
-    Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
+    Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? function_node(fn) : NULL;
     return def && (def->kind == N_DEF || def->kind == N_LAMBDA) && def->scope->code && !def->scope->flat;
 }
 /* A function of this context whose body is on the machine. */
 static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
-    return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->scope->flat;
+    return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->flat;
 }
 static SPYValue *bound_function(SPYContext *, SPYValue *);
 static SPYValue *class_init(SPYContext *, SPYValue *, int *);
@@ -20049,7 +20052,7 @@ static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *e
 /* A Python function's body, run in env, a new environment of its scope;
  * it takes env. */
 static ALWAYS_INLINE SPYValue *run_function(SPYContext *c, SPYValue *fn, SPYValue *env) {
-    if (fn->as.function.def->scope->flat) return call_machine(c, fn, env);
+    if (fn->as.function.def->flat) return call_machine(c, fn, env);
     /* A generator function's call makes its generator. */
     Frame frame = {env, fn->as.function.unit, 0};
     SPYValue *result = new_generator(c, &frame, fn);
@@ -20072,7 +20075,7 @@ static NO_INLINE SPYValue *call_with_self(SPYContext *c, SPYValue *function, SPY
     /* call_keywords guarded the stack and checked the keywords. */
     SPYValue *result;
     if (function->type == SPY_FUNCTION && function->ctx == c && function->as.function.def &&
-        function->as.function.def->kind != N_CLASS && function->as.function.def->kind != N_COMPREHENSION) {
+        function->as.function.def->kind != S_CLASS && function->as.function.def->kind != S_COMPREHENSION) {
         result = call_function(c, function, argc + 1, args, keywords);
         if (c->error_type[0]) { spy_release(result); result = NULL; }
     } else result = call_keywords(c, function, argc + 1, args, keywords);
@@ -20092,8 +20095,8 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         if (!builtin_value(c, map_items(keywords)[i].key, SPY_STRING)) return spy_error(c, "TypeError", "keywords must be strings");
     if (deeper(c, " while calling a Python object")) return NULL;
     SPYValue *result = NULL;
-    if (fn->type == SPY_FUNCTION && fn->as.function.def && fn->as.function.def->kind != N_CLASS &&
-        fn->as.function.def->kind != N_COMPREHENSION) {
+    if (fn->type == SPY_FUNCTION && fn->as.function.def && fn->as.function.def->kind != S_CLASS &&
+        fn->as.function.def->kind != S_COMPREHENSION) {
         result = call_function(c, fn, argc, argv, keywords);
     } else if (fn->type == SPY_NATIVE && fn->as.native.kwcall) {
         result = fn->as.native.kwcall(c, argc, argv, keywords, fn->as.native.data);
@@ -20127,8 +20130,8 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         SPYValue *method = special_method(c, fn, "__call__");
         if (method) { result = call_keywords(c, method, argc, argv, keywords); spy_release(method); }
         else if (!c->error_type[0]) not_callable(c, fn);
-    } else if (fn->type == SPY_FUNCTION && (!fn->as.function.def || fn->as.function.def->kind == N_CLASS ||
-                                            fn->as.function.def->kind == N_COMPREHENSION)) {
+    } else if (fn->type == SPY_FUNCTION && (!fn->as.function.def || fn->as.function.def->kind == S_CLASS ||
+                                            fn->as.function.def->kind == S_COMPREHENSION)) {
         result = call_module_code(c, fn, argc, argv, keywords);
     } else not_callable(c, fn);
     return call_result(c, result);
@@ -20438,7 +20441,7 @@ static ALWAYS_INLINE SPYValue *step_call(SPYContext *c, Machine *m, SPYValue *fn
      * function of a module's code runs it on m, one of a generator
      * expression's calls its iterable's __iter__ there (call_module_code). */
     if (UNLIKELY(fn->type == SPY_MODULE || (fn->type == SPY_FUNCTION && (!fn->as.function.def ||
-                                                                         fn->as.function.def->kind == N_COMPREHENSION))))
+                                                                         fn->as.function.def->kind == S_COMPREHENSION))))
         return step_native(c, m, fn, method, at, argc, argv, NULL);
     return call_plain(c, fn, method, at, argc, argv);
 }
@@ -23000,7 +23003,7 @@ static int class_deferred(SPYContext *c, ClassState *s) {
  * namespace, any other function in its own frame, so as in CPython the
  * namespace only holds what __prepare__ put there. */
 static SPYValue *make_class(SPYContext *c, SPYValue *function, SPYValue *name, SPYValue *bases, SPYValue *arguments) {
-    Node *n = function->as.function.def;
+    Node *n = function_node(function);
     ClassState s;
     SPYValue *classcell = NULL, *cls, *body = NULL;
     if (class_prepare(c, function->as.function.env, name, bases, arguments, NULL, &s, NULL, NULL, NULL)) return NULL;
@@ -23775,7 +23778,7 @@ static NO_INLINE int trace_call(SPYContext *c) {
         top->line = cls->decorators ? cls->decorators->line : cls->line;
         return trace_event(c, TRACE_CALL, NULL) || trace_class_line(c, cls);
     }
-    if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->line;
+    if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->owner->line;
     else if (owner->type == V_UNIT) top->line = 0;
     else if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) {
         /* A resumed generator continues the line where it was suspended. */
@@ -24523,7 +24526,7 @@ static SPYValue *build_prepared(SPYContext *c, Machine *m, SPYValue *state, SPYV
     return build_put(c, m, state, BUILD_NAMESPACE, namespace, BUILD_PREPARING);
 }
 static SPYValue *build_ran(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    int body = state->as.seq.items[BUILD_FUNC]->as.function.def->kind == N_CLASS;
+    int body = state->as.seq.items[BUILD_FUNC]->as.function.def->kind == S_CLASS;
     if (result && !body) { spy_release(result); result = spy_none(c); }
     return build_put(c, m, state, BUILD_CELL, result, BUILD_MAKING);
 }
@@ -24584,7 +24587,7 @@ static SPYValue *build_go(SPYContext *c, Machine *m, SPYValue *state) {
     }
     if (stage == BUILD_RUNNING) {
         /* The body: a class statement's runs in the env (keyword_env). */
-        Node *n = func->as.function.def;
+        Node *n = function_node(func);
         if (n->kind != N_CLASS) return callk(c, m, spy_retain(func), 0, NULL, build_ran, state);
         SPYValue *params = name_local(func->as.function.metadata, "__type_params__"), *body;
         Frame f = {parent, func->as.function.unit, 0};
@@ -26587,7 +26590,7 @@ static SPYValue *coroutine_origin(SPYContext *c) {
     return origin;
 }
 static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
-    Node *n = function->as.function.def;
+    Node *n = function_node(function);
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
     if (!v) return NULL;
     if (!(v->as.generator.machine = machine_new(c, n->scope->code, f->env, f->unit))) { spy_release(v); return NULL; }
@@ -27484,7 +27487,7 @@ static int zip_of_generator(SPYValue *v) {
 static SPYValue *adapted_generator(SPYValue *);
 /* Whether fn is a generator function, whose call runs none of its body. */
 static int generator_function(SPYContext *c, SPYValue *fn) {
-    Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
+    Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? function_node(fn) : NULL;
     return def && def->kind == N_DEF && !def->op && def->scope->code && !def->scope->flat;
 }
 /* The Python __iter__ of plain instance v's class, or of a list's,
@@ -32907,7 +32910,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Instruc
         (convert = index_function(c, argv[1])))
         /* As a plain call's step (stack_call). */
         return round_enter(c, m, convert, env);
-    Node *def = callee->type == SPY_FUNCTION && callee->ctx == c ? callee->as.function.def : NULL;
+    Node *def = callee->type == SPY_FUNCTION && callee->ctx == c ? function_node(callee) : NULL;
     if (def && def->kind != N_CLASS && def->kind != N_COMPREHENSION) {
         SPYValue *callee_env = keyword_env(c, callee, positional, argv, kw, kwc, NULL, 0);
         if (callee_env && calls && def->scope->flat) {
@@ -39993,7 +39996,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* An instruction of no line ticks on its definition's, keeping
              * the frame's line; while only a line would be recorded, it need
              * not. A finalizer the machine runs waits for a step with a line. */
-            Node *n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
+            Node *n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : function_node(c->calls[c->calls_len - 1]->fn);
             size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
             if (tick_full(c, &f, n->line, TICK_DEFINITION)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
@@ -49508,7 +49511,7 @@ static SPYValue *comprehension_named(SPYContext *c, SPYValue *fn, SPYValue *gene
 static SPYValue *comprehension_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *iterator) {
     (void)m;
     SPYValue *fn = state->as.seq.items[0], *source = state->as.seq.items[1], *generator = NULL;
-    Node *def = fn->as.function.def;
+    Node *def = function_node(fn);
     if (iterator) iterator = def->flags & F_AITER ? async_returned(c, source, iterator, 1) : iterator_returned(c, source, iterator, "__iter__");
     if (iterator) {
         Frame frame = {fn->as.function.env, fn->as.function.unit, 0};
@@ -49519,7 +49522,7 @@ static SPYValue *comprehension_iterated(SPYContext *c, Machine *m, SPYValue *sta
 }
 static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
-    Node *def = fn->as.function.def;
+    Node *def = function_node(fn);
     if (def && def->kind == N_COMPREHENSION) {
         if (keywords && keywords->as.map.len) {
             SPYValue *key = map_items(keywords)[0].key;
