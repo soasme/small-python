@@ -22097,42 +22097,6 @@ static SPYValue *optional_attribute(SPYContext *c, SPYValue *v, const char *name
     if (!value && error_is(c, "AttributeError")) spy_clear_error(c);
     return value;
 }
-/* from m import * (17.4.3), as CPython's import_all_from: the names m.__all__
- * lists, or else the public keys of m.__dict__, each read from m. */
-static NO_INLINE int import_star(SPYContext *c, Frame *f, SPYValue *module) {
-    SPYValue *all = optional_attribute(c, module, "__all__");
-    int keys = !all;
-    if (keys && !c->error_type[0]) {
-        SPYValue *dict = optional_attribute(c, module, "__dict__");
-        if (!dict && !c->error_type[0]) spy_error(c, "ImportError", "from-import-* object has no __dict__ and no __all__");
-        SPYValue *method = dict ? attribute(c, dict, "keys") : NULL, *view = method ? call(c, method, 0, NULL) : NULL;
-        all = view ? call(c, c->types[SPY_LIST], 1, &view) : NULL;
-        spy_release(dict); spy_release(method); spy_release(view);
-    }
-    for (int64_t i = 0; all && !c->error_type[0]; i++) {
-        SPYValue *index = spy_int(c, i), *key = index ? get_index(c, all, index) : NULL, *text = key ? builtin_value(c, key, SPY_STRING) : NULL;
-        spy_release(index);
-        if (!key && error_is(c, "IndexError")) spy_clear_error(c);
-        if (!key) break;
-        if (!text) {
-            SPYValue *name = attribute(c, module, "__name__"), *name_text = name ? builtin_value(c, name, SPY_STRING) : NULL;
-            if (name && !name_text) errorf(c, "TypeError", "module __name__ must be a string, not %s", type_name(name));
-            else if (name) errorf(c, "TypeError", "%s in %s.%s must be str, not %s", keys ? "Key" : "Item",
-                                  name_text->as.string.data, keys ? "__dict__" : "__all__", type_name(key));
-            spy_release(name);
-        } else if (!keys || text->as.string.data[0] != '_') {
-            /* A package's __all__ may name submodules, which are imported first. */
-            SPYValue *value = !keys && name_local(module, "__path__") ? import_from(c, module, text->as.string.data, 0) : NULL;
-            spy_release(value);
-            value = c->error_type[0] ? NULL : attribute(c, module, text->as.string.data);
-            if (value) name_set(c, f->env, text->as.string.data, value);
-            spy_release(value);
-        }
-        spy_release(key);
-    }
-    spy_release(all);
-    return c->error_type[0] ? -1 : 0;
-}
 static SPYValue *local_snapshot(SPYContext *, SPYValue *);
 /* The __import__ that an import statement in f calls, borrowed, its five
  * arguments for name, fromlist (NULL for None) and level in args, owned;
@@ -27075,7 +27039,6 @@ static NO_INLINE void import_statement(SPYContext *c, Frame *f, const ImportReco
         error_is(c, "ModuleNotFoundError")) { spy_clear_error(c); return; }
     if (r->from && !module) return;
     for (const ImportItem *item = only ? only : r->items; item < (only ? only + 1 : r->items + r->count) && !c->error_type[0]; item++) {
-        if (module && !item->bind) { import_star(c, f, module); continue; }
         int lazy = module ? 0 : lazy_import(c, f, r, item, listed);
         if (lazy) { if (lazy > 0) lazy_statement(c, f, r, item); continue; }
         SPYValue *value = module ? import_from(c, module, item->name, 1) : call_import(c, f, item->name, NULL, 0);

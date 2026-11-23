@@ -154,3 +154,11 @@ write("spec_pkg/subpkg/renamed.py", "__name__ = 'x'\n")
 package_globals = {"__package__": "spec_pkg", "__name__": "spec_pkg.importer"}
 assert_true(__import__("subpkg.renamed", package_globals, None, (), 1) is spec_pkg.subpkg)
 assert_eq(__import__("subpkg.renamed", package_globals, None, ("x",), 1).__name__, "x")
+
+# A package's __all__ may name a submodule not yet imported: star import
+# imports it first; a name neither bound nor a submodule is an AttributeError.
+star_names = {}
+exec("from spec_star_pkg import *", star_names)
+assert_eq((star_names["sub"].leaf, star_names["top"]), (2, 1))
+assert_eq(str(assert_raises(AttributeError, exec, "from spec_star_bad import *", {})),
+          "module 'spec_star_bad' has no attribute 'absent'")

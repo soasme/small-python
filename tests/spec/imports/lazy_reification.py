@@ -1,5 +1,6 @@
 # spec: PLS-315 17.5
 # description: Reification calls __import__ with the looking frame's globals and a one-name fromlist; re-entering it is an ImportCycleError.
+# Native code reifies as Python code does: resolve() called through map, a module attribute read by str.format.
 from harness import *
 import builtins
 
@@ -26,3 +27,14 @@ builtins.__import__ = real
 assert_eq(calls, [(None, True, True, 0),
                   ("ImportCycleError", "cannot import name 'spec_lazy_pair' (most likely due to a circular import)", "spec_lazy_pair"),
                   (("other",), True, True, 0)])
+
+# Native code resolves and reifies a placeholder as Python code does.
+lazy import spec_lazy_pair as pair
+held = [globals()["pair"]]
+LazyImport = type(held[0])
+assert_eq(list(map(LazyImport.resolve, held))[0].value, 1)
+holder = type(builtins)("holder")
+exec("lazy from spec_lazy_native import value", holder.__dict__)
+assert_eq(type(holder.__dict__["value"]), LazyImport)
+assert_eq("{0.value}".format(holder), "5")
+assert_eq(holder.__dict__["value"], 5)

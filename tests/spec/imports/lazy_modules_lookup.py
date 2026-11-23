@@ -5,7 +5,8 @@
 # a future statement once; a KeyError means none, a module listed is
 # imported lazily, and any other exception propagates. Imports in a
 # class body, a function or a try, and lazy imports, read nothing.
-# Inside functions and generators as at module level.
+# Inside functions and generators as at module level. An unlisted dotted
+# import with as binds the attribute path below what __import__ returned.
 from harness import *
 log = []
 class Globals(dict):
@@ -57,3 +58,18 @@ assert_eq(next(gen()), expected)
 def outer():
     return cases()
 assert_eq(outer(), expected)
+
+# An unlisted dotted import binds, with as, the attributes below the top
+# module __import__ returned, and without it the top module.
+class Part: pass
+top = Part(); top.b = Part(); top.b.c = "leaf"
+imported = []
+def import_top(name, *args):
+    imported.append(name)
+    return top
+names = {"__builtins__": {"__import__": import_top}, "__lazy_modules__": ["other"]}
+exec("import top.b.c as x\nimport top.b", names)
+assert_eq((names["x"], names["top"] is top, imported), ("leaf", True, ["top.b.c", "top.b"]))
+top.b = Part()
+assert_eq(str(assert_raises(ImportError, exec, "import top.b.c as y", names)),
+          "cannot import name 'c' from '<unknown module name>' (unknown location)")
