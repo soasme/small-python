@@ -153,7 +153,11 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * its first build. */
 /* children: the scopes whose parent this is, linked through sibling.
  * type_params: a generic scope's (TypeParameter). */
-struct Scope { Node *owner; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+/* A body's: its symbols, and as its values run it, its programs, owned:
+ * a generator's (code), or a function's or class's on the machine (flat);
+ * a function's or lambda's parameters (signature), their names borrowed;
+ * and its code object, made once (code_value). */
+struct Scope { Node *owner; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -198,11 +202,7 @@ struct Node {
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
-    Program *code;
-    Program *flat; /* A function body that holds a call and cannot suspend, on the machine. */
-    Parameter *signature; /* A function's or lambda's parameters, args', their names borrowed. */
     Scope *scope;
-    SPYValue *code_value;
     SPYValue *constant; /* A literal's value, made once; a def's or class's docstring. */
     AttributeOperand attribute; /* An N_ATTR's, its name b's. */
 };
@@ -1325,13 +1325,16 @@ typedef void (*Visit)(SPYValue *, void *);
 static void machine_edges(Machine *, Visit, void *);
 static void free_machine(SPYContext *, Machine *);
 static void free_program(Program *);
+static void program_edges(Program *, Visit, void *);
 static void scope_edges(Scope *scope, Visit visit, void *data) {
     if (!scope) return;
     for (size_t i = 0; i < scope->len; i++)
         if (scope->symbols[i].key) visit(scope->symbols[i].key, data);
     if (scope->static_attributes) visit(scope->static_attributes, data);
+    if (scope->code_value) visit(scope->code_value, data);
+    program_edges(scope->code, visit, data);
+    program_edges(scope->flat, visit, data);
 }
-static void program_edges(Program *, Visit, void *);
 static void edges(SPYValue *v, Visit visit, void *data) {
     /* A value released half-built, after a failed allocation, may hold NULL. */
 #define VISIT(e) do { SPYValue *e_ = (e); if (e_) visit(e_, data); } while (0)
@@ -1341,12 +1344,9 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         VISIT(v->as.unit.owner);
         VISIT(v->as.unit.replaced);
         for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
-            VISIT(node->code_value);
             VISIT(node->constant);
             VISIT(node->name.global_key);
             scope_edges(node->scope, visit, data);
-            program_edges(node->code, visit, data);
-            program_edges(node->flat, visit, data);
         }
         scope_edges(v->as.unit.scope, visit, data);
         program_edges(v->as.unit.flat, visit, data);
@@ -1470,8 +1470,9 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     }
 #undef VISIT
 }
+static void free_program(Program *);
 static void free_scope(Scope *scope) {
-    if (scope) { mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics); mem_free(scope); }
+    if (scope) { free_program(scope->code); free_program(scope->flat); mem_free(scope->signature); mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics); mem_free(scope); }
 }
 static int weak_push(SPYContext *c, SPYValue ***items, size_t *len, size_t *cap, SPYValue *value) {
     if (*len == *cap) {
@@ -1582,7 +1583,7 @@ static void free_value(SPYValue *v) {
         mem_free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->signature); mem_free(n->name.text); mem_free(n->original); mem_free(n); n = next; }
+        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); mem_free(n->name.text); mem_free(n->original); mem_free(n); n = next; }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
         free_scope(v->as.unit.scope);
@@ -7903,7 +7904,7 @@ static Node *statement_body(Parser *p) {
         size_t first_return = p->return_line;
         p->definition = definition; p->return_line = return_line; p->collecting = collecting;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
-        if (body_end(p, n->b, start, enclosing) || !(n->scope = scope_new(p->ctx, NULL, S_FUNCTION))) return NULL;
+        if (body_end(p, n->b, start, enclosing) || (!n->scope && !(n->scope = scope_new(p->ctx, NULL, S_FUNCTION)))) return NULL;
         n->scope->return_line = first_return;
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
         return n;
@@ -8279,6 +8280,13 @@ static Scope *scope_new(SPYContext *c, Scope *parent, int kind) {
     if (s) { s->kind = kind; scope_adopt(parent, s); }
     return s;
 }
+/* The scope of body n, of kind, made when its program was (body_begin,
+ * compile_generator) or now; analysis places it within parent. */
+static Scope *scope_of(SPYContext *c, Node *n, Scope *parent, int kind) {
+    if (!n->scope) n->scope = scope_new(c, NULL, kind);
+    if (n->scope) { scope_adopt(parent, n->scope); n->scope->owner = n; }
+    return n->scope;
+}
 /* Binds the name n, reporting errors at the node `at` covers. */
 static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node *at) {
     if ((flags & (S_LOCAL | S_PARAM)) && !strcmp(n->name.text, "__debug__")) {
@@ -8368,9 +8376,8 @@ static int scope_await(SPYContext *c, Scope *scope, Node *n) {
  * names of an enclosing class body. */
 static int scope_annotations(SPYContext *c, Scope *parent, Node *fn, const char *within) {
     if (!fn) return 0;
-    fn->scope = scope_new(c, parent, S_FUNCTION);
-    if (!fn->scope) return -1;
-    fn->scope->owner = fn; fn->scope->within = within;
+    if (!scope_of(c, fn, parent, S_FUNCTION)) return -1;
+    fn->scope->within = within;
     if (scope_record(c, fn->scope, fn->args, S_PARAM)) return -1;
     for (Node *entry = fn->b->args; entry; entry = entry->next)
         if (scope_node(c, fn->scope, entry->a)) return -1;
@@ -8397,8 +8404,8 @@ static int scope_string_annotation(SPYContext *c, Node *n) {
 }
 /* The annotation scope binding a definition's type parameters. */
 static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
-    if (!(generic->scope = scope_new(c, parent, S_FUNCTION))) return NULL;
-    generic->scope->owner = generic; generic->scope->within = "the definition of a generic";
+    if (!scope_of(c, generic, parent, S_FUNCTION)) return NULL;
+    generic->scope->within = "the definition of a generic";
     for (Node *param = generic->args; param; param = param->next) {
         if (scope_symbol(generic->scope, param->name.text)) {
             c->line = param->line;
@@ -8557,12 +8564,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         Scope *outer = n->params ? scope_generic(c, scope, n->params) : scope;
         if (!outer) return -1;
         if (n->kind == N_CLASS && scope_walk(c, outer, n->args)) return -1;
-        /* A parsed def already owns its compile-time properties. Lambdas,
-         * classes and synthesized annotation functions get their scope here. */
-        if (n->scope) scope_adopt(outer, n->scope);
-        else n->scope = scope_new(c, outer, n->kind == N_CLASS ? S_CLASS : S_FUNCTION);
-        if (!n->scope) return -1;
-        n->scope->owner = n;
+        if (!scope_of(c, n, outer, n->kind == N_CLASS ? S_CLASS : S_FUNCTION)) return -1;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_record(c, n->scope, param, S_PARAM)) return -1;
         if (scope_annotations(c, n->kind == N_CLASS ? n->scope : outer, n->annotate, "an annotation")) return -1;
@@ -8570,9 +8572,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     }
     case N_COMPREHENSION:
         if (scope_node(c, scope, n->a->a)) return -1;
-        n->scope = scope_new(c, scope, S_COMPREHENSION);
-        if (!n->scope) return -1;
-        n->scope->owner = n;
+        if (!scope_of(c, n, scope, S_COMPREHENSION)) return -1;
         for (Node *clause = n->a; clause; clause = clause->b) {
             if (clause->kind == N_FOR && clause->op && scope_await(c, n->scope, clause)) return -1;
             if (clause != n->a && scope_node(c, n->scope, clause->a)) return -1;
@@ -12673,14 +12673,14 @@ static int error_is(SPYContext *c, const char *name) {
 static SPYValue *suspended_delegate(SPYContext *, SPYValue *);
 static SPYValue *qualified_name(SPYContext *, Scope *);
 static SPYValue *definition_code(SPYContext *c, SPYValue *unit, Node *definition) {
-    if (!definition->code_value) {
+    if (!definition->scope->code_value) {
         SPYValue *code = value_new(c, SPY_CODE);
         if (!code) return NULL;
         code->as.unit.owner = spy_retain(unit);
         code->as.unit.definition = definition;
-        definition->code_value = code;
+        definition->scope->code_value = code;
     }
-    return spy_retain(definition->code_value);
+    return spy_retain(definition->scope->code_value);
 }
 /* A missing module attribute that a lazy import named as a submodule
  * (sys.lazy_modules holds "module.name" or a name below it) imports it. */
@@ -13115,14 +13115,14 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             int64_t flags = unit->as.unit.future_flags;
             if (def && def->kind != N_CLASS) {
                 flags |= 0x3;
-                for (Parameter *arg = def->signature; arg && arg->name; arg++)
+                for (Parameter *arg = def->scope->signature; arg && arg->name; arg++)
                     flags |= arg->kind == P_VARARGS ? 0x4 : arg->kind == P_KWARGS ? 0x8 : 0;
                 Scope *parent = def->scope ? def->scope->parent : NULL;
                 while (parent && parent->owner && parent->owner->kind == N_GENERIC) parent = parent->parent;
                 if (parent && (parent->kind == S_FUNCTION || parent->kind == S_COMPREHENSION)) flags |= 0x10;
                 if (parent && parent->kind == S_CLASS) flags |= 0x8000000;
                 if (def->kind == N_COMPREHENSION) flags |= def->op != N_TUPLE ? 0 : def->asynchronous ? 0x200 : 0x20;
-                else if (def->code) flags |= def->op == 2 ? 0x200 : def->op ? 0x80 : 0x20;
+                else if (def->scope->code) flags |= def->op == 2 ? 0x200 : def->op ? 0x80 : 0x20;
                 if (def->kind == N_DEF && def->constant) flags |= 0x4000000;
             }
             return spy_int(c, flags);
@@ -13137,7 +13137,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             if (iterable && names && sequence_append(c, names, iterable)) { spy_release(names); names = NULL; }
             spy_release(iterable);
             for (int pass = 0; pass < 3; pass++)
-            for (Parameter *arg = def ? def->signature : NULL; names && arg && arg->name; arg++) {
+            for (Parameter *arg = def ? def->scope->signature : NULL; names && arg && arg->name; arg++) {
                 if ((arg->kind == P_VARARGS) != (pass == 1) || (arg->kind == P_KWARGS) != (pass == 2)) continue;
                 SPYValue *text = spy_string(c, arg->name, strlen(arg->name));
                 if (!text || sequence_append(c, names, text)) { spy_release(text); spy_release(names); return NULL; }
@@ -13164,7 +13164,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_argcount") || !strcmp(name, "co_posonlyargcount") || !strcmp(name, "co_kwonlyargcount")) {
             if (def && def->kind == N_COMPREHENSION) return spy_int(c, !strcmp(name, "co_argcount"));
             int64_t count = 0;
-            for (Parameter *arg = def ? def->signature : NULL; arg && arg->name; arg++)
+            for (Parameter *arg = def ? def->scope->signature : NULL; arg && arg->name; arg++)
                 count += !strcmp(name, "co_kwonlyargcount") ? arg->kind == P_KWONLY :
                          !strcmp(name, "co_posonlyargcount") ? arg->kind == P_POSONLY :
                          arg->kind == P_POSITIONAL || arg->kind == P_POSONLY;
@@ -16682,13 +16682,14 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
     patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, clause, 0); patch(p, loop, p->len);
 }
 static int compile_comprehension(SPYContext *c, Node *n) {
-    n->code = allocate(c, sizeof(*n->code));
-    if (!n->code) return -1;
-    n->code->calls = c->pausing ? PAUSING : BODY; n->code->loads = c->string_source != 0;
+    if (!n->scope && !(n->scope = scope_new(c, NULL, S_COMPREHENSION))) return -1;
+    n->scope->code = allocate(c, sizeof(*n->scope->code));
+    if (!n->scope->code) return -1;
+    n->scope->code->calls = c->pausing ? PAUSING : BODY; n->scope->code->loads = c->string_source != 0;
     if (n->a->op) n->flags |= F_AITER;
-    compile_comprehension_clause(c, n->code, n, n->a);
-    if (n->op == N_TUPLE) emit(c, n->code, BC_NONE, n, 0);
-    emit(c, n->code, BC_FLOW, n, FLOW_RETURN);
+    compile_comprehension_clause(c, n->scope->code, n, n->a);
+    if (n->op == N_TUPLE) emit(c, n->scope->code, BC_NONE, n, 0);
+    emit(c, n->scope->code, BC_FLOW, n, FLOW_RETURN);
     return c->error_type[0] ? -1 : 0;
 }
 /* The items of a with statement, entered in order, which the parser
@@ -17377,7 +17378,9 @@ static int body_statements(Parser *p, Node *head, Node *stop) {
 static Body body_begin(Parser *p, Node *n, size_t depth) {
     SPYContext *c = p->ctx;
     Body enclosing = p->body;
-    Program *program = allocate(c, sizeof(*program));
+    /* A def's or class's scope holds its program from the start. */
+    if (n && !n->scope) n->scope = scope_new(c, NULL, n->kind == N_CLASS ? S_CLASS : S_FUNCTION);
+    Program *program = n && !n->scope ? NULL : allocate(c, sizeof(*program));
     p->body = (Body){program, NULL, NULL, depth, !n, 1, 0};
     if (!program) return enclosing;
     program->calls = c->pausing ? PAUSING : BODY;
@@ -17385,7 +17388,7 @@ static Body body_begin(Parser *p, Node *n, size_t depth) {
     program->unbinds = !n || program->namespace;
     program->loads = program->namespace || c->string_source;
     program->display = !n && (c->interactive_input || c->eval_input == 2);
-    if (n) n->flat = program;
+    if (n) n->scope->flat = program;
     else p->unit->as.unit.flat = program;
     if (n && n->kind == N_CLASS) { emit(c, program, BC_CLASS, n, 9); emit(c, program, BC_POP, n, 0); }
     if (!n) { emit(c, program, BC_CLASS, NULL, 17); emit(c, program, BC_POP, NULL, 0); }
@@ -17430,7 +17433,8 @@ static Parameter *definition_signature(SPYContext *c, Node *n) {
     return signature;
 }
 static int compile_generator(SPYContext *c, Node *n) {
-    if (n->kind != N_CLASS && n->kind != N_COMPREHENSION && !n->signature && !(n->signature = definition_signature(c, n))) return -1;
+    if (!n->scope && !(n->scope = scope_new(c, NULL, n->kind == N_CLASS ? S_CLASS : S_FUNCTION))) return -1;
+    if (n->kind != N_CLASS && n->kind != N_COMPREHENSION && !n->scope->signature && !(n->scope->signature = definition_signature(c, n))) return -1;
     if (n->kind != N_LAMBDA && !n->constant && !(n->constant = docstring(c, n->b)) && c->error_type[0]) return -1;
     /* A def or class keeps its name, as bound and as spelled. */
     Node *name = n->a && n->a->kind == N_NAME ? n->a : NULL;
@@ -17441,21 +17445,22 @@ static int compile_generator(SPYContext *c, Node *n) {
     /* A parsed def's or class's statements were compiled as they were
      * parsed (body_begin); a lambda's body, an __annotate__ function's or
      * a lazy value's is compiled now. */
-    Program *p = n->flat;
+    Program *p = n->scope->flat;
     if (!p) {
         if (!(p = allocate(c, sizeof(*p)))) return -1;
         p->calls = mode; p->loads = c->string_source != 0;
-        n->flat = p;
+        n->scope->flat = p;
         compile_body(c, p, n->b);
     }
-    if (generator) { n->code = p; n->flat = NULL; }
+    if (generator) { n->scope->code = p; n->scope->flat = NULL; }
     c->code_work++;
     if (n->kind == N_CLASS && n->params && n->args) {
         /* A generic class's bases and keywords, in its type parameters'
          * frame (header_step). */
         Program *header = allocate(c, sizeof(*header));
         if (!header) { c->code_work--; return -1; }
-        header->calls = mode; header->loads = c->string_source != 0; n->params->flat = header;
+        if (!n->params->scope && !(n->params->scope = scope_new(c, NULL, S_FUNCTION))) { mem_free(header); c->code_work--; return -1; }
+        header->calls = mode; header->loads = c->string_source != 0; n->params->scope->flat = header;
         emit(c, header, BC_CLASS, n, 18); emit(c, header, BC_ARGS, n, 0);
         compile_arguments(c, header, n->args);
         emit(c, header, BC_CLASS, n, 19); emit(c, header, BC_FLOW, NULL, FLOW_RETURN);
@@ -18179,7 +18184,7 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     SPYValue **items = w.names->as.seq.items;
     size_t front = 0;
     for (int pass = 0; cells && pass < 3; pass++)
-        for (Parameter *arg = def->signature; arg && arg->name; arg++) {
+        for (Parameter *arg = def->scope->signature; arg && arg->name; arg++) {
             if ((arg->kind == P_VARARGS) != (pass == 1) || (arg->kind == P_KWARGS) != (pass == 2)) continue;
             for (size_t i = front; i < w.names->as.seq.len; i++)
                 if (!strcmp(items[i]->as.string.data, arg->name)) {
@@ -18474,7 +18479,7 @@ static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
     size_t *order = allocate(c, (scope->len + 1) * sizeof(*order)), len = 0;
     if (!order) return -1;
     /* Only a def's or lambda's scope has parameters. */
-    Parameter *params = scope->kind == S_FUNCTION ? scope->owner->signature : NULL;
+    Parameter *params = scope->kind == S_FUNCTION ? scope->signature : NULL;
     scope->positional = scope->parameters = scope->positionals = 0;
     scope->stars = 0;
     for (Parameter *arg = params; arg && arg->name; arg++) {
@@ -18595,7 +18600,7 @@ static NO_INLINE void closed_locals(SPYValue *env) {
     SPYContext *c = env->ctx;
     Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
     if (!scope || env->as.map.namespace || env->as.map.class_cell || env->as.map.base || env->as.map.native || (env->as.map.flags & ~2) ||
-        scope->kind != S_FUNCTION || !scope->owner || scope->owner->code || c->error_type[0]) return;
+        scope->kind != S_FUNCTION || !scope->owner || scope->code || c->error_type[0]) return;
     if (!(scope->cells & CELLS_MARKED)) {
         SPYValue *names = closure_names(c, scope->owner, 1);
         if (!names) { spy_clear_error(c); return; }
@@ -19042,7 +19047,7 @@ static Parameter *replaced_signature(SPYValue *code) {
     return code->as.unit.owner && code->as.unit.definition ? code->as.unit.signature : NULL;
 }
 static Parameter *function_parameters(SPYValue *fn) {
-    return fn->as.function.signature ? fn->as.function.signature : fn->as.function.def->signature;
+    return fn->as.function.signature ? fn->as.function.signature : fn->as.function.def->scope->signature;
 }
 /* A parameter's value in env, or NULL while it is unbound. */
 static SPYValue *bound_local(SPYValue *env, const char *name) {
@@ -19329,7 +19334,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     Entry *items = env->as.map.items;
     size_t count = scope->parameters, posonly = 0, i, j;
     size_t kwargs = count + (scope->stars & 1), end = kwargs + (scope->stars >> 1);
-    for (Parameter *arg = fn->as.function.def->signature; arg->name && arg->kind == P_POSONLY; arg++) posonly++;
+    for (Parameter *arg = fn->as.function.def->scope->signature; arg->name && arg->kind == P_POSONLY; arg++) posonly++;
     if ((scope->stars & 1) && items[count].value == c->unbound) { spy_release(items[count].value); items[count].value = value_new(c, SPY_TUPLE); }
     if (scope->stars & 2) { spy_release(items[kwargs].value); items[kwargs].value = value_new(c, SPY_DICT); }
     for (i = 0; i < kwc; i++) {
@@ -19349,7 +19354,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     }
     SPYValue *defaults = NULL, *kwdefaults = NULL;
     j = 0;
-    for (Parameter *arg = fn->as.function.def->signature; arg->name && i == kwc; arg++, j++) {
+    for (Parameter *arg = fn->as.function.def->scope->signature; arg->name && i == kwc; arg++, j++) {
         if (arg->kind == P_VARARGS || arg->kind == P_KWARGS) { j--; continue; }
         if (items[j].value != c->unbound) continue;
         SPYValue *value = NULL;
@@ -19479,7 +19484,7 @@ static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env
     if (!enter_frame(c, env, fn)) {
         if ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c)) {
             Call *call = c->calls[c->calls_len++];
-            call->m.code = fn->as.function.def->flat; call->m.pc = 0; call->m.outermost = !caller;
+            call->m.code = fn->as.function.def->scope->flat; call->m.pc = 0; call->m.outermost = !caller;
             call->m.frame = (Frame){env, fn->as.function.unit, 0};
             call->caller = caller; call->fn = fn;
             call->caller_env = c->eval_env; c->eval_env = env;
@@ -19592,11 +19597,11 @@ static int string_keys(SPYContext *c, SPYValue *keywords) {
  * asynchronous generator, running none of its body. */
 static int suspending_function(SPYContext *c, SPYValue *fn) {
     Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
-    return def && (def->kind == N_DEF || def->kind == N_LAMBDA) && def->code && !def->flat;
+    return def && (def->kind == N_DEF || def->kind == N_LAMBDA) && def->scope->code && !def->scope->flat;
 }
 /* A function of this context whose body is on the machine. */
 static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
-    return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->flat;
+    return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->scope->flat;
 }
 static SPYValue *bound_function(SPYContext *, SPYValue *);
 static SPYValue *class_init(SPYContext *, SPYValue *, int *);
@@ -20044,7 +20049,7 @@ static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *e
 /* A Python function's body, run in env, a new environment of its scope;
  * it takes env. */
 static ALWAYS_INLINE SPYValue *run_function(SPYContext *c, SPYValue *fn, SPYValue *env) {
-    if (fn->as.function.def->flat) return call_machine(c, fn, env);
+    if (fn->as.function.def->scope->flat) return call_machine(c, fn, env);
     /* A generator function's call makes its generator. */
     Frame frame = {env, fn->as.function.unit, 0};
     SPYValue *result = new_generator(c, &frame, fn);
@@ -21853,7 +21858,7 @@ static SPYValue *comprehension_of(SPYContext *c, Frame *f, Node *n, SPYValue *it
         result->as.generator.unit = spy_retain(f->unit);
         result->as.generator.node = n;
         result->as.generator.code = definition_code(c, f->unit, n);
-        Machine *m = result->as.generator.machine = machine_new(c, n->code, env, f->unit);
+        Machine *m = result->as.generator.machine = machine_new(c, n->scope->code, env, f->unit);
         if (m) {
             m->generator = result;
             if (n->op != N_TUPLE)
@@ -23236,7 +23241,7 @@ static NO_INLINE SPYValue *generic_function(SPYContext *c, Machine *m, Frame *f,
         Frame frame = {env, f->unit, 0};
         fn = function_new(c, &frame, n);
         size_t i = 0;
-        for (Parameter *arg = n->signature; fn && arg->name && !c->error_type[0]; arg++)
+        for (Parameter *arg = n->scope->signature; fn && arg->name && !c->error_type[0]; arg++)
             if (arg->defaulted) function_default(c, fn, arg->kind == P_KWONLY, arg->name, defaults->as.seq.items[i++]);
     }
     if (!fn || c->error_type[0]) { spy_release(fn); spy_release(env); return NULL; }
@@ -26585,7 +26590,7 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     Node *n = function->as.function.def;
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
     if (!v) return NULL;
-    if (!(v->as.generator.machine = machine_new(c, n->code, f->env, f->unit))) { spy_release(v); return NULL; }
+    if (!(v->as.generator.machine = machine_new(c, n->scope->code, f->env, f->unit))) { spy_release(v); return NULL; }
     v->as.generator.machine->generator = v;
     v->as.generator.node = n;
     v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
@@ -27480,7 +27485,7 @@ static SPYValue *adapted_generator(SPYValue *);
 /* Whether fn is a generator function, whose call runs none of its body. */
 static int generator_function(SPYContext *c, SPYValue *fn) {
     Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
-    return def && def->kind == N_DEF && !def->op && def->code && !def->flat;
+    return def && def->kind == N_DEF && !def->op && def->scope->code && !def->scope->flat;
 }
 /* The Python __iter__ of plain instance v's class, or of a list's,
  * tuple's or dict's subclass, or of a builtin's that has none (an int's),
@@ -32905,7 +32910,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Instruc
     Node *def = callee->type == SPY_FUNCTION && callee->ctx == c ? callee->as.function.def : NULL;
     if (def && def->kind != N_CLASS && def->kind != N_COMPREHENSION) {
         SPYValue *callee_env = keyword_env(c, callee, positional, argv, kw, kwc, NULL, 0);
-        if (callee_env && calls && def->flat) {
+        if (callee_env && calls && def->scope->flat) {
             /* The call takes the callee from the stack. */
             m->len -= argc + 1;
             release_all(argc, argv);
@@ -37957,7 +37962,7 @@ static NO_INLINE SPYValue *header_step(SPYContext *c, Machine *m, Frame *f, Inst
         return pair;
     }
     c->k_fn = spy_retain(f->unit); c->k_env = spy_retain(m->stack[m->len - 1]->as.seq.items[0]); c->k_unit = 1;
-    c->k_code = ins->definition->params->flat; c->k = unchanged; c->k_ctx = NULL;
+    c->k_code = ins->definition->params->scope->flat; c->k = unchanged; c->k_ctx = NULL;
     return NULL;
 }
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
@@ -41649,7 +41654,7 @@ static SPYValue *implicit_super(SPYContext *c, Machine *m) {
     /* A list, set or dictionary comprehension runs in its function's frame. */
     while (env && env->type == V_ENV && env->as.map.flags == 2 && env->as.map.scope->owner->op != N_TUPLE) env = env->as.map.parent;
     Scope *scope = env && env->type == V_ENV ? env->as.map.scope : NULL;
-    Parameter *first = scope && scope->kind == S_FUNCTION ? scope->owner->signature : NULL;
+    Parameter *first = scope && scope->kind == S_FUNCTION ? scope->signature : NULL;
     if (!first || !first->name || (first->kind != P_POSITIONAL && first->kind != P_POSONLY))
         return spy_error(c, "RuntimeError", "super(): no arguments");
     SPYValue *self = name_local(env, first->name);
