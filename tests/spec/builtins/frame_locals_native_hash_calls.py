@@ -29,3 +29,9 @@ def inside():
     other = EqKey()
     return [other in proxy, stored in proxy, proxy[stored], NameKey("a") not in proxy]
 assert_eq(inside(), [False, True, 7, False])
+def chained():
+    key = EqKey()
+    found = [key not in proxy, 1 < 2 < 3 and key in proxy, (key in proxy) in [False], key in proxy in [False]]
+    proxy[key] = 4
+    return found + [key in proxy in [True], [proxy[key] for _ in range(2)], all(key in proxy for _ in range(3))]
+assert_eq(chained(), [True, False, True, False, False, [4, 4], True])
