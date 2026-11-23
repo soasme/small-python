@@ -633,6 +633,40 @@ int main(int argc, char **argv) {
     assert(integer(c, spy_call(c, fn, 1, &arg)) == 43);
     spy_release(arg); spy_release(fn);
 
+    /* A builtin the host calls runs in C: __build_class__ makes the class,
+     * and issubclass and isinstance read __bases__ and __class__ through
+     * an object's properties. */
+    execute(c, "def body():\n    pass\nclass Fake:\n    def __init__(self, bases): self.bases = bases\n"
+               "    @property\n    def __bases__(self): return self.bases\nroot = Fake(())\nmid = Fake((root,))\n"
+               "two = Fake((Fake(()), mid))\nclass Odd:\n    __class__ = mid\nodd = Odd()\n"
+               "build, sub, inst = __build_class__, issubclass, isinstance\n"
+               "def made(k): return 1 if k.__name__ == 'N' and k.__bases__ == (int,) else 0\n"
+               "def truth(v): return 1 if v is True else 0 if v is False else 2\n");
+    const char *const checks[][4] = {{"sub", "mid", "root", "1"}, {"sub", "two", "root", "1"}, {"sub", "root", "mid", "0"},
+                                     {"inst", "odd", "root", "1"}, {"inst", "odd", "two", "0"}};
+    SPYValue *truth = spy_get_global(c, "truth");
+    for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); i++) {
+        SPYValue *check = spy_get_global(c, checks[i][0]), *pair[] = {spy_get_global(c, checks[i][1]), spy_get_global(c, checks[i][2])};
+        SPYValue *answer = spy_call(c, check, 2, pair);
+        assert(answer && integer(c, spy_call(c, truth, 1, &answer)) == checks[i][3][0] - '0');
+        spy_release(answer); spy_release(pair[0]); spy_release(pair[1]); spy_release(check);
+    }
+    spy_release(truth);
+    SPYValue *build = spy_get_global(c, "build"), *made = spy_get_global(c, "made");
+    SPYValue *parts[] = {spy_get_global(c, "body"), spy_string(c, "N", 1), spy_eval(c, "int", "host.py")};
+    SPYValue *made_class = spy_call(c, build, 3, parts);
+    assert(made_class && integer(c, spy_call(c, made, 1, &made_class)) == 1);
+    spy_release(made_class); spy_release(made);
+    for (int i = 0; i < 3; i++) spy_release(parts[i]);
+    /* So does a class statement's body, which a Python __build_class__ was given. */
+    execute(c, "import builtins\nbodies = []\ndef grab(func, name, *bases):\n    bodies.append(func)\n    return build(func, name, *bases)\n"
+               "builtins.__build_class__ = grab\nclass Q:\n    y = 2\nbuiltins.__build_class__ = build\nq_body = bodies[0]\n"
+               "def made_q(k): return 1 if k.__name__ == 'Q2' and k.y == 2 and k is not Q else 0\n");
+    SPYValue *q_parts[] = {spy_get_global(c, "q_body"), spy_string(c, "Q2", 2)}, *made_q = spy_get_global(c, "made_q");
+    SPYValue *q_class = spy_call(c, build, 2, q_parts);
+    assert(q_class && integer(c, spy_call(c, made_q, 1, &q_class)) == 1);
+    spy_release(q_class); spy_release(made_q); spy_release(build); spy_release(q_parts[0]); spy_release(q_parts[1]);
+
     /* External references root cycles; dropping the last root makes them garbage. */
     spy_collect(c);
     size_t baseline = spy_live_values(c);
