@@ -285,14 +285,20 @@ analysed.
 
 Code objects keep their body's scope, and scopes copy the text they
 keep (symbol, parameter, type parameter and static attribute names), so
-run time reads no tree. A scope tree owns its scopes. Once a line of
-module statements is compiled, analysed and resolved, the nodes of the
-line before it are freed: the parse keeps only the first statement
-(for the docstring and line), the module's annotations, which its
-`__annotate__` compiles at the end, and the nodes owning a root scope
-(a string annotation's). Compiling 20,000 lines of `x = a.b` peaks at
-26 MB, down from 49 MB, and 5,000 small functions at 35 MB, down from
-47 MB.
+run time reads no tree. A scope tree owns its scopes. A scope's
+definition record is filled as its node is complete, and an async
+def's first valued return keeps only its line and span, so resolution
+reads no node. Once a line of module statements is compiled, analysed
+and resolved, the nodes of the line before it are freed; a line of a
+def's, class's or suite's statements is freed as soon as it is compiled
+and analysed. The parse keeps only a body's first statement while the
+body is open (a module's for its docstring and line; a def's or class's
+docstring is read as it compiles), the annotations of a module or class,
+which its `__annotate__` compiles when the body ends, and the nodes
+owning a root scope (a string annotation's). Compiling 20,000 lines of
+`x = a.b` peaks at 26 MB, down from 49 MB, 5,000 small functions at
+33 MB, down from 47 MB, and a 20,000-line function and class at 46 MB,
+down from 124 MB.
 
 ## Remaining stages
 

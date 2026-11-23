@@ -115,6 +115,9 @@ typedef struct ImportRecord { struct ImportRecord *next; const char *module; int
  * the last compiled; whether the last parsed waits for the body's end, as
  * a module's does, and whether the first may be a docstring. */
 typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int holds, docs, tries; } Body;
+/* A statement's place for an error raised after its nodes go: the node
+ * while it lives, then its line and the source it covers (free_parsed). */
+typedef struct { Node *node; size_t line; const char *start, *end; } Site;
 /* An analysis error waiting for the end of the parse: its class, message
  * (owned), line and source span. */
 typedef struct { char type[64]; char *message; size_t line; const char *start, *end; Node *open; } Analysis;
@@ -4580,7 +4583,7 @@ typedef struct {
     int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1; 3: also a 0-based offset; 4: a 0-based offset, end offset 0). */
     SPYValue *unit;
     Node *definition; /* The current function, lambda or class body; NULL at module level. */
-    Node *returned; /* First valued return in the compiler's diagnostic order. */
+    Site returned; /* First valued return in the compiler's diagnostic order. */
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
     Node *deferred_node; /* When set, the deferred error covers this node. */
@@ -5362,6 +5365,7 @@ static size_t if_else(SPYContext *, Program *, Node *, size_t);
 static int nodes_finish(Parser *, Node *);
 static Scope *body_scope(SPYContext *, Node *);
 static void scope_define(Node *);
+static void site_settle(Site *);
 static SPYValue *docstring(SPYContext *, Node *);
 static size_t loop_begin(SPYContext *, Program *, Node *, size_t *);
 static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
@@ -7133,8 +7137,8 @@ static int annotated(Parser *p, Node *n) {
     if (p->future_annotations) { n->flags |= F_FUTURE; p->annotation_index++; return 0; }
     Node *entry = annotation_entry(p, n->a->name.text, n->b, p->annotation_index, p->conditional ? F_CONDITIONAL : 0);
     if (!entry) return -1;
-    /* A module's annotations are compiled when its parse ends. */
-    if (!p->definition) keep_tree(entry);
+    /* A body's annotations are compiled when it ends (collect_end). */
+    keep_tree(entry);
     n->op = p->annotation_index++;
     if (p->conditional) n->flags |= F_CONDITIONAL;
     *p->annotations_tail = entry; p->annotations_tail = &entry->next;
@@ -7819,8 +7823,8 @@ static Node *statement_body(Parser *p) {
         }
         int loops = p->loops, functions = p->functions, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
-        Node *returned = p->returned;
-        p->definition = n; p->returned = NULL;
+        Site returned = p->returned;
+        p->definition = n; p->returned = (Site){0};
         const char *private_name = p->private_name;
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
@@ -7868,8 +7872,8 @@ static Node *statement_body(Parser *p) {
         if (emits) try_handlers(p->ctx, program, n, &t);
         /* Bindings still follow source order. For return diagnostics the
          * compiler visits else and finally before exception handlers. */
-        Node *body_return = p->returned;
-        p->returned = NULL;
+        Site body_return = p->returned;
+        p->returned = (Site){0};
         Node **tail = &n->args;
         int bare = 0, star = -1;
         size_t bare_at = 0;
@@ -7941,7 +7945,7 @@ static Node *statement_body(Parser *p) {
             span_block(p, handler, except_at);
             *tail = handler; tail = &handler->next;
         }
-        Node *handler_return = p->returned;
+        Site handler_return = p->returned;
         p->returned = body_return;
         if (star == 1) n->flags |= F_STAR;
         if (emits) try_else(p->ctx, program, n, &t);
@@ -7951,7 +7955,7 @@ static Node *statement_body(Parser *p) {
         }
         if (emits) try_finally(p->ctx, program, &t);
         if (take_word(p, "finally") && !(n->c = suite_of(p, "'finally' statement", keyword_line(p), emits))) return NULL;
-        if (!p->returned) p->returned = handler_return;
+        if (!p->returned.node && !p->returned.line) p->returned = handler_return;
         if (!n->args && !n->c) return syntax(p, "expected 'except' or 'finally' block");
         p->body.tries--;
         if (emits) { try_end(p->ctx, program, &t); n->flags |= F_EMITTED; }
@@ -7998,8 +8002,8 @@ static Node *statement_body(Parser *p) {
         if (function_annotations(p, n) || analyse_statements(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
-        Node *returned = p->returned;
-        p->definition = n; p->returned = NULL;
+        Site returned = p->returned;
+        p->definition = n; p->returned = (Site){0};
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
         int collecting = p->collecting;
         p->collecting = 0;
@@ -8008,15 +8012,14 @@ static Node *statement_body(Parser *p) {
         Body enclosing = body_begin(p, n, p->depth + 1);
         p->scope = n->scope;
         n->b = p->body.program ? suite_after(p, "function definition", n->line) : NULL;
-        Node *first_return = p->returned;
+        Site first_return = p->returned;
         p->definition = definition; p->returned = returned; p->collecting = collecting; p->scope = scope;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
         if (body_end(p, n->b, start, enclosing) || !body_scope(p->ctx, n)) return NULL;
         /* The first valued return, whose error waits for resolution. */
-        if (first_return) {
-            n->scope->returned_line = first_return->line;
-            if (first_return->spanned) { n->scope->returned_start = first_return->start; n->scope->returned_end = first_return->end; }
-        }
+        if (first_return.node) site_settle(&first_return);
+        n->scope->returned_line = first_return.line;
+        n->scope->returned_start = first_return.start; n->scope->returned_end = first_return.end;
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
         scope_define(n);
         return n;
@@ -8043,7 +8046,7 @@ static Node *statement_body(Parser *p) {
         if (outside) p->deferred_node = n;
         if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
         if (keyword(p, "for")) return syntax(p, "invalid syntax");
-        if (n->a && !p->returned) p->returned = n;
+        if (n->a && !p->returned.node && !p->returned.line) p->returned.node = n;
         return n;
     }
     if (keyword(p, "break") || keyword(p, "continue")) {
@@ -8395,6 +8398,7 @@ static void free_node(Node *n) {
  * but those the parse reads when it ends (F_KEEP): the first statement
  * and the module's annotations. A deferred compiler error keeps the
  * source its node covers. */
+static void free_parsed(Parser *, Node **);
 static void free_lines(Parser *p, Node *start) {
     SPYValue *unit = p->unit;
     Node **at = &unit->as.unit.nodes;
@@ -8404,15 +8408,39 @@ static void free_lines(Parser *p, Node *start) {
         Node *n = *at;
         /* A root scope's node goes with the unit, whose scopes it may hold. */
         if ((n->flags & F_KEEP) || node_root(unit, n->scope)) { at = &n->allocated; continue; }
-        if (n == p->deferred_node) {
-            if (n->spanned) { p->deferred_start = n->start; p->deferred_end = n->end; }
-            p->deferred_node = NULL;
-        }
-        if (n == p->symbols.open) p->symbols.open = NULL;
-        *at = n->allocated;
-        free_node(n);
+        free_parsed(p, at);
     }
     p->line_nodes = count;
+}
+/* Free node *at, which nothing reads, unlinked from the parse's nodes; a
+ * deferred error at it keeps the source it covers. */
+static void site_settle(Site *s) {
+    Node *n = s->node;
+    *s = (Site){NULL, n->line, n->spanned ? n->start : NULL, n->spanned ? n->end : NULL};
+}
+static void free_parsed(Parser *p, Node **at) {
+    Node *n = *at;
+    if (n == p->returned.node) site_settle(&p->returned);
+    if (n == p->deferred_node) {
+        if (n->spanned) { p->deferred_start = n->start; p->deferred_end = n->end; }
+        p->deferred_node = NULL;
+    }
+    if (n == p->symbols.open) p->symbols.open = NULL;
+    *at = n->allocated;
+    free_node(n);
+}
+/* After a line of statements of a body that holds none back, parsed
+ * since start, is analysed and compiled, free its nodes but those the
+ * parse reads later (F_KEEP) and the body's first statement, which ends
+ * its chain of statements now and its last compiled. */
+static void free_line(Parser *p, Node *start) {
+    for (Node **at = &p->unit->as.unit.nodes; *at != start;) {
+        Node *n = *at;
+        if ((n->flags & F_KEEP) || n == p->body.head || node_root(p->unit, n->scope)) at = &n->allocated;
+        else free_parsed(p, at);
+    }
+    p->body.head->next = NULL;
+    p->body.done = p->body.head;
 }
 /* What a module reads of its first statement, head: its line and
  * docstring, which -OO drops. */
@@ -8442,6 +8470,7 @@ static Node *statements(Parser *p) {
         if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
         if (!p->depth && body && !p->ctx->error_type[0]) free_lines(p, start);
+        else if (body && !p->body.holds && !p->ctx->error_type[0]) { free_line(p, start); tail = &head->next; last = head; }
     }
     return head;
 }
@@ -17800,6 +17829,8 @@ static int body_statements(Parser *p, Node *head, Node *stop) {
     Node *s = p->body.todo ? p->body.todo : p->body.done ? p->body.done->next : head;
     for (; s != stop && !c->error_type[0]; s = s->next) {
         if (s == head && p->body.docs && c->optimize > 1) drop_docstring(s);
+        /* A def's or class's docstring, read before its nodes go (free_line). */
+        else if (s == head && p->body.docs && p->scope && !p->scope->doc && !(p->scope->doc = docstring(c, s)) && c->error_type[0]) return -1;
         if (!(s->flags & F_EMITTED)) compile_statement(c, p->body.program, s);
         p->body.done = s;
     }
@@ -17875,7 +17906,8 @@ static Parameter *definition_signature(SPYContext *c, Node *n) {
 static int compile_generator(SPYContext *c, Node *n) {
     if (!body_scope(c, n)) return -1;
     if (n->kind != N_CLASS && n->kind != N_COMPREHENSION && !n->scope->signature && !(n->scope->signature = definition_signature(c, n))) return -1;
-    if (n->kind != N_LAMBDA && !n->scope->doc && !(n->scope->doc = docstring(c, n->b)) && c->error_type[0]) return -1;
+    /* A parsed def's or class's docstring was read with its first statement (body_statements). */
+    if (n->kind != N_LAMBDA && !n->scope->flat && !n->scope->doc && !(n->scope->doc = docstring(c, n->b)) && c->error_type[0]) return -1;
     /* A def or class keeps its name, as bound and as spelled. */
     Node *name = n->a && n->a->kind == N_NAME ? n->a : NULL;
     if (name && !n->scope->name && (!(n->scope->name = copy_text(c, name->name.text, strlen(name->name.text))) ||
