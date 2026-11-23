@@ -3390,6 +3390,22 @@ static const char *const programs[] = {
     "print(f())\n"
     "def g(): return [x for x in a for y in x.b if y.c]\n"
     "print(g.__code__.co_names)\n",
+    /* Machine continuations whose state allocation may fail: a split()
+     * condition's Python truth, a range count's Python __eq__, complex()'s
+     * __complex__, filter()'s test and __exit__'s truth. */
+    "class T:\n"
+    "    def __bool__(self): return True\n"
+    "class EqAll:\n"
+    "    def __eq__(self, other): return True\n"
+    "class C:\n"
+    "    def __complex__(self): return 1j\n"
+    "class Ex:\n"
+    "    def __enter__(self): return self\n"
+    "    def __exit__(self, *a): return T()\n"
+    "eg = ExceptionGroup(\"g\", [ValueError(1)])\n"
+    "print(eg.split(lambda e: T())[0] is not None, range(5).count(EqAll()))\n"
+    "print(complex(C()), list(filter(lambda x: T(), [1])))\n"
+    "with Ex(): raise KeyError\n",
 };
 
 static char *read_file(const char *path) {
