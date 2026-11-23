@@ -49,6 +49,18 @@ class Logged:
         return other == self.name
 
 
+class NativeHashed:
+    """A key whose __hash__ is native and whose __eq__ runs on the machine and logs."""
+    __hash__ = object.__hash__
+
+    def __init__(self, log):
+        self.log = log
+
+    def __eq__(self, other):
+        self.log.append("e")
+        return self is other
+
+
 def act(p, namespace, fr, g):
     op = p["op"]
     try:
@@ -114,6 +126,12 @@ def act(p, namespace, fr, g):
             value = proxy[Logged("z", log)]
             log.append(" ")
             return f"{value} {Logged('z', log) in proxy} {''.join(log)}"
+        if op == "native_hash":
+            proxy, absent, stored = fr.f_locals, NativeHashed(log), NativeHashed(log)
+            found = [absent in proxy, absent not in proxy]
+            proxy[stored] = 7
+            found += [proxy[stored], stored in proxy, absent in proxy]
+            return " ".join(map(str, found)) + " " + "".join(log)
         fr.clear()
         return repr(dict(fr.f_locals)) + ("" if g is None else " " + repr(g.gi_frame))
     except (TypeError, AttributeError, ValueError, RuntimeError) as error:

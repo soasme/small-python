@@ -35850,18 +35850,6 @@ static int frame_key_calls(SPYContext *, SPYValue *);
 static SPYValue *frame_operatek(SPYContext *, Machine *, int, SPYValue *, SPYValue *, SPYValue *, Continuation, SPYValue *);
 enum { FL_GETITEM, FL_SETITEM, FL_DELITEM, FL_CONTAINS, FL_ITER, FL_LEN, FL_REVERSED, FL_EQ, FL_NE,
        FL_OR, FL_ROR, FL_IOR, FL_REPR, FL_UPDATE, FL_COPY, FL_KEYS, FL_VALUES, FL_ITEMS, FL_GET, FL_POP, FL_SETDEFAULT };
-/* What a FrameLocalsProxy's item or in, state's step (item_state), gave,
- * result, negated for not in (item_called). */
-static SPYValue *frame_item_done(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    int op = 0;
-    step_operation(&m->code->items[state->as.seq.items[0]->as.integer_data.small], &op);
-    if (result && op == O_NOTIN) {
-        int truth = result == c->booleans[1];
-        spy_release(result);
-        result = spy_bool(c, !truth);
-    }
-    return item_called(c, m, state, result);
-}
 /* Whether v, a dict or frozendict subclass's instance, does not iterate
  * as its builtin, so that merging it calls its keys(). */
 static int keyed_dict(SPYContext *c, SPYValue *v) {
@@ -35899,14 +35887,6 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         return operator_call(c, m, ins, x, y->as.bound.self, env);
     }
     if (UNLIKELY(proxies_instance(x)) && ins->op == BC_INDEX) return operator_call(c, m, ins, x->as.bound.self, y, env);
-    /* A FrameLocalsProxy's item, or x in one, its key's Python __hash__
-     * and __eq__ on m (frame_operatek, frame_item_done). */
-    if (UNLIKELY(kind == OPERATE_INDEX ? x->type == SPY_FRAME_LOCALS && frame_key_calls(c, y) :
-                 contains && y->type == SPY_FRAME_LOCALS && frame_key_calls(c, x))) {
-        SPYValue *state = item_state(c, m, ins, x, y);
-        return state ? item_queued(c, state, frame_operatek(c, m, contains ? FL_CONTAINS : FL_GETITEM, contains ? y : x, contains ? x : y,
-                                                            NULL, frame_item_done, state)) : NULL;
-    }
     /* A set operation, augmented assignment or comparison, whose lookups
      * may call a Python __eq__. */
     if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) &&
@@ -36610,19 +36590,24 @@ static SPYValue *view_stepped(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 }
 /* Operator step ins's in of x in y, a dict's keys or items view
  * (view_containsk), or its comparison of x and y (view_operands,
- * view_comparek, reflected for a set x), on m: c->stepped once the step
- * ended (view_stepped), NULL with a call left on m that ends it, or with
- * an error; else c->unbound. */
+ * view_comparek, reflected for a set x); or x[y] or x in y of a
+ * FrameLocalsProxy whose key has a Python __hash__ or __eq__
+ * (frame_operatek); on m: c->stepped once the step ended (view_stepped),
+ * NULL with a call left on m that ends it, or with an error; else
+ * c->unbound. */
 static NO_INLINE SPYValue *view_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y) {
-    int op = 0, kind = step_operation(ins, &op), rich = kind == OPERATE_INPLACE ? -1 : rich_kind(op);
-    int contains = (op == O_IN || op == O_NOTIN) && set_view(y);
-    if (!contains && (rich < 0 || !view_operands(x, y))) return c->unbound;
+    int op = 0, kind = step_operation(ins, &op), rich = kind == OPERATE_INPLACE ? -1 : rich_kind(op), in = op == O_IN || op == O_NOTIN;
+    int frame = x->type == SPY_FRAME_LOCALS ? kind == OPERATE_INDEX && frame_key_calls(c, y) :
+                in && y->type == SPY_FRAME_LOCALS && frame_key_calls(c, x);
+    int contains = in && set_view(y);
+    if (!frame && !contains && (rich < 0 || !view_operands(x, y))) return c->unbound;
     size_t at = (size_t)(ins - m->code->items);
     SPYValue *index = int_value(c, (int64_t)at), *state = index ? spy_tuple(c, 2, (SPYValue *[]){index, y}) : NULL;
     spy_release(index);
     if (!state) return NULL;
     m->pc = at + 1;
-    SPYValue *result = contains ? view_containsk(c, m, x, y, view_stepped, state) :
+    SPYValue *result = frame ? frame_operatek(c, m, in ? FL_CONTAINS : FL_GETITEM, in ? y : x, in ? x : y, NULL, view_stepped, state) :
+                       contains ? view_containsk(c, m, x, y, view_stepped, state) :
                        set_view(x) ? view_comparek(c, m, op, x, y, view_stepped, state) :
                        view_comparek(c, m, compare_tokens[rich_reflected[rich]], y, x, view_stepped, state);
     return result;
@@ -41345,9 +41330,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (b) spy_release(b);
             goto intrinsics_entered;
         }
-        if (UNLIKELY(y && (UINT64_C(1) << x->type | UINT64_C(1) << y->type) & (UINT64_C(1) << SPY_DICT_KEYS | UINT64_C(1) << SPY_DICT_ITEMS)) &&
+        if (UNLIKELY(y && (UINT64_C(1) << x->type | UINT64_C(1) << y->type) & (UINT64_C(1) << SPY_DICT_KEYS | UINT64_C(1) << SPY_DICT_ITEMS | UINT64_C(1) << SPY_FRAME_LOCALS)) &&
             (value = view_step(c, m, ins, x, y)) != c->unbound) {
-            /* A dict view's in or comparison, whose chain ends the step (view_step). */
+            /* A dict view's in or comparison, or a FrameLocalsProxy's item
+             * or in, whose chain ends the step (view_step). */
             if (a) spy_release(a);
             if (b) spy_release(b);
             if (value == c->stepped) { pc = m->pc; continue; }

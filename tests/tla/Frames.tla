@@ -41,7 +41,7 @@ Sources == {"running", "finished", "gennew", "gensusp", "gendone", "gendropped",
 Ops == {"f_code", "repr", "f_back", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator", "f_lineno", "f_trace",
         "settrace", "setlines", "setbadlines", "setlineno", "setcode", "clear",
         "dellineno", "dellines", "delopcodes", "impostor", "unhashable", "reversed",
-        "get_keyerror", "setdefault_keyerror", "extra_calls"}
+        "get_keyerror", "setdefault_keyerror", "extra_calls", "native_hash"}
 Programs == [source : Sources, op : Ops]
 
 VARIABLES program, outcome
@@ -84,6 +84,9 @@ Run(p) ==
       \* A key no variable's name equals is hashed again for the extra
       \* locals, where it is compared with the key stored there.
       [] p.op = "extra_calls" -> "7 True hh hhee hhee"
+      \* A key of a native __hash__ and a Python __eq__ that no variable's
+      \* name or extra local equals is absent at once; one stored is found.
+      [] p.op = "native_hash" -> "False True 7 True False "
       [] p.op = "clear" -> CASE s \in {"running", "gensusp"} -> "RuntimeError"
                              \* A generator that has not started is finalized; its frame stays its own.
                              [] s = "gennew" -> "{'a': 1} None"
