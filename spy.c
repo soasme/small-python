@@ -185,7 +185,6 @@ struct Node {
     int spanned;
     NameOperand name;
     char *original;
-    char *local; /* A replace()d code's parameter: the body's name for its slot. */
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
@@ -195,7 +194,7 @@ struct Node {
     Parameter *signature; /* A function's or lambda's parameters, args', their names borrowed. */
     Scope *scope;
     SPYValue *code_value;
-    SPYValue *constant; /* A literal's value, made once. */
+    SPYValue *constant; /* A literal's value, made once; a def's or class's docstring. */
     AttributeOperand attribute; /* An N_ATTR's, its name b's. */
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->name.text; }
@@ -1577,7 +1576,7 @@ static void free_value(SPYValue *v) {
         mem_free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->signature); mem_free(n->name.text); mem_free(n->original); mem_free(n->local); mem_free(n); n = next; }
+        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->signature); mem_free(n->name.text); mem_free(n->original); mem_free(n); n = next; }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
         free_scope(v->as.unit.scope);
@@ -13078,9 +13077,9 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_stacksize")) return spy_int(c, 1); /* positive; the depth is implementation-defined */
         if (!strcmp(name, "co_consts")) {
             /* A function's or module's docstring comes first. */
-            Node *body = def ? (def->kind == N_DEF ? def->b : NULL) : unit->as.unit.expression ? NULL : unit->as.unit.body;
             SPYValue *consts = value_new(c, SPY_TUPLE);
-            SPYValue *doc = consts ? docstring(c, body) : NULL;
+            SPYValue *doc = !consts ? NULL : def ? (def->kind == N_DEF ? spy_retain(def->constant) : NULL) :
+                            unit->as.unit.expression ? NULL : docstring(c, unit->as.unit.body);
             if (c->error_type[0] || (doc && sequence_append(c, consts, doc))) { spy_release(consts); consts = NULL; }
             spy_release(doc);
             return consts;
@@ -13111,7 +13110,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 if (parent && parent->kind == S_CLASS) flags |= 0x8000000;
                 if (def->kind == N_COMPREHENSION) flags |= def->op != N_TUPLE ? 0 : def->asynchronous ? 0x200 : 0x20;
                 else if (def->code) flags |= def->op == 2 ? 0x200 : def->op ? 0x80 : 0x20;
-                if (def->kind == N_DEF && def->b && def->b->kind == N_EXPR && def->b->a->kind == N_STRING) flags |= 0x4000000;
+                if (def->kind == N_DEF && def->constant) flags |= 0x4000000;
             }
             return spy_int(c, flags);
         }
@@ -17411,6 +17410,7 @@ static Parameter *definition_signature(SPYContext *c, Node *n) {
 }
 static int compile_generator(SPYContext *c, Node *n) {
     if (n->kind != N_CLASS && n->kind != N_COMPREHENSION && !n->signature && !(n->signature = definition_signature(c, n))) return -1;
+    if (n->kind != N_LAMBDA && !n->constant && !(n->constant = docstring(c, n->b)) && c->error_type[0]) return -1;
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS)), mode = c->pausing ? PAUSING : BODY;
     /* A parsed def's or class's statements were compiled as they were
      * parsed (body_begin); a lambda's body, an __annotate__ function's or
@@ -18248,9 +18248,7 @@ static SPYValue *function_new(SPYContext *c, Frame *f, Node *n) {
     SPYValue *text = spy_string(c, name, strlen(name));
     SPYValue *qualname = qualified_name(c, n->scope);
     SPYValue *module = name_local(module_env(c, f->env), "__name__");
-    Node *body = n->kind == N_COMPREHENSION ? NULL : n->b;
-    SPYValue *doc = docstring(c, body);
-    if (!doc && !c->error_type[0]) doc = spy_none(c);
+    SPYValue *doc = n->kind == N_COMPREHENSION || !n->constant ? spy_none(c) : spy_retain(n->constant);
     if (text && qualname && doc && fn->as.function.metadata) {
         name_set(c, fn->as.function.metadata, "__name__", text);
         name_set(c, fn->as.function.metadata, "__qualname__", qualname);
@@ -22717,9 +22715,7 @@ static SPYValue *hooked_namespace(SPYContext *c, SPYValue *env) {
  * parameters, __annotations__ under PEP 563, its value c->unbound for a
  * new dict unless the namespace has one, and __doc__; owned. */
 static SPYValue *class_names_before(SPYContext *c, Node *n, SPYValue *module, SPYValue *type_params) {
-    SPYValue *names = value_new(c, SPY_LIST), *doc = NULL;
-    Node *body = n->b;
-    if (body && body->kind == N_EXPR && body->a->kind == N_STRING && !(doc = docstring(c, body)) && c->error_type[0]) { spy_release(names); return NULL; }
+    SPYValue *names = value_new(c, SPY_LIST), *doc = spy_retain(n->constant);
     SPYValue *values[] = {module, qualified_name(c, n->scope), spy_int(c, (int64_t)(n->decorators ? n->decorators->line : n->line)),
                           type_params, n->flags & F_SETUP_ANNOTATIONS ? c->unbound : NULL, doc};
     static const char *const keys[] = {"__module__", "__qualname__", "__firstlineno__", "__type_params__", "__annotations__", "__doc__"};
