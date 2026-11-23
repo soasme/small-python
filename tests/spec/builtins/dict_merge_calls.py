@@ -6,6 +6,7 @@
 # unequal one is added. A comparison's exception propagates, the entries
 # before it merged; a change of the merged dict's size raises RuntimeError
 # ("dict mutated during update"); | leaves its operands as they were.
+# So does an update() repeated in a loop, its argument made by a call.
 # Inside functions as at module level.
 from harness import *
 
@@ -56,6 +57,15 @@ expected = [None, [(1, 'x'), (3, 'z'), (5, 'y')], True, [(1, 'a'), (3, 'x')], [(
              ('eq', 1, 3), ('eq', 1, 3), ('hash', 1), ('eq', 1, 3), ('hash', 7), ('eq', 7, 3), ('hash', -1),
              ('hash', 3), ('hash', 4), ('eq', -1, 3), ('hash', 3), ('hash', 1), ('eq', 1, 3), ('hash', 9),
              ('eq', 3, 9)]]
+
+def repeated():
+    d = {Key(1): "a"}
+    del log[:]
+    for i in range(4):
+        d.update(dict([(Key(1), i)]))
+    return shown(d), list(log)
+
+assert_eq(repeated(), ([(1, 3)], [('hash', 1), ('eq', 1, 1)] * 4))
 
 def main():
     return merges()

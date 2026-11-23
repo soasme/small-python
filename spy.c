@@ -33013,30 +33013,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Instruct
         spy_release(object);
         return class_stack_call(c, m, cls, argc, 1, env);
     }
-    if (callee && method < 0 && calls && skip && argc && unbound_called(c, callee, argv[1]) && called_machine(c, argv[1], argc - 1, argv + 2)) {
-        /* So does type.__call__ of the class first, in the object's place. */
-        spy_release(object); spy_release(callee);
-        memmove(argv, argv + 1, argc * sizeof(*argv));
-        m->len--;
-        return class_stack_call(c, m, argv[0], argc - 1, 1, env);
-    }
     if (callee && method < 0 && calls && machine_function(c, callee)) {
         m->len -= argc + 1;
         if (skip) spy_release(object);
         if ((*env = function_env(c, callee, argc + !skip, argv + skip, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
-    }
-    if (callee && method < 0 && calls && skip && argc && generator_slot(c, callee, argv[1])) {
-        /* A generator's method from its type given the generator is its
-         * bound method (generator_slot), in the type's place. */
-        SPYValue *bound = attribute_value(c, argv[1], callee->as.native.name->as.string.data);
-        spy_release(callee);
-        if (!bound) { for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m)); return NULL; }
-        spy_release(object);
-        memmove(argv, argv + 1, argc * sizeof(*argv));
-        m->len--; argc--;
-        callee = bound; object = argv[0];
     }
     if (callee && method < 0 && calls && !skip && argc == 1 && callee->type == SPY_NATIVE && callee->as.native.kwcall == set_method &&
         set_like(argv[0]) && !walk_operand(argv[1])) {
@@ -33060,27 +33042,10 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Instruct
         return set_call(c, m, callee, argc + !skip, held + skip, env);
     }
     SPYValue *seq = callee && calls ? searched(callee, method, argc, argv + 1, &id) : NULL;
-    size_t first = seq && callee->type == SPY_NATIVE;
-    if (seq && seq->type == SPY_RANGE) {
-        /* A range's index or count of an instance (range_search). */
-        SPYValue *x = spy_retain(argv[1 + first]);
-        spy_retain(seq);
-        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-        result = range_search(c, m, id, x, seq);
-        spy_release(x); spy_release(seq); spy_release(callee);
-        return result;
-    }
     if (seq) {
-        /* index, count or remove of a list or tuple (search_call). */
-        SPYValue *x = spy_retain(argv[1 + first]);
-        size_t at;
-        int64_t tally;
-        search_span(c, seq, id, argc - first, argv + 1 + first, &at, &tally);
-        spy_retain(seq);
-        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-        SPYValue *function = search_call(c, m, id, x, seq, at, tally, env, &result);
-        spy_release(x); spy_release(seq); spy_release(callee);
-        return function == c->unbound ? NULL : function ? spy_retain(c->types[SPY_STRING]) : result;
+        result = call_searched(c, m, callee, seq, id, argc, argv + 1, argc + 1, env);
+        spy_release(callee);
+        return result;
     }
     if (callee && calls && method == M_UPDATE && argc == 1 && merges(callee, argv[1])) {
         /* A dict's update of a dict (update_call). */
