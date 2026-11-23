@@ -278,8 +278,14 @@ table error; resolving free and cell names still waits for the end.
 
 Code objects keep their body's scope, and scopes copy the text they
 keep (symbol, parameter, type parameter and static attribute names), so
-run time reads no tree. The parse still builds each statement's tree,
-compiles and analyses it, and keeps every tree until its unit is freed.
+run time reads no tree. A scope tree owns its scopes. Once a line of
+module statements is compiled, analysed and resolved, the nodes of the
+line before it are freed: the parse keeps only the first statement
+(for the docstring and line), the module's annotations, which its
+`__annotate__` compiles at the end, and the nodes owning a root scope
+(a string annotation's). Compiling 20,000 lines of `x = a.b` peaks at
+26 MB, down from 49 MB, and 5,000 small functions at 35 MB, down from
+47 MB.
 
 ## Remaining stages
 

@@ -114,7 +114,7 @@ typedef struct ImportRecord { struct ImportRecord *next; const char *module; int
  * depth are compiled into as each ends (body_statements), the first and
  * the last compiled; whether the last parsed waits for the body's end, as
  * a module's does, and whether the first may be a docstring. */
-typedef struct { Program *program; Node *head, *done; size_t depth; int holds, docs, tries; } Body;
+typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int holds, docs, tries; } Body;
 /* An analysis error waiting for the end of the parse: its class, message
  * (owned), line and source span. */
 typedef struct { char type[64]; char *message; size_t line; const char *start, *end; } Analysis;
@@ -144,7 +144,7 @@ enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANN
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 /* key: the name's str, made when the name is first bound and traced
  * through the unit that owns the scope. */
-typedef struct { const char *name; unsigned flags; size_t line; Node *declared; int64_t hash; SPYValue *key; } Symbol;
+typedef struct { const char *name; unsigned flags; size_t line; const char *declared, *declared_end; int64_t hash; SPYValue *key; } Symbol;
 /* order: the symbols of a plain function environment's entries, in the
  * order the entries keep them, once its first environment is made. kept:
  * up to KEPT environments its calls (or a comprehension's runs) returned
@@ -182,7 +182,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_EMITTED = 8192 /* A statement compiled in place as it was parsed (at_body). */,
        F_AITER = 16384 /* A comprehension whose first iterable is asynchronous. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
-       F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
+       F_YIELDS = 524288 /* The definition's own scope contains a yield. */,
+       F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */ };
 /* A text operand and its name-lookup cache. Literal nodes use only text.
  * Instructions can borrow this record without inspecting a syntax tree. */
 typedef struct {
@@ -4614,6 +4615,12 @@ typedef struct {
     Node *resolved_to;
     Scope *resolved_child;
     Analysis resolved, returns;
+    /* The nodes the last line of module statements allocated, freed after
+     * the next (free_lines); the last module statement; whether the
+     * module's docstring and line are read (module_first). */
+    size_t line_nodes;
+    Node *last_statement;
+    int module_begun;
 } Parser;
 static Scope *scope_new(SPYContext *, Scope *, int);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -6862,7 +6869,7 @@ static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
     if (!emits) return suite_after(p, what, line);
     Body outer = p->body;
     Node *start = p->unit->as.unit.nodes;
-    p->body = (Body){outer.program, NULL, NULL, p->depth + 1, 0, 0, outer.tries};
+    p->body = (Body){outer.program, NULL, NULL, NULL, p->depth + 1, 0, 0, outer.tries};
     Node *body = suite_after(p, what, line);
     int failed = !body || (!p->body.done && nodes_finish(p, start)) || body_statements(p, body, NULL);
     p->body = outer;
@@ -7093,6 +7100,13 @@ static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
     fn->line = body->line = entries ? entries->line : fn->line;
     return fn;
 }
+/* Mark n and the nodes within it, and the nodes after it, F_KEEP. */
+static void keep_tree(Node *n) {
+    for (; n && !(n->flags & F_KEEP); n = n->next) {
+        n->flags |= F_KEEP;
+        keep_tree(n->a); keep_tree(n->b); keep_tree(n->c); keep_tree(n->args); keep_tree(n->decorators); keep_tree(n->params);
+    }
+}
 /* Simple annotated assignment n of the body being parsed, if it collects
  * them: PEP 563 stores each string in __annotations__ as it runs; else its
  * entry of the body's __annotate__ (collect_end). */
@@ -7103,6 +7117,8 @@ static int annotated(Parser *p, Node *n) {
     if (p->future_annotations) { n->flags |= F_FUTURE; p->annotation_index++; return 0; }
     Node *entry = annotation_entry(p, n->a->name.text, n->b, p->annotation_index, p->conditional ? F_CONDITIONAL : 0);
     if (!entry) return -1;
+    /* A module's annotations are compiled when its parse ends. */
+    if (!p->definition) keep_tree(entry);
     n->op = p->annotation_index++;
     if (p->conditional) n->flags |= F_CONDITIONAL;
     *p->annotations_tail = entry; p->annotations_tail = &entry->next;
@@ -8301,6 +8317,7 @@ static int resolve_tree(Parser *p, Scope *s) {
         spy_error(c, "SyntaxError", "'return' with value in async generator");
         if (analysis_defer(p, &p->returns)) return -1;
     }
+    s->returned = NULL;
     return resolve_children(p, s->children, NULL);
 }
 /* Resolve the module's scopes made since the last resolved, and define
@@ -8330,6 +8347,49 @@ static void analysis_raise(SPYContext *c, Analysis *a) {
     spy_error(c, a->type, a->message);
     c->line = a->line; c->node_start = a->start; c->node_end = a->end;
 }
+/* Free node n, which nothing reads, and its values; its scope, within
+ * the unit's, keeps no pointer to it. */
+static void free_node(Node *n) {
+    if (n->scope && n->scope->owner == n) n->scope->owner = NULL;
+    spy_release(n->constant); spy_release(n->name.global_key);
+    mem_free(n->name.text); mem_free(n->original); mem_free(n);
+}
+/* After a line of module statements, parsed since start, is compiled
+ * and analysed, free the nodes of the line before it, now compiled too,
+ * but those the parse reads when it ends (F_KEEP): the first statement
+ * and the module's annotations. A deferred compiler error keeps the
+ * source its node covers. */
+static void free_lines(Parser *p, Node *start) {
+    SPYValue *unit = p->unit;
+    Node **at = &unit->as.unit.nodes;
+    size_t count = 0;
+    while (*at != start) { at = &(*at)->allocated; count++; }
+    for (size_t i = 0; i < p->line_nodes && *at; i++) {
+        Node *n = *at;
+        /* A root scope's node goes with the unit, whose scopes it may hold. */
+        if ((n->flags & F_KEEP) || node_root(unit, n->scope)) { at = &n->allocated; continue; }
+        if (n == p->deferred_node) {
+            if (n->spanned) { p->deferred_start = n->start; p->deferred_end = n->end; }
+            p->deferred_node = NULL;
+        }
+        *at = n->allocated;
+        free_node(n);
+    }
+    p->line_nodes = count;
+}
+/* What a module reads of its first statement, head: its line and
+ * docstring, which -OO drops. */
+static void module_first(Parser *p, Node *head) {
+    SPYContext *c = p->ctx;
+    SPYValue *unit = p->unit;
+    Scope *module = unit->as.unit.scope;
+    if (p->module_begun || !module || !head) return;
+    p->module_begun = 1;
+    if (c->optimize > 1) drop_docstring(head);
+    module->line = head->line;
+    if (!unit->as.unit.expression) module->doc = docstring(c, head);
+    head->flags |= F_KEEP;
+}
 static Node *statements(Parser *p) {
     Node *head = NULL, **tail = &head, *last = NULL;
     int body = p->body.program && p->depth == p->body.depth;
@@ -8341,9 +8401,10 @@ static Node *statements(Parser *p) {
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
         if (!p->depth && (analyse_statements(p, n) || resolve_statements(p, start))) return NULL;
-        if (!p->depth) p->analysed = last;
+        if (!p->depth) { p->analysed = p->last_statement = last; module_first(p, head); }
         if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
+        if (!p->depth && body && !p->ctx->error_type[0]) free_lines(p, start);
     }
     return head;
 }
@@ -8471,7 +8532,7 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
         const char *name = scope_text(c, scope, n->name.text);
         if (!name || grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return -1;
         symbol = &scope->symbols[scope->len++];
-        *symbol = (Symbol){name, 0, n->line, NULL, text_hash(name, strlen(name)), NULL};
+        *symbol = (Symbol){name, 0, n->line, NULL, NULL, text_hash(name, strlen(name)), NULL};
     }
     if (flags & (S_GLOBAL | S_NONLOCAL)) {
         const char *kind = flags & S_GLOBAL ? "global" : "nonlocal";
@@ -8482,7 +8543,7 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
         else if (symbol->flags & S_LOCAL) errorf(c, "SyntaxError", "name '%s' is assigned to before %s declaration", n->name.text, kind);
         if (c->error_type[0]) return -1;
         /* Conflicting declarations are reported at the first one. */
-        if (!(symbol->flags & (S_GLOBAL | S_NONLOCAL))) { symbol->line = n->line; symbol->declared = at; }
+        if (!(symbol->flags & (S_GLOBAL | S_NONLOCAL))) { symbol->line = n->line; symbol->declared = at->spanned ? at->start : NULL; symbol->declared_end = at->end; }
     }
     symbol->flags |= flags;
     if ((flags & S_GLOBAL) && scope->parent) {
@@ -8495,7 +8556,7 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
             const char *name = scope_text(c, top, n->name.text);
             if (!name || grow(c, (void **)&top->symbols, &top->cap, top->len + 1, sizeof(*top->symbols))) return -1;
             global = &top->symbols[top->len++];
-            *global = (Symbol){name, 0, n->line, NULL, text_hash(name, strlen(name)), NULL};
+            *global = (Symbol){name, 0, n->line, NULL, NULL, text_hash(name, strlen(name)), NULL};
         }
         if (global) global->flags |= S_GLOBAL;
     }
@@ -8822,7 +8883,7 @@ static int scope_resolve(SPYContext *c, Scope *scope) {
         Symbol *symbol = &scope->symbols[i];
         if (!(symbol->flags & S_NONLOCAL)) continue;
         c->line = symbol->line;
-        if (symbol->declared) node_error(c, symbol->declared);
+        if (symbol->declared) { c->node_start = symbol->declared; c->node_end = symbol->declared_end; }
         if (symbol->flags & S_GLOBAL) errorf(c, "SyntaxError", "name '%s' is nonlocal and global", symbol->name);
         else if (scope->kind == S_MODULE) spy_error(c, "SyntaxError", "nonlocal declaration not allowed at module level");
         else {
@@ -9141,9 +9202,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         Node *start = unit->as.unit.nodes;
         if (!c->error_type[0]) collect_end(&p, NULL, &unit->as.unit.annotate, annotations);
         if (!c->error_type[0]) nodes_finish(&p, start);
-        if (c->optimize > 1) {
-            drop_docstring(unit->as.unit.body);
-        }
+        if (c->optimize > 1 && !p.module_begun) drop_docstring(unit->as.unit.body);
         /* What no line of statements analysed: an eval() expression. */
         Node *rest = p.analysed ? p.analysed->next : unit->as.unit.body;
         if (!c->error_type[0] && rest && analyse_statements(&p, rest)) {}
@@ -9151,8 +9210,10 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         mem_free(p.named.message); mem_free(p.symbols.message);
         if (!c->error_type[0] && !unit->as.unit.scope) unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
         if (!c->error_type[0]) {
-            if (unit->as.unit.scope && unit->as.unit.body) unit->as.unit.scope->line = unit->as.unit.body->line;
-            if (unit->as.unit.scope && !unit->as.unit.expression) unit->as.unit.scope->doc = docstring(c, unit->as.unit.body);
+            if (!p.module_begun) {
+                if (unit->as.unit.scope && unit->as.unit.body) unit->as.unit.scope->line = unit->as.unit.body->line;
+                if (unit->as.unit.scope && !unit->as.unit.expression) unit->as.unit.scope->doc = docstring(c, unit->as.unit.body);
+            }
             if (unit->as.unit.scope && !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) {
                 if (unit->as.unit.annotate) unit->as.unit.scope->annotate = unit->as.unit.annotate->scope;
                 scope_resolve(c, unit->as.unit.scope);
@@ -17623,11 +17684,15 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
  * becomes pass first. */
 static int body_statements(Parser *p, Node *head, Node *stop) {
     SPYContext *c = p->ctx;
-    for (Node *s = p->body.done ? p->body.done->next : head; s != stop && !c->error_type[0]; s = s->next) {
+    Node *s = p->body.todo ? p->body.todo : p->body.done ? p->body.done->next : head;
+    for (; s != stop && !c->error_type[0]; s = s->next) {
         if (s == head && p->body.docs && c->optimize > 1) drop_docstring(s);
         if (!(s->flags & F_EMITTED)) compile_statement(c, p->body.program, s);
         p->body.done = s;
     }
+    /* The statement held back is the next to compile, its body's done
+     * statement perhaps freed (free_lines). */
+    p->body.todo = s;
     return c->error_type[0] ? -1 : 0;
 }
 /* Begin the body of def or class n, or with n NULL the module's, whose
@@ -17639,7 +17704,7 @@ static Body body_begin(Parser *p, Node *n, size_t depth) {
     Body enclosing = p->body;
     /* A def's or class's scope holds its program from the start. */
     Program *program = n && !body_scope(c, n) ? NULL : allocate(c, sizeof(*program));
-    p->body = (Body){program, NULL, NULL, depth, !n, 1, 0};
+    p->body = (Body){program, NULL, NULL, NULL, depth, !n, 1, 0};
     if (!program) return enclosing;
     program->calls = c->pausing ? PAUSING : BODY;
     program->namespace = n && n->kind == N_CLASS;
@@ -17667,7 +17732,7 @@ static int body_end(Parser *p, Node *head, Node *start, Body enclosing) {
 static int module_body_finish(Parser *p, SPYValue *unit) {
     SPYContext *c = p->ctx;
     Program *program = p->body.program;
-    Node *body = unit->as.unit.body, *last = body;
+    Node *body = unit->as.unit.body, *last = p->last_statement ? p->last_statement : body;
     while (last->next) last = last->next;
     if (!unit->as.unit.annotate && !unit->as.unit.conditional_annotations) program->entry = 2;
     if (body_statements(p, body, last)) return -1;
@@ -18772,7 +18837,7 @@ static NO_INLINE void closed_locals(SPYValue *env) {
     SPYContext *c = env->ctx;
     Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
     if (!scope || env->as.map.namespace || env->as.map.class_cell || env->as.map.base || env->as.map.native || (env->as.map.flags & ~2) ||
-        scope->kind != S_FUNCTION || !scope->owner || scope->code || c->error_type[0]) return;
+        scope->kind != S_FUNCTION || !scope->form || scope->code || c->error_type[0]) return;
     if (!(scope->cells & CELLS_MARKED)) {
         SPYValue *names = closure_names(c, scope, 1);
         if (!names) { spy_clear_error(c); return; }
@@ -41152,7 +41217,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         goto enter_special;
     enter_init:
         /* A class call enters its __init__ (class_init). */
-        spy_release(value); value = spy_retain(c->entering_init); special = c->entering_kind;
+        /* The __init__ is borrowed, perhaps from value: retain it first. */
+        { SPYValue *init = spy_retain(c->entering_init); spy_release(value); value = init; }
+        special = c->entering_kind;
         goto enter_special;
     load_intrinsics:
         /* A step that calls an intrinsic loads their module first, then runs again (intrinsics_step). */
@@ -42587,7 +42654,7 @@ static SPYValue *frame_attribute(SPYContext *c, SPYValue *frame, const char *nam
         return spy_retain(frame->as.frame.back && !frame->as.frame.index ? frame->as.frame.back : c->none);
     }
     Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
-    if (!strcmp(name, "f_code") && owner->type == V_UNIT && scope && scope->kind == S_CLASS && scope->owner)
+    if (!strcmp(name, "f_code") && owner->type == V_UNIT && scope && scope->kind == S_CLASS && scope->form)
         return definition_code(c, owner, scope);
     if (!strcmp(name, "f_code"))
         return owner->type == SPY_FUNCTION ? attribute(c, owner, "__code__") : owner->type == V_UNIT || owner->type == SPY_CODE ? spy_retain(owner) :
