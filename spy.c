@@ -16295,18 +16295,23 @@ static int operand_shape(SPYContext *c, Node *n) {
     literal_value(c, n);
     return SHAPE_LOAD;
 }
+/* An operator at hand's operation of operator node n: its kind and, from bit 2, its operator. */
+enum { FUSED_INDEX, FUSED_BINARY, FUSED_COMPARE };
+static int fused_operation(Node *n) {
+    return n->kind == N_INDEX ? FUSED_INDEX : n->kind == N_BINARY ? FUSED_BINARY | n->op << 2 : FUSED_COMPARE | n->args->op << 2;
+}
 static void compile_operation(SPYContext *, Program *, Node *);
 /* The fused step of operator n, whose left operand, of shape left, is at
  * hand or atop the stack, and its plain steps: those after the left's
  * value when it is on the stack, else all of n's. The step jumps past
  * them when it computes n without running Python code, else lets them
  * run; with truth, its value is tested, and a BC_FALSE after them makes
- * it a BC_TEST. Its arg holds truth, the operands' shapes, and from bit 6
+ * it a BC_TEST. Its arg holds truth, the operands' shapes, from bit 6
  * the right one's first step after it: 1, 2 or 3 past an operand at
- * hand's, at once past the stack's. */
+ * hand's, at once past the stack's, and from bit 8 n's operation. */
 static void compile_fused(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth) {
     int shape = operand_shape(c, right), steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
-    size_t fused = emit(c, p, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6);
+    size_t fused = emit(c, p, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6 | fused_operation(n) << 8);
     p->plain++;
     if (left == SHAPE_STACK) compile_operation(c, p, n);
     else compile_expr(c, p, n);
@@ -18296,7 +18301,7 @@ static SPYValue *method_of(SPYContext *c, AttributeOperand *at, SPYValue *object
     return callee;
 }
 static SPYValue *operand(SPYContext *, Frame *, Node *);
-static SPYValue *operator_fast(SPYContext *, Node *, SPYValue *, SPYValue *);
+static SPYValue *operator_fast(SPYContext *, int, SPYValue *, SPYValue *);
 /* Call fn as plain call node n, method the native method its callee
  * names (method_of), or -1. A Python function skips call_keywords'
  * dispatch. */
@@ -18361,21 +18366,22 @@ static ALWAYS_INLINE SPYValue *operand(SPYContext *c, Frame *f, Node *n) {
     SPYValue *v = leaf_operand(f, n);
     return v || n->kind != N_ATTR ? v : attr_operand(c, f, n);
 }
-/* Operator node n on its operands x and y, both borrowed, when they are
- * exact small ints, floats, lists and tuples it computes without running
- * Python code or raising anything but MemoryError; else NULL. */
-static ALWAYS_INLINE SPYValue *operator_fast(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
-    if (n->kind == N_INDEX) return spy_retain(sequence_item(x, y));
-    if (n->kind == N_BINARY) return number_fast(c, n->op, x, y, 0);
-    int truth = ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
+/* Operation (fused_operation) on operands x and y, both borrowed, when
+ * they are exact small ints, floats, lists and tuples it computes without
+ * running Python code or raising anything but MemoryError; else NULL. */
+static ALWAYS_INLINE SPYValue *operator_fast(SPYContext *c, int operation, SPYValue *x, SPYValue *y) {
+    int kind = operation & 3, op = operation >> 2;
+    if (kind == FUSED_INDEX) return spy_retain(sequence_item(x, y));
+    if (kind == FUSED_BINARY) return number_fast(c, op, x, y, 0);
+    int truth = ordering(op) ? number_order(op, x, y) : -1;
     return truth < 0 ? NULL : spy_bool(c, truth);
 }
-/* Operator node n on its operands x and y. */
-static ALWAYS_INLINE SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
-    relocate(c, n);
+/* Fused operator step ins on its operands x and y. */
+static ALWAYS_INLINE SPYValue *operate(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y) {
+    int operation = ins->arg >> 8, kind = operation & 3, op = operation >> 2;
+    relocate(c, ins->node);
     spy_retain(x); spy_retain(y);
-    SPYValue *result = n->kind == N_INDEX ? get_index(c, x, y) : n->kind == N_COMPARE ? comparison(c, n->args->op, x, y) :
-        binary(c, n->op, x, y);
+    SPYValue *result = kind == FUSED_INDEX ? get_index(c, x, y) : kind == FUSED_COMPARE ? comparison(c, op, x, y) : binary(c, op, x, y);
     spy_release(x); spy_release(y);
     return result;
 }
@@ -31864,7 +31870,7 @@ static ALWAYS_INLINE SPYValue *operand_callee(SPYContext *c, Frame *f, Node *n, 
         if (arg->constant || arg->kind == N_NAME) { if ((value = leaf_operand(f, arg))) spy_retain(value); }
         else if (arg->flags & F_OPERATOR) {
             SPYValue *x = operand(c, f, arg->a), *y = x ? operand(c, f, arg->kind == N_COMPARE ? arg->args->a : arg->b) : NULL;
-            if (y) value = operator_fast(c, arg, x, y);
+            if (y) value = operator_fast(c, fused_operation(arg), x, y);
         }
         if (!(argv[done] = value)) {
             while (done) spy_release(argv[--done]);
@@ -33113,15 +33119,16 @@ enum { OPERATE_INDEX, OPERATE_BINARY, OPERATE_COMPARE, OPERATE_INPLACE, OPERATE_
 /* What operator step ins does: a subscript, or a binary, augmented, unary
  * operator or comparison *op. */
 static int step_operation(Instruction *ins, int *op) {
-    Node *n = ins->node;
     if (ins->op == BC_BINARY) { *op = ins->arg; return rich_kind(*op) < 0 ? OPERATE_BINARY : OPERATE_COMPARE; }
     if (ins->op == BC_UNARY) { *op = ins->arg; return OPERATE_UNARY; }
     if (ins->op == BC_INPLACE) { *op = ins->arg; return OPERATE_INPLACE; }
     if (ins->op == BC_COMPARE) { *op = (int)ins->other; return OPERATE_COMPARE; }
-    if (ins->op == BC_INDEX || n->kind == N_INDEX) return OPERATE_INDEX;
-    if (n->kind == N_COMPARE) { *op = n->args->op; return OPERATE_COMPARE; }
-    *op = n->op;
-    return OPERATE_BINARY;
+    if (ins->op == BC_OPERATE || ins->op == BC_STACKED || ins->op == BC_TEST || ins->op == BC_STACKED_TEST) {
+        int operation = ins->arg >> 8;
+        *op = operation >> 2;
+        return (operation & 3) == FUSED_INDEX ? OPERATE_INDEX : (operation & 3) == FUSED_COMPARE ? OPERATE_COMPARE : OPERATE_BINARY;
+    }
+    return OPERATE_INDEX; /* BC_INDEX */
 }
 /* Whether item is x or its comparison with x calls a Python __eq__
  * (rich_function), or its pairs' (pair_python, pair_walks). */
@@ -38556,24 +38563,25 @@ static NO_INLINE SPYValue *operate_native(SPYContext *c, Instruction *ins, SPYVa
     if (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE || y->type == SPY_ITERATOR || x->type == SPY_MAPPINGPROXY) return c->unbound;
     SPYValue *value = y->type == SPY_LIST || y->type == SPY_TUPLE ? sequence_test(c, ins, x, y) :
                       y->type == SPY_DICT && x->type == SPY_DICT ? c->unbound : NULL;
-    return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
+    return value || c->error_type[0] ? value : operate(c, ins, x, y);
 }
-/* The value of fused operator step ins, of node n, on x, its left
- * operand, and its right one at hand, owned; else NULL, with an error or
- * for its plain steps to run. */
-static ALWAYS_INLINE SPYValue *fused_on(SPYContext *c, Frame *f, Instruction *ins, Node *n, SPYValue *x) {
-    SPYValue *y = step_operand(c, f, ins + 1 + (ins->arg >> 6), ins->arg >> 4 & 3);
-    SPYValue *value = y ? operator_fast(c, n, x, y) : NULL;
+/* The value of fused operator step ins on x, its left operand, and its
+ * right one at hand, owned; else NULL, with an error or for its plain
+ * steps to run. */
+static ALWAYS_INLINE SPYValue *fused_on(SPYContext *c, Frame *f, Instruction *ins, SPYValue *x) {
+    SPYValue *y = step_operand(c, f, ins + 1 + (ins->arg >> 6 & 3), ins->arg >> 4 & 3);
+    SPYValue *value = y ? operator_fast(c, ins->arg >> 8, x, y) : NULL;
     if (UNLIKELY(!value) && y && !c->error_type[0] && (value = operate_native(c, ins, x, y)) == c->unbound) value = NULL;
     return value;
 }
-/* The truth of fused test step ins, of node n, on operands x and y: 0 or
- * 1; 2 for a value not a bool, owned in *value; -1 with an error or for
- * its plain steps to run. A comparison of numbers makes no bool. */
-static ALWAYS_INLINE int fused_truth(SPYContext *c, Instruction *ins, Node *n, SPYValue *x, SPYValue *y, SPYValue **value) {
-    int truth = n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
+/* The truth of fused test step ins on operands x and y: 0 or 1; 2 for a
+ * value not a bool, owned in *value; -1 with an error or for its plain
+ * steps to run. A comparison of numbers makes no bool. */
+static ALWAYS_INLINE int fused_truth(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **value) {
+    int operation = ins->arg >> 8, op = operation >> 2;
+    int truth = (operation & 3) == FUSED_COMPARE && ordering(op) ? number_order(op, x, y) : -1;
     if (truth >= 0) return truth;
-    SPYValue *v = operator_fast(c, n, x, y);
+    SPYValue *v = operator_fast(c, operation, x, y);
     if (!v && !c->error_type[0]) v = operate_native(c, ins, x, y);
     if (!v || v == c->unbound) return -1;
     if (v->type != SPY_BOOL) { *value = v; return 2; }
@@ -38583,9 +38591,8 @@ static ALWAYS_INLINE int fused_truth(SPYContext *c, Instruction *ins, Node *n, S
 }
 /* The value of fused operator step ins on operands at hand (fused_on). */
 static ALWAYS_INLINE SPYValue *fused_value(SPYContext *c, Frame *f, Instruction *ins) {
-    Node *n = ins->node;
-    SPYValue *x = n->flags & F_OPERATOR ? step_operand(c, f, ins + 1, ins->arg >> 1 & 7) : NULL;
-    return x ? fused_on(c, f, ins, n, x) : NULL;
+    SPYValue *x = step_operand(c, f, ins + 1, ins->arg >> 1 & 7);
+    return x ? fused_on(c, f, ins, x) : NULL;
 }
 /* The slot of an exact list x at an int y within it; else NULL. */
 static SPYValue **list_slot(SPYValue *x, SPYValue *y) {
@@ -39943,7 +39950,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             NEXT;
         CASE(BC_STACKED)
             /* BC_OPERATE on the left operand atop the stack, which it takes. */
-            if (!(value = fused_on(c, &f, ins, n, m->stack[m->len - 1]))) continue;
+            if (!(value = fused_on(c, &f, ins, m->stack[m->len - 1]))) continue;
             spy_release(machine_pop(m));
             goto operated;
         CASE(BC_ASSIGN)
@@ -40247,8 +40254,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_STACKED_TEST)
             /* BC_TEST on the left operand atop the stack, which it takes. */
             x = m->stack[m->len - 1];
-            y = step_operand(c, &f, &code[pc + (ins->arg >> 6)], ins->arg >> 4 & 3);
-            if ((truth = y ? fused_truth(c, ins, n, x, y, &value) : -1) < 0) continue;
+            y = step_operand(c, &f, &code[pc + (ins->arg >> 6 & 3)], ins->arg >> 4 & 3);
+            if ((truth = y ? fused_truth(c, ins, x, y, &value) : -1) < 0) continue;
             spy_release(machine_pop(m));
             if (truth > 1) { pc = ins->other - 1; machine_push(c, m, value); break; }
             goto tested;
@@ -40256,9 +40263,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* A fused operator and the BC_FALSE after its plain steps, at
              * other - 1, sharing its target; a value not a bool is left to
              * that BC_FALSE. */
-            x = n->flags & F_OPERATOR ? step_operand(c, &f, &code[pc], ins->arg >> 1 & 7) : NULL;
-            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 6)], ins->arg >> 4 & 3) : NULL;
-            if ((truth = y ? fused_truth(c, ins, n, x, y, &value) : -1) < 0) continue;
+            x = step_operand(c, &f, &code[pc], ins->arg >> 1 & 7);
+            y = x ? step_operand(c, &f, &code[pc + (ins->arg >> 6 & 3)], ins->arg >> 4 & 3) : NULL;
+            if ((truth = y ? fused_truth(c, ins, x, y, &value) : -1) < 0) continue;
             if (truth > 1) { pc = ins->other - 1; machine_push(c, m, value); break; }
         tested:
             pc = truth ? ins->other : ins->target;
