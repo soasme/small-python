@@ -15969,6 +15969,8 @@ typedef struct { int flow; SPYValue *value; } Result;
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
+/* An annotation function's BC_CLASS 14 or 15 of a starred entry (annotation_step). */
+enum { ANNOTATION_STAR = 32 };
 /* A call step's arg: its count of arguments, and a method call's object in its callee's place. */
 enum { CALL_COUNT = 255, CALL_OBJECT = 256 };
 /* A fused call's arg (call_operands): each argument's kind, from bit 0, then its callee's. */
@@ -15982,11 +15984,11 @@ typedef struct {
     int op, arg;
     union {
         struct { uint32_t target, other; };
-        SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit or its program; BC_CALLK: its keywords' names, its program's. */
+        SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit or its program; BC_CALLK: its keywords' names, and a future BC_ANNOTATE: its name and text, its program's. */
         NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, a keyword's BC_ARG, or a parameter's BC_DEFAULT: spelling and lookup cache, borrowed from the source unit. */
         const ImportRecord *import; /* BC_IMPORT: its program's. */
         AttributeOperand *attribute; /* BC_ATTR, or an attribute's target step or BC_DELETE, or a method call's BC_CALLN: borrowed from the source unit. */
-        Node *definition; /* BC_FUNCTION, BC_GENERIC_FUNCTION, BC_COMPREHENSION, BC_CLASS and BC_ANNOTATE: the function, comprehension,
+        Node *definition; /* BC_FUNCTION, BC_GENERIC_FUNCTION, BC_COMPREHENSION and BC_CLASS: the function, comprehension,
                            * class, alias or annotation entry they make or record, borrowed from the source unit. */
     };
     uint32_t line; /* Its source line, or 0 when it runs on the line before it. */
@@ -16318,7 +16320,7 @@ static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line,
         p->items[pc].name = &n->name;
     if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET || op == BC_DELETE) && n->kind == N_ATTR)
         p->items[pc].attribute = &n->attribute;
-    if (op == BC_FUNCTION || op == BC_GENERIC_FUNCTION || op == BC_COMPREHENSION || op == BC_CLASS || op == BC_ANNOTATE)
+    if (op == BC_FUNCTION || op == BC_GENERIC_FUNCTION || op == BC_COMPREHENSION || op == BC_CLASS)
         p->items[pc].definition = n;
     return pc;
 }
@@ -16887,6 +16889,22 @@ static void loop_else(SPYContext *c, Program *p, Node *n, size_t loop, size_t br
     if (loop != SIZE_MAX) patch(p, emit(c, p, BC_JUMP, NULL, 0), p->items[loop].other);
     patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
 }
+/* BC_ANNOTATE of annotated assignment n (record_annotation): under
+ * `from __future__ import annotations`, its name and text, a pair p
+ * owns; in a conditional block, its entry's index plus one. */
+static void emit_annotation(SPYContext *c, Program *p, Node *n) {
+    SPYValue *pair = NULL;
+    if (n->flags & F_FUTURE) {
+        SPYValue *items[] = {spy_string(c, n->a->name.text, strlen(n->a->name.text)), spy_string(c, n->b->name.text, (size_t)n->b->op)};
+        if (items[0] && items[1] && !grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)))
+            pair = spy_tuple(c, 2, items);
+        release_all(2, items);
+        if (!pair) return;
+        p->values[p->values_len++] = pair;
+    }
+    size_t pc = emit(c, p, BC_ANNOTATE, n, n->flags & F_CONDITIONAL ? n->op + 1 : 0);
+    if (pc != SIZE_MAX) p->items[pc].constant = pair;
+}
 /* A BC_LOAD of value, which p takes. */
 static void emit_value(SPYContext *c, Program *p, Node *n, SPYValue *value) {
     size_t pc = value && !grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)) ? emit(c, p, BC_NONE, n, 0) : SIZE_MAX;
@@ -17302,20 +17320,31 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             compile_expr(c, p, n->a->a); emit(c, p, BC_POP, n, 0);
             if (n->a->kind == N_INDEX) { compile_expr(c, p, n->a->b); emit(c, p, BC_POP, n, 0); }
         }
-        if (n->flags & (F_FUTURE | F_CONDITIONAL)) { emit(c, p, BC_ANNOTATE, n, 0); emit(c, p, BC_POP, n, 0); }
+        if (n->flags & (F_FUTURE | F_CONDITIONAL)) { emit_annotation(c, p, n); emit(c, p, BC_POP, n, 0); }
         break;
-    case N_ANNOTATIONS:
+    case N_ANNOTATIONS: {
         /* An annotation function's dict, then each entry that ran stored
          * in it (annotation_step); a lazy value's returns its value. */
-        emit(c, p, BC_CLASS, n, 12);
+        size_t pc = emit(c, p, BC_CLASS, n, 12);
+        if (pc != SIZE_MAX) p->items[pc].target = n->op == 1;
         for (Node *entry = n->args; entry; entry = entry->next) {
-            branch = entry->flags & F_CONDITIONAL ? (emit(c, p, BC_CLASS, entry, 13), emit(c, p, BC_FALSE, entry, 0)) : SIZE_MAX;
-            compile_expr(c, p, entry->a->kind == N_STAR ? entry->a->a : entry->a);
-            if (entry->a->kind == N_STAR) emit(c, p, BC_CLASS, entry, 16);
-            emit(c, p, BC_CLASS, entry, n->op == 1 ? 15 : 14);
+            branch = SIZE_MAX;
+            if (entry->flags & F_CONDITIONAL) {
+                if ((pc = emit(c, p, BC_CLASS, entry, 13)) != SIZE_MAX) p->items[pc].target = (uint32_t)entry->op;
+                branch = emit(c, p, BC_FALSE, entry, 0);
+            }
+            int star = entry->a->kind == N_STAR;
+            compile_expr(c, p, star ? entry->a->a : entry->a);
+            if (star) emit(c, p, BC_CLASS, entry, 16);
+            SPYValue *key = n->op == 1 ? NULL : spy_string(c, entry->name.text, strlen(entry->name.text));
+            if (n->op != 1 && (!key || grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)))) { spy_release(key); break; }
+            if (key) p->values[p->values_len++] = key;
+            pc = emit(c, p, BC_CLASS, entry, (n->op == 1 ? 15 : 14) | (star ? ANNOTATION_STAR : 0));
+            if (pc != SIZE_MAX) p->items[pc].constant = key;
             patch(p, branch, p->len);
         }
         emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
+    }
     case N_RETURN:
         /* A return of a name or literal returns it in its own step, before
          * the plain steps that run when the name is not at hand; one through
@@ -25477,7 +25506,7 @@ static SPYValue *conditional_set(SPYContext *c, Frame *f) {
             return spy_retain(name_local(e->as.map.class_cell, "__conditional_annotations__"));
     return name_get(c, f->env, "__conditional_annotations__");
 }
-static SPYValue *record_annotation(SPYContext *, Machine *, Frame *, Node *);
+static SPYValue *record_annotation(SPYContext *, Machine *, Frame *, Instruction *);
 /* The __conditional_annotations__ set an annotation's record (ctx: its
  * key and value, the env and the index) found in executed, or NULL with
  * an error: the index added; None. */
@@ -25509,21 +25538,21 @@ static SPYValue *annotation_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPY
  * or, in a conditional block, that it ran in __conditional_annotations__.
  * None, or NULL with an error; on m, those names' lookups may be calls
  * there (name_walk). */
-static NO_INLINE SPYValue *record_annotation(SPYContext *c, Machine *m, Frame *f, Node *n) {
-    int future = (n->flags & F_FUTURE) != 0, conditional = (n->flags & F_CONDITIONAL) != 0;
-    SPYValue *items[] = {future ? spy_string(c, n->a->name.text, strlen(n->a->name.text)) : spy_none(c),
-                         future ? spy_string(c, n->b->name.text, (size_t)n->b->op) : spy_none(c),
-                         spy_retain(conditional ? conditional_env(f) : c->none), conditional ? spy_int(c, n->op) : spy_none(c)};
+static NO_INLINE SPYValue *record_annotation(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
+    SPYValue *pair = ins->constant;
+    int future = pair != NULL, conditional = ins->arg != 0;
+    SPYValue *items[] = {spy_retain(future ? pair->as.seq.items[0] : c->none), spy_retain(future ? pair->as.seq.items[1] : c->none),
+                         spy_retain(conditional ? conditional_env(f) : c->none), conditional ? spy_int(c, ins->arg - 1) : spy_none(c)};
     SPYValue *ctx = items[0] && items[1] && items[3] ? spy_tuple(c, 4, items) : NULL;
     release_all(4, items);
     if (!ctx) return NULL;
     if (future) return name_walk(c, m, f->env, f->env, name_of("__annotations__"), 1, 0, NULL, annotation_stored, ctx);
     return annotation_mark(c, m, ctx);
 }
-/* An annotation function n's dict, or NULL with an error: a format above
- * 2 is NotImplementedError. */
-static SPYValue *annotations_begin(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *format = name_get(c, f->env, n->op == 1 ? ".format" : "format"), two = {.type = SPY_INT, .as.integer_data.small = 2};
+/* An annotation function's dict, or NULL with an error: a format (a lazy
+ * value's .format parameter) above 2 is NotImplementedError. */
+static SPYValue *annotations_begin(SPYContext *c, Frame *f, int lazy) {
+    SPYValue *format = name_get(c, f->env, lazy ? ".format" : "format"), two = {.type = SPY_INT, .as.integer_data.small = 2};
     SPYValue *unsupported = format ? comparison(c, '>', format, &two) : NULL;
     int raise = unsupported && truthy(unsupported);
     spy_release(format); spy_release(unsupported);
@@ -25532,8 +25561,8 @@ static SPYValue *annotations_begin(SPYContext *c, Frame *f, Node *n) {
 }
 /* Whether conditional annotation entry ran, its index in executed (or,
  * NULL, the set conditional_set finds): 1, 0, or -1 with an error. */
-static int annotation_ran(SPYContext *c, Frame *f, Node *entry, SPYValue *executed) {
-    SPYValue *set = executed ? spy_retain(executed) : conditional_set(c, f), *index = set ? spy_int(c, entry->op) : NULL;
+static int annotation_ran(SPYContext *c, Frame *f, size_t entry, SPYValue *executed) {
+    SPYValue *set = executed ? spy_retain(executed) : conditional_set(c, f), *index = set ? spy_int(c, (int64_t)entry) : NULL;
     int64_t hash;
     int found = !index || set->type != SPY_SET || hash_value(c, index, &hash) ? -1 : set_contains(c, set, index, hash);
     spy_release(index); spy_release(set);
@@ -25564,16 +25593,16 @@ static NO_INLINE SPYValue *module_annotations(SPYContext *c, Machine *m, Frame *
  * 12 its dict (annotations_begin); 13 whether a conditional entry ran
  * (annotation_ran); 16 a starred entry's single item, above its value, as
  * BC_UNPACK takes it (unpack_step), or NULL, taken on the machine; 14
- * stores an entry's value, above the dict, in it; 15 a lazy value's
- * function returns its value instead. 17 starts a module body
+ * stores an entry's value, above the dict, in it under its name, its
+ * constant; 15 a lazy value's function returns its value instead; either
+ * marked ANNOTATION_STAR drops the starred value below. 17 starts a module body
  * (start_annotations), through its namespace's Python __setitem__ on the
  * machine (class_names_call). */
 static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
-    Node *entry = ins->definition;
     if (ins->arg == 17) return module_annotations(c, m, f);
-    if (ins->arg == 12) return annotations_begin(c, f, entry);
+    if (ins->arg == 12) return annotations_begin(c, f, ins->target);
     if (ins->arg == 13) {
-        int found = annotation_ran(c, f, entry, NULL);
+        int found = annotation_ran(c, f, ins->target, NULL);
         return found < 0 ? NULL : spy_bool(c, found);
     }
     if (ins->arg == 16) {
@@ -25582,12 +25611,11 @@ static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, 
         return item;
     }
     SPYValue *value = machine_pop(m);
-    if (entry->a->kind == N_STAR) spy_release(machine_pop(m));
+    if (ins->arg & ANNOTATION_STAR) spy_release(machine_pop(m));
     SPYValue *result = machine_pop(m);
-    if (ins->arg == 15) { spy_release(result); return value; }
-    SPYValue *key = spy_string(c, entry->name.text, strlen(entry->name.text));
-    int status = key ? map_set(c, result, key, value) : -1;
-    spy_release(key); spy_release(value);
+    if ((ins->arg & ~ANNOTATION_STAR) == 15) { spy_release(result); return value; }
+    int status = map_set(c, result, ins->constant, value);
+    spy_release(value);
     if (status) { spy_release(result); return NULL; }
     return result;
 }
@@ -37972,7 +38000,7 @@ static NO_INLINE SPYValue *header_step(SPYContext *c, Machine *m, Frame *f, Inst
 }
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     if (ins->arg == 11) return alias_step(c, m, f, ins->definition);
-    if (ins->arg >= 18) return header_step(c, m, f, ins);
+    if (ins->arg >= 18 && !(ins->arg & ANNOTATION_STAR)) return header_step(c, m, f, ins);
     if (ins->arg >= 12) return annotation_step(c, m, f, ins);
     if (ins->arg == 7) {
         SPYValue *state = m->stack[m->len - 3], *cls, *classcell;
@@ -40039,7 +40067,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
 
         CASE(BC_NONE) machine_push(c, m, spy_none(c)); NEXT;
         CASE(BC_ANNOTATE)
-            value = record_annotation(c, m, &f, ins->definition);
+            value = record_annotation(c, m, &f, ins);
             if (c->k_fn) goto enter_k;
             machine_push(c, m, value); break;
         CASE(BC_POP) spy_release(machine_pop(m)); NEXT;
