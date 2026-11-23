@@ -16420,7 +16420,7 @@ typedef struct {
  * inlined comprehension's, whose program's uses follow (USE_INLINE). */
 enum { USE_NONE, USE_NAME, USE_ALWAYS, USE_INLINE };
 typedef struct Operand { struct Operand *next; int use; Scope *inlined; AttributeOperand attribute; NameOperand name; char text[]; } Operand;
-struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, loads; ImportRecord *imports; Operand *operands, *last; SPYValue **values; size_t values_len, values_cap; };
+struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, loads; size_t split; /* where an operator's own steps began after its left operand's */ ImportRecord *imports; Operand *operands, *last; SPYValue **values; size_t values_len, values_cap; };
 /* The values a program owns (emit_value). */
 static void program_edges(Program *code, Visit visit, void *data) {
     for (size_t i = 0; code && i < code->values_len; i++) visit(code->values[i], data);
@@ -16865,17 +16865,20 @@ static void compile_operation(SPYContext *, Program *, Node *);
  * it a BC_TEST. Its arg holds truth, the operands' shapes, from bit 6
  * the right one's first step after it: 1, 2 or 3 past an operand at
  * hand's, at once past the stack's, and from bit 8 n's operation. */
-static void compile_fused(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth) {
+static void fuse_steps(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth, size_t start) {
     int shape = operand_shape(c, right), steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
-    size_t start = p->len;
-    if (left == SHAPE_STACK) compile_operation(c, p, n);
-    else compile_node(c, p, n, 0);
     /* An item operand is its plain steps alone. */
     for (size_t i = start; i < p->len; i++) if (p->items[i].op == BC_OPERATE) emit_drop(p, i--);
     size_t fused = c->error_type[0] ? SIZE_MAX :
         emit_before(c, p, start, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6 | fused_operation(n) << 8);
     patch(p, fused, p->len);
     if (truth && fused != SIZE_MAX) p->tested = fused + 1;
+}
+static void compile_fused(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth) {
+    size_t start = p->len;
+    if (left == SHAPE_STACK) compile_operation(c, p, n);
+    else compile_node(c, p, n, 0);
+    fuse_steps(c, p, n, left, right, truth, start);
 }
 /* Operator n on operands at hand (operator_right). */
 static void compile_operator(SPYContext *c, Program *p, Node *n, int truth) {
@@ -16891,6 +16894,7 @@ static Node *stacked_right(Node *n) {
  * step taking it atop the stack. */
 static void compile_stacked(SPYContext *c, Program *p, Node *n, int truth) {
     compile_expr(c, p, n->a);
+    p->split = p->len;
     compile_fused(c, p, n, SHAPE_STACK, stacked_right(n), truth);
 }
 /* An expression whose truth the next instruction tests: an and/or passes
@@ -16911,6 +16915,20 @@ static void compile_test(SPYContext *c, Program *p, Node *n) {
     else if (n && !expands(n, modes(p)) && stacked_right(n)) compile_stacked(c, p, n, 1);
     else compile_expr(c, p, n);
 }
+/* Make the value of n, whose steps from start on compiled it, a test, as
+ * compile_test would: its fused step tests it, or it takes one now; a
+ * folded constant stays a value. */
+static int loads_name(Node *);
+static void retest(SPYContext *c, Program *p, Node *n, size_t start) {
+    if (c->error_type[0] || n->constant || at_hand(n) || expands(n, modes(p))) return;
+    Node *right = operator_right(n), *stacked = right ? NULL : stacked_right(n);
+    if (!right && !stacked) return;
+    size_t at = right ? start : p->split;
+    int fused = (n->kind != N_COMPARE || right) && !(p->calls == PAUSING && loads_name(n));
+    if (!fused) { fuse_steps(c, p, n, right ? operand_shape(c, n->a) : SHAPE_STACK, right ? right : stacked, 1, at); return; }
+    p->items[at].arg |= 1;
+    p->tested = at + 1;
+}
 /* A call's or class header's arguments, each added by BC_ARG: the
  * positional and starred ones first, then the keywords. */
 static void compile_arguments(SPYContext *c, Program *p, Node *args) {
@@ -16930,7 +16948,6 @@ static void compile_decorations(SPYContext *c, Program *p, Node *decorators) {
     compile_decorations(c, p, decorators->next);
     emit(c, p, BC_DECORATE, decorators, 0);
 }
-static int loads_name(Node *);
 /* The names of keyword-plain call n's keywords, hashed, a tuple p owns;
  * NULL with an error. */
 static SPYValue *keyword_names(SPYContext *c, Program *p, Node *n) {
@@ -17053,10 +17070,11 @@ static void compile_node(SPYContext *c, Program *p, Node *n, int fuse) {
         emit(c, p, n->kind == N_UNARY ? BC_UNARY : BC_ATTR, n, n->kind == N_UNARY ? n->op : 0); break;
     case N_BINARY:
         if (n->op == O_AND || n->op == O_OR) {
-            compile_test(c, p, n->a);
+            size_t left = p->len;
+            compile_expr(c, p, n->a); retest(c, p, n->a, left);
             branch = emit(c, p, BC_SHORT, n, n->op);
             compile_expr(c, p, n->b); patch(p, branch, p->len);
-        } else { compile_expr(c, p, n->a); compile_operation(c, p, n); }
+        } else { compile_expr(c, p, n->a); p->split = p->len; compile_operation(c, p, n); }
         break;
     case N_INDEX:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INDEX, n, 0); break;
@@ -17074,7 +17092,7 @@ static void compile_node(SPYContext *c, Program *p, Node *n, int fuse) {
         end = emit(c, p, BC_JUMP, n, 0);
         patch(p, branch, p->len); compile_expr(c, p, n->c); patch(p, end, p->len); break;
     }
-    case N_COMPARE: compile_expr(c, p, n->a); compile_operation(c, p, n); break;
+    case N_COMPARE: compile_expr(c, p, n->a); p->split = p->len; compile_operation(c, p, n); break;
     case N_LIST: case N_TUPLE: case N_SET: case N_DICT:
         if (packed(n)) {
             /* BC_NEW takes the items atop the stack, as many as arg's count. */
