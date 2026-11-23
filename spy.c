@@ -16771,11 +16771,11 @@ static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line,
 /* Whether x's target, and its other, are steps of the expression it is in. */
 static int steps_target(const Instruction *x) {
     switch (x->op) {
-    case BC_FALSE: case BC_TEST: case BC_STACKED_TEST: case BC_OPERATE: case BC_STACKED: case BC_JUMP: case BC_SHORT: case BC_CALLF: case BC_COMPARE: case BC_STORE_AT: case BC_ASSIGN: return 1;
+    case BC_FALSE: case BC_TEST: case BC_STACKED_TEST: case BC_OPERATE: case BC_STACKED: case BC_JUMP: case BC_SHORT: case BC_CALLF: case BC_COMPARE: case BC_STORE_AT: case BC_ASSIGN: case BC_LOOP: case BC_NEXT: return 1;
     default: return x->op == BC_YIELD && x->arg == 1;
     }
 }
-static int steps_other(const Instruction *x) { return x->op == BC_FALSE || x->op == BC_TEST || x->op == BC_STACKED_TEST; }
+static int steps_other(const Instruction *x) { return x->op == BC_FALSE || x->op == BC_TEST || x->op == BC_STACKED_TEST || x->op == BC_LOOP; }
 /* Remove step at of the expression it is in, which no step jumps to. */
 static void emit_drop(Program *p, size_t at) {
     memmove(p->items + at, p->items + at + 1, (--p->len - at) * sizeof(*p->items));
@@ -17178,42 +17178,49 @@ static size_t compile_next(SPYContext *c, Program *p, Node *n, Node *target) {
     compile_store(c, p, target, n);
     return next;
 }
-static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Node *clause) {
+/* The steps of comprehension n's element, which its clauses' steps go
+ * before (compile_comprehension_clause). */
+static void compile_comprehension_item(SPYContext *c, Program *p, Node *n) {
+    Node *item = n->args;
+    if (n->op == N_TUPLE) {
+        if (item->kind == N_STAR) {
+            compile_expr(c, p, item->a);
+            size_t loop = emit(c, p, BC_LOOP, item, 1), start = p->len;
+            size_t end = emit(c, p, BC_NEXT, item, 0);
+            emit(c, p, BC_YIELD, item, 0); emit(c, p, BC_POP, item, 0);
+            patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
+            patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, item, 0);
+            patch(p, loop, p->len);
+        } else {
+            compile_expr(c, p, item); emit(c, p, BC_YIELD, item, 0); emit(c, p, BC_POP, item, 0);
+        }
+    } else if (item->kind == N_STAR || item->kind == N_MAPPING) {
+        compile_expr(c, p, item->a); emit(c, p, BC_EXTEND, item, 0);
+    } else if (n->op == N_DICT) {
+        compile_expr(c, p, item->a); compile_expr(c, p, item->b); emit(c, p, BC_MAP, item, 0);
+    } else if (n->op == N_SET) {
+        /* As a set display's element (compile_expr). */
+        compile_expr(c, p, item); emit(c, p, BC_NONE, item, 0); emit(c, p, BC_MAP, item, 0);
+    } else { compile_expr(c, p, item); emit(c, p, BC_ADD, item, 0); }
+}
+/* The steps of clause and those after it, around the element's, which
+ * were compiled first, from item on, and are moved after their opening
+ * steps; *moved then counts the steps those opening steps moved back by. */
+static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Node *clause, Mark item, Mark opening, size_t *moved) {
     if (c->error_type[0]) return;
-    if (!clause) {
-        Node *item = n->args;
-        if (n->op == N_TUPLE) {
-            if (item->kind == N_STAR) {
-                compile_expr(c, p, item->a);
-                size_t loop = emit(c, p, BC_LOOP, item, 1), start = p->len;
-                size_t end = emit(c, p, BC_NEXT, item, 0);
-                emit(c, p, BC_YIELD, item, 0); emit(c, p, BC_POP, item, 0);
-                patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
-                patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, item, 0);
-                patch(p, loop, p->len);
-            } else {
-                compile_expr(c, p, item); emit(c, p, BC_YIELD, item, 0); emit(c, p, BC_POP, item, 0);
-            }
-        } else if (item->kind == N_STAR || item->kind == N_MAPPING) {
-            compile_expr(c, p, item->a); emit(c, p, BC_EXTEND, item, 0);
-        } else if (n->op == N_DICT) {
-            compile_expr(c, p, item->a); compile_expr(c, p, item->b); emit(c, p, BC_MAP, item, 0);
-        } else if (n->op == N_SET) {
-            /* As a set display's element (compile_expr). */
-            compile_expr(c, p, item); emit(c, p, BC_NONE, item, 0); emit(c, p, BC_MAP, item, 0);
-        } else { compile_expr(c, p, item); emit(c, p, BC_ADD, item, 0); }
-        return;
-    }
+    if (!clause) { emit_after(p, item, opening, NULL); *moved = opening.at - item.at; return; }
     if (clause->kind == N_IF) {
         size_t end = compile_branch(c, p, clause->a, clause);
-        compile_comprehension_clause(c, p, n, clause->b); patch(p, end, p->len);
+        compile_comprehension_clause(c, p, n, clause->b, item, opening, moved); patch(p, end - *moved, p->len);
         return;
     }
     /* The first iterator is acquired eagerly in the enclosing frame. */
     if (clause != n->a) compile_expr(c, p, clause->a);
     size_t loop = emit(c, p, BC_LOOP, clause, clause == n->a ? 3 : clause->op ? 2 : 1);
     size_t start = p->len, end = compile_next(c, p, clause, clause->args);
-    compile_comprehension_clause(c, p, n, clause->b);
+    compile_comprehension_clause(c, p, n, clause->b, item, opening, moved);
+    if (c->error_type[0]) return;
+    loop -= *moved; start -= *moved; end -= *moved;
     patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
     patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, clause, 0); patch(p, loop, p->len);
 }
@@ -17224,7 +17231,11 @@ static int compile_comprehension(SPYContext *c, Node *n) {
     n->scope->code->calls = c->pausing ? PAUSING : BODY; n->scope->code->loads = c->string_source != 0;
     /* Its scope is defined before or after this (scope_of). */
     if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
-    compile_comprehension_clause(c, n->scope->code, n, n->a);
+    Program *code = n->scope->code;
+    Mark item = mark(code);
+    compile_comprehension_item(c, code, n);
+    size_t moved = 0;
+    compile_comprehension_clause(c, code, n, n->a, item, mark(code), &moved);
     if (n->op == N_TUPLE) emit(c, n->scope->code, BC_NONE, n, 0);
     emit(c, n->scope->code, BC_FLOW, n, FLOW_RETURN);
     return c->error_type[0] ? -1 : 0;
