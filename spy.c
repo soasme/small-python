@@ -40315,8 +40315,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             break;
         CASE(BC_RETURN)
-            /* Its plain steps run when the name is not at hand. */
-            if (!(value = leaf_operand(&f, n->a))) continue;
+            /* Its plain steps, the operand's first, run when the name is not at hand. */
+            if (!(value = leaf_step(&f, &code[pc]))) continue;
             spy_retain(value);
             if (!m->block_len && !m->outermost) {
                 /* A call returns into its caller, dispatching its next step
