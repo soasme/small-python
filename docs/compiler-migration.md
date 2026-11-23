@@ -270,8 +270,16 @@ match captures bind, are the record of the names its code uses;
 twice: compiling 20,000 lines of `x = a.b` executes 10% more
 instructions and peaks at 24% more memory.
 
-Still read from trees: the definition node a code object keeps for its
-other metadata (`co_varnames`, `co_consts`, positions and the rest).
+A module's statements are analysed as each line of them is parsed:
+their named expressions, then their symbols. The first error of each
+waits for the end of the parse, so that, as before, a parse error
+anywhere wins over a named-expression error, which wins over a symbol
+table error; resolving free and cell names still waits for the end.
+
+Code objects keep their body's scope, and scopes copy the text they
+keep (symbol, parameter, type parameter and static attribute names), so
+run time reads no tree. The parse still builds each statement's tree,
+compiles and analyses it, and keeps every tree until its unit is freed.
 
 ## Remaining stages
 

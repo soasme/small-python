@@ -115,6 +115,12 @@ typedef struct ImportRecord { struct ImportRecord *next; const char *module; int
  * the last compiled; whether the last parsed waits for the body's end, as
  * a module's does, and whether the first may be a docstring. */
 typedef struct { Program *program; Node *head, *done; size_t depth; int holds, docs, tries; } Body;
+/* An analysis error waiting for the end of the parse: its class, message
+ * (owned), line and source span. */
+typedef struct { char type[64]; char *message; size_t line; const char *start, *end; } Analysis;
+typedef struct { Node *expression, *clause; } NamedScope;
+static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
+static int scope_walk(SPYContext *, Scope *, Node *);
 /* A try statement's shape and its instructions to patch (try_begin). */
 typedef struct { size_t final, handler, skip, first, rest; int has_final, excepts, star, otherwise; } Try;
 /* A pattern's failure exits (compile_pattern): each jump's step and the
@@ -4571,6 +4577,11 @@ typedef struct {
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
+    /* The module statements analysed so far, the last of them, and the
+     * first error in their named expressions and in their symbol tables,
+     * set aside until the parse ends (analyse_statements). */
+    Node *analysed;
+    Analysis named, symbols;
 } Parser;
 static Scope *scope_new(SPYContext *, Scope *, int);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -8190,6 +8201,47 @@ static int nodes_finish(Parser *p, Node *start) {
     }
     return c->error_type[0] ? -1 : 0;
 }
+/* Set aside the pending error of analysing module statements in *a, as
+ * analyse_statements reports it; a MemoryError is not set aside. */
+static int analysis_defer(Parser *p, Analysis *a) {
+    SPYContext *c = p->ctx;
+    if (!strcmp(c->error_type, "MemoryError")) return -1;
+    const char *message = c->error_text ? c->error_text : c->error_message;
+    if (!(a->message = mem_malloc(c, strlen(message) + 1))) return -1;
+    strcpy(a->message, message);
+    memcpy(a->type, c->error_type, sizeof(a->type));
+    a->line = c->line; a->start = c->node_start; a->end = c->node_end;
+    spy_clear_error(c);
+    return 0;
+}
+/* Analyse module statements n and those after it as each line of them is
+ * parsed: their named expressions (validate_named), then their symbols
+ * (scope_walk), each as far as its first error. As when the parse has
+ * ended, a parse error wins over the first named-expression error, which
+ * wins over the first symbol table error (reported at the end); -1 only
+ * for an error that cannot wait. */
+static int analyse_statements(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    SPYValue *unit = p->unit;
+    if (p->named.message || c->error_type[0]) return 0;
+    const char *start = c->node_start, *end = c->node_end;
+    c->node_start = c->node_end = NULL;
+    NamedScope comps[128];
+    int status = 0;
+    if (validate_named(c, n, comps, 0, 0, 0)) status = analysis_defer(p, &p->named);
+    else if (!p->symbols.message) {
+        if (!unit->as.unit.scope && !(unit->as.unit.scope = scope_new(c, NULL, S_MODULE))) status = -1;
+        else if (scope_walk(c, unit->as.unit.scope, n)) status = analysis_defer(p, &p->symbols);
+    }
+    c->node_start = start; c->node_end = end;
+    return status;
+}
+/* Raise analysis error a, unless one is pending. */
+static void analysis_raise(SPYContext *c, Analysis *a) {
+    if (c->error_type[0] || !a->message) return;
+    spy_error(c, a->type, a->message);
+    c->line = a->line; c->node_start = a->start; c->node_end = a->end;
+}
 static Node *statements(Parser *p) {
     Node *head = NULL, **tail = &head, *last = NULL;
     int body = p->body.program && p->depth == p->body.depth;
@@ -8200,6 +8252,8 @@ static Node *statements(Parser *p) {
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
+        if (!p->depth && analyse_statements(p, n)) return NULL;
+        if (!p->depth) p->analysed = last;
         if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
     }
@@ -8225,7 +8279,6 @@ static Node *target_name(Node *n, const char *name) {
             if ((found = target_name(item, name))) return found;
     return NULL;
 }
-typedef struct { Node *expression, *clause; } NamedScope;
 static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
 /* A compile-time SyntaxError is reported at the source its node covers. */
 static void node_error(SPYContext *c, Node *n) {
@@ -9003,14 +9056,16 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (c->optimize > 1) {
             drop_docstring(unit->as.unit.body);
         }
-        NamedScope comps[128];
-        if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0);
+        /* What no line of statements analysed: an eval() expression. */
+        Node *rest = p.analysed ? p.analysed->next : unit->as.unit.body;
+        if (!c->error_type[0] && rest && analyse_statements(&p, rest)) {}
+        analysis_raise(c, &p.named); analysis_raise(c, &p.symbols);
+        mem_free(p.named.message); mem_free(p.symbols.message);
+        if (!c->error_type[0] && !unit->as.unit.scope) unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
         if (!c->error_type[0]) {
-            unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
             if (unit->as.unit.scope && unit->as.unit.body) unit->as.unit.scope->line = unit->as.unit.body->line;
             if (unit->as.unit.scope && !unit->as.unit.expression) unit->as.unit.scope->doc = docstring(c, unit->as.unit.body);
-            if (unit->as.unit.scope && !scope_walk(c, unit->as.unit.scope, unit->as.unit.body) &&
-                !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) {
+            if (unit->as.unit.scope && !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) {
                 if (unit->as.unit.annotate) unit->as.unit.scope->annotate = unit->as.unit.annotate->scope;
                 scope_resolve(c, unit->as.unit.scope);
             }
