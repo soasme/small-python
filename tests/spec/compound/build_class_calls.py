@@ -41,3 +41,10 @@ assert_eq(log, [("A", 0, []), ("B", 1, ["flag"]), ("C", 0, ["plain"]), ("D", 0, 
 assert_eq((namespace["A"].x, namespace["B"].__bases__ == (namespace["A"],), namespace["C"], namespace["caught"]),
           (1, True, "not a class", "'D'"))
 assert_eq((namespace["E"].z, namespace["E"].__bases__ == (namespace["A"],), namespace["F"].j), (3, True, 1))
+
+# Any number of bases and keywords reach it, more than 62 bases too.
+def counting(func, name, *bases, **kw):
+    return (name, len(bases), kw)
+many = {"__builtins__": dict(vars(__build_class__.__self__), __build_class__=counting), "bases": [object] * 70}
+exec("class C(*bases, flag=1): pass", many)
+assert_eq(many["C"], ("C", 70, {"flag": 1}))
