@@ -96,6 +96,12 @@ typedef struct Program Program;
  * body's name for its slot. A signature is an array of them that one with
  * no name ends. */
 typedef struct { char *name, *local; int kind, defaulted; } Parameter;
+/* A PEP 695 type parameter: its name, as bound and as spelled, its kind
+ * (0 TypeVar, 1 TypeVarTuple, 2 ParamSpec), whether its bound is a tuple
+ * of constraints, and the definitions of its lazy bound and default, or
+ * NULL; all borrowed from its generic's source unit. Its generic scope
+ * holds an array of them that one with no name ends. */
+typedef struct { const char *name, *spelling; int kind, constraints; Node *bound, *fallback; } TypeParameter;
 /* An import statement's operands (17.4), owned by its code: a
  * from-import's module, "" for none, and level; each item's dotted name,
  * "*" for a star, the name it binds, NULL for a star, and whether it has
@@ -144,8 +150,9 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * statics chain its methods' self.attr stores through static_next; its
  * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
  * its first build. */
-/* children: the scopes whose parent this is, linked through sibling. */
-struct Scope { Node *owner, *statics; Scope *parent, *children, *sibling; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+/* children: the scopes whose parent this is, linked through sibling.
+ * type_params: a generic scope's (TypeParameter). */
+struct Scope { Node *owner, *statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -1466,7 +1473,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
 #undef VISIT
 }
 static void free_scope(Scope *scope) {
-    if (scope) { mem_free(scope->symbols); mem_free(scope->order); mem_free(scope); }
+    if (scope) { mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope); }
 }
 static int weak_push(SPYContext *c, SPYValue ***items, size_t *len, size_t *cap, SPYValue *value) {
     if (*len == *cap) {
@@ -8402,9 +8409,16 @@ static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
         if (scope_record(c, generic->scope, param, S_LOCAL)) return NULL;
     }
     static const char *const defaults[] = {"a TypeVar default", "a TypeVarTuple default", "a ParamSpec default"};
-    for (Node *param = generic->args; param; param = param->next)
+    size_t count = 0;
+    for (Node *param = generic->args; param; param = param->next) count++;
+    TypeParameter *made = generic->scope->type_params = allocate(c, (count + 1) * sizeof(*made));
+    if (!made) return NULL;
+    for (Node *param = generic->args; param; param = param->next, made++) {
         if (scope_annotations(c, generic->scope, param->b, param->flags & F_CONSTRAINTS ? "a TypeVar constraint" : "a TypeVar bound") ||
             scope_annotations(c, generic->scope, param->c, defaults[param->op])) return NULL;
+        *made = (TypeParameter){param->name.text, source_name(param), (int)param->op, (param->flags & F_CONSTRAINTS) != 0, param->b, param->c};
+    }
+    *made = (TypeParameter){0};
     return generic->scope;
 }
 static SPYValue *unary(SPYContext *, int, SPYValue *);
@@ -23175,9 +23189,8 @@ static SPYValue *method_called(SPYContext *, Machine *, SPYValue *, SPYValue *);
  * the tuple second: bound in env and added, it goes on to the next. */
 static SPYValue *type_param_made(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
     SPYValue *env = state->as.seq.items[0], *params = state->as.seq.items[1];
-    Node *param = env->as.map.scope->owner->args;
-    for (size_t i = 0; i < params->as.seq.len; i++) param = param->next;
-    if (!value || name_set(c, env, param->name.text, value) || sequence_append(c, params, value)) {
+    TypeParameter *param = env->as.map.scope->type_params + params->as.seq.len;
+    if (!value || name_set(c, env, param->name, value) || sequence_append(c, params, value)) {
         spy_release(value);
         return k_resume(c, m, state, NULL);
     }
@@ -23191,15 +23204,13 @@ static SPYValue *type_param_made(SPYContext *c, Machine *m, SPYValue *state, SPY
  * the env, the tuple, then k_state's. */
 static SPYValue *type_params_from(SPYContext *c, Machine *m, SPYValue *state) {
     SPYValue *env = state->as.seq.items[0], *params = state->as.seq.items[1];
-    Node *param = env->as.map.scope->owner->args;
-    for (size_t i = 0; param && i < params->as.seq.len; i++) param = param->next;
-    if (!param) return k_resume(c, m, state, spy_retain(params));
+    TypeParameter *param = env->as.map.scope->type_params + params->as.seq.len;
+    if (!param->name) return k_resume(c, m, state, spy_retain(params));
     Frame frame = {env, env->as.map.unit, 0};
-    int constraints = (param->flags & F_CONSTRAINTS) != 0;
-    SPYValue *lazy = param->b ? make_function(c, &frame, param->b) : spy_none(c);
-    SPYValue *args[] = {spy_int(c, param->op), spy_string(c, source_name(param), strlen(source_name(param))),
-                        constraints ? spy_none(c) : spy_retain(lazy), constraints ? spy_retain(lazy) : spy_none(c),
-                        param->c ? make_function(c, &frame, param->c) : spy_none(c)};
+    SPYValue *lazy = param->bound ? make_function(c, &frame, param->bound) : spy_none(c);
+    SPYValue *args[] = {spy_int(c, param->kind), spy_string(c, param->spelling, strlen(param->spelling)),
+                        param->constraints ? spy_none(c) : spy_retain(lazy), param->constraints ? spy_retain(lazy) : spy_none(c),
+                        param->fallback ? make_function(c, &frame, param->fallback) : spy_none(c)};
     SPYValue *function = intrinsic(c, "_type_param");
     spy_release(lazy);
     if (!function || !args[0] || !args[1] || !args[2] || !args[3] || !args[4]) { release_all(5, args); return k_resume(c, m, state, NULL); }
