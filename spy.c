@@ -16909,22 +16909,22 @@ static size_t compile_branch(SPYContext *c, Program *p, Node *n, Node *at) {
     if (negated) p->tested = 0;
     return emit(c, p, BC_FALSE, at, negated);
 }
+static void retest(SPYContext *, Program *, Node *, size_t);
 static void compile_test(SPYContext *c, Program *p, Node *n) {
-    if (c->error_type[0]) return;
-    if (n && !expands(n, modes(p)) && operator_right(n)) compile_operator(c, p, n, 1);
-    else if (n && !expands(n, modes(p)) && stacked_right(n)) compile_stacked(c, p, n, 1);
-    else compile_expr(c, p, n);
+    size_t start = p->len;
+    compile_expr(c, p, n);
+    retest(c, p, n, start);
 }
-/* Make the value of n, whose steps from start on compiled it, a test, as
- * compile_test would: its fused step tests it, or it takes one now; a
- * folded constant stays a value. */
+/* Make the value of n, whose steps from start on compiled it, a test:
+ * its fused step tests it, or it takes one now; a constant folded from
+ * an operand not at hand stays a value. */
 static int loads_name(Node *);
 static void retest(SPYContext *c, Program *p, Node *n, size_t start) {
-    if (c->error_type[0] || n->constant || at_hand(n) || expands(n, modes(p))) return;
+    if (c->error_type[0] || !n || at_hand(n) || expands(n, modes(p))) return;
     Node *right = operator_right(n), *stacked = right ? NULL : stacked_right(n);
-    if (!right && !stacked) return;
+    if (!right && (!stacked || n->constant)) return;
     size_t at = right ? start : p->split;
-    int fused = (n->kind != N_COMPARE || right) && !(p->calls == PAUSING && loads_name(n));
+    int fused = !n->constant && (n->kind != N_COMPARE || right) && !(p->calls == PAUSING && loads_name(n));
     if (!fused) { fuse_steps(c, p, n, right ? operand_shape(c, n->a) : SHAPE_STACK, right ? right : stacked, 1, at); return; }
     p->items[at].arg |= 1;
     p->tested = at + 1;
