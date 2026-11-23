@@ -117,7 +117,7 @@ typedef struct ImportRecord { struct ImportRecord *next; const char *module; int
 typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int holds, docs, tries; } Body;
 /* An analysis error waiting for the end of the parse: its class, message
  * (owned), line and source span. */
-typedef struct { char type[64]; char *message; size_t line; const char *start, *end; } Analysis;
+typedef struct { char type[64]; char *message; size_t line; const char *start, *end; Node *open; } Analysis;
 typedef struct { Node *expression, *clause; } NamedScope;
 static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
 static int scope_walk(SPYContext *, Scope *, Node *);
@@ -183,7 +183,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_AITER = 16384 /* A comprehension whose first iterable is asynchronous. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */,
-       F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */ };
+       F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */,
+       F_ANALYSED = 2097152 /* A statement, or a compound statement's header, analysed as it was parsed. */ };
 /* A text operand and its name-lookup cache. Literal nodes use only text.
  * Instructions can borrow this record without inspecting a syntax tree. */
 typedef struct {
@@ -594,6 +595,7 @@ struct SPYContext {
     Program *k_code;
     int interactive_input; /* eval_source parses interactive input, whose expression statements display their values. */
     SPYValue *pattern_calls[2]; /* The builtin len and isinstance, as a pattern's steps call them (pattern_step). */
+    Node *node_open; /* The node of the last compile-time SyntaxError, while analysis runs (analysis_defer). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -4607,9 +4609,13 @@ typedef struct {
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
      * first error in their named expressions and in their symbol tables,
-     * set aside until the parse ends (analyse_statements). */
+     * set aside until the parse ends (analyse_statements); the scope of
+     * the body being parsed, and the decorators of the definition after
+     * them. */
     Node *analysed;
     Analysis named, symbols;
+    Scope *scope;
+    Node *decorators;
     /* The newest node and module child scope resolved (resolve_new), and
      * the first nonlocal error and async generator return error. */
     Node *resolved_to;
@@ -4623,6 +4629,7 @@ typedef struct {
     int module_begun;
 } Parser;
 static Scope *scope_new(SPYContext *, Scope *, int);
+static void scope_adopt(Scope *, Scope *);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
     if (grow(p->ctx, (void **)&p->tokens, &p->cap, p->len + 1, sizeof(Token))) return -1;
     p->tokens[p->len++] = (Token){kind, s, n, line, 0};
@@ -5251,6 +5258,9 @@ static void span_block(Parser *p, Node *n, size_t first) {
     if (last > first) {
         n->start = p->tokens[first].start; n->end = p->tokens[last - 1].start + p->tokens[last - 1].len; n->spanned = 1;
     }
+    /* An analysis error at n's header covers n (analysis_defer). */
+    Analysis *errors[] = {&p->named, &p->symbols};
+    for (size_t i = 0; i < 2; i++) if (errors[i]->open == n) { errors[i]->start = n->start; errors[i]->end = n->end; errors[i]->open = NULL; }
 }
 static Node *span(Parser *p, Node *n, size_t first) {
     if (n && !n->spanned && p->pos > first) {
@@ -6857,6 +6867,7 @@ static Try try_shape(Parser *p) {
 /* Whether the statement being parsed is compiled in place, among the
  * statements of the body or suite whose program is open. */
 static int at_body(Parser *p) { return p->body.program && p->depth == p->body.depth; }
+static int analyse_statements(Parser *, Node *);
 /* Before a compound statement's header, whose nodes follow start, is
  * compiled in place: its nodes finished, and a statement the body held
  * back compiled first. */
@@ -6885,7 +6896,7 @@ static Node *if_statement(Parser *p, int emits) {
     size_t condition = p->pos;
     n->a = expression(p, 0);
     if (n->a && at(p, '=')) return condition_equals_error(p, condition);
-    if (!n->a || (emits && header_ready(p, start))) return NULL;
+    if (!n->a || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
     if (emits) branch = if_begin(p->ctx, p->body.program, n);
     if (!(n->b = suite_of(p, what, line, emits))) return NULL;
     if (emits) end = if_else(p->ctx, p->body.program, n, branch);
@@ -7152,7 +7163,12 @@ static int collect_end(Parser *p, Node *owner, Node **out, Annotations saved) {
         if (owner) owner->flags |= F_SETUP_ANNOTATIONS;
         else p->unit->as.unit.setup_annotations = 1;
     }
-    return entries && !(*out = annotation_function(p, owner, entries)) ? -1 : 0;
+    if (!entries) return 0;
+    if (!(*out = annotation_function(p, owner, entries))) return -1;
+    /* Its scope, made as the first annotation was analysed (annotation_scope). */
+    Scope *body = owner ? owner->scope : p->unit->as.unit.scope, *annotate = body ? body->annotate : NULL;
+    if (annotate) { (*out)->scope = annotate; annotate->owner = *out; scope_adopt(body, annotate); }
+    return 0;
 }
 static int function_annotations(Parser *p, Node *def) {
     Node *entries = NULL, **tail = &entries;
@@ -7519,7 +7535,7 @@ static Node *match_statement(Parser *p) {
     if (!n) return NULL;
     p->pos++;
     size_t line = keyword_line(p);
-    if (!(n->a = expression_items(p, 0, 1)) || (emits && header_ready(p, start))) return NULL;
+    if (!(n->a = expression_items(p, 0, 1)) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
     if (emits) compile_expr(p->ctx, p->body.program, n->a);
     if (!expect(p, ':', at(p, T_NL) ? "expected ':'" : "invalid syntax") || !expect(p, T_NL, "invalid syntax")) return NULL;
     while (take(p, T_NL)) {}
@@ -7532,7 +7548,7 @@ static Node *match_statement(Parser *p) {
         size_t case_line = keyword_line(p);
         Case k = {{0}, 0, NULL};
         Node *before = p->unit->as.unit.nodes, *item = case_header(p);
-        if (!item || (emits && header_ready(p, before))) return NULL;
+        if (!item || analyse_statements(p, item) || (emits && header_ready(p, before))) return NULL;
         if (emits) case_begin(p->ctx, p->body.program, item, &k);
         if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); return NULL; }
         if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
@@ -7703,7 +7719,9 @@ static Node *statement_body(Parser *p) {
             *tail = expr; tail = &expr->next;
         }
         if (!keyword(p, "def") && !keyword(p, "class") && !keyword(p, "async")) return syntax(p, "invalid syntax");
+        p->decorators = decorators;
         Node *definition = statement(p);
+        p->decorators = NULL;
         if (definition) definition->decorators = decorators;
         return definition;
     }
@@ -7760,7 +7778,7 @@ static Node *statement_body(Parser *p) {
         if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
         /* With emits compiled in place, as compile_statement does (with_begin). */
         uint32_t last = NO_STEP;
-        if (emits && header_ready(p, start)) return NULL;
+        if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits) last = with_begin(p->ctx, p->body.program, n->args, n->op);
         if (!(n->b = suite_of(p, "'with' statement", n->line, emits))) return NULL;
         if (emits) { with_end(p->ctx, p->body.program, last, n->op); n->flags |= F_EMITTED; }
@@ -7787,7 +7805,9 @@ static Node *statement_body(Parser *p) {
     }
     if (take_word(p, "class")) {
         n = node(p, N_CLASS);
-        if (!n || !(n->a = identifier(p))) return NULL;
+        if (!n) return NULL;
+        n->decorators = p->decorators; p->decorators = NULL;
+        if (!(n->a = identifier(p))) return NULL;
         if (take(p, '[') && !(n->params = type_params(p))) return NULL;
         if (take(p, '(')) {
             if (call_arguments(p, n)) return NULL;
@@ -7801,9 +7821,14 @@ static Node *statement_body(Parser *p) {
         p->loops = p->functions = p->async_function = p->star = 0;
         Annotations annotations = collect_begin(p, 1, 0);
         Node *start = p->unit->as.unit.nodes;
+        Scope *scope = p->scope;
+        p->definition = definition;
+        if (analyse_statements(p, n)) return NULL;
+        p->definition = n;
         Body enclosing = body_begin(p, n, p->depth + 1);
+        p->scope = n->scope;
         n->b = p->body.program ? suite_after(p, "class definition", n->line) : NULL;
-        p->definition = definition; p->returned = returned;
+        p->definition = definition; p->returned = returned; p->scope = scope;
         if (body_end(p, n->b, start, enclosing) || collect_end(p, n, &n->annotate, annotations)) return NULL;
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
@@ -7830,7 +7855,7 @@ static Node *statement_body(Parser *p) {
         Program *program = p->body.program;
         Try t = emits ? try_shape(p) : (Try){0};
         n = node(p, N_TRY);
-        if (!n || (emits && header_ready(p, start))) return NULL;
+        if (!n || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits) try_begin(p->ctx, program, n, &t);
         p->body.tries++;
         if (!(n->a = suite_of(p, "'try' statement", line, emits))) return NULL;
@@ -7900,7 +7925,7 @@ static Node *statement_body(Parser *p) {
             } else { bare = 1; bare_at = except_at; }
             int saved = p->star;
             size_t match = 0, final = 0;
-            if (emits && header_ready(p, before)) return NULL;
+            if (analyse_statements(p, handler) || (emits && header_ready(p, before))) return NULL;
             if (emits) match = except_begin(p->ctx, program, handler, &t, &final);
             if (is_star) p->star = p->loops + 1;
             handler->b = suite_of(p, is_star ? "'except*' statement" : "'except' statement", except_line, emits);
@@ -7945,7 +7970,7 @@ static Node *statement_body(Parser *p) {
         if (!n->a) return NULL;
         if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
         /* With emits compiled in place, as compile_statement does (loop_begin). */
-        if (emits && header_ready(p, start)) return NULL;
+        if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits) branch = loop_begin(p->ctx, p->body.program, n, &loop);
         p->loops++; n->b = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
         if (!n->b) return NULL;
@@ -7956,13 +7981,15 @@ static Node *statement_body(Parser *p) {
     }
     if (take_word(p, "def")) {
         n = node(p, N_DEF);
-        if (!n || !(n->a = identifier(p))) return NULL;
+        if (!n) return NULL;
+        n->decorators = p->decorators; p->decorators = NULL;
+        if (!(n->a = identifier(p))) return NULL;
         if (take(p, '[') && !(n->params = type_params(p))) return NULL;
         if (!expect(p, '(', "expected '('")) return NULL;
         n->op = asynchronous;
         if (parameters(p, n, ')')) return NULL;
         if (take(p, T_ARROW) && !(n->c = expression(p, 0))) return NULL;
-        if (function_annotations(p, n)) return NULL;
+        if (function_annotations(p, n) || analyse_statements(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
         Node *returned = p->returned;
@@ -7971,10 +7998,12 @@ static Node *statement_body(Parser *p) {
         int collecting = p->collecting;
         p->collecting = 0;
         Node *start = p->unit->as.unit.nodes;
+        Scope *scope = p->scope;
         Body enclosing = body_begin(p, n, p->depth + 1);
+        p->scope = n->scope;
         n->b = p->body.program ? suite_after(p, "function definition", n->line) : NULL;
         Node *first_return = p->returned;
-        p->definition = definition; p->returned = returned; p->collecting = collecting;
+        p->definition = definition; p->returned = returned; p->collecting = collecting; p->scope = scope;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
         if (body_end(p, n->b, start, enclosing) || !body_scope(p->ctx, n)) return NULL;
         n->scope->returned = first_return;
@@ -8204,6 +8233,7 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
         p->inline_suite = 1;
         body = line_statements(p);
         p->inline_suite = 0;
+        if (body && analyse_statements(p, body)) return NULL;
     }
     else {
         while (take(p, T_NL)) {}
@@ -8260,6 +8290,8 @@ static int analysis_defer(Parser *p, Analysis *a) {
     strcpy(a->message, message);
     memcpy(a->type, c->error_type, sizeof(a->type));
     a->line = c->line; a->start = c->node_start; a->end = c->node_end;
+    /* An error at a statement still being parsed covers it once it ends (span_block). */
+    a->open = c->node_open && !c->node_open->spanned ? c->node_open : NULL;
     spy_clear_error(c);
     return 0;
 }
@@ -8274,14 +8306,20 @@ static int analyse_statements(Parser *p, Node *n) {
     SPYValue *unit = p->unit;
     if (p->named.message || c->error_type[0]) return 0;
     const char *start = c->node_start, *end = c->node_end;
-    c->node_start = c->node_end = NULL;
+    c->node_start = c->node_end = NULL; c->node_open = NULL;
     NamedScope comps[128];
     int status = 0;
-    if (validate_named(c, n, comps, 0, 0, 0)) status = analysis_defer(p, &p->named);
+    if (validate_named(c, n, comps, 0, 0, p->definition && p->definition->kind == N_CLASS)) status = analysis_defer(p, &p->named);
     else if (!p->symbols.message) {
-        if (!unit->as.unit.scope && !(unit->as.unit.scope = scope_new(c, NULL, S_MODULE))) status = -1;
-        else if (scope_walk(c, unit->as.unit.scope, n)) status = analysis_defer(p, &p->symbols);
+        if (!p->scope && !unit->as.unit.scope && !(unit->as.unit.scope = scope_new(c, NULL, S_MODULE))) status = -1;
+        Scope *scope = p->scope ? p->scope : unit->as.unit.scope;
+        /* A lazy import names the try statements around it (scope_node). */
+        int tries = scope ? scope->tries : 0;
+        if (scope) scope->tries = p->body.tries;
+        if (scope && scope_walk(c, scope, n)) status = analysis_defer(p, &p->symbols);
+        if (scope) scope->tries = tries;
     }
+    for (; n; n = n->next) n->flags |= F_ANALYSED;
     c->node_start = start; c->node_end = end;
     return status;
 }
@@ -8327,7 +8365,7 @@ static int resolve_new(Parser *p, Node *stop) {
     SPYContext *c = p->ctx;
     Scope *module = p->unit->as.unit.scope;
     const char *at = c->node_start, *end = c->node_end;
-    c->node_start = c->node_end = NULL;
+    c->node_start = c->node_end = NULL; c->node_open = NULL;
     int status = resolve_children(p, module->children, p->resolved_child);
     c->node_start = at; c->node_end = end;
     p->resolved_child = module->children;
@@ -8372,6 +8410,8 @@ static void free_lines(Parser *p, Node *start) {
             if (n->spanned) { p->deferred_start = n->start; p->deferred_end = n->end; }
             p->deferred_node = NULL;
         }
+        if (n == p->named.open) p->named.open = NULL;
+        if (n == p->symbols.open) p->symbols.open = NULL;
         *at = n->allocated;
         free_node(n);
     }
@@ -8400,7 +8440,7 @@ static Node *statements(Parser *p) {
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
-        if (!p->depth && (analyse_statements(p, n) || resolve_statements(p, start))) return NULL;
+        if (analyse_statements(p, n) || (!p->depth && resolve_statements(p, start))) return NULL;
         if (!p->depth) { p->analysed = p->last_statement = last; module_first(p, head); }
         if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
@@ -8431,7 +8471,7 @@ static Node *target_name(Node *n, const char *name) {
 static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
 /* A compile-time SyntaxError is reported at the source its node covers. */
 static void node_error(SPYContext *c, Node *n) {
-    c->line = n->line;
+    c->line = n->line; c->node_open = n;
     if (n->spanned) { c->node_start = n->start; c->node_end = n->end; }
 }
 /* A function or class body starts without enclosing comprehensions; its
@@ -8444,6 +8484,7 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
     if (deeper(c, " during compilation")) return -1;
     int status = 0;
     for (; n && !status; n = n->next) {
+        if (n->flags & F_ANALYSED) continue;
         if (n->kind == N_NAMED) {
             node_error(c, iterable ? n : n->a);
             if (iterable) spy_error(c, "SyntaxError", "assignment expression cannot be used in a comprehension iterable expression");
@@ -8523,17 +8564,22 @@ static char *scope_text(SPYContext *c, Scope *s, const char *text) {
     if (copy) s->texts[s->texts_len++] = copy;
     return copy;
 }
+/* The symbol of name in scope, made with line if new; NULL with an error. */
+static Symbol *scope_add(SPYContext *c, Scope *scope, const char *name, size_t line) {
+    Symbol *symbol = scope_symbol(scope, name);
+    if (symbol) return symbol;
+    const char *copy = scope_text(c, scope, name);
+    if (!copy || grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return NULL;
+    symbol = &scope->symbols[scope->len++];
+    *symbol = (Symbol){copy, 0, line, NULL, NULL, text_hash(copy, strlen(copy)), NULL};
+    return symbol;
+}
 static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node *at) {
     if ((flags & (S_LOCAL | S_PARAM)) && !strcmp(n->name.text, "__debug__")) {
         node_error(c, at); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1;
     }
-    Symbol *symbol = scope_symbol(scope, n->name.text);
-    if (!symbol) {
-        const char *name = scope_text(c, scope, n->name.text);
-        if (!name || grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return -1;
-        symbol = &scope->symbols[scope->len++];
-        *symbol = (Symbol){name, 0, n->line, NULL, NULL, text_hash(name, strlen(name)), NULL};
-    }
+    Symbol *symbol = scope_add(c, scope, n->name.text, n->line);
+    if (!symbol) return -1;
     if (flags & (S_GLOBAL | S_NONLOCAL)) {
         const char *kind = flags & S_GLOBAL ? "global" : "nonlocal";
         node_error(c, at);
@@ -8551,14 +8597,11 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
          * nested scope also makes the name explicitly global in the module block. */
         Scope *top = scope;
         while (top->parent) top = top->parent;
-        Symbol *global = top->kind == S_MODULE ? scope_symbol(top, n->name.text) : NULL;
-        if (top->kind == S_MODULE && !global) {
-            const char *name = scope_text(c, top, n->name.text);
-            if (!name || grow(c, (void **)&top->symbols, &top->cap, top->len + 1, sizeof(*top->symbols))) return -1;
-            global = &top->symbols[top->len++];
-            *global = (Symbol){name, 0, n->line, NULL, NULL, text_hash(name, strlen(name)), NULL};
+        if (top->kind == S_MODULE) {
+            Symbol *global = scope_add(c, top, n->name.text, n->line);
+            if (!global) return -1;
+            global->flags |= S_GLOBAL;
         }
-        if (global) global->flags |= S_GLOBAL;
     }
     return 0;
 }
@@ -8609,6 +8652,18 @@ static int scope_await(SPYContext *c, Scope *scope, Node *n) {
     spy_error(c, "SyntaxError", comprehension ? "asynchronous comprehension outside of an asynchronous function" :
               scope->kind == S_FUNCTION ? "'await' outside async function" : "'await' outside function");
     return -1;
+}
+/* The scope of the __annotate__ of module or class body scope, made at its
+ * first annotation, of line: within it, but its child only once the
+ * function is made (collect_end). */
+static Scope *annotation_scope(SPYContext *c, Scope *scope, size_t line) {
+    if (scope->annotate) return scope->annotate;
+    Scope *annotate = scope_new(c, NULL, S_FUNCTION);
+    if (!annotate) return NULL;
+    annotate->parent = scope; annotate->within = "an annotation";
+    Symbol *format = scope_add(c, annotate, "format", line);
+    if (format) format->flags |= S_PARAM;
+    return scope->annotate = format ? annotate : NULL;
 }
 /* Annotation functions run in their own scope. Unlike methods, they see the
  * names of an enclosing class body. */
@@ -8718,12 +8773,13 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     case N_ANNASSIGN: {
         Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->name.text) : NULL;
         if (symbol && scope->kind != S_MODULE && (symbol->flags & (S_GLOBAL | S_NONLOCAL))) {
-            c->line = n->a->line;
+            node_error(c, n);
             errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->name.text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
             return -1;
         }
         /* An annotation no __annotate__ evaluates is still analysed, in this
-         * scope, as an annotation. */
+         * scope, as an annotation; a module's or class's, in the scope of
+         * the __annotate__ that evaluates it (annotation_scope). */
         if (!(n->flags & F_SIMPLE) || scope->kind == S_FUNCTION || (n->flags & F_FUTURE)) {
             const char *within = scope->within;
             size_t nodes = scope->nodes;
@@ -8731,6 +8787,9 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
             int status = scope_node(c, scope, n->b);
             scope->within = within; scope->nodes = nodes;
             if (status) return -1;
+        } else {
+            Scope *annotate = annotation_scope(c, scope, n->line);
+            if (!annotate || scope_node(c, annotate, n->b)) return -1;
         }
         /* A parenthesized name without a value is neither bound nor used. */
         int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
@@ -8809,7 +8868,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         if (!scope_of(c, n, outer)) return -1;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_record(c, n->scope, param, S_PARAM)) return -1;
-        if (scope_annotations(c, n->kind == N_CLASS ? n->scope : outer, n->annotate, "an annotation")) return -1;
+        if (scope_annotations(c, outer, n->annotate, "an annotation")) return -1;
         return scope_walk(c, n->scope, n->b);
     }
     case N_COMPREHENSION:
@@ -8874,7 +8933,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     }
 }
 static int scope_walk(SPYContext *c, Scope *scope, Node *n) {
-    for (; n; n = n->next) if (scope_node(c, scope, n)) return -1;
+    for (; n; n = n->next) if (!(n->flags & F_ANALYSED) && scope_node(c, scope, n)) return -1;
     return 0;
 }
 static int scope_resolve(SPYContext *c, Scope *scope) {
@@ -9214,10 +9273,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 if (unit->as.unit.scope && unit->as.unit.body) unit->as.unit.scope->line = unit->as.unit.body->line;
                 if (unit->as.unit.scope && !unit->as.unit.expression) unit->as.unit.scope->doc = docstring(c, unit->as.unit.body);
             }
-            if (unit->as.unit.scope && !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) {
-                if (unit->as.unit.annotate) unit->as.unit.scope->annotate = unit->as.unit.annotate->scope;
-                scope_resolve(c, unit->as.unit.scope);
-            }
+            if (unit->as.unit.scope) scope_resolve(c, unit->as.unit.scope);
         }
         /* What no line resolved: the module's annotations, an eval() expression. */
         if (!c->error_type[0] && unit->as.unit.scope && !resolve_new(&p, p.resolved_to)) { analysis_raise(c, &p.resolved); analysis_raise(c, &p.returns); }

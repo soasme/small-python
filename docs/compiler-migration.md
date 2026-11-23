@@ -270,11 +270,18 @@ match captures bind, are the record of the names its code uses;
 twice: compiling 20,000 lines of `x = a.b` executes 10% more
 instructions and peaks at 24% more memory.
 
-A module's statements are analysed as each line of them is parsed:
-their named expressions, then their symbols. The first error of each
-waits for the end of the parse, so that, as before, a parse error
-anywhere wins over a named-expression error, which wins over a symbol
-table error; resolving free and cell names still waits for the end.
+Every statement is analysed as it is parsed, in the scope of the body
+that holds it: a simple statement when its line ends, a compound
+statement's header before its suite, a definition's decorators,
+defaults, bases and annotations before its body. A module's or class's
+annotation is analysed at its statement, in the scope of the
+`__annotate__` made at the first annotation and attached to the function
+once the body ends. An error at a header takes its statement's whole
+source when the statement ends. The first named-expression error and
+the first symbol table error wait for the end of the parse, so that a
+parse error anywhere wins over a named-expression error, which wins
+over a symbol table error. Free and cell names are resolved once each
+line of module statements is analysed.
 
 Code objects keep their body's scope, and scopes copy the text they
 keep (symbol, parameter, type parameter and static attribute names), so

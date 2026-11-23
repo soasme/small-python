@@ -32,7 +32,12 @@
 (* an async generator's valued return before or after an unbound nonlocal; *)
 (* the first met visiting scopes from the module downward, sibling scopes  *)
 (* in source order, is raised, and a return only when no scope has one     *)
-(* (PLS-315 8.4, 14.9). The outcome is "ok" or the message and line.       *)
+(* (PLS-315 8.4, 14.9). A statements program has two early errors, a yield *)
+(* in a module's or class's annotation and an annotated global name, either *)
+(* first, or a binding in a for, except or case header before a global     *)
+(* declaration in its suite: the first in statement order, a header before *)
+(* its suite, is raised (8.3.1, 8.7). The outcome is "ok" or the message  *)
+(* and line.                                                               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -42,6 +47,8 @@ Programs == [part : {"decl"}, decl : Decls, prior : {"none", "param", "use", "as
             \cup [part : {"place"}, decl : Decls, where : {"module", "class"}]
             \cup [part : {"binding"}, source : {"enclosing", "module", "none"}]
             \cup [part : {"order"}, shape : {"siblings", "inner_first", "outer_first", "module", "returns", "return_first", "return_last"}]
+            \cup [part : {"statements"}, body : {"module", "class"}, first : {"annotation", "global"}]
+            \cup [part : {"headers"}, header : {"for", "except", "case"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -72,8 +79,14 @@ Order(p) == CASE p.shape = "siblings" -> "no binding for nonlocal 'a' found@2"
               [] p.shape = "return_first" -> "no binding for nonlocal 'z' found@5"
               [] p.shape = "return_last" -> "no binding for nonlocal 'z' found@2"
 
+\* The earlier statement's error; a module's global annotation is no error.
+Statements(p) == IF p.first = "annotation" \/ p.body = "module"
+                 THEN "yield expression cannot be used within an annotation@" \o (IF p.first = "annotation" THEN "2" ELSE "4")
+                 ELSE "annotated name 'a' can't be global@3"
+
 Run(p) == CASE p.part = "decl" -> Decl(p) [] p.part = "place" -> Place(p) [] p.part = "binding" -> Binding(p)
-            [] p.part = "order" -> Order(p)
+            [] p.part = "order" -> Order(p) [] p.part = "statements" -> Statements(p)
+            [] p.part = "headers" -> "name 'x' is assigned to before global declaration@4"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -84,6 +97,9 @@ Done == outcome # Pending
 
 \* A declaration that comes first, alone, with a plain assignment, is fine.
 CleanDeclarations == Done /\ program.part = "decl" /\ program.prior = "none" /\ program.after # "annot" => outcome = "ok"
+
+\* A header's binding is analysed before the declaration in its suite.
+HeadersFirst == Done /\ program.part = "headers" => outcome # "ok"
 
 \* A valued async generator return is never reported over a nonlocal error.
 ScopesBeforeReturns == Done /\ program.part = "order" /\ program.shape \in {"return_first", "return_last"} =>

@@ -28,6 +28,14 @@ def source(p):
                 "returns": "async def f():\n    yield 1\n    return 2\nasync def g():\n    yield 1\n    return 3\n",
                 "return_first": "async def f():\n    yield 1\n    return 2\ndef g():\n    nonlocal z\n",
                 "return_last": "def g():\n    nonlocal z\nasync def f():\n    yield 1\n    return 2\n"}[p["shape"]]
+    if part == "statements":
+        annotation, declaration = "    y: (yield)\n", "    global a\n    a: int\n"
+        body = annotation + declaration if p["first"] == "annotation" else declaration + annotation
+        return ("class C:\n" if p["body"] == "class" else "if 1:\n") + body
+    if part == "headers":
+        return {"for": "def g():\n    for x in y:\n        pass\n        global x\n",
+                "except": "def g():\n    try: pass\n    except E as x:\n        global x\n",
+                "case": "def g():\n    match v:\n        case [x]:\n            global x\n"}[p["header"]]
     binding = {"enclosing": "def g():\n    x = 1\n", "module": "x = 1\ndef g():\n", "none": "def g():\n"}[p["source"]]
     return binding + "    def f():\n        nonlocal x\n"
 
