@@ -169,7 +169,7 @@ typedef struct { const char *name; unsigned flags; size_t line; const char *decl
  * its annotation function's scope, or on that function its owner's;
  * generic is its type parameters' scope, and first_line its first
  * decorator's line or its own (scope_define). */
-struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap; int kind, stars, tries, iterables, cells, kept_len; const char *within; Node *returned, *clause; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
+struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap; int kind, stars, tries, iterables, cells, kept_len; const char *within, *returned_start, *returned_end; size_t returned_line; Node *clause; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -4624,7 +4624,6 @@ typedef struct {
     Node *decorators;
     /* The newest node and module child scope resolved (resolve_new), and
      * the first nonlocal error and async generator return error. */
-    Node *resolved_to;
     Scope *resolved_child;
     Analysis resolved, returns;
     /* The nodes the last line of module statements allocated, freed after
@@ -5362,6 +5361,7 @@ static size_t if_begin(SPYContext *, Program *, Node *);
 static size_t if_else(SPYContext *, Program *, Node *, size_t);
 static int nodes_finish(Parser *, Node *);
 static Scope *body_scope(SPYContext *, Node *);
+static void scope_define(Node *);
 static SPYValue *docstring(SPYContext *, Node *);
 static size_t loop_begin(SPYContext *, Program *, Node *, size_t *);
 static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
@@ -7172,7 +7172,7 @@ static int collect_end(Parser *p, Node *owner, Node **out, Annotations saved) {
     if (!(*out = annotation_function(p, owner, entries))) return -1;
     /* Its scope, made as the first annotation was analysed (annotation_scope). */
     Scope *body = owner ? owner->scope : p->unit->as.unit.scope, *annotate = body ? body->annotate : NULL;
-    if (annotate) { (*out)->scope = annotate; annotate->owner = *out; scope_adopt(body, annotate); }
+    if (annotate) { (*out)->scope = annotate; annotate->owner = *out; scope_adopt(body, annotate); scope_define(*out); }
     return 0;
 }
 static int function_annotations(Parser *p, Node *def) {
@@ -7835,6 +7835,7 @@ static Node *statement_body(Parser *p) {
         n->b = p->body.program ? suite_after(p, "class definition", n->line) : NULL;
         p->definition = definition; p->returned = returned; p->scope = scope;
         if (body_end(p, n->b, start, enclosing) || collect_end(p, n, &n->annotate, annotations)) return NULL;
+        if (n->scope) scope_define(n);
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
         return n->b ? n : NULL;
@@ -8011,8 +8012,13 @@ static Node *statement_body(Parser *p) {
         p->definition = definition; p->returned = returned; p->collecting = collecting; p->scope = scope;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
         if (body_end(p, n->b, start, enclosing) || !body_scope(p->ctx, n)) return NULL;
-        n->scope->returned = first_return;
+        /* The first valued return, whose error waits for resolution. */
+        if (first_return) {
+            n->scope->returned_line = first_return->line;
+            if (first_return->spanned) { n->scope->returned_start = first_return->start; n->scope->returned_end = first_return->end; }
+        }
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
+        scope_define(n);
         return n;
     }
     if (keyword(p, "global") || keyword(p, "nonlocal")) {
@@ -8323,7 +8329,6 @@ static int analyse_statements(Parser *p, Node *n) {
     return status;
 }
 static int scope_resolve(SPYContext *, Scope *);
-static void scope_define(Node *);
 static int resolve_tree(Parser *, Scope *);
 static void node_error(SPYContext *, Node *);
 /* Resolve the scopes of a list of siblings from head back to stop, in
@@ -8348,19 +8353,16 @@ static int resolve_children(Parser *p, Scope *head, Scope *stop) {
 static int resolve_tree(Parser *p, Scope *s) {
     SPYContext *c = p->ctx;
     if (!p->resolved.message && scope_resolve(c, s) && analysis_defer(p, &p->resolved)) return -1;
-    if (s->owner) scope_define(s->owner);
-    if (!p->returns.message && s->form == N_DEF && s->op == 2 && s->returned) {
-        node_error(c, s->returned);
+    if (!p->returns.message && s->form == N_DEF && s->op == 2 && s->returned_line) {
+        c->line = s->returned_line; c->node_start = s->returned_start; c->node_end = s->returned_end;
         spy_error(c, "SyntaxError", "'return' with value in async generator");
         if (analysis_defer(p, &p->returns)) return -1;
     }
-    s->returned = NULL;
+    s->returned_line = 0;
     return resolve_children(p, s->children, NULL);
 }
-/* Resolve the module's scopes made since the last resolved, and define
- * the root scopes of the nodes parsed since stop (a string annotation's),
- * which are within no scope. */
-static int resolve_new(Parser *p, Node *stop) {
+/* Resolve the module's scopes made since the last resolved. */
+static int resolve_new(Parser *p) {
     SPYContext *c = p->ctx;
     Scope *module = p->unit->as.unit.scope;
     const char *at = c->node_start, *end = c->node_end;
@@ -8368,15 +8370,12 @@ static int resolve_new(Parser *p, Node *stop) {
     int status = resolve_children(p, module->children, p->resolved_child);
     c->node_start = at; c->node_end = end;
     p->resolved_child = module->children;
-    for (Node *n = p->unit->as.unit.nodes; n != stop; n = n->allocated) if (node_root(p->unit, n->scope)) scope_define(n);
-    p->resolved_to = p->unit->as.unit.nodes;
     return status;
 }
-/* Resolve a line of module statements, parsed since start, once it is
- * analysed without error. */
-static int resolve_statements(Parser *p, Node *start) {
+/* Resolve a line of module statements once it is analysed without error. */
+static int resolve_statements(Parser *p) {
     if (p->symbols.message || p->ctx->error_type[0]) return 0;
-    return resolve_new(p, start);
+    return resolve_new(p);
 }
 /* Raise analysis error a, unless one is pending. */
 static void analysis_raise(SPYContext *c, Analysis *a) {
@@ -8438,7 +8437,7 @@ static Node *statements(Parser *p) {
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
-        if (analyse_statements(p, n) || (!p->depth && resolve_statements(p, start))) return NULL;
+        if (analyse_statements(p, n) || (!p->depth && resolve_statements(p))) return NULL;
         if (!p->depth) { p->analysed = p->last_statement = last; module_first(p, head); }
         if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
@@ -8497,7 +8496,7 @@ static Scope *body_scope(SPYContext *c, Node *n) {
 }
 /* The scope of body n, which analysis places within parent. */
 static Scope *scope_of(SPYContext *c, Node *n, Scope *parent) {
-    if (body_scope(c, n)) { scope_adopt(parent, n->scope); n->scope->owner = n; }
+    if (body_scope(c, n)) { scope_adopt(parent, n->scope); n->scope->owner = n; scope_define(n); }
     return n->scope;
 }
 /* Binds the name n, reporting errors at the node `at` covers. */
@@ -8671,7 +8670,9 @@ static Scope *scope_named_owner(SPYContext *c, Scope *scope, Node *n) {
 static int scope_string_annotation(SPYContext *c, Node *n) {
     if (!(n->scope = scope_new(c, NULL, S_FUNCTION))) return -1;
     n->scope->owner = n; n->scope->within = "an annotation";
-    return scope_node(c, n->scope, n->annotate);
+    if (scope_node(c, n->scope, n->annotate)) return -1;
+    scope_define(n);
+    return 0;
 }
 /* The annotation scope binding a definition's type parameters. */
 static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
@@ -8814,7 +8815,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
                    comprehension == N_SET ? "set comprehension" : comprehension == N_DICT ? "dict comprehension" : "generator expression");
             return -1;
         }
-        if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = 2;
+        if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = scope->op = 2;
         return scope_node(c, scope, n->a);
     case N_NAME: return scope_record(c, scope, n, S_USE);
     case N_STRING: return n->annotate ? scope_string_annotation(c, n) : 0;
@@ -9011,7 +9012,7 @@ static int scope_resolve(SPYContext *c, Scope *scope) {
                 if (!binding) continue;
                 if (binding->flags & S_GLOBAL) break;
                 if (!(binding->flags & S_NONLOCAL) && (binding->flags & (S_LOCAL | S_PARAM))) {
-                    if (parent->owner && parent->owner->kind == N_GENERIC) {
+                    if (parent->form == N_GENERIC) {
                         errorf(c, "SyntaxError", "nonlocal binding not allowed for type parameter '%s'", symbol->name);
                         return -1;
                     }
@@ -9331,7 +9332,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (unit->as.unit.scope) scope_resolve(c, unit->as.unit.scope);
         }
         /* What no line resolved: the module's annotations, an eval() expression. */
-        if (!c->error_type[0] && unit->as.unit.scope && !resolve_new(&p, p.resolved_to)) { analysis_raise(c, &p.resolved); analysis_raise(c, &p.returns); }
+        if (!c->error_type[0] && unit->as.unit.scope && !resolve_new(&p)) { analysis_raise(c, &p.resolved); analysis_raise(c, &p.returns); }
         mem_free(p.resolved.message); mem_free(p.returns.message);
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
@@ -17079,7 +17080,8 @@ static int compile_comprehension(SPYContext *c, Node *n) {
     n->scope->code = allocate(c, sizeof(*n->scope->code));
     if (!n->scope->code) return -1;
     n->scope->code->calls = c->pausing ? PAUSING : BODY; n->scope->code->loads = c->string_source != 0;
-    if (n->a->op) n->flags |= F_AITER;
+    /* Its scope is defined before or after this (scope_of). */
+    if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
     compile_comprehension_clause(c, n->scope->code, n, n->a);
     if (n->op == N_TUPLE) emit(c, n->scope->code, BC_NONE, n, 0);
     emit(c, n->scope->code, BC_FLOW, n, FLOW_RETURN);
