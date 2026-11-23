@@ -15948,7 +15948,7 @@ typedef struct {
     int op, arg;
     union {
         struct { uint32_t target, other; };
-        SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit. */
+        SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit or its program; BC_CALLK: its keywords' names, its program's. */
         NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, or a keyword's BC_ARG: spelling and lookup cache, borrowed from the source unit. */
         const ImportRecord *import; /* BC_IMPORT: its program's. */
         AttributeOperand *attribute; /* BC_ATTR, or an attribute's target step or BC_DELETE, or a method call's BC_CALLN: borrowed from the source unit. */
@@ -16373,6 +16373,21 @@ static void compile_decorations(SPYContext *c, Program *p, Node *decorators) {
     emit(c, p, BC_DECORATE, decorators, 0);
 }
 static int loads_name(Node *);
+/* The names of keyword-plain call n's keywords, hashed, a tuple p owns;
+ * NULL with an error. */
+static SPYValue *keyword_names(SPYContext *c, Program *p, Node *n) {
+    SPYValue *names = spy_tuple(c, 0, NULL);
+    for (Node *a = n->args; a && names; a = a->next) {
+        if (a->kind != N_KEYWORD) continue;
+        SPYValue *name = spy_string(c, a->name.text, strlen(a->name.text));
+        if (name) name->as.string.hash = text_hash(name->as.string.data, name->as.string.len);
+        if (!name || sequence_append(c, names, name)) { spy_release(names); names = NULL; }
+        spy_release(name);
+    }
+    if (names && grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values))) { spy_release(names); names = NULL; }
+    if (names) p->values[p->values_len++] = names;
+    return names;
+}
 /* Plain or keyword-plain call n as stack steps, BC_CALLN or BC_CALLK
  * taking argc arguments, its arg. A plain method call's BC_CALLN holds
  * its attribute; its object is on the stack in its callee's place
@@ -16389,6 +16404,7 @@ static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
     for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
     size_t call = emit(c, p, plain ? BC_CALLN : BC_CALLK, n, argc | (method && literals ? CALL_OBJECT : 0));
     if (method && call != SIZE_MAX) p->items[call].attribute = &n->a->attribute;
+    if (!plain && call != SIZE_MAX) p->items[call].constant = keyword_names(c, p, n);
 }
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
@@ -32679,15 +32695,11 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Instruc
     size_t argc = (size_t)(ins->arg & CALL_COUNT);
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result = NULL;
     Entry kw[8];
-    size_t kwc = 0, positional = 0;
+    /* Its keywords' names, the positional arguments before them (keyword_names). */
+    SPYValue *names = ins->constant;
+    size_t kwc = names ? names->as.seq.len : 0, positional = argc - kwc;
     relocate(c, n);
-    for (Node *a = n->args; a; a = a->next) {
-        if (a->kind != N_KEYWORD) { positional++; continue; }
-        Name name = node_name(a);
-        if (!a->name.global_key && !(a->name.global_key = spy_string(c, name.text, name.len))) goto done;
-        kw[kwc] = (Entry){a->name.global_key, argv[positional + kwc], name.hash};
-        kwc++;
-    }
+    for (size_t i = 0; i < kwc; i++) kw[i] = (Entry){names->as.seq.items[i], argv[positional + i], names->as.seq.items[i]->as.string.hash};
     for (SPYValue *wrapped; calls && (wrapped = static_called(c, callee));) {
         /* A staticmethod calls its function, which takes its place. */
         argv[-1] = spy_retain(wrapped);
