@@ -26,6 +26,12 @@
 (* __class__ property loops, then answers X: X's method called on it       *)
 (* (X.m(proxy), X.p.fget(proxy)) reads that __class__ at each super()     *)
 (* and runs as on an instance of X.                                        *)
+(*                                                                         *)
+(* Or the program calls super() with no arguments in a frame (op "frame") *)
+(* whose code has no positional parameter: a lambda nested in a method,   *)
+(*  (lambda: super())() , or a generic class's bases, which run in its    *)
+(* type parameters' scope,  class G[T](super()): pass . Both raise        *)
+(* RuntimeError "super(): no arguments"; a method's own super() does not. *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -33,7 +39,9 @@ Classes == {"A", "B", "C", "D"}
 Kinds == {"none", "stop", "super"}
 MRO(x) == CASE x = "A" -> <<"A">> [] x = "B" -> <<"B", "A">> [] x = "C" -> <<"C", "A">>
              [] x = "D" -> <<"D", "B", "C", "A">>
-Programs == [kind : [Classes -> Kinds], call : Classes, name : {"m", "__get__", "p"}, receiver : {"instance", "proxy"}]
+Diamonds == [kind : [Classes -> Kinds], call : Classes, name : {"m", "__get__", "p"}, receiver : {"instance", "proxy"}]
+Frames == [op : {"frame"}, frame : {"method", "lambda", "generic"}]
+Programs == Diamonds \cup Frames
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -51,30 +59,33 @@ Call(p) ==
                    ELSE LET rest == From(i + 1, TRUE) IN <<<<mro[i]>> \o rest[1], rest[2]>>
     IN  From(1, FALSE)
 
+Run(p) == IF p \in Frames THEN <<<<>>, IF p.frame = "method" THEN "ok" ELSE "RuntimeError: super(): no arguments">> ELSE Call(p)
+
 Init == program \in Programs /\ outcome = Pending
-Execute == outcome = Pending /\ outcome' = Call(program) /\ UNCHANGED program
+Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
 Spec == Init /\ [][Execute]_vars
 
 -----------------------------------------------------------------------------
 Done == outcome # Pending
+Diamond == Done /\ program \in Diamonds
 Log == outcome[1]
 Index(s, x) == CHOOSE i \in DOMAIN s : s[i] = x
 
 \* Methods run in MRO order: for D, C's runs after B's although C is not
 \* B's base.
-InMROOrder == Done => \A i, j \in DOMAIN Log : i < j => Index(MRO(program.call), Log[i]) < Index(MRO(program.call), Log[j])
+InMROOrder == Diamond => \A i, j \in DOMAIN Log : i < j => Index(MRO(program.call), Log[i]) < Index(MRO(program.call), Log[j])
 
 \* Each method runs at most once, even A's in the diamond.
-AtMostOnce == Done => \A i, j \in DOMAIN Log : i # j => Log[i] # Log[j]
+AtMostOnce == Diamond => \A i, j \in DOMAIN Log : i # j => Log[i] # Log[j]
 
 \* When every class cooperates, every class's method runs, then lookup
 \* fails at object, or the super object's own __get__ answers.
-AllCooperate == Done /\ (\A c \in Classes : program.kind[c] = "super") =>
+AllCooperate == Diamond /\ (\A c \in Classes : program.kind[c] = "super") =>
     Log = MRO(program.call) /\ outcome[2] = IF program.name = "__get__" THEN "ok" ELSE "AttributeError"
 
 \* A property read through super() runs its getter as a method call does.
-PropertyIsMethod == Done /\ program.name = "p" => outcome = Call([program EXCEPT !.name = "m"])
+PropertyIsMethod == Diamond /\ program.name = "p" => outcome = Call([program EXCEPT !.name = "m"])
 
 \* A proxy whose __class__ answers X receives X's methods as an X does.
-ProxyIsInstance == Done /\ program.receiver = "proxy" => outcome = Call([program EXCEPT !.receiver = "instance"])
+ProxyIsInstance == Diamond /\ program.receiver = "proxy" => outcome = Call([program EXCEPT !.receiver = "instance"])
 =============================================================================

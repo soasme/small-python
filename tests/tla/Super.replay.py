@@ -6,7 +6,20 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 BASES = {"A": "", "B": "(A)", "C": "(A)", "D": "(B, C)"}
 
 
+FRAMES = {
+    "method": "class A:\n    def m(self):\n        return super()\nA().m()\n",
+    "lambda": "class A:\n    def m(self):\n        return (lambda: super())()\nA().m()\n",
+    "generic": "class G[T](super()): pass\n",
+}
+
+
 def outcome(p):
+    if p.get("op") == "frame":
+        try:
+            exec(FRAMES[p["frame"]], {})
+        except RuntimeError as error:
+            return ((), "RuntimeError: %s" % error)
+        return ((), "ok")
     lines = []
     for c in "ABCD":
         lines.append("class %s%s:" % (c, BASES[c]))

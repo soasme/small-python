@@ -3012,7 +3012,6 @@ static ALWAYS_INLINE Name operand_name(NameOperand *n) {
     if (!n->len) { n->len = strlen(n->text); n->hash = text_hash(n->text, n->len); }
     return (Name){n->text, n->len, n->hash};
 }
-static ALWAYS_INLINE Name node_name(Node *n) { return operand_name(&n->name); }
 /* The entry stored under name in env's own entries. */
 static int key_names(SPYValue *env, SPYValue *key, Name name) {
     if (key->type != SPY_STRING && !(key = builtin_value(env->ctx, key, SPY_STRING))) return 0;
@@ -18457,19 +18456,20 @@ static int declare_name(SPYContext *c, SPYValue *env, const char *name) {
 static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
     size_t *order = allocate(c, (scope->len + 1) * sizeof(*order)), len = 0;
     if (!order) return -1;
-    Node *params = scope->kind == S_FUNCTION ? scope->owner->args : NULL;
+    /* Only a def's or lambda's scope has parameters. */
+    Parameter *params = scope->kind == S_FUNCTION ? scope->owner->signature : NULL;
     scope->positional = scope->parameters = scope->positionals = 0;
     scope->stars = 0;
-    for (Node *arg = params; arg; arg = arg->next) {
-        int positional = arg->op == P_POSITIONAL || arg->op == P_POSONLY;
+    for (Parameter *arg = params; arg && arg->name; arg++) {
+        int positional = arg->kind == P_POSITIONAL || arg->kind == P_POSONLY;
         scope->positional = positional ? scope->positional + 1 : SIZE_MAX;
         scope->positionals += positional;
-        scope->stars |= arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0;
-        scope->parameters += arg->op != P_VARARGS && arg->op != P_KWARGS;
+        scope->stars |= arg->kind == P_VARARGS ? 1 : arg->kind == P_KWARGS ? 2 : 0;
+        scope->parameters += arg->kind != P_VARARGS && arg->kind != P_KWARGS;
     }
     for (int pass = 0; pass < 3; pass++)
-        for (Node *arg = params; arg; arg = arg->next) {
-            Symbol *symbol = (arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0) == pass ? remember_symbol(&arg->name, scope, scope_find(scope, node_name(arg))) : NULL;
+        for (Parameter *arg = params; arg && arg->name; arg++) {
+            Symbol *symbol = (arg->kind == P_VARARGS ? 1 : arg->kind == P_KWARGS ? 2 : 0) == pass ? scope_find(scope, name_of(arg->name)) : NULL;
             if (symbol && !(symbol->flags & (S_GLOBAL | S_NONLOCAL))) order[len++] = (size_t)(symbol - scope->symbols);
         }
     for (size_t i = 0; i < scope->len; i++) {
@@ -41644,10 +41644,10 @@ static SPYValue *implicit_super(SPYContext *c, Machine *m) {
     /* A list, set or dictionary comprehension runs in its function's frame. */
     while (env && env->type == V_ENV && env->as.map.flags == 2 && env->as.map.scope->owner->op != N_TUPLE) env = env->as.map.parent;
     Scope *scope = env && env->type == V_ENV ? env->as.map.scope : NULL;
-    Node *first = scope && scope->kind == S_FUNCTION ? scope->owner->args : NULL;
-    if (!first || (first->op != P_POSITIONAL && first->op != P_POSONLY))
+    Parameter *first = scope && scope->kind == S_FUNCTION ? scope->owner->signature : NULL;
+    if (!first || !first->name || (first->kind != P_POSITIONAL && first->kind != P_POSONLY))
         return spy_error(c, "RuntimeError", "super(): no arguments");
-    SPYValue *self = name_local(env, first->name.text);
+    SPYValue *self = name_local(env, first->name);
     if (!self || self->type == V_UNBOUND) return spy_error(c, "RuntimeError", "super(): arg[0] deleted");
     Symbol *symbol = scope_symbol(scope, "__class__");
     if (symbol && (symbol->flags & (S_LOCAL | S_PARAM | S_GLOBAL)) && !(symbol->flags & S_NONLOCAL))

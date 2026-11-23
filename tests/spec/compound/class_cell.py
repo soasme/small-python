@@ -24,6 +24,11 @@ assert_is(B().nested(), B)
 # A nested function sees the cell, but super() needs its own first argument.
 e = assert_raises(RuntimeError, B().via_lambda)
 assert_eq(str(e), "super(): no arguments")
+# A generic class's bases run in its type parameters' scope, which has none.
+def generic_base():
+    class G[T](super()): pass
+e = assert_raises(RuntimeError, generic_base)
+assert_eq(str(e), "super(): no arguments")
 assert_true("__class__" in B.cls.__code__.co_freevars)
 assert_true("__class__" in B.who.__code__.co_freevars)
 assert_false("__class__" in B.plain.__code__.co_freevars)
