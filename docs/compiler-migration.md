@@ -242,11 +242,18 @@ retired), `loop` executes 1.5% fewer instructions, `generators` 1.3% and
 `nbody` 0.9% fewer; `sort` is 0.02% higher and every other benchmark
 program lower.
 
-Still read from trees: a fused call's callee and arguments
-(`operand_callee`), whose reading from plain steps cost `fib` 3.5% more
-instructions; a yield's operand, where reading its plain step cost
-`loop` 0.2%; annotation records; and the definition records of
-functions, classes and comprehensions, which their values keep.
+A fused call reads its callee and arguments from its plain steps, and
+its arg says how they lie there; this costs `fib` 3.5% more instructions
+and `classes` 1.2% more, which the tuning after the move off the tree is
+to recover. A yield of a name or literal reads its plain step. Functions
+bind their arguments through a signature record, an array of parameter
+names and kinds, built when the definition is compiled; `code.replace()`
+of another signature builds its own.
+
+Still read from trees: source locations (`relocate`, `tick`), annotation
+records, the closure names a code object reports (`closure_names`), and
+the definition records of functions, classes and comprehensions, which
+their values keep.
 
 ## Remaining stages
 
