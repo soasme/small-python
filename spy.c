@@ -8736,6 +8736,21 @@ static int scope_mapping_keys(SPYContext *c, Node *n) {
     return c->error_type[0] ? -1 : 0;
 }
 static int scope_visit(SPYContext *, Scope *, Node *);
+static void scope_reverse(Symbol *s, size_t i, size_t j) { for (; i + 1 < j; i++, j--) { Symbol t = s[i]; s[i] = s[j - 1]; s[j - 1] = t; } }
+/* Move the symbols scope added from from to mid after those added since:
+ * a target checked before the value it stores is numbered after it, as
+ * the value is evaluated first (co_varnames). */
+static void scope_later(Scope *scope, size_t from, size_t mid) {
+    if (from == mid || mid == scope->len) return;
+    scope_reverse(scope->symbols, from, mid); scope_reverse(scope->symbols, mid, scope->len); scope_reverse(scope->symbols, from, scope->len);
+}
+/* A call's or class's arguments: the positional and starred ones, then
+ * the keywords and unpacked mappings. */
+static int scope_arguments(SPYContext *c, Scope *scope, Node *args) {
+    for (int pass = 0; pass < 2; pass++) for (Node *a = args; a; a = a->next)
+        if ((a->kind == N_KEYWORD || a->kind == N_MAPPING) == pass && scope_node(c, scope, a)) return -1;
+    return 0;
+}
 /* Analyse n in scope, as deep as the stack allows. */
 static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     if (!n || c->error_type[0]) return c->error_type[0] ? -1 : 0;
@@ -8754,6 +8769,12 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
             errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->name.text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
             return -1;
         }
+        /* The target, the annotation, then the value. A parenthesized name
+         * without a value is neither bound nor used. */
+        int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
+        size_t from = scope->len;
+        if (!bare && scope_target(c, scope, n->a, n->c ? 1 : -1)) return -1;
+        size_t mid = scope->len;
         /* An annotation no __annotate__ evaluates is still analysed, in this
          * scope, as an annotation; a module's or class's, in the scope of
          * the __annotate__ that evaluates it (annotation_scope). */
@@ -8768,9 +8789,8 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
             Scope *annotate = annotation_scope(c, scope, n->line);
             if (!annotate || scope_node(c, annotate, n->b)) return -1;
         }
-        /* A parenthesized name without a value is neither bound nor used. */
-        int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
-        if (scope_node(c, scope, n->c) || (!bare && scope_target(c, scope, n->a, n->c ? 1 : -1))) return -1;
+        if (scope_node(c, scope, n->c)) return -1;
+        scope_later(scope, from, mid);
         if ((n->flags & F_SIMPLE) && n->a->kind == N_NAME && (symbol = scope_symbol(scope, n->a->name.text))) symbol->flags |= S_ANNOT;
         return 0;
     }
@@ -8812,10 +8832,16 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
             if (scope_bind(c, scope, binding, S_LOCAL, item)) return -1;
         }
         return 0;
-    case N_ASSIGN:
-        if (scope_node(c, scope, n->b) || scope_target(c, scope, n->a, 1)) return -1;
+    case N_ASSIGN: {
+        /* The targets before the value. */
+        size_t from = scope->len;
+        if (scope_target(c, scope, n->a, 1)) return -1;
         for (Node *target = n->args; target; target = target->next) if (scope_target(c, scope, target, 1)) return -1;
+        size_t mid = scope->len;
+        if (scope_node(c, scope, n->b)) return -1;
+        scope_later(scope, from, mid);
         return 0;
+    }
     case N_DELETE:
         return scope_target(c, scope, n->a, 0) ? -1 : 0;
     case N_KEYWORD:
@@ -8847,19 +8873,24 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         return outer ? scope_annotations(c, outer, n->b, "a type alias") : -1;
     }
     case N_DEF: case N_LAMBDA: case N_CLASS: {
-        if (scope_walk(c, scope, n->decorators)) return -1;
+        /* The name, the defaults, then the decorators; the name is stored
+         * last. */
+        size_t from = scope->len;
+        if (n->kind != N_LAMBDA && scope_bind(c, scope, n->a, S_LOCAL, n)) return -1;
+        size_t mid = scope->len;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_node(c, scope, param->a)) return -1;
-        if (n->kind != N_LAMBDA && scope_bind(c, scope, n->a, S_LOCAL, n)) return -1;
+        if (scope_walk(c, scope, n->decorators)) return -1;
         /* Type parameters, bases and annotations live in a hidden scope
          * between the enclosing scope and the definition (PEP 695). */
         Scope *outer = n->params ? scope_generic(c, scope, n->params) : scope;
         if (!outer) return -1;
-        if (n->kind == N_CLASS && scope_walk(c, outer, n->args)) return -1;
+        if (n->kind == N_CLASS && scope_arguments(c, outer, n->args)) return -1;
         if (!scope_of(c, n, outer)) return -1;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_record(c, n->scope, param, S_PARAM)) return -1;
         if (scope_annotations(c, outer, n->annotate, "an annotation")) return -1;
+        scope_later(scope, from, mid);
         return scope_walk(c, n->scope, n->b);
     }
     case N_COMPREHENSION: {
@@ -8873,18 +8904,26 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         for (Node *clause = n->a; clause; clause = clause->b) {
             n->scope->clause = clause;
             if (clause->kind == N_FOR && clause->op && scope_await(c, n->scope, clause)) return -1;
+            /* A for clause's target, then its iterable, but the first's. */
+            if (clause->kind == N_FOR && scope_target(c, n->scope, clause->args, 1)) return -1;
             n->scope->iterables += clause->kind == N_FOR;
             status = clause != n->a && scope_node(c, n->scope, clause->a);
             n->scope->iterables -= clause->kind == N_FOR;
-            if (status || (clause->kind == N_FOR && scope_target(c, n->scope, clause->args, 1))) return -1;
+            if (status) return -1;
         }
         n->scope->clause = NULL;
         if (n->op == N_DICT) return scope_node(c, n->scope, n->args->b) || scope_node(c, n->scope, n->args->a) ? -1 : 0;
         return scope_walk(c, n->scope, n->args);
     }
-    case N_FOR:
-        return scope_node(c, scope, n->a) || scope_target(c, scope, n->args, 1) ||
-            scope_walk(c, scope, n->b) || scope_walk(c, scope, n->c) ? -1 : 0;
+    case N_FOR: {
+        /* The target before the iterable. */
+        size_t from = scope->len;
+        if (scope_target(c, scope, n->args, 1)) return -1;
+        size_t mid = scope->len;
+        if (scope_node(c, scope, n->a)) return -1;
+        scope_later(scope, from, mid);
+        return scope_walk(c, scope, n->b) || scope_walk(c, scope, n->c) ? -1 : 0;
+    }
     case N_WITH:
         for (Node *item = n->args; item; item = item->next)
             if (scope_node(c, scope, item->a) || scope_target(c, scope, item->b, 1)) return -1;
@@ -8923,10 +8962,16 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
             return 0;
         default: return scope_walk(c, scope, n->args);
         }
+    case N_CALL: return scope_node(c, scope, n->a) || scope_arguments(c, scope, n->args) ? -1 : 0;
+    /* The test, then the branches. */
+    case N_COND: return scope_node(c, scope, n->b) || scope_node(c, scope, n->a) || scope_node(c, scope, n->c) ? -1 : 0;
     case N_DICT:
-        /* Dictionary entries use assignment-shaped nodes without bindings. */
+        /* Dictionary entries use assignment-shaped nodes without bindings:
+         * the keys, then the values, an unpacked mapping's among them. */
         for (Node *item = n->args; item; item = item->next)
-            if (scope_node(c, scope, item->a) || scope_node(c, scope, item->b)) return -1;
+            if (item->kind != N_MAPPING && scope_node(c, scope, item->a)) return -1;
+        for (Node *item = n->args; item; item = item->next)
+            if (scope_node(c, scope, item->kind == N_MAPPING ? item->a : item->b)) return -1;
         return 0;
     default:
         return scope_walk(c, scope, n->a) || scope_walk(c, scope, n->b) ||

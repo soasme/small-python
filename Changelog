@@ -21,6 +21,8 @@ Unreleased (0.10.0):
   source order, a comprehension's clauses before its element
 - an assignment expression in a comprehension in a TypeVar bound, type alias or
   generic's header is a SyntaxError; one in a module annotation binds the module's name
+- of several early errors in one statement, the first in CPython's visiting order is
+  reported (targets before values, dictionary keys before values, defaults before decorators)
 - a generator that dies while its frame lives on is gone to weak references
 - the asend, athrow and anext awaitable types define their methods, so
   they are awaitable to type-based checks

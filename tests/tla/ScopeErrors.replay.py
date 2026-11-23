@@ -36,13 +36,27 @@ def source(p):
         return {"for": "def g():\n    for x in y:\n        pass\n        global x\n",
                 "except": "def g():\n    try: pass\n    except E as x:\n        global x\n",
                 "case": "def g():\n    match v:\n        case [x]:\n            global x\n"}[p["header"]]
+    if part == "expressions":
+        a, b = "[(yield) for a in b]", "[(yield) for c in d]"
+        body = {"assign": "x[A] = (\n        B)", "for": "for x[A] in (\n        B): pass",
+                "annassign": "x[A]: int = (\n        B)", "dict": "{1: A, (\n        B): 2}",
+                "call": "f(k=A, *(\n        B))", "decorator": "@A\n    def f(a=B): pass",
+                "dictcomp": "{A: (\n        B) for z in w}", "cond": "(A if (\n        B) else 1)"}[p["shape"]]
+        return "def g():\n    " + body.replace("A", a).replace("B", b) + "\n"
+    if part == "locals":
+        return "def g():\n    " + {"assign": "x = (y := 1)", "for": "for x in (y := []): pass",
+                                     "annassign": "x: int = (y := 1)", "def": "def f(a=(z := 1)): pass"}[p["shape"]] + "\n"
     binding = {"enclosing": "def g():\n    x = 1\n", "module": "x = 1\ndef g():\n", "none": "def g():\n"}[p["source"]]
     return binding + "    def f():\n        nonlocal x\n"
 
 
 def outcome(p):
     try:
-        compile(source(p), "<scope>", "exec")
+        code = compile(source(p), "<scope>", "exec")
+        if p["part"] == "locals":
+            namespace = {}
+            exec(code, namespace)
+            return ",".join(namespace["g"].__code__.co_varnames)
         return "ok"
     except SyntaxError as error:
         return "%s@%s" % (error.msg, error.lineno)

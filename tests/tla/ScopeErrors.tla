@@ -36,8 +36,14 @@
 (* in a module's or class's annotation and an annotated global name, either *)
 (* first, or a binding in a for, except or case header before a global     *)
 (* declaration in its suite: the first in statement order, a header before *)
-(* its suite, is raised (8.3.1, 8.7). The outcome is "ok" or the message  *)
-(* and line.                                                               *)
+(* its suite, is raised (8.3.1, 8.7). An expressions program has a yield *)
+(* in a comprehension on each of two lines of one construct: the first    *)
+(* met visiting it (a target before its value, keys before values, a      *)
+(* call's positional arguments before its keywords, defaults before       *)
+(* decorators, a dict comprehension's value before its key, a test before *)
+(* its branches) is raised. A locals program binds a target and, with an  *)
+(* assignment expression, a name in its value: the value's is numbered    *)
+(* first (28.2). The outcome is "ok", the message and line, or the locals. *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -49,6 +55,8 @@ Programs == [part : {"decl"}, decl : Decls, prior : {"none", "param", "use", "as
             \cup [part : {"order"}, shape : {"siblings", "inner_first", "outer_first", "module", "returns", "return_first", "return_last"}]
             \cup [part : {"statements"}, body : {"module", "class"}, first : {"annotation", "global"}]
             \cup [part : {"headers"}, header : {"for", "except", "case"}]
+            \cup [part : {"expressions"}, shape : {"assign", "for", "annassign", "dict", "call", "decorator", "dictcomp", "cond"}]
+            \cup [part : {"locals"}, shape : {"assign", "for", "annassign", "def"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -84,9 +92,14 @@ Statements(p) == IF p.first = "annotation" \/ p.body = "module"
                  THEN "yield expression cannot be used within an annotation@" \o (IF p.first = "annotation" THEN "2" ELSE "4")
                  ELSE "annotated name 'a' can't be global@3"
 
+\* The line of the first error met: a target's, or the later line's.
+Expressions(p) == "'yield' inside list comprehension@" \o (IF p.shape \in {"assign", "for", "annassign"} THEN "2" ELSE "3")
+Locals(p) == IF p.shape = "def" THEN "z,f" ELSE "y,x"
+
 Run(p) == CASE p.part = "decl" -> Decl(p) [] p.part = "place" -> Place(p) [] p.part = "binding" -> Binding(p)
             [] p.part = "order" -> Order(p) [] p.part = "statements" -> Statements(p)
             [] p.part = "headers" -> "name 'x' is assigned to before global declaration@4"
+            [] p.part = "expressions" -> Expressions(p) [] p.part = "locals" -> Locals(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -100,6 +113,11 @@ CleanDeclarations == Done /\ program.part = "decl" /\ program.prior = "none" /\ 
 
 \* A header's binding is analysed before the declaration in its suite.
 HeadersFirst == Done /\ program.part = "headers" => outcome # "ok"
+
+\* A target is analysed before the value it is assigned, but numbered after.
+TargetsFirst == Done /\ program.part = "expressions" /\ program.shape \in {"assign", "for", "annassign"} =>
+                outcome = "'yield' inside list comprehension@2"
+ValuesNumberedFirst == Done /\ program.part = "locals" /\ program.shape # "def" => outcome = "y,x"
 
 \* A valued async generator return is never reported over a nonlocal error.
 ScopesBeforeReturns == Done /\ program.part = "order" /\ program.shape \in {"return_first", "return_last"} =>
