@@ -22367,17 +22367,6 @@ static SPYValue *comprehension_of(SPYContext *c, Frame *f, Scope *s, SPYValue *i
 static SPYValue *comprehension_new(SPYContext *c, Frame *f, Scope *s, SPYValue *source) {
     return comprehension_of(c, f, s, s->flags & F_AITER ? async_iterator(c, source, 1) : get_iterator(c, source));
 }
-/* The value of comprehension s over source: an eager one's result, else a
- * generator. */
-static SPYValue *comprehension_from(SPYContext *c, Frame *f, Scope *s, SPYValue *source) {
-    SPYValue *result = comprehension_new(c, f, s, source);
-    if (!result || !eager_comprehension(s)) return result;
-    SPYValue *outer = c->eval_env;
-    c->eval_env = result->as.generator.env;
-    Result value = run_machine(c, result->as.generator.machine, NULL, NULL, 0, NULL);
-    c->eval_env = outer;
-    return comprehension_end(c, result, value);
-}
 static void release_owned(SPYValue *v, void *data) { (void)data; spy_release(v); }
 static void generator_close(SPYValue *v) {
     if (v->as.generator.machine) {
@@ -26417,7 +26406,7 @@ static SPYValue *percent_job(SPYContext *c, SPYValue *const *held, Buffer *out, 
  * the job defers its conversion, as percent_build says, its state built
  * of the format and args in held, the text so far in out and the spec's
  * position and count of characters and the arguments' length and index
- * in at; 2, the text in *piece, when a repr job ended at once; else 0.
+ * in at; else 0.
  * A number's spec converts by int() or float(), or %o, %x and %X by the
  * __index__ int() takes ("int"), as %c does, a bytes format's by
  * __index__ alone ("index"); a bytes format's %s and %b by bytes(), and
@@ -26438,12 +26427,7 @@ static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYVa
                                                 percent_converted, job);
     else if (!machine_push(c, m, job) && !machine_push(c, m, spy_retain(c->replacing)) && !machine_push(c, m, spy_retain(callee)) &&
              !machine_push(c, m, spy_retain(v)) && (*piece = repr_call(c, m, &env))) {
-        if (!env) {
-            /* The job ended at once. */
-            spy_release(machine_pop(m)); spy_release(machine_pop(m));
-            if (ch == 'a' || bytes) *piece = ascii_text(c, *piece, *piece);
-            return 2;
-        }
+        /* It reaches a Python __repr__, so it stops at that call (repr_from). */
         spy_release(*piece); *piece = NULL;
         c->k_fn = spy_retain(c->entering_init); c->k_env = env; c->k = NULL; c->k_ctx = NULL;
     }
@@ -26588,21 +26572,21 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
         if (!failed && end) { errorf(c, "ValueError", "stray %% at position %zu", fmtstart); failed = 1; }
         i = at; chars = atc;
         SPYValue *v = failed ? NULL : percent_next(c, &p, 1), *piece = NULL;
-        int sign = 0, defer;
+        int sign = 0;
         if (v) switch (ch) {
         case 's': case 'r': case 'a': case 'b':
             if (bytes && (ch == 's' || ch == 'b')) {
                 if (converted) { piece = converted; converted = NULL; }
                 else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) && !builtin_value(c, v, SPY_BYTEARRAY) &&
-                         (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
+                         percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))
                     deferred = 1;
                 else piece = percent_bytes(c, &p, key, v);
             } else if (ch == 'b') goto unsupported;
             else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
             else if (converted) { piece = ch == 'a' || bytes ? ascii_text(c, converted, converted) : converted; converted = NULL; }
             else if (m && (instance_like(v) || repr_container(v)) &&
-                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
-                deferred = defer == 1;
+                     percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))
+                deferred = 1;
             else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));
             break;
         case 'i': case 'd': case 'u': case 'o': case 'x': case 'X':
@@ -26614,7 +26598,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
                 piece = percent_type(c, &p, key, real || !(ch == 'o' || ch == 'x' || ch == 'X') ? "%%%c requires a real number" : "%%%c requires an integer", (int)ch, v);
             else if (converted) v = converted;
             else if (m && v->type == SPY_INSTANCE &&
-                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
+                     percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)) {
                 deferred = 1;
                 break;
             }
@@ -26627,7 +26611,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             if (converted == c->unbound) piece = percent_type(c, &p, key, "%%c requires an integer or a unicode character", 0, v);
             else if (converted) piece = percent_char(c, &p, key, converted, bytes);
             else if (m && v->type == SPY_INSTANCE && !builtin_value(c, v, bytes ? SPY_BYTES : SPY_STRING) &&
-                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
+                     percent_defer(c, m, ch, v, (SPYValue *[]){held, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)) {
                 deferred = 1;
                 break;
             } else piece = percent_char(c, &p, key, v, bytes);
@@ -40739,7 +40723,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             a = machine_pop(m);
             if (a == c->unbound) { spy_release(a); a = NULL; b = machine_pop(m); }
             if (!eager_comprehension(ins->definition)) {
-                machine_push(c, m, b ? comprehension_of(c, &f, ins->definition, b) : comprehension_from(c, &f, ins->definition, a));
+                machine_push(c, m, b ? comprehension_of(c, &f, ins->definition, b) : comprehension_new(c, &f, ins->definition, a));
                 b = NULL;
                 break;
             }
@@ -49960,9 +49944,11 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
         }
         if (argc > 1) return errorf(c, "TypeError", "%s() takes 1 positional argument but %zu were given", name, argc);
         if (!argc) return errorf(c, "TypeError", "%s() missing 1 required positional argument: '.0'", name);
-        /* On the step's machine an instance's Python __iter__ or
-         * __aiter__ is its call (comprehension_iterated). */
-        Machine *m = argv[0]->type == SPY_INSTANCE && !eager_comprehension(def) ? step_machine(c) : NULL;
+        /* Only a generator's or coroutine's code is a program's, eager
+         * comprehensions running inline. On the step's machine an
+         * instance's Python __iter__ or __aiter__ is its call
+         * (comprehension_iterated). */
+        Machine *m = argv[0]->type == SPY_INSTANCE ? step_machine(c) : NULL;
         SPYValue *method = m ? special_method(c, argv[0], def->flags & F_AITER ? "__aiter__" : "__iter__") : NULL;
         SPYValue *state = method ? spy_tuple(c, 2, (SPYValue *[]){fn, argv[0]}) : NULL;
         if (state) {
@@ -49973,7 +49959,7 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
         spy_release(method);
         if (c->error_type[0]) return NULL;
         Frame frame = {fn->as.function.env, fn->as.function.unit, 0};
-        return comprehension_named(c, fn, comprehension_from(c, &frame, def, argv[0]));
+        return comprehension_named(c, fn, comprehension_new(c, &frame, def, argv[0]));
     }
     if (body_arguments(c, fn, argc, keywords && keywords->as.map.len ? map_items(keywords)[0].key : NULL)) return NULL;
     SPYValue *global = module_env(c, fn->as.function.env), *unit = fn->as.function.unit, *env;
