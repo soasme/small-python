@@ -189,3 +189,38 @@ def not_a_class(subject):
 
 
 assert_raises(TypeError, not_a_class, 1, message="class pattern must refer to a class")
+
+
+class Meta(type):
+    @property
+    def __match_args__(cls):
+        log.append("match args")
+        if cls.kind == "list":
+            return ["a"]
+        if cls.kind == "none":
+            raise AttributeError("none")
+        return ("a", "b")
+
+
+class Q(metaclass=Meta):
+    kind = "tuple"
+    a = 1
+    b = property(lambda self: 2)
+
+
+def meta(subject):
+    match subject:
+        case Q(1, b):
+            return b
+    return "miss"
+
+
+# __match_args__ is read from the class, its metaclass's property running.
+assert_same(meta(Q()), 2)
+assert_same(log, ["match args"])
+del log[:]
+Q.kind = "list"
+assert_raises(TypeError, meta, Q(), message="Q.__match_args__ must be a tuple (got list)")
+Q.kind = "none"
+assert_raises(TypeError, meta, Q(), message="Q() accepts 0 positional sub-patterns (2 given)")
+assert_same(meta(1), "miss")

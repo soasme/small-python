@@ -16863,8 +16863,7 @@ static void compile_sequence_pattern(SPYContext *c, Program *p, Node *n, size_t 
     size_t left = count;
     for (Node *item = n->args; item; item = item->next, left--) {
         if (item->op != PT_STAR) compile_pattern(c, p, item, temps + left, fail);
-        else if (item->a) pattern_bind(c, p, item, item->a, temps + left, fail);
-        else emit(c, p, BC_POP, item, 0);
+        else pattern_bind(c, p, item, item->a, temps + left, fail);
     }
     emit(c, p, BC_POP, n, 0);
 }
