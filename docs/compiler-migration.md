@@ -250,10 +250,13 @@ bind their arguments through a signature record, an array of parameter
 names and kinds, built when the definition is compiled; `code.replace()`
 of another signature builds its own.
 
-Still read from trees: source locations (`relocate`, `tick`), annotation
-records, the closure names a code object reports (`closure_names`), and
-the definition records of functions, classes and comprehensions, which
-their values keep.
+An instruction carries its source line, not a node: a step without one
+runs on the line before it, and a trace function sees no line event for
+a step that ticks on its definition's line.
+
+Still read from trees: annotation records, the closure names a code
+object reports (`closure_names`), and the definition records of
+functions, classes and comprehensions, which their values keep.
 
 ## Remaining stages
 

@@ -566,9 +566,6 @@ struct SPYContext {
      * each of the six (compare_enter), and the comparisons running. */
     Program *compare_code;
     size_t comparing;
-    /* compare_code's call nodes of each count of arguments, their
-     * callee's, which names no attribute, and their arguments' (compare_enter). */
-    Node *call_nodes;
     /* Borrowed: the instance whose __dict__ a read searched on the machine
      * without finding its name (search_begin), whose next search, of that
      * read, finds nothing (instance_dict_search), and its class's
@@ -15987,7 +15984,7 @@ typedef struct {
         Node *definition; /* BC_FUNCTION, BC_GENERIC_FUNCTION, BC_COMPREHENSION, BC_CLASS and BC_ANNOTATE: the function, comprehension,
                            * class, alias or annotation entry they make or record, borrowed from the source unit. */
     };
-    Node *node; /* Source location; some older instructions also execute this tree. */
+    uint32_t line; /* Its source line, or 0 when it runs on the line before it. */
 } Instruction;
 /* calls: BODY for a function body whose calls run on the machine (expands). */
 /* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
@@ -16113,7 +16110,6 @@ typedef struct {
     int kind, flow;
     size_t depth, target, other;
     NameOperand *name; /* A handler's name, unbound when it ends. */
-    Node *node;
     SPYValue *value, *handled;
     ErrorState *error;
     Consumer *consumer;
@@ -16296,7 +16292,10 @@ static int expands(Node *n, int calls) {
                list_expands(n->args, mode) || list_expands(n->decorators, mode);
     return list_expands(n->a, mode) || list_expands(n->b, mode) || list_expands(n->c, mode) || list_expands(n->args, mode);
 }
-static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
+static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line, int arg);
+/* Emit op with arg, its operands from n, at n's line. */
+static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) { return emit_line(c, p, op, n, n ? n->line : 0, arg); }
+static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line, int arg) {
     size_t pc = p->len;
     /* A fused truth test whose plain steps end here jumps past this
      * BC_FALSE, or to its target, which patch gives both. */
@@ -16307,7 +16306,7 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
         p->items[test - 1].other = (uint32_t)pc + 1;
     }
     if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
-    else p->items[p->len++] = (Instruction){.node = n, .arg = arg, .other = (uint32_t)test};
+    else p->items[p->len++] = (Instruction){.line = (uint32_t)line, .arg = arg, .other = (uint32_t)test};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     if (op == BC_LOAD) p->items[pc].constant = n->constant;
     if (op == BC_NAME || op == BC_INTERPOLATION || op == BC_DEFAULT || ((op == BC_STORE || op == BC_NAMED || op == BC_DELETE) && n->kind == N_NAME) || (op == BC_ARG && arg == N_KEYWORD))
@@ -16717,10 +16716,11 @@ static void with_end(SPYContext *c, Program *p, uint32_t last, int asynchronous)
     while (last != NO_STEP && !c->error_type[0]) {
         size_t start = last;
         last = p->items[start].other;
-        emit(c, p, BC_LEAVE, p->items[start].node, 0); patch(p, start, p->len);
-        emit(c, p, BC_CALLN, p->items[start].node, 3);
-        if (asynchronous) emit(c, p, BC_DELEGATE, p->items[start].node, DELEGATE_AEXIT);
-        emit(c, p, BC_END_WITH, p->items[start].node, 0);
+        size_t line = p->items[start].line;
+        emit_line(c, p, BC_LEAVE, NULL, line, 0); patch(p, start, p->len);
+        emit_line(c, p, BC_CALLN, NULL, line, 3);
+        if (asynchronous) emit_line(c, p, BC_DELEGATE, NULL, line, DELEGATE_AEXIT);
+        emit_line(c, p, BC_END_WITH, NULL, line, 0);
     }
 }
 /* A del of a subscript or attribute evaluates its object (and key) on
@@ -17863,10 +17863,12 @@ static SPYValue *finalizer(SPYContext *);
 static int weak_machined(SPYContext *);
 static int closes_quietly(SPYContext *, SPYValue *);
 static void finalize_ahead(SPYContext *, size_t);
-/* A machine's tick at a step of no node (TICK_DEFER) leaves a finalizer
- * the machine runs (finalizer) for the next node's. */
-enum { TICK_DEFER = 2 };
-static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
+/* A machine's tick at a store (TICK_DEFER) or at a step of no line, on
+ * its definition's (TICK_DEFINITION), leaves a finalizer the machine runs
+ * (finalizer) for the next step's with a line; the latter is no line of
+ * its own for a trace function. */
+enum { TICK_DEFER = 2, TICK_DEFINITION };
+static NO_INLINE int tick_full(SPYContext *c, Frame *f, size_t line, int machine) {
     if (c->error_type[0]) return -1;
     /* A collection waits for the finalizers that wait (a boundary inside
      * __del__), so that it can run its own and free what they leave. */
@@ -17881,21 +17883,15 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
         finalize_ahead(c, waiting);
     }
     int machined = machine && (weak_next(c) ? weak_machined(c) : c->finalize_calls_len && finalizer(c) != NULL);
-    if (machined && machine != TICK_DEFER) return 1;
+    if (machined && machine < TICK_DEFER) return 1;
     if (!machined && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
-    c->line = n->line;
+    c->line = line;
     if (c->py_depth) {
-        /* A new line is a trace function's 'line' event; the definition
-         * node of a generator or a function on the machine, or a module
-         * body, only stands in for instructions without one. */
+        /* A new line is a trace function's 'line' event. */
         struct ActiveFrame *top = &c->frames[c->py_depth - 1];
-        top->line = n->line;
-        int stand_in = top->owner->type == SPY_FUNCTION ? top->owner->as.function.def == n :
-                       top->owner->type == V_UNIT ? top->owner->as.unit.body == n :
-                       (top->owner->type == SPY_GENERATOR || top->owner->type == SPY_COROUTINE ||
-                        top->owner->type == SPY_ASYNC_GENERATOR) && top->owner->as.generator.node == n;
-        if (c->settings[SET_TRACE] && n->line != top->traced && !stand_in) {
-            top->traced = n->line;
+        top->line = line;
+        if (c->settings[SET_TRACE] && line != top->traced && machine != TICK_DEFINITION) {
+            top->traced = line;
             if (trace_event(c, TRACE_LINE, NULL)) return -1;
         }
     }
@@ -17914,10 +17910,10 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
 static int quiet(SPYContext *c, Frame *f) {
     return !c->error_type[0] && c->quiet_unit == f->unit;
 }
-static void relocate(SPYContext *, Node *);
-static ALWAYS_INLINE int tick(SPYContext *c, Frame *f, Node *n) {
-    if (!quiet(c, f)) return tick_full(c, f, n, 0);
-    relocate(c, n);
+static void relocate(SPYContext *, size_t);
+static ALWAYS_INLINE int tick(SPYContext *c, Frame *f, size_t line) {
+    if (!quiet(c, f)) return tick_full(c, f, line, 0);
+    relocate(c, line);
     return 0;
 }
 static SPYValue *number_literal(SPYContext *c, Node *n) {
@@ -18345,8 +18341,8 @@ static SPYValue *unary(SPYContext *c, int op, SPYValue *a) {
 }
 /* An operation is reported at its own line once its operands, which may
  * span later lines, are evaluated. */
-static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
-    c->line = *c->frame_line = n->line;
+static ALWAYS_INLINE void relocate(SPYContext *c, size_t line) {
+    c->line = *c->frame_line = line;
 }
 /* The function the attribute node n names for a call. With *self set, it is
  * a Python function of a plain instance's class, called with *self first as
@@ -18454,7 +18450,7 @@ static ALWAYS_INLINE SPYValue *operator_fast(SPYContext *c, int operation, SPYVa
 /* Fused operator step ins on its operands x and y. */
 static ALWAYS_INLINE SPYValue *operate(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y) {
     int operation = ins->arg >> 8, kind = operation & 3, op = operation >> 2;
-    relocate(c, ins->node);
+    relocate(c, ins->line);
     spy_retain(x); spy_retain(y);
     SPYValue *result = kind == FUSED_INDEX ? get_index(c, x, y) : kind == FUSED_COMPARE ? comparison(c, op, x, y) : binary(c, op, x, y);
     spy_release(x); spy_release(y);
@@ -19545,19 +19541,11 @@ static const int compare_tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE, O_IN};
  * whose machine paths it takes. NULL, x and y released, on an error;
  * nested past the recursion limit, RecursionError. */
 static NO_INLINE Call *compare_enter(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int rich, int kind) {
-    enum { CALLEE = COMPARE_ARGS + 1, ARGS = CALLEE + 1, NODES = ARGS + COMPARE_ARGS };
-    if (!c->call_nodes && (c->call_nodes = allocate(c, NODES * sizeof(Node)))) {
-        Node *nodes = c->call_nodes;
-        memset(nodes, 0, NODES * sizeof(Node));
-        for (int i = 0; i <= COMPARE_ARGS; i++) nodes[i] = (Node){.kind = N_CALL, .a = &nodes[CALLEE], .args = i ? &nodes[NODES - i] : NULL};
-        for (int i = CALLEE; i < NODES; i++) { nodes[i].kind = N_NAME; nodes[i].next = i > CALLEE && i + 1 < NODES ? &nodes[i + 1] : NULL; }
-    }
-    if (!c->compare_code && c->call_nodes && (c->compare_code = allocate(c, sizeof(Program)))) {
+    if (!c->compare_code && (c->compare_code = allocate(c, sizeof(Program)))) {
         *c->compare_code = (Program){0};
         for (int r = 0; r < COMPARE_END; r++) {
             if (r < COMPARE_CALL) emit(c, c->compare_code, BC_BINARY, NULL, compare_tokens[r]);
-            else if (r < COMPARE_KEYWORD) emit(c, c->compare_code, BC_CALLN, &c->call_nodes[r - COMPARE_CALL], r - COMPARE_CALL);
-            else emit(c, c->compare_code, BC_CALLK, &c->call_nodes[r - COMPARE_KEYWORD], r - COMPARE_KEYWORD);
+            else emit(c, c->compare_code, r < COMPARE_KEYWORD ? BC_CALLN : BC_CALLK, NULL, r - (r < COMPARE_KEYWORD ? COMPARE_CALL : COMPARE_KEYWORD));
             emit(c, c->compare_code, BC_FLOW, NULL, FLOW_RETURN);
         }
         if (c->compare_code->len < 2 * COMPARE_END) { free_program(c->compare_code); c->compare_code = NULL; }
@@ -19578,7 +19566,8 @@ static NO_INLINE Call *compare_enter(SPYContext *c, Machine *m, SPYValue *x, SPY
     machine_push(c, &call->m, x);
     if (rich < COMPARE_CALL) machine_push(c, &call->m, y);
     else {
-        c->call_nodes[y->as.seq.len].line = c->line;
+        /* The call is a step of the caller's line. */
+        call->m.code->items[2 * (size_t)rich].line = (uint32_t)c->line;
         for (size_t i = 0; i < y->as.seq.len; i++) machine_push(c, &call->m, spy_retain(y->as.seq.items[i]));
         spy_release(y);
     }
@@ -21640,7 +21629,7 @@ static NO_INLINE SPYValue *call_import(SPYContext *c, Frame *f, const char *name
  * index star (SIZE_MAX for none) receives them: the starred items gathered
  * into a list. */
 static SPYValue *unpack_settle(SPYContext *, SPYValue *, SPYValue *, size_t, size_t);
-static SPYValue *unpack_values(SPYContext *c, Frame *f, Node *n, SPYValue *value, size_t count, size_t star) {
+static SPYValue *unpack_values(SPYContext *c, Frame *f, size_t line, SPYValue *value, size_t count, size_t star) {
     if (!iterable_type(value)) {
         const char *name = value->type == SPY_INT ? "int" : value->type == SPY_FLOAT ? "float" :
                            value->type == SPY_BOOL ? "bool" : value->type == SPY_NONE ? "NoneType" : "object";
@@ -21650,7 +21639,7 @@ static SPYValue *unpack_values(SPYContext *c, Frame *f, Node *n, SPYValue *value
     SPYValue *items = spy_list(c), *iterator = get_iterator(c, value);
     if (!items || !iterator) { spy_release(items); spy_release(iterator); return NULL; }
     for (size_t i = 0; star != SIZE_MAX || i <= count; i++) {
-        if (tick(c, f, n)) break;
+        if (tick(c, f, line)) break;
         SPYValue *item = iterator_next(c, iterator);
         if (!item) break;
         int status = sequence_append(c, items, item);
@@ -21702,7 +21691,7 @@ static size_t target_count(Node *n, size_t *star) {
     }
     return count;
 }
-static int store_slow(SPYContext *c, Frame *f, Node *n, NameOperand *name, SPYValue *value, int calls);
+static int store_slow(SPYContext *c, Frame *f, size_t line, NameOperand *name, SPYValue *value, int calls);
 /* A name stored in its remembered slot cannot fail, so it skips the step
  * bookkeeping unless a trace function watches, as eval's names do. */
 /* Store value, taking it, in the entry of env remembered for a name. */
@@ -21724,9 +21713,9 @@ static ALWAYS_INLINE Entry *stored_entry(SPYContext *c, Frame *f, NameOperand *n
 }
 /* Store value to target n; with calls, a machine step's store, which
  * returns 1, storing nothing, for a Python __setitem__ (store_call). */
-static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, NameOperand *name, SPYValue *value, int calls) {
+static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, size_t line, NameOperand *name, SPYValue *value, int calls) {
     Entry *entry = stored_entry(c, f, name);
-    if (!entry) return store_slow(c, f, n, name, value, calls);
+    if (!entry) return store_slow(c, f, line, name, value, calls);
     entry_store(c, f->env, entry, spy_retain(value));
     return 0;
 }
@@ -21789,9 +21778,9 @@ static NO_INLINE SPYValue *name_mapping(SPYContext *c, SPYValue *env, Name name)
     SPYValue *namespace = env->type == V_ENV && env->as.map.flags != ENV_FORWARD && env->as.map.flags != 3 ? namespace_map(env) : env;
     return namespace != env && setitem_function(c, namespace) ? namespace : NULL;
 }
-static int store_slow(SPYContext *c, Frame *f, Node *n, NameOperand *name, SPYValue *value, int calls) {
+static int store_slow(SPYContext *c, Frame *f, size_t line, NameOperand *name, SPYValue *value, int calls) {
     /* A machine's store leaves a due finalizer to the machine (TICK_DEFER). */
-    if (calls ? !quiet(c, f) && tick_full(c, f, n, TICK_DEFER) < 0 : tick(c, f, n)) return -1;
+    if (calls ? !quiet(c, f) && tick_full(c, f, line, TICK_DEFER) < 0 : tick(c, f, line)) return -1;
     Entry *entry = name_slot(f->env, name);
     if (!entry) return calls && name_mapping(c, f->env, operand_name(name)) ? 1 : name_bind(c, f->env, operand_name(name), value);
     SPYValue *old = entry->value;
@@ -21808,7 +21797,7 @@ static SPYValue *machine_pop(Machine *);
  * to run, as when Python code would. */
 static NO_INLINE int store_operands(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
     /* A machine's store leaves a due finalizer to the machine (TICK_DEFER). */
-    if (!quiet(c, f) && tick_full(c, f, ins->node, TICK_DEFER) < 0) return 0;
+    if (!quiet(c, f) && tick_full(c, f, ins->line, TICK_DEFER) < 0) return 0;
     int item = ins[2].op != BC_SET_TARGET, status = 1;
     SPYValue *value = m->stack[m->len - 1], *object = leaf_step(f, ins + 1), *key = object && item ? leaf_step(f, ins + 2) : NULL;
     if (!object || (item && !key)) return 0;
@@ -25543,8 +25532,7 @@ static int annotation_ran(SPYContext *c, Frame *f, Node *entry, SPYValue *execut
 }
 /* The target list of one name that PEP 646's `*args: *Ts` unpacks its
  * annotation to; never changed. */
-static Node one_target = {.kind = N_TUPLE};
-static SPYValue *unpack_counted(SPYContext *, Machine *, Frame *, Node *, size_t, size_t);
+static SPYValue *unpack_counted(SPYContext *, Machine *, Frame *, size_t, size_t, size_t);
 static SPYValue *class_names_call(SPYContext *, Machine *, Frame *, SPYValue *, SPYValue *);
 /* A module body in frame f, on m, binds its annotation function, then
  * the set of its executed conditional annotations (start_annotations),
@@ -25579,7 +25567,7 @@ static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, 
         return found < 0 ? NULL : spy_bool(c, found);
     }
     if (ins->arg == 16) {
-        SPYValue *items = unpack_counted(c, m, f, &one_target, 1, SIZE_MAX), *item = items ? spy_retain(items->as.seq.items[0]) : NULL;
+        SPYValue *items = unpack_counted(c, m, f, ins->line, 1, SIZE_MAX), *item = items ? spy_retain(items->as.seq.items[0]) : NULL;
         spy_release(items);
         return item;
     }
@@ -26280,7 +26268,7 @@ static int match_mapping_subject(SPYContext *c, SPYValue *subject) {
     return subject->type == SPY_INSTANCE && (subclass(subject->as.map.parent, c->types[SPY_DICT]) ||
         subclass(subject->as.map.parent, c->types[SPY_FROZENDICT]));
 }
-static SPYValue *unpack_counted(SPYContext *, Machine *, Frame *, Node *, size_t, size_t);
+static SPYValue *unpack_counted(SPYContext *, Machine *, Frame *, size_t, size_t, size_t);
 static int checks_call_rest(SPYContext *, Machine *, int, size_t, SPYValue *const *, SPYValue **);
 static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
 /* What a pattern step's call returned, as it is. */
@@ -26430,7 +26418,7 @@ static NO_INLINE SPYValue *pattern_step(SPYContext *c, Machine *m, Frame *f, Ins
         return same;
     }
     case P_UNPACK: {
-        SPYValue *items = unpack_counted(c, m, f, ins->node, ins->target, ins->other ? ins->other - 1 : SIZE_MAX);
+        SPYValue *items = unpack_counted(c, m, f, ins->line, ins->target, ins->other ? ins->other - 1 : SIZE_MAX);
         if (!items) return NULL;
         for (size_t i = items->as.seq.len; i; i--) if (machine_push(c, m, spy_retain(items->as.seq.items[i - 1]))) break;
         spy_release(items);
@@ -26633,7 +26621,7 @@ static int machine_push_all(SPYContext *c, Machine *m, size_t n, SPYValue *const
 static Block *push_block(SPYContext *c, Machine *m, int kind, Instruction *ins) {
     if (grow(c, (void **)&m->blocks, &m->block_cap, m->block_len + 1, sizeof(*m->blocks))) return NULL;
     Block *b = &m->blocks[m->block_len++];
-    *b = (Block){.kind = kind, .depth = m->len, .target = ins->target, .other = ins->other, .node = ins->node};
+    *b = (Block){.kind = kind, .depth = m->len, .target = ins->target, .other = ins->other};
     return b;
 }
 static void sort_restore(SPYContext *, SPYValue *, SPYValue *);
@@ -28579,9 +28567,9 @@ static int machine_items(SPYContext *c, SPYValue *v) {
  * items, owned, or, for a source whose items the machine takes
  * (machine_items), NULL, its items to be taken on the machine
  * (BLOCK_CONSUME) as an unpacking (UNPACK_ITEMS). */
-static SPYValue *unpack_counted(SPYContext *c, Machine *m, Frame *f, Node *n, size_t count, size_t star) {
+static SPYValue *unpack_counted(SPYContext *c, Machine *m, Frame *f, size_t line, size_t count, size_t star) {
     SPYValue *value = m->stack[m->len - 1];
-    if (!machine_items(c, value)) return unpack_values(c, f, n, value, count, star);
+    if (!machine_items(c, value)) return unpack_values(c, f, line, value, count, star);
     Consumer *s = allocate(c, sizeof(*s));
     SPYValue *items = s ? spy_list(c) : NULL, *source = items ? spy_retain(value) : NULL;
     int keyed = source ? consumer_source(c, &source) : 0;
@@ -31950,7 +31938,7 @@ static ALWAYS_INLINE SPYValue *operand_callee(SPYContext *c, Frame *f, Instructi
         }
     }
     *argc = (size_t)(out - argv);
-    relocate(c, ins->node);
+    relocate(c, ins->line);
     return a;
 }
 /* BC_CALLF ins, whose operands operand_callee finds; else c->unbound, for its plain steps to run, or NULL
@@ -32133,7 +32121,6 @@ static NO_INLINE SPYValue *call_searched(SPYContext *c, Machine *m, SPYValue *ca
     return function == c->unbound ? NULL : function ? spy_retain(c->types[SPY_STRING]) : result;
 }
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Instruction *ins, int calls, SPYValue **env) {
-    Node *n = ins->node;
     size_t argc = (size_t)(ins->arg & CALL_COUNT);
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
     if (ins->attribute && (ins->arg & CALL_OBJECT || callee == c->unbound)) {
@@ -32145,7 +32132,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Instruction *in
         }
         return stack_method_call(c, m, ins, calls, env);
     }
-    relocate(c, n);
+    relocate(c, ins->line);
     if (argc == 1 && pure_builtin(callee) && plain_arguments(argc, argv)) {
         /* len() and the like of a plain argument call nothing on m. */
         result = step_call(c, m, callee, -1, NULL, argc, argv);
@@ -32509,14 +32496,13 @@ static void search_span(SPYContext *c, SPYValue *seq, int method, size_t argc, S
     *at = (size_t)start; *tally = stop;
 }
 static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Instruction *ins, int calls, SPYValue **env) {
-    Node *n = ins->node;
     AttributeOperand *at = ins->attribute;
     size_t argc = (size_t)(ins->arg & CALL_COUNT);
     SPYValue **argv = &m->stack[m->len - argc - 1], *object = argv[0], *self = NULL, *result = NULL;
     int method = -1;
     c->line = *c->frame_line = at->line;
     SPYValue *callee = method_of(c, at, spy_retain(object), &self, &method, calls);
-    relocate(c, n);
+    relocate(c, ins->line);
     if (!callee && self) return method_getter(c, m, at, self, (int)argc);
     if (self) spy_release(object); /* The stack holds it; a native method's callee is the reference passed. */
     /* A method takes the object first; another callee, the arguments after it. */
@@ -32752,14 +32738,13 @@ static int enumerate_named(SPYValue *callee, size_t positional, SPYValue *const 
     return named[0] != NULL;
 }
 static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Instruction *ins, int calls, SPYValue **env) {
-    Node *n = ins->node;
     size_t argc = (size_t)(ins->arg & CALL_COUNT);
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result = NULL;
     Entry kw[8];
     /* Its keywords' names, the positional arguments before them (keyword_names). */
     SPYValue *names = ins->constant;
     size_t kwc = names ? names->as.seq.len : 0, positional = argc - kwc;
-    relocate(c, n);
+    relocate(c, ins->line);
     for (size_t i = 0; i < kwc; i++) kw[i] = (Entry){names->as.seq.items[i], argv[positional + i], names->as.seq.items[i]->as.string.hash};
     for (SPYValue *wrapped; calls && (wrapped = static_called(c, callee));) {
         /* A staticmethod calls its function, which takes its place. */
@@ -34144,7 +34129,7 @@ static Machine *call_hashed(SPYContext *c, Machine *m, Instruction *ins, SPYValu
     SPYValue *callee = machine_pop(m), *function = NULL, *env;
     Call *call = NULL;
     if (hash_kept(c, key, hashed, hash)) {
-        relocate(c, ins->node);
+        relocate(c, ins->line);
         if (method < 0 && (function = missing_found(c, callee, argc, args, key, &env))) call = call_enter(c, function, env, m);
         SPYValue *result = function ? NULL : call_plain(c, callee, method, method >= 0 ? call_attribute(ins) : NULL, argc, args);
         if (result) machine_push(c, m, result);
@@ -34166,7 +34151,7 @@ static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYVa
         int deletion = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = deletion ? NULL : machine_pop(m), *storage = namespace_map(map);
         m->pc = pc;
-        if (ins->op != BC_MAP) relocate(c, ins->node);
+        if (ins->op != BC_MAP) relocate(c, ins->line);
         if (c->error_type[0]) {
         } else if (deletion && found < 0) missing_key(c, key);
         else if (deletion) {
@@ -34752,7 +34737,7 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
             return m;
         }
         if (hash_kept(c, key, hashed, hash)) {
-            relocate(c, ins->node);
+            relocate(c, ins->line);
             if (deletion) delete_evaluated(c, object, item);
             else set_index(c, object, item, value);
             if (!c->error_type[0] && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
@@ -34999,7 +34984,7 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
         }
         if (status < 0) { spy_release(index); index = NULL; }
     } else index = index_result(c, key, result);
-    relocate(c, ins->node);
+    relocate(c, ins->line);
     if (index && index->type == SPY_INT && index->as.integer_data.big) errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key));
     else if (index && deletion) delete_evaluated(c, object, index);
     else if (index && !set_index(c, object, index, value) && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
@@ -35730,7 +35715,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
 found:
     /* A builtin's operator (builtin_operator) goes with the phase. */
     if (!function || (!machine_function(c, function) && !descriptor_getter(c, function)) ||
-        operator_push(c, m, x, y, ins->node ? phase : phase | op << 2) || (negated && machine_push(c, m, spy_retain(c->negating)))) return NULL;
+        operator_push(c, m, x, y, ins->line ? phase : phase | op << 2) || (negated && machine_push(c, m, spy_retain(c->negating)))) return NULL;
     int maybe = kind == OPERATE_BINARY || kind == OPERATE_COMPARE || (kind == OPERATE_INPLACE && function != class_lookup(value_class(c, x), o->inplace));
     if ((function = special_env(c, m, function, self, kind == OPERATE_UNARY ? NULL : other, maybe ? c->not_implemented : NULL, env))) return function;
     for (int i = 0; i < 3 + negated; i++) spy_release(machine_pop(m));
@@ -35742,7 +35727,7 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
     /* A lookup found in C (lookup_found). */
     if (c->looked) return looked(c);
     /* A comparison's of compare_enter has no node: its line is its caller's. */
-    if (ins->node) relocate(c, ins->node);
+    if (ins->line) relocate(c, ins->line);
     spy_retain(x); spy_retain(y);
     /* A lone in is a BC_BINARY (binary_operand). */
     SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY && op != O_IN && op != O_NOTIN ? binary(c, op, x, y) :
@@ -35873,7 +35858,7 @@ static int declined_bases(SPYContext *c, int op, SPYValue *x, SPYValue *y, const
  * nothing left on m. */
 static int declined_k(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, int op, SPYValue *self) {
     int rich = rich_kind(op), mine = self == x;
-    if (operator_push(c, m, x, y, ins->node ? OPERATOR_LAST : OPERATOR_LAST | op << 2)) return 0;
+    if (operator_push(c, m, x, y, ins->line ? OPERATOR_LAST : OPERATOR_LAST | op << 2)) return 0;
     c->k_fn = spy_retain(sequence_base(self)); c->k_env = spy_retain(sequence_base(mine ? y : x));
     c->k_unit = 2 + (mine ? rich : rich_reflected[rich]); c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_OPERATOR;
     return 1;
@@ -36893,7 +36878,6 @@ static SPYValue *frame_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue
 }
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     if (ins->op == BC_IMPORT) return import_step(c, m, f, ins->import, env);
-    Node *n = ins->node;
     c->entering_kind = CALL_STORE;
     SPYValue *args[3];
     if ((ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET) && ins->attribute) {
@@ -36910,7 +36894,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
             function = setter_object(object) ? setter_function(c, object, name, &descriptor, 1) : NULL;
             spy_retain(function ? descriptor : NULL);
         } else { function = c->entering_init; descriptor = c->fallback; c->fallback = NULL; }
-        relocate(c, n);
+        relocate(c, ins->line);
         if (!function) { delete_attribute(c, object, name); spy_release(object); return NULL; }
         if (function->type == SPY_PROPERTY) {
             /* A missing setter or deleter (setter_function). */
@@ -36938,7 +36922,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         args[1] = machine_pop(m); args[0] = machine_pop(m);
         if (args[0]->type == SPY_FRAME_LOCALS && frame_key_calls(c, args[1])) {
             /* A FrameLocalsProxy's key looked up on m (frame_operatek). */
-            relocate(c, n);
+            relocate(c, ins->line);
             frame_operatek(c, m, FL_DELITEM, args[0], args[1], NULL, frame_stored, NULL);
             release_all(2, args);
             return NULL;
@@ -36951,7 +36935,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
                                                  : (function = index_call(c, m, args[1], 2, args, env)) || c->error_type[0])) {
             release_all(2, args); return function;
         }
-        relocate(c, n);
+        relocate(c, ins->line);
         if (function) return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
         delete_evaluated(c, args[0], args[1]);
         release_all(2, args);
@@ -36967,7 +36951,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     else { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
     if (args[0]->type == SPY_FRAME_LOCALS && frame_key_calls(c, args[1])) {
         /* A FrameLocalsProxy's key looked up on m (frame_operatek). */
-        relocate(c, n);
+        relocate(c, ins->line);
         frame_operatek(c, m, FL_SETITEM, args[0], args[1], args[2], frame_stored, NULL);
         release_all(3, args);
         return NULL;
@@ -36977,7 +36961,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         const char *kind;
         SPYValue *function = memory_converter(c, args[0], args[1], args[2], &kind);
         if (function) {
-            relocate(c, n);
+            relocate(c, ins->line);
             memory_store_call(c, m, function, kind, args[0], args[1], args[2]);
             release_all(3, args);
             return NULL;
@@ -36992,7 +36976,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
             (function = index_call(c, m, args[1], 3, args, env)) || c->error_type[0]) {
             release_all(3, args); return function;
         }
-        relocate(c, n);
+        relocate(c, ins->line);
         /* A bytearray's byte by its Python __index__, on m (bytearray_stored). */
         if ((function = byte_function(c, args[0], args[1], args[2]))) {
             SPYValue *state = tuple_of(c, 3, args);
@@ -37010,7 +36994,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         release_all(3, args);
         return NULL;
     }
-    relocate(c, n);
+    relocate(c, ins->line);
     return (*env = function_env(c, function, 3, args, NULL, 1)) ? spy_retain(function) : NULL;
 }
 /* BC_IMPORT of import statement n, None atop m's stack: when
@@ -38623,12 +38607,12 @@ static NO_INLINE SPYValue *sequence_test(SPYContext *c, Instruction *ins, SPYVal
     /* == and != of two such sequences, natively when no item calls Python. */
     if (op == T_EQ || op == T_NE) {
         if (x->type != y->type || (x->type == SPY_LIST && x->as.seq.len != y->as.seq.len)) return NULL;
-        relocate(c, ins->node);
+        relocate(c, ins->line);
         int same = sequence_equal_from(c, x, y, 0, 1);
         return same == 2 ? c->unbound : same < 0 ? NULL : spy_bool(c, (op == T_EQ) == same);
     }
     if (op != O_IN && op != O_NOTIN) return c->unbound;
-    relocate(c, ins->node);
+    relocate(c, ins->line);
     int found = sequence_contains(c, x, y, 1);
     return found == 2 ? c->unbound : found < 0 ? NULL : spy_bool(c, (op == O_IN) == found);
 }
@@ -38731,7 +38715,7 @@ static int fused(int op) {
 /* The label comes first: after case, it leaves the brace past a break uncounted by clang coverage. */
 #define CASE(op) op_##op: case op:
 #define NEXT { if (quiet(c, &f)) { \
-        ins = &code[pc++]; n = ins->node; if (n) relocate(c, n); \
+        ins = &code[pc++]; if (ins->line) relocate(c, ins->line); \
         truth_known = known; known = 0; a = b = value = NULL; goto *ins->step; } } continue
 #define NEXT_RELEASE { if (a) spy_release(a); if (b) spy_release(b); } NEXT
 #else
@@ -38812,7 +38796,7 @@ static ALWAYS_INLINE int loop_item(SPYContext *c, Machine *m, Frame *f, Instruct
     Entry *entry = next->other ? stored_entry(c, f, next[1].name) : NULL;
     /* A remembered name takes the item's reference. */
     if (entry) { entry_store(c, f->env, entry, item); return 1; }
-    if (!next->other || store_slow(c, f, next[1].node, next[1].name, item, 1) > 0) { machine_push(c, m, item); return 0; }
+    if (!next->other || store_slow(c, f, next[1].line, next[1].name, item, 1) > 0) { machine_push(c, m, item); return 0; }
     spy_release(item);
     return 1;
 }
@@ -39984,10 +39968,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (c->error_type[0]) continue;
         }
         Instruction *ins = &code[pc++];
-        Node *n = ins->node;
-        if (n) {
+        if (ins->line) {
             if (!quiet(c, &f)) {
-                int ticked = tick_full(c, &f, n, !truth_known);
+                int ticked = tick_full(c, &f, ins->line, !truth_known);
                 /* A dead instance's Python __del__ runs before the step. */
                 if (ticked > 0) goto finalize;
                 if (ticked) continue;
@@ -40000,14 +39983,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 /* A fused step runs only quiet, where no tick would record
                  * its plain steps; NEXT dispatches only then. */
                 if (fused(ins->op)) continue;
-            } else relocate(c, n);
+            } else relocate(c, ins->line);
         } else if (!quiet(c, &f)) {
-            /* An instruction of no node ticks on the definition, keeping the
-             * frame's line; while only a line would be recorded, it need not.
-             * A finalizer the machine runs waits for a node's step. */
-            n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
+            /* An instruction of no line ticks on its definition's, keeping
+             * the frame's line; while only a line would be recorded, it need
+             * not. A finalizer the machine runs waits for a step with a line. */
+            Node *n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
             size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
-            if (tick_full(c, &f, n, TICK_DEFER)) continue;
+            if (tick_full(c, &f, n->line, TICK_DEFINITION)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
         }
         SPYValue *a = NULL, *b = NULL, *value = NULL, *x, *y; /* a and b are owned; x and y, borrowed operands */
@@ -40182,7 +40165,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); break;
         CASE(BC_STORE)
-            if (store_into(c, &f, n, ins->name, m->stack[m->len - 1], 1) > 0) goto store_step;
+            if (store_into(c, &f, ins->line, ins->name, m->stack[m->len - 1], 1) > 0) goto store_step;
             if (ins->arg) a = machine_pop(m);
             NEXT_RELEASE;
         CASE(BC_IMPORT) goto store_step;
@@ -40191,7 +40174,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (store_operands(c, m, &f, ins)) pc = ins->target;
             NEXT;
         CASE(BC_UNPACK)
-            a = unpack_counted(c, m, &f, n, (size_t)ins->arg, ins->other == NO_STEP ? SIZE_MAX : ins->other);
+            a = unpack_counted(c, m, &f, ins->line, (size_t)ins->arg, ins->other == NO_STEP ? SIZE_MAX : ins->other);
             if (a) for (size_t i = a->as.seq.len; i; i--)
                 if (machine_push(c, m, spy_retain(a->as.seq.items[i - 1]))) break;
             if (!a && !c->error_type[0]) goto consume_generator;
@@ -40488,7 +40471,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 SPYValue *iterator = m->blocks[m->block_len - 1].value;
                 if (!iterator_fast(c, iterator, &a)) {
                     if (resumable(iterator)) { value = iterator; goto resume_generator; }
-                    relocate(c, n);
+                    relocate(c, ins->line);
                     /* A Python __next__, or a map's function, is a call that
                      * returns into this step. */
                     SPYValue *next;
@@ -40502,20 +40485,20 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     /* The name's BC_STORE after the step, which it skips, takes one
                      * bound through a namespace's Python __setitem__ (store_call). */
                     Instruction *store = &code[pc];
-                    if (UNLIKELY(store_into(c, &f, store->node, store->name, a, 1) > 0)) { machine_push(c, m, a); a = NULL; }
+                    if (UNLIKELY(store_into(c, &f, store->line, store->name, a, 1) > 0)) { machine_push(c, m, a); a = NULL; }
                     /* The body and the jump back, while no pass is counted or
                      * watched and the iterator steps itself without raising. */
                     else if (pc++, ins->other == 4 && !watched(c)) {
                         int left = 0;
                         while (quiet(c, &f)) {
                             spy_release(a); a = NULL;
-                            relocate(c, code[pc].node);
+                            relocate(c, code[pc].line);
                             /* Its plain steps run when it declines. */
                             if (!assign_fused(c, &f, code, pc + 1, &code[pc])) { pc++; break; }
                             if (c->error_type[0]) { left = 1; break; }
                             if (watched(c) || !quiet(c, &f) || !iterator_fast(c, iterator, &a)) { pc -= 2; break; }
                             if (!a) { pc = ins->target; break; }
-                            store_into(c, &f, store->node, store->name, a, 0);
+                            store_into(c, &f, store->line, store->name, a, 0);
                         }
                         if (left) { pc++; continue; }
                     }
@@ -40534,7 +40517,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* A handler's block, which unbinds its name, stores it, skipping its BC_STORE. */
             else if (match > 0 && (ins->arg & 4)) {
                 block->name = code[pc].name;
-                store_into(c, &f, code[pc].node, code[pc].name, block->error->value, 0);
+                store_into(c, &f, code[pc].line, code[pc].name, block->error->value, 0);
                 pc++;
             } else if (match > 0 && (ins->arg & 2)) machine_push(c, m, spy_retain(block->error->value));
             break;
@@ -40579,7 +40562,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             inner->target = ins->other;
             if (ins->arg & 2) {
                 inner->name = code[pc].name;
-                store_into(c, &f, code[pc].node, code[pc].name, match, 0);
+                store_into(c, &f, code[pc].line, code[pc].name, match, 0);
                 pc++;
             } else if (ins->arg) machine_push(c, m, spy_retain(match));
             spy_release(c->handled); c->handled = match;
@@ -52275,7 +52258,6 @@ void spy_context_free(SPYContext *c) {
     if (c->spare_machine) { mem_free(c->spare_machine->blocks); mem_free(c->spare_machine->stack); mem_free(c->spare_machine); }
     calls_free(c, 0);
     free_program(c->compare_code);
-    mem_free(c->call_nodes);
     mem_free(c->calls);
     for (int k = 0; k < 16; k++)
         for (MemHead *b = c->spare_blocks[k], *next; b; b = next) { cache_take(b, sizeof(*b) + (k + 1) * 16); next = b->next; free(b); }

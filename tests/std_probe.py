@@ -338,6 +338,8 @@ def traced_class():
 
 def traced_exec():
     exec("x = 1\nfor i in range(2):\n    x += i\nx")
+    exec("class First:\n    a = 1\nz = 3\n", {})
+    exec("f = lambda: 1\nf()\n", {})
     return eval("x if False else 5", {"x": 1})
 
 
