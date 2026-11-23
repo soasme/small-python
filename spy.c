@@ -147,12 +147,13 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * symbol keys (owned) for the next call. */
 /* nodes counts the scope's own nodes, which run at most once between two
  * steps: a body is charged a step per 8 of them when entered. A class's
- * statics chain its methods' self.attr stores through static_next; its
+ * statics are the attribute names its methods' self.attr stores spell,
+ * borrowed from its source unit; its
  * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
  * its first build. */
 /* children: the scopes whose parent this is, linked through sibling.
  * type_params: a generic scope's (TypeParameter). */
-struct Scope { Node *owner, *statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+struct Scope { Node *owner; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -161,6 +162,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_ANNOTATED = 2048 /* A class body with an annotated assignment. */, F_FINISHED = 4096 /* Seen by nodes_finish. */,
        F_EMITTED = 8192 /* A statement compiled in place as it was parsed (at_body). */,
+       F_AITER = 16384 /* A comprehension whose first iterable is asynchronous. */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
 /* A text operand and its name-lookup cache. Literal nodes use only text.
@@ -196,7 +198,6 @@ struct Node {
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
-    Node *static_next; /* A self.attr store's next one in its class's statics. */
     Program *code;
     Program *flat; /* A function body that holds a call and cannot suspend, on the machine. */
     Parameter *signature; /* A function's or lambda's parameters, args', their names borrowed. */
@@ -1473,7 +1474,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
 #undef VISIT
 }
 static void free_scope(Scope *scope) {
-    if (scope) { mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope); }
+    if (scope) { mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics); mem_free(scope); }
 }
 static int weak_push(SPYContext *c, SPYValue ***items, size_t *len, size_t *cap, SPYValue *value) {
     if (*len == *cap) {
@@ -8345,7 +8346,8 @@ static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
     if (store > 0 && n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self")) {
         for (Scope *outer = scope->parent; outer; outer = outer->parent) {
             if (outer->kind != S_CLASS) continue;
-            n->static_next = outer->statics; outer->statics = n;
+            if (grow(c, (void **)&outer->statics, &outer->statics_cap, outer->statics_len + 1, sizeof(*outer->statics))) return -1;
+            outer->statics[outer->statics_len++] = source_name(n->b);
             break;
         }
     }
@@ -16680,6 +16682,7 @@ static int compile_comprehension(SPYContext *c, Node *n) {
     n->code = allocate(c, sizeof(*n->code));
     if (!n->code) return -1;
     n->code->calls = c->pausing ? PAUSING : BODY; n->code->loads = c->string_source != 0;
+    if (n->a->op) n->flags |= F_AITER;
     compile_comprehension_clause(c, n->code, n, n->a);
     if (n->op == N_TUPLE) emit(c, n->code, BC_NONE, n, 0);
     emit(c, n->code, BC_FLOW, n, FLOW_RETURN);
@@ -21871,7 +21874,7 @@ static SPYValue *comprehension_of(SPYContext *c, Frame *f, Node *n, SPYValue *it
 }
 /* Comprehension n over source, its first iterable (comprehension_of). */
 static SPYValue *comprehension_new(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
-    return comprehension_of(c, f, n, n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source));
+    return comprehension_of(c, f, n, n->flags & F_AITER ? async_iterator(c, source, 1) : get_iterator(c, source));
 }
 /* The value of comprehension n over source: an eager one's result, else a
  * generator. */
@@ -22678,8 +22681,7 @@ static SPYValue *static_attributes(SPYContext *c, Scope *scope) {
     if (scope->static_attributes) return spy_retain(scope->static_attributes);
     SPYValue *names = value_new(c, SPY_DICT), *result = spy_list(c);
     if (!names || !result) { spy_release(names); spy_release(result); return NULL; }
-    for (Node *node = scope->statics; node && !c->error_type[0]; node = node->static_next)
-        name_set(c, names, source_name(node->b), c->none);
+    for (size_t i = 0; i < scope->statics_len && !c->error_type[0]; i++) name_set(c, names, scope->statics[i], c->none);
     for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++)
         sequence_append(c, result, map_items(names)[i].key);
     spy_release(names);
@@ -49515,7 +49517,7 @@ static SPYValue *comprehension_iterated(SPYContext *c, Machine *m, SPYValue *sta
     (void)m;
     SPYValue *fn = state->as.seq.items[0], *source = state->as.seq.items[1], *generator = NULL;
     Node *def = fn->as.function.def;
-    if (iterator) iterator = def->a->op ? async_returned(c, source, iterator, 1) : iterator_returned(c, source, iterator, "__iter__");
+    if (iterator) iterator = def->flags & F_AITER ? async_returned(c, source, iterator, 1) : iterator_returned(c, source, iterator, "__iter__");
     if (iterator) {
         Frame frame = {fn->as.function.env, fn->as.function.unit, 0};
         generator = comprehension_named(c, fn, comprehension_of(c, &frame, def, iterator));
@@ -49536,7 +49538,7 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
         /* On the step's machine an instance's Python __iter__ or
          * __aiter__ is its call (comprehension_iterated). */
         Machine *m = argv[0]->type == SPY_INSTANCE && !eager_comprehension(def) ? step_machine(c) : NULL;
-        SPYValue *method = m ? special_method(c, argv[0], def->a->op ? "__aiter__" : "__iter__") : NULL;
+        SPYValue *method = m ? special_method(c, argv[0], def->flags & F_AITER ? "__aiter__" : "__iter__") : NULL;
         SPYValue *state = method ? spy_tuple(c, 2, (SPYValue *[]){fn, argv[0]}) : NULL;
         if (state) {
             SPYValue *generator = callk(c, m, method, 0, NULL, comprehension_iterated, state);
