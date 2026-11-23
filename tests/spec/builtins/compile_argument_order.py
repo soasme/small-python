@@ -5,7 +5,7 @@
 # checking the source's type and the mode's and numbers' values; an
 # error stops the conversions after it; keywords and calls inside
 # functions convert alike.
-from harness import assert_eq
+from harness import assert_eq, assert_raises
 
 log = []
 
@@ -70,3 +70,26 @@ for i, (f, expected) in enumerate(cases):
 def inside():
     return [run(f) for f, _ in cases]
 assert_eq(inside(), [e for _, e in cases])
+
+# A filename's native __fspath__ gives str or bytes, or raises; one None,
+# like an object without it, is no path.
+class NativePath:
+    __fspath__ = "native.py".__str__
+class BytesPath:
+    __fspath__ = b"bytes.py".__bytes__
+class IntPath:
+    __fspath__ = (5).__int__
+assert_eq(compile("1", NativePath(), "eval").co_filename, "native.py")
+assert_eq(compile("1", BytesPath(), "eval").co_filename, "bytes.py")
+with assert_raises(TypeError, message="expected IntPath.__fspath__() to return str or bytes, not int"):
+    compile("1", IntPath(), "eval")
+class RaisingPath:
+    __fspath__ = [].pop
+with assert_raises(IndexError):
+    compile("1", RaisingPath(), "eval")
+class NoPath:
+    __fspath__ = None
+with assert_raises(TypeError, message="expected str, bytes or os.PathLike object, not NoPath"):
+    compile("1", NoPath(), "eval")
+with assert_raises(TypeError, message="expected str, bytes or os.PathLike object, not int"):
+    compile("1", 5, "eval")
