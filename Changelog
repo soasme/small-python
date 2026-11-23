@@ -13,6 +13,8 @@ Unreleased (0.10.0):
 - spyc -D PKG.* adds the modules in name order
 - the unicode_escape codec
 - -O and -OO preserve generator functions whose yield occurs in an assertion
+- of several nonlocal errors, the first met from the module scope down is
+  reported; an async generator's valued return after them, at its return
 - a generator that dies while its frame lives on is gone to weak references
 - the asend, athrow and anext awaitable types define their methods, so
   they are awaitable to type-based checks

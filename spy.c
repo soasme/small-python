@@ -171,7 +171,7 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * its annotation function's scope, or on that function its owner's;
  * generic is its type parameters' scope, and first_line its first
  * decorator's line or its own (scope_define). */
-struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
+struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; Node *returned; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -4571,7 +4571,7 @@ typedef struct {
     int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1; 3: also a 0-based offset; 4: a 0-based offset, end offset 0). */
     SPYValue *unit;
     Node *definition; /* The current function, lambda or class body; NULL at module level. */
-    size_t return_line; /* First valued return in the compiler's diagnostic order. */
+    Node *returned; /* First valued return in the compiler's diagnostic order. */
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
     Node *deferred_node; /* When set, the deferred error covers this node. */
@@ -4609,6 +4609,11 @@ typedef struct {
      * set aside until the parse ends (analyse_statements). */
     Node *analysed;
     Analysis named, symbols;
+    /* The newest node and module child scope resolved (resolve_new), and
+     * the first nonlocal error and async generator return error. */
+    Node *resolved_to;
+    Scope *resolved_child;
+    Analysis resolved, returns;
 } Parser;
 static Scope *scope_new(SPYContext *, Scope *, int);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -7773,8 +7778,8 @@ static Node *statement_body(Parser *p) {
         }
         int loops = p->loops, functions = p->functions, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
-        size_t return_line = p->return_line;
-        p->definition = n; p->return_line = 0;
+        Node *returned = p->returned;
+        p->definition = n; p->returned = NULL;
         const char *private_name = p->private_name;
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
@@ -7782,7 +7787,7 @@ static Node *statement_body(Parser *p) {
         Node *start = p->unit->as.unit.nodes;
         Body enclosing = body_begin(p, n, p->depth + 1);
         n->b = p->body.program ? suite_after(p, "class definition", n->line) : NULL;
-        p->definition = definition; p->return_line = return_line;
+        p->definition = definition; p->returned = returned;
         if (body_end(p, n->b, start, enclosing) || collect_end(p, n, &n->annotate, annotations)) return NULL;
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
@@ -7816,8 +7821,8 @@ static Node *statement_body(Parser *p) {
         if (emits) try_handlers(p->ctx, program, n, &t);
         /* Bindings still follow source order. For return diagnostics the
          * compiler visits else and finally before exception handlers. */
-        size_t body_return = p->return_line;
-        p->return_line = 0;
+        Node *body_return = p->returned;
+        p->returned = NULL;
         Node **tail = &n->args;
         int bare = 0, star = -1;
         size_t bare_at = 0;
@@ -7889,8 +7894,8 @@ static Node *statement_body(Parser *p) {
             span_block(p, handler, except_at);
             *tail = handler; tail = &handler->next;
         }
-        size_t handler_return = p->return_line;
-        p->return_line = body_return;
+        Node *handler_return = p->returned;
+        p->returned = body_return;
         if (star == 1) n->flags |= F_STAR;
         if (emits) try_else(p->ctx, program, n, &t);
         if (take_word(p, "else")) {
@@ -7899,7 +7904,7 @@ static Node *statement_body(Parser *p) {
         }
         if (emits) try_finally(p->ctx, program, &t);
         if (take_word(p, "finally") && !(n->c = suite_of(p, "'finally' statement", keyword_line(p), emits))) return NULL;
-        if (!p->return_line) p->return_line = handler_return;
+        if (!p->returned) p->returned = handler_return;
         if (!n->args && !n->c) return syntax(p, "expected 'except' or 'finally' block");
         p->body.tries--;
         if (emits) { try_end(p->ctx, program, &t); n->flags |= F_EMITTED; }
@@ -7944,19 +7949,19 @@ static Node *statement_body(Parser *p) {
         if (function_annotations(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
-        size_t return_line = p->return_line;
-        p->definition = n; p->return_line = 0;
+        Node *returned = p->returned;
+        p->definition = n; p->returned = NULL;
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
         int collecting = p->collecting;
         p->collecting = 0;
         Node *start = p->unit->as.unit.nodes;
         Body enclosing = body_begin(p, n, p->depth + 1);
         n->b = p->body.program ? suite_after(p, "function definition", n->line) : NULL;
-        size_t first_return = p->return_line;
-        p->definition = definition; p->return_line = return_line; p->collecting = collecting;
+        Node *first_return = p->returned;
+        p->definition = definition; p->returned = returned; p->collecting = collecting;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
         if (body_end(p, n->b, start, enclosing) || !body_scope(p->ctx, n)) return NULL;
-        n->scope->return_line = first_return;
+        n->scope->returned = first_return;
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
         return n;
     }
@@ -7982,7 +7987,7 @@ static Node *statement_body(Parser *p) {
         if (outside) p->deferred_node = n;
         if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
         if (keyword(p, "for")) return syntax(p, "invalid syntax");
-        if (n->a && !p->return_line) p->return_line = n->line;
+        if (n->a && !p->returned) p->returned = n;
         return n;
     }
     if (keyword(p, "break") || keyword(p, "continue")) {
@@ -8234,6 +8239,7 @@ static int analysis_defer(Parser *p, Analysis *a) {
     SPYContext *c = p->ctx;
     if (!strcmp(c->error_type, "MemoryError")) return -1;
     const char *message = c->error_text ? c->error_text : c->error_message;
+    mem_free(a->message);
     if (!(a->message = mem_malloc(c, strlen(message) + 1))) return -1;
     strcpy(a->message, message);
     memcpy(a->type, c->error_type, sizeof(a->type));
@@ -8263,6 +8269,61 @@ static int analyse_statements(Parser *p, Node *n) {
     c->node_start = start; c->node_end = end;
     return status;
 }
+static int scope_resolve(SPYContext *, Scope *);
+static void scope_define(Node *);
+static int resolve_tree(Parser *, Scope *);
+static void node_error(SPYContext *, Node *);
+/* Resolve the scopes of a list of siblings from head back to stop, in
+ * source order: the reverse of the list, newest first. */
+static int resolve_children(Parser *p, Scope *head, Scope *stop) {
+    size_t count = 0;
+    for (Scope *s = head; s != stop; s = s->sibling) count++;
+    Scope **order = count ? allocate(p->ctx, count * sizeof(*order)) : NULL;
+    if (count && !order) return -1;
+    size_t i = count;
+    for (Scope *s = head; s != stop; s = s->sibling) order[--i] = s;
+    int status = 0;
+    for (i = 0; i < count && !status; i++) status = resolve_tree(p, order[i]);
+    mem_free(order);
+    return status;
+}
+/* Resolve scope s, then those within it, and put on each what run time
+ * reads of its definition. As CPython's symbol table and compiler do,
+ * the first nonlocal error in that order is kept (p->resolved), and
+ * after it the first async generator's valued return (p->returns);
+ * -1 for an error that cannot wait. */
+static int resolve_tree(Parser *p, Scope *s) {
+    SPYContext *c = p->ctx;
+    if (!p->resolved.message && scope_resolve(c, s) && analysis_defer(p, &p->resolved)) return -1;
+    if (s->owner) scope_define(s->owner);
+    if (!p->returns.message && s->form == N_DEF && s->op == 2 && s->returned) {
+        node_error(c, s->returned);
+        spy_error(c, "SyntaxError", "'return' with value in async generator");
+        if (analysis_defer(p, &p->returns)) return -1;
+    }
+    return resolve_children(p, s->children, NULL);
+}
+/* Resolve the module's scopes made since the last resolved, and define
+ * the root scopes of the nodes parsed since stop (a string annotation's),
+ * which are within no scope. */
+static int resolve_new(Parser *p, Node *stop) {
+    SPYContext *c = p->ctx;
+    Scope *module = p->unit->as.unit.scope;
+    const char *at = c->node_start, *end = c->node_end;
+    c->node_start = c->node_end = NULL;
+    int status = resolve_children(p, module->children, p->resolved_child);
+    c->node_start = at; c->node_end = end;
+    p->resolved_child = module->children;
+    for (Node *n = p->unit->as.unit.nodes; n != stop; n = n->allocated) if (node_root(p->unit, n->scope)) scope_define(n);
+    p->resolved_to = p->unit->as.unit.nodes;
+    return status;
+}
+/* Resolve a line of module statements, parsed since start, once it is
+ * analysed without error. */
+static int resolve_statements(Parser *p, Node *start) {
+    if (p->named.message || p->symbols.message || p->ctx->error_type[0]) return 0;
+    return resolve_new(p, start);
+}
 /* Raise analysis error a, unless one is pending. */
 static void analysis_raise(SPYContext *c, Analysis *a) {
     if (c->error_type[0] || !a->message) return;
@@ -8279,7 +8340,7 @@ static Node *statements(Parser *p) {
         if (!p->depth) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
-        if (!p->depth && analyse_statements(p, n)) return NULL;
+        if (!p->depth && (analyse_statements(p, n) || resolve_statements(p, start))) return NULL;
         if (!p->depth) p->analysed = last;
         if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
@@ -9097,15 +9158,9 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 scope_resolve(c, unit->as.unit.scope);
             }
         }
-        for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated) {
-            if (scope_resolve(c, n->scope)) break;
-            if (n->scope) scope_define(n);
-            /* The compiler's error, after every symbol table error. */
-            if (n->kind == N_DEF && n->op == 2 && n->scope->return_line) {
-                c->line = n->scope->return_line;
-                spy_error(c, "SyntaxError", "'return' with value in async generator"); break;
-            }
-        }
+        /* What no line resolved: the module's annotations, an eval() expression. */
+        if (!c->error_type[0] && unit->as.unit.scope && !resolve_new(&p, p.resolved_to)) { analysis_raise(c, &p.resolved); analysis_raise(c, &p.returns); }
+        mem_free(p.resolved.message); mem_free(p.returns.message);
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
             c->line = p.deferred_line; p.error_start = p.deferred_start; p.error_end = p.deferred_end;

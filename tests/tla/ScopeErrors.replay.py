@@ -20,6 +20,14 @@ def source(p):
         if p["where"] == "module":
             return "%s x\n" % p["decl"]
         return "def g():\n    x = 1\n    class C:\n        %s x\n        x = 2\n" % p["decl"]
+    if part == "order":
+        return {"siblings": "def f():\n    nonlocal a\ndef g():\n    nonlocal b\n",
+                "inner_first": "def f():\n    def h():\n        nonlocal a\n    nonlocal b\n",
+                "outer_first": "def f():\n    nonlocal b\n    def h():\n        nonlocal a\n",
+                "module": "def f():\n    nonlocal a\nnonlocal top\n",
+                "returns": "async def f():\n    yield 1\n    return 2\nasync def g():\n    yield 1\n    return 3\n",
+                "return_first": "async def f():\n    yield 1\n    return 2\ndef g():\n    nonlocal z\n",
+                "return_last": "def g():\n    nonlocal z\nasync def f():\n    yield 1\n    return 2\n"}[p["shape"]]
     binding = {"enclosing": "def g():\n    x = 1\n", "module": "x = 1\ndef g():\n", "none": "def g():\n"}[p["source"]]
     return binding + "    def f():\n        nonlocal x\n"
 
