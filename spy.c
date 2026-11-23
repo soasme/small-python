@@ -18143,8 +18143,9 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     ClosureNames w = {c, def ? def->scope : NULL, value_new(c, SPY_TUPLE), cells};
     if (!w.names || !w.self) return w.names;
     if (closure_scopes(&w, w.self)) { spy_release(w.names); return NULL; }
-    if (cells && def->kind == N_CLASS && needs_classdict(def->b, 0, def->flags & F_FUTURE)) {
-        SPYValue *text = spy_string(c, "__classdict__", 13);
+    /* A class body's own cells, and a generic one's type parameters. */
+    if (def->kind == N_CLASS && (cells ? needs_classdict(def->b, 0, def->flags & F_FUTURE) : def->params != NULL)) {
+        SPYValue *text = cells ? spy_string(c, "__classdict__", 13) : spy_string(c, ".type_params", 12);
         if (!text || sequence_append(c, w.names, text)) { spy_release(text); spy_release(w.names); return NULL; }
         spy_release(text);
     }

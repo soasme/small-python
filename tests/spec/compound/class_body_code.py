@@ -1,4 +1,4 @@
-# spec: PLS-315 16.4.2, 16.4.3, 9.3.3, 28.1, 28.2
+# spec: PLS-315 16.4.2, 16.4.3, 16.7, 9.3.3, 28.1, 28.2
 # description: The code of a class body: its __classdict__ and __class__ cells, the class dictionary cell type.__new__ fills, and functions made from it.
 from harness import *
 
@@ -55,6 +55,8 @@ free_cases = [
     ("def f(z, a):\n    class C:\n        def m(self): return __class__, z, a\n    return C\n", ("__class__", "__classdict__"), ("a", "z")),
     # The class's annotation function is within its body, so its names are too.
     ("def f(a):\n    class C:\n        x: a\n    return C\n", ("__classdict__",), ("a",)),
+    # A generic class's body reads its type parameters from the scope around it.
+    ("def f(a):\n    class C[T]:\n        x = a, T\n    return C\n", (), (".type_params", "T", "a")),
 ]
 for source, cells, free in free_cases:
     ns = {"a": "global"}

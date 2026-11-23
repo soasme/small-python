@@ -30,7 +30,7 @@ def outcome(p):
             return builtins.__build_class__(func, name, *bases, **kw)
 
         line = "a: v" if p["annotated"] else "b = 1"
-        exec("def outer():\n    v = 1\n    class C:\n        " + line + "\n    return C\nouter()\n",
+        exec("def outer():\n    v = 1\n    class C" + ("[T]" if p["generic"] else "") + ":\n        " + line + "\n    return C\nouter()\n",
              {"__builtins__": dict(vars(builtins), __build_class__=build)})
         return "%r %r" % (bodies[0].co_cellvars, bodies[0].co_freevars)
     if p["op"] in ("module", "methods"):
