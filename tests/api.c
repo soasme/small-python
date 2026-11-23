@@ -1082,6 +1082,27 @@ int main(int argc, char **argv) {
     assert(numbers[0] && numbers[1] && integer(c, spy_call(c, numbers_ok, 2, numbers)) == 1);
     spy_release(numbers[0]); spy_release(numbers[1]); spy_release(numbers_ok);
     spy_release(only_index); spy_release(host_int); spy_release(host_float);
+    /* An async generator's operation the host sends to or closes runs in
+     * C: a close the generator answers by awaiting, an aclose answered by
+     * a yield, and an asend's yield ending it with StopIteration. */
+    execute(c, "class HostFut:\n    def __await__(self):\n        yield 'fut'\n"
+               "async def awaits_on_exit():\n    try: yield 1\n    except GeneratorExit: await HostFut()\n"
+               "async def yields_on_exit():\n    try: yield 1\n    except GeneratorExit: yield 2\n"
+               "def started(g):\n    try: g.asend(None).send(None)\n    except StopIteration: pass\n    return g\n"
+               "op_close = started(awaits_on_exit()).asend(None).close\n"
+               "aclose_send = started(yields_on_exit()).aclose().send\n"
+               "asend_send = yields_on_exit().asend(None).send\n");
+    static const char *const op_calls[][3] = {
+        {"op_close", "RuntimeError", "coroutine ignored GeneratorExit"},
+        {"aclose_send", "RuntimeError", "async generator ignored GeneratorExit"},
+        {"asend_send", "StopIteration", "1"}};
+    for (size_t i = 0; i < sizeof(op_calls) / sizeof(*op_calls); i++) {
+        SPYValue *method = spy_get_global(c, op_calls[i][0]), *none = spy_none(c);
+        assert(!spy_call(c, method, i ? 1 : 0, &none));
+        assert(!strcmp(spy_error_type(c), op_calls[i][1]) && !strcmp(spy_error_message(c), op_calls[i][2]));
+        spy_clear_error(c);
+        spy_release(none); spy_release(method);
+    }
 
     /* The policy sees each engine event once, with its arguments; a refusal
      * is PermissionError unless the policy raised its own. */
