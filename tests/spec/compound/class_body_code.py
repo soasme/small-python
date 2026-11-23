@@ -34,6 +34,18 @@ cases = [
     ("class C:\n    x: int = 1\n", ("__classdict__",)),
     ("class C:\n    (x): int\n", ("__classdict__",)),
     ("class C:\n    type A = int\n", ("__classdict__",)),
+    # Any annotated assignment, whatever its target, under PEP 649.
+    ("class C:\n    d = {}\n    d['k']: int\n", ("__classdict__",)),
+    # One in a conditional block also has the set of those that ran.
+    ("class C:\n    if 1:\n        x: int\n", ("__classdict__", "__conditional_annotations__")),
+    ("class C:\n    while 0:\n        x: int\n", ("__classdict__", "__conditional_annotations__")),
+    ("class C:\n    try: pass\n    finally:\n        d = {}\n        d['k']: int\n", ("__classdict__", "__conditional_annotations__")),
+    # Under PEP 563 only type parameters and aliases see the namespace.
+    ("from __future__ import annotations\nclass C:\n    x: int\n    def m(self): pass\n", ()),
+    ("from __future__ import annotations\nclass C:\n    def m[T](self): pass\n", ("__classdict__",)),
+    ("from __future__ import annotations\nclass C:\n    type A = int\n", ("__classdict__",)),
+    ("from __future__ import annotations\nclass C:\n    class D[T]: pass\n", ("__classdict__",)),
+    ("from __future__ import annotations\nclass C:\n    if 1:\n        x: int\n", ("__conditional_annotations__",)),
     ("class C:\n    def m(self): return __class__\n", ("__class__", "__classdict__")),
     ("class C:\n    def m(self): return super()\n", ("__class__", "__classdict__")),
 ]

@@ -151,7 +151,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
-       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_FINISHED = 4096 /* Seen by nodes_finish. */,
+       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_ANNOTATED = 2048 /* A class body with an annotated assignment. */, F_FINISHED = 4096 /* Seen by nodes_finish. */,
        F_EMITTED = 8192 /* A statement compiled in place as it was parsed (at_body). */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */ };
@@ -7069,6 +7069,7 @@ static int collect_end(Parser *p, Node *owner, Node **out, Annotations saved) {
     *out = NULL;
     if (conditional && owner) owner->flags |= F_CONDITIONAL;
     else if (conditional) p->unit->as.unit.conditional_annotations = 1;
+    if (annotated && owner) owner->flags |= F_ANNOTATED;
     if (p->future_annotations && owner) owner->flags |= F_FUTURE;
     if (p->future_annotations && annotated) {
         if (owner) owner->flags |= F_SETUP_ANNOTATIONS;
@@ -18123,17 +18124,16 @@ static int code_names_clauses(ClosureNames *w, Node *n, int depth) {
     if (n->op == N_DICT) return code_names_walk(w, n->scope, element->a, depth + 1) || code_names_walk(w, n->scope, element->b, depth + 1) ? -1 : 0;
     return code_names_walk(w, n->scope, element, depth + 1);
 }
-/* Whether a class body has a scope that can see the class namespace (a
- * def, an annotation, a type alias, or type parameters), so its code has a
- * __classdict__ cell (16.4.1); under PEP 563 (future) no def or
- * annotation has one. */
-static int needs_classdict(Node *n, int depth, int future) {
-    for (; n && depth < 1000; n = n->next) {
-        if (n->kind == N_TYPEALIAS || n->kind == N_GENERIC || (!future && (n->kind == N_DEF || n->kind == N_ANNASSIGN))) return 1;
-        if (n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_COMPREHENSION || n->kind == N_DEF || n->kind == N_ANNASSIGN) continue;
-        if (needs_classdict(n->a, depth + 1, future) || needs_classdict(n->b, depth + 1, future) ||
-            needs_classdict(n->c, depth + 1, future) || needs_classdict(n->args, depth + 1, future))
-            return 1;
+/* Whether class body n has a __classdict__ cell (16.4.1): it has a scope
+ * that can see the class namespace, type parameters or a type alias, or,
+ * but under PEP 563, a def or an annotation. Lambdas, comprehensions and
+ * classes do not see it. */
+static int needs_classdict(Node *n) {
+    int future = n->flags & F_FUTURE;
+    if (!future && (n->flags & F_ANNOTATED)) return 1;
+    for (Scope *child = n->scope->children; child; child = child->sibling) {
+        Node *owner = child->owner;
+        if (owner->kind == N_GENERIC || (owner->kind == N_DEF && (!future || (owner->flags & F_TYPEPARAMS)))) return 1;
     }
     return 0;
 }
@@ -18144,8 +18144,13 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     if (!w.names || !w.self) return w.names;
     if (closure_scopes(&w, w.self)) { spy_release(w.names); return NULL; }
     /* A class body's own cells, and a generic one's type parameters. */
-    if (def->kind == N_CLASS && (cells ? needs_classdict(def->b, 0, def->flags & F_FUTURE) : def->params != NULL)) {
-        SPYValue *text = cells ? spy_string(c, "__classdict__", 13) : spy_string(c, ".type_params", 12);
+    const char *own[2];
+    size_t count = 0;
+    if (def->kind == N_CLASS && !cells && def->params) own[count++] = ".type_params";
+    if (def->kind == N_CLASS && cells && needs_classdict(def)) own[count++] = "__classdict__";
+    if (def->kind == N_CLASS && cells && (def->flags & F_CONDITIONAL)) own[count++] = "__conditional_annotations__";
+    for (size_t i = 0; i < count; i++) {
+        SPYValue *text = spy_string(c, own[i], strlen(own[i]));
         if (!text || sequence_append(c, w.names, text)) { spy_release(text); spy_release(w.names); return NULL; }
         spy_release(text);
     }
