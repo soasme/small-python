@@ -1103,6 +1103,23 @@ int main(int argc, char **argv) {
         spy_clear_error(c);
         spy_release(none); spy_release(method);
     }
+    /* float.from_number and complex.from_number the host calls convert in
+     * C, and a subclass's is called with the number. */
+    execute(c, "class HostFloat(float): pass\n"
+               "from_numbers = [float.from_number, complex.from_number, HostFloat.from_number]\n"
+               "def converted_ok(f, z, h):\n"
+               "    return 1 if (type(f), f, type(z), z, type(h), h) == (float, 2.0, complex, 2+0j, HostFloat, 2.0) else 0\n");
+    SPYValue *from_numbers = spy_get_global(c, "from_numbers"), *two = spy_int(c, 2), *converted[3];
+    for (int i = 0; i < 3; i++) {
+        SPYValue *index = spy_int(c, i), *from = spy_get_item(c, from_numbers, index);
+        converted[i] = spy_call(c, from, 1, &two);
+        assert(converted[i]);
+        spy_release(from); spy_release(index);
+    }
+    SPYValue *converted_ok = spy_get_global(c, "converted_ok");
+    assert(integer(c, spy_call(c, converted_ok, 3, converted)) == 1);
+    for (int i = 0; i < 3; i++) spy_release(converted[i]);
+    spy_release(converted_ok); spy_release(two); spy_release(from_numbers);
 
     /* The policy sees each engine event once, with its arguments; a refusal
      * is PermissionError unless the policy raised its own. */

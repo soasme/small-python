@@ -83,3 +83,17 @@ expected = [
     ([[3, 7, 0, 255], [4, 7, 0, 255]], [('index', 3), ('index', 4)]),
 ]
 assert_eq(cases(), expected)
+
+# A native __float__ or __index__ converts it as well.
+class NativeF:
+    __float__ = (2.5).__float__
+class NativeI:
+    __index__ = (3).__index__
+class NativeBad:
+    __float__ = "x".__str__
+native_view = memoryview(bytearray(16)).cast('d')
+native_view[0] = NativeF()
+native_view[1] = NativeI()
+assert_eq(native_view.tolist(), [2.5, 3.0])
+with assert_raises(TypeError, message="memoryview: invalid type for format 'd'"):
+    native_view[0] = NativeBad()
