@@ -141,7 +141,7 @@ typedef struct Call Call;
 typedef struct Pool Pool;
 typedef struct { uint64_t len; int sign; uint32_t digits[]; } BigInt; /* One layout on every target. */
 typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]; } IntView;
-enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32, S_CELL = 64 /* a nested scope reads it (closed_locals) */ };
+enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32, S_CELL = 64 /* a nested scope reads it (closed_locals) */, S_HELD = 128 /* only annotated: no code reads it */ };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 /* key: the name's str, made when the name is first bound and traced
  * through the unit that owns the scope. */
@@ -172,7 +172,7 @@ typedef struct { const char *name; unsigned flags; size_t line; const char *decl
  * its annotation function's scope, or on that function its owner's;
  * generic is its type parameters' scope, and first_line its first
  * decorator's line or its own (scope_define). */
-struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap; int kind, stars, tries, iterables, cells, kept_len; const char *within, *returned_start, *returned_end; size_t returned_line; Node *clause; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
+struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics, **held; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap, held_len, held_cap; int kind, stars, tries, iterables, cells, kept_len; const char *within, *returned_start, *returned_end; size_t returned_line; Node *clause; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -1522,7 +1522,7 @@ static void drop_kept_tree(SPYContext *c, Scope *s) {
     drop_kept(c, s, 0);
 }
 static void free_scope(Scope *scope) {
-    if (scope) { mem_free(scope->name); mem_free(scope->spelling); free_program(scope->code); free_program(scope->flat); mem_free(scope->signature); mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics);
+    if (scope) { mem_free(scope->name); mem_free(scope->spelling); free_program(scope->code); free_program(scope->flat); mem_free(scope->signature); mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics); mem_free(scope->held);
         for (size_t i = 0; i < scope->texts_len; i++) mem_free(scope->texts[i]);
         mem_free(scope->texts); mem_free(scope); }
 }
@@ -5365,6 +5365,7 @@ static size_t if_else(SPYContext *, Program *, Node *, size_t);
 static int nodes_finish(Parser *, Node *);
 static Scope *body_scope(SPYContext *, Node *);
 static void scope_define(Node *);
+static int scope_unhold(SPYContext *, Scope *);
 static void site_settle(Site *);
 static SPYValue *docstring(SPYContext *, Node *);
 static size_t loop_begin(SPYContext *, Program *, Node *, size_t *);
@@ -8022,7 +8023,7 @@ static Node *statement_body(Parser *p) {
         n->scope->returned_start = first_return.start; n->scope->returned_end = first_return.end;
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
         scope_define(n);
-        return n;
+        return scope_unhold(p->ctx, n->scope) ? NULL : n;
     }
     if (keyword(p, "global") || keyword(p, "nonlocal")) {
         n = node(p, keyword(p, "global") ? N_GLOBAL : N_NONLOCAL);
@@ -8540,11 +8541,26 @@ static char *scope_text(SPYContext *c, Scope *s, const char *text) {
 static Symbol *scope_add(SPYContext *c, Scope *scope, const char *name, size_t line) {
     Symbol *symbol = scope_symbol(scope, name);
     if (symbol) return symbol;
-    const char *copy = scope_text(c, scope, name);
+    /* A name only annotated so far is numbered where it is first used. */
+    const char *copy = NULL;
+    for (size_t i = 0; i < scope->held_len && !copy; i++)
+        if (!strcmp(scope->held[i], name)) { copy = scope->held[i]; scope->held[i] = scope->held[--scope->held_len]; }
+    unsigned flags = copy ? S_LOCAL | S_ANNOT : 0;
+    if (!copy) copy = scope_text(c, scope, name);
     if (!copy || grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return NULL;
     symbol = &scope->symbols[scope->len++];
-    *symbol = (Symbol){copy, 0, line, NULL, NULL, text_hash(copy, strlen(copy)), NULL};
+    *symbol = (Symbol){copy, flags, line, NULL, NULL, text_hash(copy, strlen(copy)), NULL};
     return symbol;
+}
+/* The names of function scope only annotated, made its locals once its
+ * body is analysed; -1 with an error. */
+static int scope_unhold(SPYContext *c, Scope *scope) {
+    while (scope->held_len) {
+        Symbol *symbol = scope_add(c, scope, scope->held[scope->held_len - 1], scope->line);
+        if (!symbol) return -1;
+        symbol->flags |= S_HELD;
+    }
+    return 0;
 }
 static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node *at) {
     if ((flags & (S_LOCAL | S_PARAM)) && !strcmp(n->name.text, "__debug__")) {
@@ -8811,8 +8827,16 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         /* The target, the annotation, then the value. A parenthesized name
          * without a value is neither bound nor used. */
         int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
+        /* A function's local only annotated is no code's local until it is used. */
+        int held = !n->c && n->a->kind == N_NAME && !bare && scope->kind == S_FUNCTION && !symbol;
         size_t from = scope->len;
-        if (!bare && scope_target(c, scope, n->a, n->c ? 1 : -1)) return -1;
+        size_t i = 0;
+        while (held && i < scope->held_len && strcmp(scope->held[i], n->a->name.text)) i++;
+        if (held && i == scope->held_len) {
+            const char *name = scope_text(c, scope, n->a->name.text);
+            if (check_debug_target(c, n->a, 0) || !name || grow(c, (void **)&scope->held, &scope->held_cap, scope->held_len + 1, sizeof(*scope->held))) return -1;
+            scope->held[scope->held_len++] = name;
+        } else if (!held && !bare && scope_target(c, scope, n->a, n->c ? 1 : -1)) return -1;
         size_t mid = scope->len;
         /* An annotation no __annotate__ evaluates is still analysed, in this
          * scope, as an annotation; a module's or class's, in the scope of
@@ -13533,7 +13557,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             SPYValue *cells = names && scope ? closure_names(c, def, 1) : NULL;
             for (size_t i = 0; names && scope && cells && i < scope->len; i++) {
                 Symbol *symbol = &scope->symbols[i];
-                if (!(symbol->flags & S_LOCAL) || (symbol->flags & (S_PARAM | S_GLOBAL | S_NONLOCAL))) continue;
+                if (!(symbol->flags & S_LOCAL) || (symbol->flags & (S_PARAM | S_GLOBAL | S_NONLOCAL | S_HELD))) continue;
                 int cell = 0;
                 for (size_t j = 0; j < cells->as.seq.len && !cell; j++) cell = !strcmp(cells->as.seq.items[j]->as.string.data, symbol->name);
                 if (cell) continue;

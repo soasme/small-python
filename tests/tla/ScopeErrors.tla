@@ -43,7 +43,8 @@
 (* decorators, a dict comprehension's value before its key, a test before *)
 (* its branches) is raised. A locals program binds a target and, with an  *)
 (* assignment expression, a name in its value: the value's is numbered    *)
-(* first (28.2). The outcome is "ok", the message and line, or the locals. *)
+(* first (28.2); a name only annotated is numbered where it is next bound, *)
+(* or not at all. The outcome is "ok", the message and line, or the locals. *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -56,7 +57,7 @@ Programs == [part : {"decl"}, decl : Decls, prior : {"none", "param", "use", "as
             \cup [part : {"statements"}, body : {"module", "class"}, first : {"annotation", "global"}]
             \cup [part : {"headers"}, header : {"for", "except", "case"}]
             \cup [part : {"expressions"}, shape : {"assign", "for", "annassign", "dict", "call", "decorator", "dictcomp", "cond"}]
-            \cup [part : {"locals"}, shape : {"assign", "for", "annassign", "def"}]
+            \cup [part : {"locals"}, shape : {"assign", "for", "annassign", "def", "annotated", "unused"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -94,7 +95,7 @@ Statements(p) == IF p.first = "annotation" \/ p.body = "module"
 
 \* The line of the first error met: a target's, or the later line's.
 Expressions(p) == "'yield' inside list comprehension@" \o (IF p.shape \in {"assign", "for", "annassign"} THEN "2" ELSE "3")
-Locals(p) == IF p.shape = "def" THEN "z,f" ELSE "y,x"
+Locals(p) == CASE p.shape = "def" -> "z,f" [] p.shape = "unused" -> "y" [] OTHER -> "y,x"
 
 Run(p) == CASE p.part = "decl" -> Decl(p) [] p.part = "place" -> Place(p) [] p.part = "binding" -> Binding(p)
             [] p.part = "order" -> Order(p) [] p.part = "statements" -> Statements(p)
@@ -117,7 +118,9 @@ HeadersFirst == Done /\ program.part = "headers" => outcome # "ok"
 \* A target is analysed before the value it is assigned, but numbered after.
 TargetsFirst == Done /\ program.part = "expressions" /\ program.shape \in {"assign", "for", "annassign"} =>
                 outcome = "'yield' inside list comprehension@2"
-ValuesNumberedFirst == Done /\ program.part = "locals" /\ program.shape # "def" => outcome = "y,x"
+ValuesNumberedFirst == Done /\ program.part = "locals" /\ program.shape \in {"assign", "for", "annassign"} => outcome = "y,x"
+\* An annotation without a value numbers no local.
+AnnotationsUnnumbered == Done /\ program.part = "locals" /\ program.shape \in {"annotated", "unused"} => outcome \in {"y", "y,x"}
 
 \* A valued async generator return is never reported over a nonlocal error.
 ScopesBeforeReturns == Done /\ program.part = "order" /\ program.shape \in {"return_first", "return_last"} =>

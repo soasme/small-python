@@ -45,7 +45,8 @@ def source(p):
         return "def g():\n    " + body.replace("A", a).replace("B", b) + "\n"
     if part == "locals":
         return "def g():\n    " + {"assign": "x = (y := 1)", "for": "for x in (y := []): pass",
-                                     "annassign": "x: int = (y := 1)", "def": "def f(a=(z := 1)): pass"}[p["shape"]] + "\n"
+                                     "annassign": "x: int = (y := 1)", "def": "def f(a=(z := 1)): pass",
+                                     "annotated": "x: int\n    y = 1\n    x = 2", "unused": "x: int\n    y = 1"}[p["shape"]] + "\n"
     binding = {"enclosing": "def g():\n    x = 1\n", "module": "x = 1\ndef g():\n", "none": "def g():\n"}[p["source"]]
     return binding + "    def f():\n        nonlocal x\n"
 
