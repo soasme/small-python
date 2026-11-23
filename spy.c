@@ -1351,6 +1351,14 @@ static void scope_edges(Scope *scope, Visit visit, void *data) {
     program_edges(scope->code, visit, data);
     program_edges(scope->flat, visit, data);
 }
+/* Scope s and the scopes within it, which it owns as their root. */
+static void scope_tree_edges(Scope *s, Visit visit, void *data) {
+    scope_edges(s, visit, data);
+    for (Scope *child = s ? s->children : NULL; child; child = child->sibling) scope_tree_edges(child, visit, data);
+}
+/* Whether s, of a node of unit, is a root its node owns: one the unit's
+ * analysis placed in no scope. */
+static int node_root(SPYValue *unit, Scope *s) { return s && !s->parent && s != unit->as.unit.scope; }
 static void edges(SPYValue *v, Visit visit, void *data) {
     /* A value released half-built, after a failed allocation, may hold NULL. */
 #define VISIT(e) do { SPYValue *e_ = (e); if (e_) visit(e_, data); } while (0)
@@ -1362,9 +1370,9 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
             VISIT(node->constant);
             VISIT(node->name.global_key);
-            scope_edges(node->scope, visit, data);
+            if (node_root(v, node->scope)) scope_tree_edges(node->scope, visit, data);
         }
-        scope_edges(v->as.unit.scope, visit, data);
+        scope_tree_edges(v->as.unit.scope, visit, data);
         program_edges(v->as.unit.flat, visit, data);
         break;
     case SPY_LIST: case SPY_TUPLE:
@@ -1487,6 +1495,20 @@ static void edges(SPYValue *v, Visit visit, void *data) {
 #undef VISIT
 }
 static void free_program(Program *);
+static void drop_kept(SPYContext *, Scope *, int);
+static void free_scope(Scope *);
+/* Free root scope s and the scopes within it, their kept environments
+ * released (release) or, at shutdown, dropped. */
+static void free_scope_tree(SPYContext *c, Scope *s, int release) {
+    if (!s) return;
+    for (Scope *child = s->children, *next; child; child = next) { next = child->sibling; free_scope_tree(c, child, release); }
+    drop_kept(c, s, release); free_scope(s);
+}
+/* Drop the kept environments of s and the scopes within it (shutdown). */
+static void drop_kept_tree(SPYContext *c, Scope *s) {
+    for (Scope *child = s ? s->children : NULL; child; child = child->sibling) drop_kept_tree(c, child);
+    drop_kept(c, s, 0);
+}
 static void free_scope(Scope *scope) {
     if (scope) { mem_free(scope->name); mem_free(scope->spelling); free_program(scope->code); free_program(scope->flat); mem_free(scope->signature); mem_free(scope->symbols); mem_free(scope->order); mem_free(scope->type_params); mem_free(scope->statics);
         for (size_t i = 0; i < scope->texts_len; i++) mem_free(scope->texts[i]);
@@ -1569,7 +1591,6 @@ static NO_INLINE void seal_tuple(SPYContext *c, SPYValue *t) {
     if (t->next) t->next->prev = t;
     c->sealed = t;
 }
-static void drop_kept(SPYContext *, Scope *, int);
 static void free_value(SPYValue *v) {
     SPYContext *c = v->ctx;
     if (v->weak) weak_dead(c, v, 0);
@@ -1600,11 +1621,17 @@ static void free_value(SPYValue *v) {
         } else mem_free(map_storage(v));
         mem_free(v->as.map.index); break;
     case V_UNIT: {
+        /* A root's tree may hold a later node's scope: forget those first. */
+        for (Node *n = v->as.unit.nodes; n; n = n->allocated) if (!node_root(v, n->scope)) n->scope = NULL;
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); mem_free(n->name.text); mem_free(n->original); mem_free(n); n = next; }
+        while (n) {
+            Node *next = n->allocated;
+            free_scope_tree(c, n->scope, 1);
+            mem_free(n->name.text); mem_free(n->original); mem_free(n); n = next;
+        }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
-        free_scope(v->as.unit.scope);
+        free_scope_tree(c, v->as.unit.scope, 1);
         free_program(v->as.unit.flat);
         if (c->filename_from == v) c->filename_from = c->quiet_unit = NULL;
         mem_free(v->as.unit.filename);
@@ -52326,8 +52353,10 @@ void spy_context_free(SPYContext *c) {
     c->weak_len = 0;
     /* Kept environments' keys are values freed below. */
     for (SPYValue *v = c->values; v; v = v->next)
-        if (v->type == V_UNIT)
-            for (Node *n = v->as.unit.nodes; n; n = n->allocated) drop_kept(c, n->scope, 0);
+        if (v->type == V_UNIT) {
+            for (Node *n = v->as.unit.nodes; n; n = n->allocated) if (node_root(v, n->scope)) drop_kept_tree(c, n->scope);
+            drop_kept_tree(c, v->as.unit.scope);
+        }
     c->frames_cap = 0;
     while (c->values) free_value(c->values);
     while (c->sealed) free_value(c->sealed);
