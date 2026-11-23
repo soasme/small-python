@@ -16075,7 +16075,8 @@ static SPYValue *consumer_end(SPYContext *, Consumer *);
 typedef struct {
     int kind, flow;
     size_t depth, target, other;
-    Node *name, *node;
+    NameOperand *name; /* A handler's name, unbound when it ends. */
+    Node *node;
     SPYValue *value, *handled;
     ErrorState *error;
     Consumer *consumer;
@@ -17054,11 +17055,15 @@ static void try_handlers(SPYContext *c, Program *p, Node *n, Try *t) {
 }
 /* Handler h's test, before its body, and the handler's end after it. */
 static size_t except_begin(SPYContext *c, Program *p, Node *h, Try *t, size_t *final) {
-    /* A namespace's handler binds and unbinds its name by instructions
-     * (BC_MATCH 2 leaves the exception; handler_begin). */
-    int unbinds = p->unbinds && h->c;
+    /* A namespace's handler takes the matched exception (BC_MATCH 2,
+     * BC_STAR_MATCH 1) to bind and unbind its name by instructions
+     * (handler_begin); any other's step stores the name of the BC_STORE
+     * after it, skipping it, for its block to unbind when it ends (4, 2). */
+    int unbinds = p->unbinds && h->c, stores = h->c && !unbinds;
     if (h->a) compile_expr(c, p, h->a);
-    size_t match = t->star ? emit(c, p, BC_STAR_MATCH, h, unbinds) : emit(c, p, BC_MATCH, h, (h->a != NULL) | unbinds << 1);
+    size_t match = t->star ? emit(c, p, BC_STAR_MATCH, h, (h->c != NULL) | stores << 1) :
+                             emit(c, p, BC_MATCH, h, (h->a != NULL) | (h->c != NULL) << 1 | stores << 2);
+    if (stores) emit(c, p, BC_STORE, h->c, 1);
     *final = handler_begin(c, p, h, unbinds, t->star);
     return match;
 }
@@ -17071,9 +17076,9 @@ static void except_end(SPYContext *c, Program *p, Node *h, Try *t, size_t match,
         return;
     }
     /* Each matched except* clause runs inside an inner block that collects its error. */
-    size_t done = emit(c, p, BC_STAR_DONE, h, unbinds);
+    size_t done = emit(c, p, BC_STAR_DONE, h, 0);
     if (match != SIZE_MAX) p->items[match].other = (uint32_t)p->len;
-    emit(c, p, BC_STAR_CAUGHT, h, unbinds);
+    emit(c, p, BC_STAR_CAUGHT, h, 0);
     patch(p, match, p->len); patch(p, done, p->len);
 }
 /* After the handlers: the else suite's place, then the end. */
@@ -21640,7 +21645,6 @@ static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, NameOperan
     entry_store(c, f->env, entry, spy_retain(value));
     return 0;
 }
-static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, &n->name, value, 0); }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 static int store_hooked(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static int store_collides(SPYContext *, SPYValue *, SPYValue *);
@@ -26581,7 +26585,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     while (m->len > b.depth) spy_release(machine_pop(m));
     if (b.kind == BLOCK_HANDLER || b.kind == BLOCK_CLEANUP) {
         spy_release(c->handled); c->handled = b.handled; b.handled = NULL;
-        if (b.name) clear_binding(c, f->env, b.name->name.text);
+        if (b.name) clear_binding(c, f->env, b.name->text);
     }
     if (b.consumer && b.consumer->target) {
         /* An unfinished list.sort leaves its list as it was. */
@@ -40439,8 +40443,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             a = ins->arg & 1 ? machine_pop(m) : NULL;
             int match = a ? exception_matches(c, block->error->value, a) : 1;
             if (!match) pc = ins->target;
-            else if (match > 0 && n->c && (ins->arg & 2)) machine_push(c, m, spy_retain(block->error->value));
-            else if (match > 0 && n->c) { block->name = n->c; store_target(c, &f, n->c, block->error->value); }
+            /* A handler's block, which unbinds its name, stores it, skipping its BC_STORE. */
+            else if (match > 0 && (ins->arg & 4)) {
+                block->name = code[pc].name;
+                store_into(c, &f, code[pc].node, code[pc].name, block->error->value, 0);
+                pc++;
+            } else if (match > 0 && (ins->arg & 2)) machine_push(c, m, spy_retain(block->error->value));
             break;
         }
         CASE(BC_RERAISE)
@@ -40481,17 +40489,21 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             Block *inner = push_block(c, m, BLOCK_EXCEPT, ins);
             if (!inner) { spy_release(match); break; }
             inner->target = ins->other;
-            if (ins->arg) machine_push(c, m, spy_retain(match));
-            else if (n->c) store_target(c, &f, n->c, match);
+            if (ins->arg & 2) {
+                inner->name = code[pc].name;
+                store_into(c, &f, code[pc].node, code[pc].name, match, 0);
+                pc++;
+            } else if (ins->arg) machine_push(c, m, spy_retain(match));
             spy_release(c->handled); c->handled = match;
             break;
         }
         CASE(BC_STAR_DONE) CASE(BC_STAR_CAUGHT) {
             Block *inner = &m->blocks[m->block_len - 1];
             SPYValue *raised = ins->op == BC_STAR_CAUGHT && inner->error ? spy_retain(inner->error->value) : NULL;
+            NameOperand *name = inner->name;
             pop_block(c, m, &f);
             /* A namespace's handler unbound its name itself. */
-            if (n->c && !ins->arg) clear_binding(c, f.env, n->c->name.text);
+            if (name) clear_binding(c, f.env, name->text);
             Block *outer = &m->blocks[m->block_len - 1];
             if (raised) sequence_append(c, outer->value->as.seq.items[1], raised);
             spy_release(raised);
