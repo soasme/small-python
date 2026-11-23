@@ -16771,7 +16771,7 @@ static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line,
 /* Whether x's target, and its other, are steps of the expression it is in. */
 static int steps_target(const Instruction *x) {
     switch (x->op) {
-    case BC_FALSE: case BC_TEST: case BC_STACKED_TEST: case BC_OPERATE: case BC_STACKED: case BC_JUMP: case BC_SHORT: case BC_CALLF: case BC_COMPARE: return 1;
+    case BC_FALSE: case BC_TEST: case BC_STACKED_TEST: case BC_OPERATE: case BC_STACKED: case BC_JUMP: case BC_SHORT: case BC_CALLF: case BC_COMPARE: case BC_STORE_AT: return 1;
     default: return x->op == BC_YIELD && x->arg == 1;
     }
 }
@@ -17152,18 +17152,18 @@ static void compile_target(SPYContext *c, Program *p, Node *n) {
  * unpacked (BC_UNPACK). */
 static size_t target_count(Node *, size_t *);
 static void compile_targeted(SPYContext *c, Program *p, Node *n, Node *popped) {
-    size_t fused = SIZE_MAX;
+    size_t fused = SIZE_MAX, start = p->len;
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
-        if (store_at_hand(p, n)) fused = emit(c, p, BC_STORE_AT, n, popped != NULL);
         compile_expr(c, p, n->a);
         if (n->kind == N_INDEX) compile_expr(c, p, n->b);
         emit(c, p, BC_SET_TARGET, n, 0);
+        if (store_at_hand(p, n) && !c->error_type[0]) fused = emit_before(c, p, start, BC_STORE_AT, n, popped != NULL);
     } else {
-        size_t star, unpack = emit(c, p, BC_UNPACK, n, (int)target_count(n, &star));
-        if (unpack != SIZE_MAX) p->items[unpack].other = star == SIZE_MAX ? NO_STEP : (uint32_t)star;
         for (Node *item = n->args; item; item = item->next) {
             compile_store(c, p, item->kind == N_STAR ? item->a : item, item);
         }
+        size_t star, unpack = c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_UNPACK, n, (int)target_count(n, &star));
+        if (unpack != SIZE_MAX) p->items[unpack].other = star == SIZE_MAX ? NO_STEP : (uint32_t)star;
     }
     if (popped) emit(c, p, BC_POP, popped, 0);
     patch(p, fused, p->len);
