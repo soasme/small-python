@@ -49407,14 +49407,11 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
             if (machine_push(c, m, spy_retain(state)) || machine_push(c, m, spy_retain(c->replacing))) break;
             if (nested) {
                 *env = NULL;
+                /* It reaches a Python __repr__, so it stops at that call. */
                 if (machine_push(c, m, spy_retain(c->field_calls[0])) || machine_push(c, m, spy_retain(item)) ||
                     !(text = repr_call(c, m, env))) break;
-                if (*env) { *function = c->entering_init; return text; }
-                /* The item's job ended at once. */
-                spy_release(machine_pop(m)); spy_release(machine_pop(m));
-                if (sequence_append(c, state, text)) break;
-                spy_release(text); text = NULL;
-                continue;
+                *function = c->entering_init;
+                return text;
             }
             if (machine_push(c, m, spy_string(c, "__repr__", 8)) || machine_push(c, m, spy_retain(item)) ||
                 !(*env = function_env(c, *function, (size_t)bound, (SPYValue *[]){bound ? spy_retain(item) : item}, NULL, bound))) break;
@@ -49432,12 +49429,9 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
     if (c->error_type[0]) { spy_release(text); repr_drop(c, repr_key(shown)); return NULL; }
     Buffer b = { .ctx = c };
     int tuple = v->type == SPY_TUPLE, frozen = v->type == SPY_FROZENDICT || v->type == SPY_FROZENSET;
-    /* A set's, frozenset's or frozendict's subclass names its type. */
-    int named = shown != v && (frozen || v->type == SPY_SET), empty = state->as.seq.len == 3;
-    if (named && empty) {
-        repr_drop(c, repr_key(shown));
-        return buffer_text(&b, SPY_STRING, puts_buffer(&b, type_name(shown)) || puts_buffer(&b, "()"));
-    }
+    /* A set's, frozenset's or frozendict's subclass names its type; a job's
+     * container held items. */
+    int named = shown != v && (frozen || v->type == SPY_SET);
     int status = named ? puts_buffer(&b, type_name(shown)) || puts_buffer(&b, "({") :
                  puts_buffer(&b, v->type == SPY_FROZENDICT ? "frozendict({" : v->type == SPY_FROZENSET ? "frozenset({" : !seq ? "{" : tuple ? "(" : "[");
     for (size_t k = 3; !status && k < state->as.seq.len; k++) {
