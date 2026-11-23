@@ -676,6 +676,26 @@ int main(int argc, char **argv) {
     SPYValue *q_slice = spy_call_keywords(c, build, 2, q_parts, slice_keywords);
     assert(q_slice && integer(c, spy_call(c, sliced, 1, &q_slice)) == 1);
     spy_release(q_slice); spy_release(sliced); spy_release(slice_keywords);
+    /* The host calls a staticmethod object and a class whose metaclass
+     * has a Python __call__, with keywords. */
+    execute(c, "def scaled(x, by): return x * by\nhost_static = staticmethod(scaled)\n"
+               "class CallMeta(type):\n    def __call__(cls, x, by): return ('called', x * by)\n"
+               "class Called(metaclass=CallMeta): pass\n"
+               "def called(r): return 1 if r == ('called', 6) else 0\n");
+    SPYValue *by = spy_eval(c, "{'by': 3}", "host.py"), *two_in = spy_int(c, 2), *called = spy_get_global(c, "called");
+    SPYValue *host_static = spy_get_global(c, "host_static"), *called_class = spy_get_global(c, "Called");
+    SPYValue *scaled = spy_call_keywords(c, host_static, 1, &two_in, by), *metacalled = spy_call_keywords(c, called_class, 1, &two_in, by);
+    assert(integer(c, scaled) == 6 && metacalled && integer(c, spy_call(c, called, 1, &metacalled)) == 1);
+    spy_release(scaled); spy_release(metacalled); spy_release(host_static); spy_release(called_class);
+    spy_release(called); spy_release(two_in); spy_release(by);
+    /* The host calls object's __str__ slot, which calls a Python __repr__,
+     * and a tuple subclass's __contains__ slot. */
+    execute(c, "class Shown:\n    def __repr__(self): return 'shown'\nclass Held(tuple): pass\n"
+               "host_str, host_contains = Shown().__str__, Held((1, 2)).__contains__\n");
+    SPYValue *host_str = spy_get_global(c, "host_str"), *host_contains = spy_get_global(c, "host_contains"), *two_held = spy_int(c, 2);
+    SPYValue *shown_text = spy_call(c, host_str, 0, NULL), *held_two = spy_call(c, host_contains, 1, &two_held);
+    assert(shown_text && !strcmp(spy_as_string(c, shown_text, NULL), "shown") && held_two && spy_truth(c, held_two) == 1);
+    spy_release(shown_text); spy_release(held_two); spy_release(host_str); spy_release(host_contains); spy_release(two_held);
     spy_release(build); spy_release(q_parts[0]); spy_release(q_parts[1]);
     /* The host calls a class body's function, which returns None, and a
      * function of module code, which runs in its globals. */

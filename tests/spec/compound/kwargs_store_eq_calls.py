@@ -74,3 +74,20 @@ assert_eq(run({"y": 0}, {name(Hashed, "y", False, True): 1}), ([("str", "y", 1)]
 
 assert_eq(results(), expected)
 assert_eq(main(), expected)
+
+# A native __eq__ raising there propagates too, from the parameter name's
+# comparison or the stored name's.
+native_answers = {"a": False}
+class NativeEqName(str):
+    def __hash__(self): return hash("a")
+    __eq__ = native_answers.__getitem__
+native_kw = {"a": 1}
+native_kw[NativeEqName("b")] = 2
+del native_answers["a"]
+def native_only(**kw): return len(kw)
+def native_param(x=0, **kw): return len(kw)
+native_errors = []
+for native_call in (lambda: native_only(**native_kw), lambda: native_param(**native_kw), lambda: native_param(1, **native_kw), lambda: native_only(z=0, **native_kw)):
+    try: native_call()
+    except KeyError as e: native_errors.append(e.args)
+assert_eq(native_errors, [("a",), ("x",), ("x",), ("a",)])

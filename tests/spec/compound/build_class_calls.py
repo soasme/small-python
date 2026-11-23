@@ -48,3 +48,21 @@ def counting(func, name, *bases, **kw):
 many = {"__builtins__": dict(vars(__build_class__.__self__), __build_class__=counting), "bases": [object] * 70}
 exec("class C(*bases, flag=1): pass", many)
 assert_eq(many["C"], ("C", 70, {"flag": 1}))
+
+# __build_class__ reads a base's __mro_entries__ through its Python
+# __getattr__; a __prepare__ that fails, Python or native, stops it.
+class GetattrEntry:
+    def __getattr__(self, name):
+        if name == "__mro_entries__": return lambda bases: (int,)
+        raise AttributeError(name)
+class RaisingPrepare(type):
+    @classmethod
+    def __prepare__(m, name, bases): raise KeyError("p")
+class NativePrepare(type):
+    __prepare__ = {}.__getitem__
+def entry_body(): pass
+entry_got = __build_class__(entry_body, "Got", GetattrEntry())
+assert_eq([entry_got.__bases__, type(entry_got.__orig_bases__[0])], [(int,), GetattrEntry])
+assert_raises(KeyError, lambda: __build_class__(entry_body, "Fails", GetattrEntry(), metaclass=RaisingPrepare))
+assert_raises(TypeError, lambda: __build_class__(entry_body, "Fails", GetattrEntry(), metaclass=NativePrepare),
+              message="dict.__getitem__() takes exactly one argument (2 given)")

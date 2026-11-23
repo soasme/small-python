@@ -167,3 +167,16 @@ CASES = {
 assert_eq(len(CASES), 110)
 for (mode, default, name), expected in CASES.items():
     assert_eq(show(dict(ops(mode, default))[name]), expected, f"{mode} {default} {name}")
+
+# So does one whose __anext__ gives an object whose Python __await__
+# returns a coroutine's __await__().
+async def relay_inner(): return 5
+class RelayAwaits:
+    def __await__(self): return relay_inner().__await__()
+class RelayIterator:
+    def __aiter__(self): return self
+    def __anext__(self): return RelayAwaits()
+async def relay_main(): return [await anext(RelayIterator(), 0), await anext(RelayIterator())]
+try: relay_main().send(None)
+except StopIteration as e: relay_value = e.value
+assert_eq(relay_value, [5, 5])
