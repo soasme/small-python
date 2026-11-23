@@ -277,11 +277,11 @@ defaults, bases and annotations before its body. A module's or class's
 annotation is analysed at its statement, in the scope of the
 `__annotate__` made at the first annotation and attached to the function
 once the body ends. An error at a header takes its statement's whole
-source when the statement ends. The first named-expression error and
-the first symbol table error wait for the end of the parse, so that a
-parse error anywhere wins over a named-expression error, which wins
-over a symbol table error. Free and cell names are resolved once each
-line of module statements is analysed.
+source when the statement ends. One walk finds named-expression and
+symbol table errors alike, in CPython's order; the first waits for the
+end of the parse, so that a parse error anywhere wins over it. Free and
+cell names are resolved once each line of module statements is
+analysed.
 
 Code objects keep their body's scope, and scopes copy the text they
 keep (symbol, parameter, type parameter and static attribute names), so

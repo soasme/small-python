@@ -12,7 +12,10 @@
 (* generator expression, whose remaining evaluation waits until it is      *)
 (* iterated; the comprehension has its own scope, so its targets do not    *)
 (* leak, a class body's names are visible only in the first iterable, and  *)
-(* an assignment expression binds in the enclosing function or module; and *)
+(* an assignment expression binds in the enclosing function or module,     *)
+(* past an annotation scope (a module annotation's binds the module's      *)
+(* name), never in a class or type scope, its comprehension's clauses      *)
+(* checked before its element; and                                         *)
 (* yield, an unparenthesized second argument, and dict unpacking outside a *)
 (* dict comprehension are syntax errors.                                   *)
 (*                                                                         *)
@@ -36,7 +39,8 @@ Cases == {"no_leak", "class_scope", "class_scope_inner", "class_first_iterable",
           "star_gen", "dstar_list", "star_dict_key", "star_dict_bad", "dstar_bad", "star_target_in_comp",
           "nested_scope", "late_binding", "gen_close", "gen_send_none", "gen_name", "frame_name",
           "unparenthesized_tuple", "if_else_elem", "if_without_else", "lambda_in_if", "iter_var_global",
-          "iter_method", "gen_iter_method", "iter_method_bad"}
+          "iter_method", "gen_iter_method", "iter_method_bad", "walrus_typevar", "walrus_alias",
+          "walrus_annotation", "walrus_clause_first"}
 Programs == [kind : {"list", "set", "dict", "gen"}, clauses : Clauses, element : {"plain", "star"}]
             \cup [case : Cases]
 
@@ -83,6 +87,10 @@ Case(c) ==
       [] c = "walrus_iter_var" -> Syntax("assignment expression cannot rebind comprehension iteration variable 'x'")
       [] c = "walrus_iterable" -> Syntax("assignment expression cannot be used in a comprehension iterable expression")
       [] c = "walrus_class" -> Syntax("assignment expression within a comprehension cannot be used in a class body")
+      [] c = "walrus_typevar" -> Syntax("assignment expression within a comprehension cannot be used in a TypeVar bound")
+      [] c = "walrus_alias" -> Syntax("assignment expression within a comprehension cannot be used in a type alias")
+      [] c = "walrus_annotation" -> <<"ok", "({'x': [7]}, 7)", <<>>>>
+      [] c = "walrus_clause_first" -> Syntax("assignment expression cannot be used in a comprehension iterable expression")
       [] c = "yield_in" -> Syntax("'yield' inside list comprehension")
       [] c = "await_outside" -> Syntax("asynchronous comprehension outside of an asynchronous function")
       [] c = "async_for_outside" -> Syntax("asynchronous comprehension outside of an asynchronous function")

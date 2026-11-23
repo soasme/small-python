@@ -118,8 +118,6 @@ typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int h
 /* An analysis error waiting for the end of the parse: its class, message
  * (owned), line and source span. */
 typedef struct { char type[64]; char *message; size_t line; const char *start, *end; Node *open; } Analysis;
-typedef struct { Node *expression, *clause; } NamedScope;
-static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
 static int scope_walk(SPYContext *, Scope *, Node *);
 /* A try statement's shape and its instructions to patch (try_begin). */
 typedef struct { size_t final, handler, skip, first, rest; int has_final, excepts, star, otherwise; } Try;
@@ -171,7 +169,7 @@ typedef struct { const char *name; unsigned flags; size_t line; const char *decl
  * its annotation function's scope, or on that function its owner's;
  * generic is its type parameters' scope, and first_line its first
  * decorator's line or its own (scope_define). */
-struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; Node *returned; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
+struct Scope { Node *owner; Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap; int kind, stars, tries, iterables, cells, kept_len; const char *within; Node *returned, *clause; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -4613,7 +4611,7 @@ typedef struct {
      * the body being parsed, and the decorators of the definition after
      * them. */
     Node *analysed;
-    Analysis named, symbols;
+    Analysis symbols;
     Scope *scope;
     Node *decorators;
     /* The newest node and module child scope resolved (resolve_new), and
@@ -5259,8 +5257,7 @@ static void span_block(Parser *p, Node *n, size_t first) {
         n->start = p->tokens[first].start; n->end = p->tokens[last - 1].start + p->tokens[last - 1].len; n->spanned = 1;
     }
     /* An analysis error at n's header covers n (analysis_defer). */
-    Analysis *errors[] = {&p->named, &p->symbols};
-    for (size_t i = 0; i < 2; i++) if (errors[i]->open == n) { errors[i]->start = n->start; errors[i]->end = n->end; errors[i]->open = NULL; }
+    if (p->symbols.open == n) { p->symbols.start = n->start; p->symbols.end = n->end; p->symbols.open = NULL; }
 }
 static Node *span(Parser *p, Node *n, size_t first) {
     if (n && !n->spanned && p->pos > first) {
@@ -8295,30 +8292,24 @@ static int analysis_defer(Parser *p, Analysis *a) {
     spy_clear_error(c);
     return 0;
 }
-/* Analyse module statements n and those after it as each line of them is
- * parsed: their named expressions (validate_named), then their symbols
- * (scope_walk), each as far as its first error. As when the parse has
- * ended, a parse error wins over the first named-expression error, which
- * wins over the first symbol table error (reported at the end); -1 only
- * for an error that cannot wait. */
+/* Analyse statements n and those after it, or a compound statement's
+ * header, as they are parsed, in the scope of the body being parsed, as
+ * far as the first error (8.3.1), which waits for the parse to end: a
+ * parse error anywhere wins over it. -1 only for an error that cannot
+ * wait. */
 static int analyse_statements(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     SPYValue *unit = p->unit;
-    if (p->named.message || c->error_type[0]) return 0;
+    if (p->symbols.message || c->error_type[0]) return 0;
+    if (!p->scope && !unit->as.unit.scope && !(unit->as.unit.scope = scope_new(c, NULL, S_MODULE))) return -1;
+    Scope *scope = p->scope ? p->scope : unit->as.unit.scope;
     const char *start = c->node_start, *end = c->node_end;
     c->node_start = c->node_end = NULL; c->node_open = NULL;
-    NamedScope comps[128];
-    int status = 0;
-    if (validate_named(c, n, comps, 0, 0, p->definition && p->definition->kind == N_CLASS)) status = analysis_defer(p, &p->named);
-    else if (!p->symbols.message) {
-        if (!p->scope && !unit->as.unit.scope && !(unit->as.unit.scope = scope_new(c, NULL, S_MODULE))) status = -1;
-        Scope *scope = p->scope ? p->scope : unit->as.unit.scope;
-        /* A lazy import names the try statements around it (scope_node). */
-        int tries = scope ? scope->tries : 0;
-        if (scope) scope->tries = p->body.tries;
-        if (scope && scope_walk(c, scope, n)) status = analysis_defer(p, &p->symbols);
-        if (scope) scope->tries = tries;
-    }
+    /* A lazy import names the try statements around it (scope_node). */
+    int tries = scope->tries, status = 0;
+    scope->tries = p->body.tries;
+    if (scope_walk(c, scope, n)) status = analysis_defer(p, &p->symbols);
+    scope->tries = tries;
     for (; n; n = n->next) n->flags |= F_ANALYSED;
     c->node_start = start; c->node_end = end;
     return status;
@@ -8376,7 +8367,7 @@ static int resolve_new(Parser *p, Node *stop) {
 /* Resolve a line of module statements, parsed since start, once it is
  * analysed without error. */
 static int resolve_statements(Parser *p, Node *start) {
-    if (p->named.message || p->symbols.message || p->ctx->error_type[0]) return 0;
+    if (p->symbols.message || p->ctx->error_type[0]) return 0;
     return resolve_new(p, start);
 }
 /* Raise analysis error a, unless one is pending. */
@@ -8410,7 +8401,6 @@ static void free_lines(Parser *p, Node *start) {
             if (n->spanned) { p->deferred_start = n->start; p->deferred_end = n->end; }
             p->deferred_node = NULL;
         }
-        if (n == p->named.open) p->named.open = NULL;
         if (n == p->symbols.open) p->symbols.open = NULL;
         *at = n->allocated;
         free_node(n);
@@ -8468,64 +8458,10 @@ static Node *target_name(Node *n, const char *name) {
             if ((found = target_name(item, name))) return found;
     return NULL;
 }
-static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
 /* A compile-time SyntaxError is reported at the source its node covers. */
 static void node_error(SPYContext *c, Node *n) {
     c->line = n->line; c->node_open = n;
     if (n->spanned) { c->node_start = n->start; c->node_end = n->end; }
-}
-/* A function or class body starts without enclosing comprehensions; its
- * scope array stays out of the frames of ordinary nesting. */
-static int validate_named_body(SPYContext *c, Node *body, int iterable, int class_scope) {
-    NamedScope nested[128];
-    return validate_named(c, body, nested, 0, iterable, class_scope);
-}
-static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t count, int iterable, int class_scope) {
-    if (deeper(c, " during compilation")) return -1;
-    int status = 0;
-    for (; n && !status; n = n->next) {
-        if (n->flags & F_ANALYSED) continue;
-        if (n->kind == N_NAMED) {
-            node_error(c, iterable ? n : n->a);
-            if (iterable) spy_error(c, "SyntaxError", "assignment expression cannot be used in a comprehension iterable expression");
-            else if (count && class_scope) spy_error(c, "SyntaxError", "assignment expression within a comprehension cannot be used in a class body");
-            for (size_t i = 0; i < count && !c->error_type[0]; i++) {
-                int future = 0;
-                for (Node *clause = comps[i].expression->a; clause; clause = clause->b) {
-                    if (clause == comps[i].clause) future = 1;
-                    Node *bound = clause->kind == N_FOR ? target_name(clause->args, n->a->name.text) : NULL;
-                    if (!bound) continue;
-                    /* An inner loop's error is at its own target. */
-                    if (future) node_error(c, bound);
-                    errorf(c, "SyntaxError", future ? "comprehension inner loop cannot rebind assignment expression target '%s'" :
-                           "assignment expression cannot rebind comprehension iteration variable '%s'", source_name(n->a));
-                }
-            }
-            if (c->error_type[0]) { status = -1; break; }
-        }
-        if (n->kind == N_COMPREHENSION) {
-            if (count == 128) { spy_error(c, "SyntaxError", "too many nested comprehensions"); status = -1; break; }
-            comps[count] = (NamedScope){n, NULL};
-            status = validate_named(c, n->args, comps, count + 1, iterable, class_scope);
-            for (Node *clause = n->a; clause && !status; clause = clause->b) {
-                comps[count].clause = clause;
-                status = validate_named(c, clause->a, comps, count + 1, iterable || clause->kind == N_FOR, class_scope);
-            }
-            continue;
-        }
-        if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) {
-            status = validate_named(c, n->decorators, comps, count, iterable, class_scope) ||
-                     validate_named(c, n->args, comps, count, iterable, class_scope) ||
-                     validate_named_body(c, n->b, iterable, n->kind == N_CLASS);
-            continue;
-        }
-        status = validate_named(c, n->a, comps, count, iterable, class_scope) ||
-                 validate_named(c, n->b, comps, count, iterable, class_scope) ||
-                 validate_named(c, n->c, comps, count, iterable, class_scope) ||
-                 validate_named(c, n->args, comps, count, iterable, class_scope);
-    }
-    c->depth--;
-    return status ? -1 : 0;
 }
 static void scope_adopt(Scope *parent, Scope *child) {
     child->parent = parent;
@@ -8685,12 +8621,45 @@ static int scope_annotation_error(SPYContext *c, Scope *scope, Node *n) {
            n->kind == N_YIELD ? "yield" : n->kind == N_AWAIT ? "await" : "named", scope->within);
     return -1;
 }
+/* The scope binding named expression n in scope (8.6): the first past the
+ * comprehensions holding it, and the annotation scopes holding those, but
+ * a class or type parameter scope, which is an error; and none of those
+ * comprehensions may bind its name in a loop, here or in a later clause. */
+static Scope *scope_named_owner(SPYContext *c, Scope *scope, Node *n) {
+    size_t comprehensions = 0;
+    Scope *owner = scope;
+    for (;; owner = owner->parent) {
+        if (owner->kind == S_COMPREHENSION) comprehensions++;
+        else if (!comprehensions || !owner->within || strcmp(owner->within, "an annotation") || !owner->parent) break;
+    }
+    /* The comprehensions, outermost first. */
+    for (size_t i = comprehensions; i-- > 0;) {
+        Scope *comprehension = scope;
+        for (size_t k = 0;; comprehension = comprehension->parent)
+            if (comprehension->kind == S_COMPREHENSION && k++ == i) break;
+        int later = 0;
+        for (Node *clause = comprehension->owner->a; clause; clause = clause->b) {
+            if (clause == comprehension->clause) later = 1;
+            Node *bound = clause->kind == N_FOR ? target_name(clause->args, n->a->name.text) : NULL;
+            if (!bound) continue;
+            /* An inner loop's error is at its own target. */
+            node_error(c, later ? bound : n->a);
+            errorf(c, "SyntaxError", later ? "comprehension inner loop cannot rebind assignment expression target '%s'" :
+                   "assignment expression cannot rebind comprehension iteration variable '%s'", source_name(n->a));
+            return NULL;
+        }
+    }
+    if (!comprehensions || (owner->kind != S_CLASS && (!owner->within || !strcmp(owner->within, "an annotation")))) return owner;
+    node_error(c, n->a);
+    errorf(c, "SyntaxError", "assignment expression within a comprehension cannot be used %s",
+           owner->kind == S_CLASS ? "in a class body" : !strcmp(owner->within, "the definition of a generic") ? "within the definition of a generic" :
+           !strcmp(owner->within, "a type alias") ? "in a type alias" : "in a TypeVar bound");
+    return NULL;
+}
 /* An annotation stored as a string (16.6.4) is analysed in an annotation
  * scope of its own that never runs: it encloses no names of the scope that
  * holds it, and is not asynchronous. */
 static int scope_string_annotation(SPYContext *c, Node *n) {
-    NamedScope comps[128];
-    if (validate_named(c, n->annotate, comps, 0, 0, 0)) return -1;
     if (!(n->scope = scope_new(c, NULL, S_FUNCTION))) return -1;
     n->scope->owner = n; n->scope->within = "an annotation";
     return scope_node(c, n->scope, n->annotate);
@@ -8766,8 +8735,16 @@ static int scope_mapping_keys(SPYContext *c, Node *n) {
     spy_release(seen);
     return c->error_type[0] ? -1 : 0;
 }
+static int scope_visit(SPYContext *, Scope *, Node *);
+/* Analyse n in scope, as deep as the stack allows. */
 static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     if (!n || c->error_type[0]) return c->error_type[0] ? -1 : 0;
+    if (deeper(c, " during compilation")) return -1;
+    int status = scope_visit(c, scope, n);
+    c->depth--;
+    return status;
+}
+static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
     scope->nodes++;
     switch (n->kind) {
     case N_ANNASSIGN: {
@@ -8845,10 +8822,24 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         if (!strcmp(n->name.text, "__debug__")) { node_error(c, n); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1; }
         return scope_node(c, scope, n->a);
     case N_NAMED: {
-        if (scope_annotation_error(c, scope, n) || scope_node(c, scope, n->b)) return -1;
-        Scope *owner = scope;
-        while (owner->kind == S_COMPREHENSION) owner = owner->parent;
-        return scope_record(c, owner, n->a, S_LOCAL);
+        if (scope_annotation_error(c, scope, n)) return -1;
+        for (Scope *s = scope; s; s = s->parent) if (s->iterables) {
+            node_error(c, n);
+            spy_error(c, "SyntaxError", "assignment expression cannot be used in a comprehension iterable expression");
+            return -1;
+        }
+        /* In a comprehension, its target binds in the scope found first. */
+        if (scope->kind != S_COMPREHENSION) return scope_node(c, scope, n->b) || scope_record(c, scope, n->a, S_LOCAL) ? -1 : 0;
+        Scope *owner = scope_named_owner(c, scope, n);
+        if (!owner || scope_record(c, owner, n->a, S_LOCAL)) return -1;
+        /* A module's name is global in the scopes between, the
+         * comprehensions and an annotation scope holding them. */
+        for (Scope *s = scope; owner->kind == S_MODULE && s != owner; s = s->parent) {
+            Symbol *global = scope_add(c, s, n->a->name.text, n->a->line);
+            if (!global) return -1;
+            global->flags |= S_GLOBAL;
+        }
+        return scope_node(c, scope, n->b);
     }
     case N_TYPEALIAS: {
         if (scope_record(c, scope, n->a, S_LOCAL)) return -1;
@@ -8871,16 +8862,26 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         if (scope_annotations(c, outer, n->annotate, "an annotation")) return -1;
         return scope_walk(c, n->scope, n->b);
     }
-    case N_COMPREHENSION:
-        if (scope_node(c, scope, n->a->a)) return -1;
-        if (!scope_of(c, n, scope)) return -1;
+    case N_COMPREHENSION: {
+        /* An iterable, the first in the enclosing scope, holds no named
+         * expression (N_NAMED); a clause is the one a named expression
+         * is in, the element none (scope_named_owner). */
+        scope->iterables++;
+        int status = scope_node(c, scope, n->a->a);
+        scope->iterables--;
+        if (status || !scope_of(c, n, scope)) return -1;
         for (Node *clause = n->a; clause; clause = clause->b) {
+            n->scope->clause = clause;
             if (clause->kind == N_FOR && clause->op && scope_await(c, n->scope, clause)) return -1;
-            if (clause != n->a && scope_node(c, n->scope, clause->a)) return -1;
-            if (clause->kind == N_FOR && scope_target(c, n->scope, clause->args, 1)) return -1;
+            n->scope->iterables += clause->kind == N_FOR;
+            status = clause != n->a && scope_node(c, n->scope, clause->a);
+            n->scope->iterables -= clause->kind == N_FOR;
+            if (status || (clause->kind == N_FOR && scope_target(c, n->scope, clause->args, 1))) return -1;
         }
-        if (n->op == N_DICT) return scope_node(c, n->scope, n->args->a) || scope_node(c, n->scope, n->args->b) ? -1 : 0;
+        n->scope->clause = NULL;
+        if (n->op == N_DICT) return scope_node(c, n->scope, n->args->b) || scope_node(c, n->scope, n->args->a) ? -1 : 0;
         return scope_walk(c, n->scope, n->args);
+    }
     case N_FOR:
         return scope_node(c, scope, n->a) || scope_target(c, scope, n->args, 1) ||
             scope_walk(c, scope, n->b) || scope_walk(c, scope, n->c) ? -1 : 0;
@@ -9265,8 +9266,8 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         /* What no line of statements analysed: an eval() expression. */
         Node *rest = p.analysed ? p.analysed->next : unit->as.unit.body;
         if (!c->error_type[0] && rest && analyse_statements(&p, rest)) {}
-        analysis_raise(c, &p.named); analysis_raise(c, &p.symbols);
-        mem_free(p.named.message); mem_free(p.symbols.message);
+        analysis_raise(c, &p.symbols);
+        mem_free(p.symbols.message);
         if (!c->error_type[0] && !unit->as.unit.scope) unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
         if (!c->error_type[0]) {
             if (!p.module_begun) {
