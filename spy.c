@@ -14451,10 +14451,12 @@ static NO_INLINE SPYValue *format_field(SPYContext *c, SPYValue *value, SPYValue
     SPYValue *copy = spy_string(c, text->as.string.data, text->as.string.len);
     spy_release(result); return copy;
 }
-static NO_INLINE SPYValue *interpolation_field(SPYContext *c, Node *n, SPYValue *value, SPYValue *spec) {
-    SPYValue *expression = spy_string(c, n->name.text, strlen(n->name.text));
-    char ch = (char)n->op;
-    SPYValue *conversion = n->op ? spy_string(c, &ch, 1) : spy_none(c);
+/* A BC_INTERPOLATION's field of value: name holds the expression's
+ * source, op the conversion. */
+static NO_INLINE SPYValue *interpolation_field(SPYContext *c, NameOperand *name, int op, SPYValue *value, SPYValue *spec) {
+    SPYValue *expression = spy_string(c, name->text, strlen(name->text));
+    char ch = (char)op;
+    SPYValue *conversion = ch ? spy_string(c, &ch, 1) : spy_none(c);
     SPYValue *format = spec->type == SPY_NONE ? spy_string(c, "", 0) : spy_retain(spec);
     SPYValue *result = expression && conversion && format ? interpolation_new(c, value, expression, conversion, format) : NULL;
     spy_release(expression); spy_release(conversion); spy_release(format);
@@ -16274,7 +16276,7 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     else p->items[p->len++] = (Instruction){.node = n, .arg = arg, .other = (uint32_t)test};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     if (op == BC_LOAD) p->items[pc].constant = n->constant;
-    if (op == BC_NAME || ((op == BC_STORE || op == BC_NAMED || op == BC_DELETE) && n->kind == N_NAME) || (op == BC_ARG && arg == N_KEYWORD))
+    if (op == BC_NAME || op == BC_INTERPOLATION || ((op == BC_STORE || op == BC_NAMED || op == BC_DELETE) && n->kind == N_NAME) || (op == BC_ARG && arg == N_KEYWORD))
         p->items[pc].name = &n->name;
     if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET || op == BC_DELETE) && n->kind == N_ATTR)
         p->items[pc].attribute = &n->attribute;
@@ -16418,7 +16420,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         }
         emit(c, p, BC_TEMPLATE, n, 0); break;
     case N_INTERPOLATION:
-        compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INTERPOLATION, n, 0); break;
+        compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INTERPOLATION, n, n->op); break;
     case N_FORMAT:
         compile_expr(c, p, n->a);
         if (p->calls == PAUSING) {
@@ -16474,7 +16476,10 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_NEW, n, (n->kind == N_LIST ? SPY_LIST : SPY_TUPLE) | count << 8);
             break;
         }
-        emit(c, p, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT);
+        /* A tuple without a starred item is allocated its size, its other. */
+        size_t display = emit(c, p, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT);
+        for (Node *a = n->args; a && n->kind == N_TUPLE && display != SIZE_MAX; a = a->next)
+            p->items[display].other = a->kind == N_STAR ? 0 : p->items[display].other + 1;
         for (Node *a = n->args; a; a = a->next) {
             if (a->kind == N_STAR || a->kind == N_MAPPING) {
                 compile_expr(c, p, a->a); emit(c, p, BC_EXTEND, a, n->kind == N_TUPLE && !a->next);
@@ -16502,7 +16507,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     case N_NAMED:
         compile_expr(c, p, n->b); emit(c, p, BC_NAMED, n->a, 0); break;
     case N_COMPREHENSION:
-        compile_expr(c, p, n->a->a); emit(c, p, BC_COMPREHENSION, n, 0);
+        compile_expr(c, p, n->a->a); emit(c, p, BC_COMPREHENSION, n, n->a->op);
         if (n->op != N_TUPLE && n->asynchronous) emit(c, p, BC_DELEGATE, n, DELEGATE_COMPREHENSION);
         break;
     default: /* N_LAMBDA, the last expression that can contain a yield */
@@ -16535,6 +16540,7 @@ static void compile_target(SPYContext *c, Program *p, Node *n) {
  * evaluated first (BC_SET_TARGET), those at hand stored by a fused step
  * before them (BC_STORE_AT), which jumps past them; a target list is
  * unpacked (BC_UNPACK). */
+static size_t target_count(Node *, size_t *);
 static void compile_targeted(SPYContext *c, Program *p, Node *n, Node *popped) {
     size_t fused = SIZE_MAX;
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
@@ -16543,7 +16549,8 @@ static void compile_targeted(SPYContext *c, Program *p, Node *n, Node *popped) {
         if (n->kind == N_INDEX) compile_expr(c, p, n->b);
         emit(c, p, BC_SET_TARGET, n, 0);
     } else {
-        emit(c, p, BC_UNPACK, n, 0);
+        size_t star, unpack = emit(c, p, BC_UNPACK, n, (int)target_count(n, &star));
+        if (unpack != SIZE_MAX) p->items[unpack].other = star == SIZE_MAX ? NO_STEP : (uint32_t)star;
         for (Node *item = n->args; item; item = item->next) {
             compile_store(c, p, item->kind == N_STAR ? item->a : item, item);
         }
@@ -17374,15 +17381,6 @@ static SPYValue *frame_module_name(SPYContext *, size_t);
 static int oserror_use_init(SPYContext *, SPYValue *);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *new_generator(SPYContext *, Frame *, SPYValue *);
-static NO_INLINE SPYValue *display_new(SPYContext *c, Node *node, int type) {
-    size_t size = 0;
-    if (type == SPY_TUPLE)
-        for (Node *item = node->args; item; item = item->next) {
-            if (item->kind == N_STAR) { size = 0; break; }
-            size++;
-        }
-    return value_alloc(c, type, size);
-}
 /* A list or tuple of the count items atop m's stack, which it takes; or
  * NULL, the items left. */
 static SPYValue *display_pack(SPYContext *c, Machine *m, int type, size_t count) {
@@ -25473,8 +25471,8 @@ static int annotation_ran(SPYContext *c, Frame *f, Node *entry, SPYValue *execut
 }
 /* The target list of one name that PEP 646's `*args: *Ts` unpacks its
  * annotation to; never changed. */
-static Node one_name = {.kind = N_NAME}, one_target = {.kind = N_TUPLE, .args = &one_name};
-static SPYValue *unpack_step(SPYContext *, Machine *, Frame *, Node *);
+static Node one_target = {.kind = N_TUPLE};
+static SPYValue *unpack_counted(SPYContext *, Machine *, Frame *, Node *, size_t, size_t);
 static SPYValue *class_names_call(SPYContext *, Machine *, Frame *, SPYValue *, SPYValue *);
 /* A module body in frame f, on m, binds its annotation function, then
  * the set of its executed conditional annotations (start_annotations),
@@ -25509,7 +25507,7 @@ static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, 
         return found < 0 ? NULL : spy_bool(c, found);
     }
     if (ins->arg == 16) {
-        SPYValue *items = unpack_step(c, m, f, &one_target), *item = items ? spy_retain(items->as.seq.items[0]) : NULL;
+        SPYValue *items = unpack_counted(c, m, f, &one_target, 1, SIZE_MAX), *item = items ? spy_retain(items->as.seq.items[0]) : NULL;
         spy_release(items);
         return item;
     }
@@ -28505,15 +28503,11 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
 static int machine_items(SPYContext *c, SPYValue *v) {
     return machine_source(c, v) && (!called_iterator(v) || sequence_iterator(v) || next_calls(c, v));
 }
-/* BC_UNPACK of target list n, the value atop m's stack: its items, owned,
- * or, for a source whose items the machine takes (machine_items), NULL,
- * its items to be taken on the machine (BLOCK_CONSUME) as an unpacking
- * (UNPACK_ITEMS). */
-static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node *n) {
-    size_t star, count = target_count(n, &star);
-    return unpack_counted(c, m, f, n, count, star);
-}
-/* unpack_step of count items with a star at index star, SIZE_MAX for none. */
+/* BC_UNPACK of target list n of count targets, its arg, a star at index
+ * star, its other, SIZE_MAX for none, the value atop m's stack: its
+ * items, owned, or, for a source whose items the machine takes
+ * (machine_items), NULL, its items to be taken on the machine
+ * (BLOCK_CONSUME) as an unpacking (UNPACK_ITEMS). */
 static SPYValue *unpack_counted(SPYContext *c, Machine *m, Frame *f, Node *n, size_t count, size_t star) {
     SPYValue *value = m->stack[m->len - 1];
     if (!machine_items(c, value)) return unpack_values(c, f, n, value, count, star);
@@ -36513,7 +36507,7 @@ static NO_INLINE int iter_returned(SPYContext *c, Machine *m, Instruction *ins, 
     if (ins->op == BC_COMPREHENSION) {
         /* A comprehension's step runs again with the iterator under c->unbound. */
         SPYValue *source = machine_pop(m);
-        SPYValue *iterator = ins->node->a->op ? async_returned(c, source, result, 1) : iterator_returned(c, source, result, "__iter__");
+        SPYValue *iterator = ins->arg ? async_returned(c, source, result, 1) : iterator_returned(c, source, result, "__iter__");
         spy_release(source);
         return iterator && !machine_push(c, m, iterator) && !machine_push(c, m, spy_retain(c->unbound));
     }
@@ -40019,7 +40013,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             machine_push(c, m, value); NEXT_RELEASE;
         }
-        CASE(BC_NEW) machine_push(c, m, ins->arg >> 8 ? display_pack(c, m, ins->arg & 255, (size_t)ins->arg >> 8) : display_new(c, n, ins->arg)); break;
+        CASE(BC_NEW) machine_push(c, m, ins->arg >> 8 ? display_pack(c, m, ins->arg & 255, (size_t)ins->arg >> 8) : value_alloc(c, ins->arg, ins->other)); break;
         CASE(BC_ADD) CASE(BC_EXTEND)
             a = machine_pop(m);
             if (ins->op == BC_EXTEND) {
@@ -40119,7 +40113,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (store_operands(c, m, &f, ins)) pc = ins->target;
             NEXT;
         CASE(BC_UNPACK)
-            a = unpack_step(c, m, &f, n);
+            a = unpack_counted(c, m, &f, n, (size_t)ins->arg, ins->other == NO_STEP ? SIZE_MAX : ins->other);
             if (a) for (size_t i = a->as.seq.len; i; i--)
                 if (machine_push(c, m, spy_retain(a->as.seq.items[i - 1]))) break;
             if (!a && !c->error_type[0]) goto consume_generator;
@@ -40188,7 +40182,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_TEMPLATE)
             a = machine_pop(m); machine_push(c, m, template_from_parts(c, a->as.seq.len, a->as.seq.items)); break;
         CASE(BC_INTERPOLATION)
-            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, interpolation_field(c, n, a, b)); break;
+            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, interpolation_field(c, ins->name, ins->arg, a, b)); break;
         CASE(BC_FORMAT)
             b = ins->arg ? machine_pop(m) : NULL; a = machine_pop(m); machine_push(c, m, format_field(c, a, b ? b : c->none)); break;
         CASE(BC_JOIN)
@@ -40210,11 +40204,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             a = machine_pop(m); function_default(c, m->stack[m->len - 1], n, a); break;
         CASE(BC_COMPREHENSION)
             /* A mappingproxy iterates its mapping (mappingproxy_getiter). */
-            if (UNLIKELY(proxies_instance(m->stack[m->len - 1])) && !n->a->op) proxy_mapping(&m->stack[m->len - 1]);
+            if (UNLIKELY(proxies_instance(m->stack[m->len - 1])) && !ins->arg) proxy_mapping(&m->stack[m->len - 1]);
             /* An instance's Python __iter__ or __aiter__ is a call (iter_call). */
             if (m->stack[m->len - 1]->type == SPY_INSTANCE) {
                 callee_env = NULL;
-                if ((value = iter_call(c, m, ins, n->a->op ? "__aiter__" : "__iter__", &callee_env))) {
+                if ((value = iter_call(c, m, ins, ins->arg ? "__aiter__" : "__iter__", &callee_env))) {
                     if (value == c->unbound) { pc--; break; }
                     special = CALL_ITER; goto enter_special;
                 }
