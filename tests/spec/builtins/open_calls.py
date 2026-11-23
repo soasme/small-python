@@ -3,7 +3,8 @@
 # first a program calls included, opens a file in a directory the host
 # mounted: what is written is read back, a missing file raises
 # FileNotFoundError, and a bad mode ValueError. Inside functions and
-# generators as at module level.
+# generators as at module level. Its arguments are checked as a built-in's
+# with keyword parameters (19.3), before any file is looked at.
 from harness import *
 
 def write(path, text):
@@ -30,3 +31,15 @@ assert_raises(ValueError, open, "spec_open_calls.txt", "q")
 f = open("spec_open_calls.txt", "r")
 assert_eq(f.read(), "two")
 f.close()
+
+def message(f):
+    try: f()
+    except TypeError as e: return str(e)
+assert_eq([message(lambda: open(*["f"] * 9, mode="r")), message(lambda: open(*["f"] * 9)),
+           message(lambda: open("f", "r", -1, None, None, None, True, None, opener=None)),
+           message(lambda: open("f", "r", -1, None, None, None, True, encoding="x")),
+           message(lambda: open(file="f", bogus=1, mode="r")), message(lambda: open(mode="r")), message(lambda: open())],
+          ["open() takes at most 8 arguments (10 given)", "open() takes at most 8 arguments (9 given)",
+           "open() takes at most 8 arguments (9 given)", "argument for open() given by name ('encoding') and position (4)",
+           "open() got an unexpected keyword argument 'bogus'", "open() missing required argument 'file' (pos 1)",
+           "open() missing required argument 'file' (pos 1)"])

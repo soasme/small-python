@@ -43909,10 +43909,6 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
     if (!names) keyword_start = count;
     if (!count && argc) { errorf(c, "TypeError", "%s() takes no arguments (%zu given)", function, argc); return -1; }
     if (!count && keywords && keywords->as.map.len) { errorf(c, "TypeError", "%s() takes no keyword arguments", function); return -1; }
-    if (argc > count) {
-        errorf(c, "TypeError", "%s() takes at most %zu argument%s (%zu given)", function, count, count == 1 ? "" : "s", argc);
-        return -1;
-    }
     size_t given = argc + (keywords ? keywords->as.map.len : 0);
     if (keyword_start == count && given > argc) {
         errorf(c, "TypeError", "%s() takes no keyword arguments", function);
@@ -52936,11 +52932,13 @@ static SPYValue *input_builtin(SPYContext *c, size_t argc, SPYValue *const *argv
 }
 static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
-    if (!argc && !(keywords && name_local(keywords, "file")))
-        return spy_error(c, "TypeError", "open() missing required argument 'file' (pos 1)");
+    /* Its arguments are checked as a builtin's (parse_arguments). */
+    static const char *const names[] = {"file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener"};
+    SPYValue *args[8];
+    if (parse_arguments(c, "open", argc, argv, keywords, names, 8, 1, 0, args)) return NULL;
     /* A step's open() with keywords calls its intrinsic on its machine,
      * loading the intrinsics there first, as builtin_call's does. */
-    Machine *m = argc > 8 ? NULL : step_machine(c);
+    Machine *m = step_machine(c);
     SPYValue *ctx = m ? open_context(c, argc, argv, keywords) : NULL;
     if (ctx) return intrinsics_k(c, m, open_loaded, ctx);
     if (c->error_type[0]) return NULL;

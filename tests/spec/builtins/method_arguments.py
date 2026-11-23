@@ -107,3 +107,8 @@ check("exec() takes at most 4 arguments (5 given)", exec, "1", None, None, None,
 check("eval() takes at most 3 arguments (5 given)", lambda: eval("1", None, None, None, globals=None))
 check("exec() takes at most 4 arguments (5 given)", lambda: exec("1", None, None, None, globals=None))
 check("exec() takes at most 3 positional arguments (4 given)", lambda: exec("1", None, None, None))
+# The count given is of all the arguments, keywords included, also when the
+# positional ones alone are too many.
+check("split() takes at most 2 arguments (4 given)", lambda: "a b".split(" ", 1, 2, sep=" "))
+check("encode() takes at most 2 arguments (4 given)", lambda: "x".encode("u", "s", 1, errors="s"))
+check("from_bytes() takes at most 3 arguments (4 given)", lambda: int.from_bytes(b"a", "big", 1, signed=True))

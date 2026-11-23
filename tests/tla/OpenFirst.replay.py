@@ -15,10 +15,17 @@ def opened(call):
             f = open(file=NAME, mode="r")
         elif call == "mode":
             f = open(NAME, mode="q")
+        elif call == "many":
+            f = open(NAME, "r", -1, None, None, None, True, None, None)
+        elif call == "twice":
+            f = open(NAME, "r", mode="r")
         else:
             f = open(NAME, colour="red")
-    except (ValueError, TypeError) as e:
-        return type(e).__name__
+    except ValueError:
+        return "ValueError"
+    except TypeError as e:
+        text = str(e)
+        return "TypeError at most" if "takes at most" in text else "TypeError by name" if "given by name" in text else "TypeError"
     text = f.read()
     f.close()
     return text

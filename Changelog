@@ -758,6 +758,7 @@ Unreleased (0.10.0):
 - with a trace or profile function set, a native decorator, a builtin subclass's construction and a generic class no longer crash or misreport an operator
 - a list, str, tuple, dict or other sized builtin's subclass whose `__bool__` descriptor raises AttributeError is false when empty; it was always true
 - closing a coroutine awaiting `anext()` with a default, whose `__anext__` ends with StopAsyncIteration, gives the await the default; it raised RuntimeError
+- `open()` reports too many arguments, or one given by name and position, as other builtins do; a builtin's "takes at most" counts keyword arguments too
 
 2026-11-10 0.9.0:
 
