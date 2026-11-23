@@ -198,3 +198,12 @@ instance.__class__ = SameSlots
 assert_eq(type(instance), SameSlots)
 e = assert_raises(TypeError, setattr, instance, "__class__", OtherLayout)
 assert_eq(str(e), "__class__ assignment: 'OtherLayout' object layout differs from 'SameSlots'")
+
+# A body function it was given, called, runs in its globals as its
+# namespace and returns the __class__ cell, or None.
+called = {}
+bodies("class Q:\n    y = 2\nclass S:\n    def m(self): return __class__\n", called)
+q_body, s_body = captured
+assert_eq(called.pop("y", None), None)
+assert_eq((q_body(), "y" in called, type(s_body()) is CellType), (None, True, True))
+assert_eq(str(assert_raises(TypeError, q_body, 1)), "Q() takes 0 positional arguments but 1 was given")

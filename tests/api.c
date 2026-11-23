@@ -666,6 +666,13 @@ int main(int argc, char **argv) {
     SPYValue *q_class = spy_call(c, build, 2, q_parts);
     assert(q_class && integer(c, spy_call(c, made_q, 1, &q_class)) == 1);
     spy_release(q_class); spy_release(made_q); spy_release(build); spy_release(q_parts[0]); spy_release(q_parts[1]);
+    /* The host calls a class body's function, which returns None, and a
+     * function of module code, which runs in its globals. */
+    execute(c, "module_code = type(grab)(compile('z = 5\\n', 'code.py', 'exec'), globals())\n");
+    SPYValue *q_body = spy_get_global(c, "q_body"), *module_code = spy_get_global(c, "module_code");
+    SPYValue *body_result = spy_call(c, q_body, 0, NULL), *ran = spy_call(c, module_code, 0, NULL);
+    assert(body_result && ran && body_result == ran && integer(c, spy_get_global(c, "z")) == 5);
+    spy_release(body_result); spy_release(ran); spy_release(q_body); spy_release(module_code);
 
     /* External references root cycles; dropping the last root makes them garbage. */
     spy_collect(c);
