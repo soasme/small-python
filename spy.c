@@ -18149,13 +18149,6 @@ static SPYValue *function_named(SPYContext *c, SPYValue *qualname, SPYValue *mod
 /* _PyObject_FunctionStr: "module.qualname()", "qualname()" when the module
  * is None or builtins, or str(f) when f has no __qualname__. */
 static SPYValue *function_str(SPYContext *c, SPYValue *f) {
-    /* Statements that merge keywords themselves pass their name. */
-    if (f->type == SPY_STRING) {
-        Buffer text = {.ctx = c};
-        SPYValue *result = puts_buffer(&text, f->as.string.data) || puts_buffer(&text, "()") ? NULL :
-            spy_string(c, text.data ? text.data : "", text.len);
-        mem_free(text.data); return result;
-    }
     SPYValue *qualname = attribute(c, f, "__qualname__"), *module = NULL;
     if (!qualname) {
         if (!error_is(c, "AttributeError")) return NULL;
@@ -18225,7 +18218,7 @@ static void proxy_mapping(SPYValue **v) {
 /* Whether function_str names fn without calling Python. */
 static int named_plainly(SPYContext *c, SPYValue *fn) {
     if (fn->type == SPY_METHOD) fn = fn->as.method.function;
-    return fn->type == SPY_FUNCTION || fn->type == SPY_NATIVE || fn->type == SPY_STRING ||
+    return fn->type == SPY_FUNCTION || fn->type == SPY_NATIVE ||
            (fn->type == SPY_CLASS && value_class(c, fn) == c->types[SPY_CLASS]);
 }
 /* The read of v's attribute name on m, then continuation k with ctx,

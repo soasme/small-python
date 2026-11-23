@@ -76,3 +76,11 @@ EXPECTED = [
 assert_eq(len(OUT), len(EXPECTED))
 for got, want in zip(OUT, EXPECTED):
     assert_eq(got, want)
+
+# str.format's field lookup reads the flag too: any of a property's
+# functions, or a classmethod's, that is abstract makes it abstract.
+def plain(): pass
+def marked(): pass
+marked.__isabstractmethod__ = True
+assert_eq("{0.__isabstractmethod__}|{1.__isabstractmethod__}|{2.__isabstractmethod__}".format(
+    property(plain), property(plain, marked), classmethod(marked)), "False|True|True")
