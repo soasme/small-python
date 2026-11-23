@@ -167,6 +167,11 @@ typedef struct {
      * was absent_keys (name_fast); borrowed. */
     SPYValue *absent; size_t absent_keys;
 } NameOperand;
+/* An attribute's name and how a read or write of it last answered
+ * (operand_access): its kind and method for instances of cls while
+ * classes_changed was epoch, or for a builtin type (method_of); all
+ * borrowed. */
+typedef struct { NameOperand *name; SPYValue *cls, *method; size_t epoch; int kind; } AttributeOperand;
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -186,9 +191,7 @@ struct Node {
     Scope *scope;
     SPYValue *code_value;
     SPYValue *constant; /* A literal's value, made once. */
-    /* How an attribute read answers for instances of attr_class while
-     * classes_changed is attr_epoch (node_attribute); all borrowed. */
-    SPYValue *attr_class, *attr_method; size_t attr_epoch; int attr_kind;
+    AttributeOperand attribute; /* An N_ATTR's, its name b's. */
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->name.text; }
 enum { TUPLE_WITHIN = 15, TUPLE_SHORT = 3 };
@@ -6348,6 +6351,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
             if (kind == '.') {
                 n->b = identifier(p);
                 if (!n->b) return NULL;
+                n->attribute.name = &n->b->name;
             } else if (kind == '[') {
                 n->b = subscript(p);
                 if (n->b && (at(p, ',') || n->b->kind == N_STAR)) {
@@ -7246,6 +7250,7 @@ static Node *closed_pattern_body(Parser *p) {
             if (!attr) return NULL;
             attr->a = value;
             if (!(attr->b = identifier(p))) return NULL;
+            attr->attribute.name = &attr->b->name;
             value = attr;
         }
         if (take(p, '(')) {
@@ -13609,16 +13614,16 @@ static int instance_access(SPYContext *c, SPYValue *cls, const char *name, SPYVa
         (!(hook = class_lookup(cls, "__setattr__")) || default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR));
     return read | (write ? ATTR_WRITE : 0);
 }
-static NO_INLINE int node_access_refresh(SPYContext *c, SPYValue *cls, Node *n) {
-    n->attr_kind = instance_access(c, cls, n->b->name.text, &n->attr_method);
-    n->attr_class = cls; n->attr_epoch = c->classes_changed;
-    return n->attr_kind;
+static NO_INLINE int operand_access_refresh(SPYContext *c, SPYValue *cls, AttributeOperand *at) {
+    at->kind = instance_access(c, cls, at->name->text, &at->method);
+    at->cls = cls; at->epoch = c->classes_changed;
+    return at->kind;
 }
-/* n's answer for v, a plain instance, refreshed when v's class or any class changed. */
-static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
+/* at's answer for v, a plain instance, refreshed when v's class or any class changed. */
+static ALWAYS_INLINE int operand_access(SPYContext *c, SPYValue *v, AttributeOperand *at) {
     SPYValue *cls = v->as.map.parent;
-    if (cls != n->attr_class || n->attr_epoch != c->classes_changed) return node_access_refresh(c, cls, n);
-    return n->attr_kind;
+    if (cls != at->cls || at->epoch != c->classes_changed) return operand_access_refresh(c, cls, at);
+    return at->kind;
 }
 static int machine_function(SPYContext *, SPYValue *);
 /* Whether descriptor is an unbound super object of a subclass with no
@@ -13843,73 +13848,73 @@ static void searched_go(SPYContext *c, SPYValue *state) {
     c->searched_class = items && items[SEARCH_CLASS] != c->unbound ? items[SEARCH_CLASS] : NULL;
     c->searched_hook = items && items[SEARCH_HOOK] != c->unbound ? items[SEARCH_HOOK] : NULL;
 }
-/* The attribute node n read from v, with n remembering how v's class
+/* The attribute at read from v, with at remembering how v's class
  * answers; or, when calls is set, NULL with no error for a property whose
- * getter, n->attr_method's, or a __getattr__ (attribute_step) the machine
+ * getter, at->method's, or a __getattr__ (attribute_step) the machine
  * calls. */
-static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int calls) {
-    int kind = plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
+static HOT SPYValue *operand_attribute(SPYContext *c, SPYValue *v, AttributeOperand *at, int calls) {
+    int kind = plain_instance(v) ? operand_access(c, v, at) & ATTR_READ : ATTR_SLOW;
     if (kind == ATTR_OWN || kind == ATTR_METHOD) {
-        Entry *e = dict_slot(v, &n->b->name);
+        Entry *e = dict_slot(v, at->name);
         if (e) return spy_retain(e->value);
-        if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
+        if (kind == ATTR_METHOD) return descriptor_get(c, at->method, v, v->as.map.parent);
     }
-    if (calls && kind == ATTR_PROPERTY && property_enters(c, n->attr_method)) return NULL;
+    if (calls && kind == ATTR_PROPERTY && property_enters(c, at->method)) return NULL;
     /* A function's, class's or module's __annotations__ its Python __annotate__ makes (getter_call). */
-    if (calls && UNLIKELY(annotated_type(v)) && !strcmp(n->b->name.text, "__annotations__") && annotate_pending(c, v)) {
+    if (calls && UNLIKELY(annotated_type(v)) && !strcmp(at->name->text, "__annotations__") && annotate_pending(c, v)) {
         c->annotating = 1;
         return NULL;
     }
     /* A wrapper's __isabstractmethod__ or a property's __name__ read on the machine (getter_call). */
-    if (calls && UNLIKELY(v->type == SPY_PROPERTY || v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && wrapper_computes(v, n->b->name.text)) {
+    if (calls && UNLIKELY(v->type == SPY_PROPERTY || v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && wrapper_computes(v, at->name->text)) {
         c->annotating = 3;
         return NULL;
     }
     if (calls && v->type == SPY_CLASS) {
         /* A class with no Python getter or hook for the name is remembered
          * until any class changes, under the epoch's complement, which no
-         * other answer kept on n uses. */
-        if (n->attr_class != v || n->attr_epoch != ~c->classes_changed) {
-            if (class_getter(c, v, n->b->name.text) || class_hooked(v)) return attribute_step(c, v, n->b->name.text);
+         * other answer kept on at uses. */
+        if (at->cls != v || at->epoch != ~c->classes_changed) {
+            if (class_getter(c, v, at->name->text) || class_hooked(v)) return attribute_step(c, v, at->name->text);
             if (c->error_type[0]) return NULL;
-            n->attr_class = v; n->attr_epoch = ~c->classes_changed;
+            at->cls = v; at->epoch = ~c->classes_changed;
         }
-        return attribute(c, v, n->b->name.text);
+        return attribute(c, v, at->name->text);
     }
     /* A __dict__ whose search calls a Python __eq__ is searched on the machine (getter_call, method_getter). */
-    if (calls && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, n->b->name.text)) {
+    if (calls && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, at->name->text)) {
         c->annotating = 2;
         return NULL;
     }
-    return calls ? attribute_step(c, v, n->b->name.text) : attribute(c, v, n->b->name.text);
+    return calls ? attribute_step(c, v, at->name->text) : attribute(c, v, at->name->text);
 }
-/* Assign value to the attribute node n of v, as set_attribute. The key a
- * new entry takes is kept on the name node. */
-static ALWAYS_INLINE int node_set_own(SPYContext *, SPYValue *, Node *, SPYValue *);
-static HOT int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
-    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->name.text, value);
-    return node_set_own(c, v, n, value);
+/* Assign value to the attribute at of v, as set_attribute. The key a
+ * new entry takes is kept on its name. */
+static ALWAYS_INLINE int operand_set_own(SPYContext *, SPYValue *, AttributeOperand *, SPYValue *);
+static HOT int operand_set_attribute(SPYContext *c, SPYValue *v, AttributeOperand *at, SPYValue *value) {
+    if (!plain_instance(v) || !(operand_access(c, v, at) & ATTR_WRITE)) return set_attribute(c, v, at->name->text, value);
+    return operand_set_own(c, v, at, value);
 }
-static int setter_called(SPYContext *, SPYValue *, Node *);
-/* node_set_attribute for a machine step, which returns 1, storing nothing,
+static int setter_called(SPYContext *, SPYValue *, AttributeOperand *);
+/* operand_set_attribute for a machine step, which returns 1, storing nothing,
  * for a Python setter (store_call). */
-static HOT int node_store_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
-    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return setter_called(c, v, n) ? 1 : set_attribute(c, v, n->b->name.text, value);
-    return node_set_own(c, v, n, value);
+static HOT int operand_store_attribute(SPYContext *c, SPYValue *v, AttributeOperand *at, SPYValue *value) {
+    if (!plain_instance(v) || !(operand_access(c, v, at) & ATTR_WRITE)) return setter_called(c, v, at) ? 1 : set_attribute(c, v, at->name->text, value);
+    return operand_set_own(c, v, at, value);
 }
-/* node_set_attribute's store into v's own entries. */
-static ALWAYS_INLINE int node_set_own(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
-    Entry *e = dict_slot(v, &n->b->name);
+/* operand_set_attribute's store into v's own entries. */
+static ALWAYS_INLINE int operand_set_own(SPYContext *c, SPYValue *v, AttributeOperand *at, SPYValue *value) {
+    Entry *e = dict_slot(v, at->name);
     if (e && e->key->type == SPY_STRING) {
         SPYValue *old = e->value;
         e->value = spy_retain(value);
         spy_release(old);
         return 0;
     }
-    if (e) return set_attribute(c, v, n->b->name.text, value);
-    Name name = node_name(n->b);
-    if (!n->b->name.global_key && !(n->b->name.global_key = spy_string(c, name.text, name.len))) return -1;
-    return map_append(c, v, n->b->name.global_key, value, name.hash);
+    if (e) return set_attribute(c, v, at->name->text, value);
+    Name name = operand_name(at->name);
+    if (!at->name->global_key && !(at->name->global_key = spy_string(c, name.text, name.len))) return -1;
+    return map_append(c, v, at->name->global_key, value, name.hash);
 }
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     /* An instance's class, or a class's metaclass, may customize lookup. */
@@ -15948,6 +15953,7 @@ typedef struct {
         SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit. */
         NameOperand *name; /* BC_NAME: spelling and lookup cache, borrowed from the source unit. */
         const ImportRecord *import; /* BC_STORE of an import statement (arg 2): its program's. */
+        AttributeOperand *attribute; /* BC_ATTR, or a target step of an attribute: borrowed from the source unit. */
     };
     Node *node; /* Source location; some older instructions also execute this tree. */
 } Instruction;
@@ -16272,6 +16278,7 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     if (op == BC_LOAD) p->items[pc].constant = n->constant;
     if (op == BC_NAME) p->items[pc].name = &n->name;
+    if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET) && n->kind == N_ATTR) p->items[pc].attribute = &n->attribute;
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
@@ -16372,9 +16379,8 @@ static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
     }
     compile_expr(c, p, method ? n->a->a : n->a);
     if (method && !literals) {
-        size_t pc = emit(c, p, BC_ATTR, n->a, 0);
+        emit(c, p, BC_ATTR, n->a, 1);
         n->flags |= F_CALLEE_FIRST;
-        if (pc != SIZE_MAX) p->items[pc].other = 1;
     }
     for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
     emit(c, p, plain ? BC_CALLN : BC_CALLK, n, argc);
@@ -16440,7 +16446,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         emit(c, p, n->op || n->kind == N_AWAIT ? BC_DELEGATE : BC_YIELD, n, n->kind == N_AWAIT); break;
     case N_UNARY: case N_ATTR:
         compile_expr(c, p, n->a);
-        emit(c, p, n->kind == N_UNARY ? BC_UNARY : BC_ATTR, n, n->op); break;
+        emit(c, p, n->kind == N_UNARY ? BC_UNARY : BC_ATTR, n, n->kind == N_UNARY ? n->op : 0); break;
     case N_BINARY:
         if (n->op == O_AND || n->op == O_OR) {
             compile_test(c, p, n->a);
@@ -18241,37 +18247,36 @@ static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
  * goes to call_method without the bound method the attribute would make. */
 static SPYValue *call_native_method(SPYContext *, SPYValue *, int, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *call_function(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
-static SPYValue *method_of(SPYContext *, Node *, SPYValue *, SPYValue **, int *, int);
-/* The callee of method call n.b() on object, which it takes: a function
+static SPYValue *method_of(SPYContext *, AttributeOperand *, SPYValue *, SPYValue **, int *, int);
+/* The callee of a method call of attribute at on object, which it takes: a function
  * with *self the object to pass first, the object itself with *method its
  * native method, or else the attribute; or, when calls is set, NULL with
  * no error and *self the object for a Python getter of the attribute that
- * the machine calls (node_attribute, method_getter). */
-static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **self, int *method, int calls) {
-    relocate(c, n);
-    if (plain_instance(object) && (node_access(c, object, n) & ATTR_READ) == ATTR_METHOD && !env_find(object, node_name(n->b))) {
+ * the machine calls (operand_attribute, method_getter). */
+static SPYValue *method_of(SPYContext *c, AttributeOperand *at, SPYValue *object, SPYValue **self, int *method, int calls) {
+    if (plain_instance(object) && (operand_access(c, object, at) & ATTR_READ) == ATTR_METHOD && !env_find(object, operand_name(at->name))) {
         *self = object;
-        return spy_retain(n->attr_method);
+        return spy_retain(at->method);
     }
     /* A builtin type's methods do not depend on the value: the lookup's
      * answer is kept for the type, either its own function bound to the
-     * object or, in attr_kind as -1 - id, a native method of the object. */
+     * object or, in its kind as -1 - id, a native method of the object. */
     SPYValue *type = builtin_receiver(object) ? c->types[object->type] : NULL;
-    if (type && n->attr_class == type && n->attr_epoch == c->classes_changed) {
-        if (n->attr_kind >= 0) { *self = object; return spy_retain(n->attr_method); }
-        *method = -1 - n->attr_kind;
+    if (type && at->cls == type && at->epoch == c->classes_changed) {
+        if (at->kind >= 0) { *self = object; return spy_retain(at->method); }
+        *method = -1 - at->kind;
         return object;
     }
-    SPYValue *callee = node_attribute(c, object, n, calls);
+    SPYValue *callee = operand_attribute(c, object, at, calls);
     if (!callee && calls && !c->error_type[0]) { *self = object; return NULL; }
-    int dunder = n->b->name.text[0] == '_' && n->b->name.text[1] == '_';
+    int dunder = at->name->text[0] == '_' && at->name->text[1] == '_';
     if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
-        !dunder && callee->as.method.function == class_lookup(type, n->b->name.text)) {
-        n->attr_class = type; n->attr_method = callee->as.method.function; n->attr_kind = 0; n->attr_epoch = c->classes_changed;
+        !dunder && callee->as.method.function == class_lookup(type, at->name->text)) {
+        at->cls = type; at->method = callee->as.method.function; at->kind = 0; at->epoch = c->classes_changed;
     } else if (type && callee && callee->type == SPY_BOUND_METHOD && callee->as.bound.self == object && !callee->as.bound.module &&
-               !dunder && callee->as.bound.name && !strcmp(callee->as.bound.name->as.string.data, n->b->name.text) &&
-               (n->b->name.global_key || (n->b->name.global_key = spy_retain(callee->as.bound.name)))) {
-        n->attr_class = type; n->attr_method = NULL; n->attr_kind = -1 - callee->as.bound.method; n->attr_epoch = c->classes_changed;
+               !dunder && callee->as.bound.name && !strcmp(callee->as.bound.name->as.string.data, at->name->text) &&
+               (at->name->global_key || (at->name->global_key = spy_retain(callee->as.bound.name)))) {
+        at->cls = type; at->method = NULL; at->kind = -1 - callee->as.bound.method; at->epoch = c->classes_changed;
     }
     spy_release(object);
     return callee;
@@ -18304,13 +18309,13 @@ static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
     return y ? sequence_item(x, y) : NULL;
 }
 /* An attribute of a name found in a plain instance's own entries, as
- * node_attribute finds it, borrowed. */
-static NO_INLINE SPYValue *attr_found(SPYContext *c, SPYValue *v, Node *n) {
-    int kind = v && plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
-    Entry *e = kind == ATTR_OWN || kind == ATTR_METHOD ? dict_slot(v, &n->b->name) : NULL;
+ * operand_attribute finds it, borrowed. */
+static NO_INLINE SPYValue *attr_found(SPYContext *c, SPYValue *v, AttributeOperand *at) {
+    int kind = v && plain_instance(v) ? operand_access(c, v, at) & ATTR_READ : ATTR_SLOW;
+    Entry *e = kind == ATTR_OWN || kind == ATTR_METHOD ? dict_slot(v, at->name) : NULL;
     return e ? e->value : NULL;
 }
-static ALWAYS_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) { return attr_found(c, name_fast(f->env, &n->a->name), n); }
+static ALWAYS_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) { return attr_found(c, name_fast(f->env, &n->a->name), &n->attribute); }
 /* A leaf's value at hand from its plain step ins: BC_LOAD's constant or
  * BC_NAME's name along the fast path, borrowed. */
 static ALWAYS_INLINE SPYValue *leaf_step(Frame *f, Instruction *ins) {
@@ -18332,7 +18337,7 @@ static NO_INLINE SPYValue *item_step(Frame *f, Instruction *ins) {
 static ALWAYS_INLINE SPYValue *step_operand(SPYContext *c, Frame *f, Instruction *ins, int shape) {
     if (shape == SHAPE_LOAD) return ins->constant;
     if (shape == SHAPE_NAME) return name_fast(f->env, ins->name);
-    return shape == SHAPE_ITEM ? item_step(f, ins) : attr_found(c, name_fast(f->env, ins->name), ins[1].node);
+    return shape == SHAPE_ITEM ? item_step(f, ins) : attr_found(c, name_fast(f->env, ins->name), ins[1].attribute);
 }
 /* An operand found along the fast path, borrowed: a literal, a name, an
  * item of a list or tuple they index, or an instance's attribute. Finding
@@ -21669,14 +21674,14 @@ static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, cons
     else if ((function = descriptor_setter(c, owner, name, descriptor, deleting)) == *descriptor) return function;
     return function && machine_function(c, function) ? function : NULL;
 }
-/* Whether a store to attribute n of object, which node_set_attribute
+/* Whether a store to attribute at of object, which operand_set_attribute
  * would not store at once, calls a Python setter on the machine: then
  * store_call enters c->entering_init with the descriptor c->fallback. */
-static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
-    SPYValue *descriptor = NULL, *function = setter_object(object) ? setter_function(c, object, n->b->name.text, &descriptor, 0) : NULL;
+static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, AttributeOperand *at) {
+    SPYValue *descriptor = NULL, *function = setter_object(object) ? setter_function(c, object, at->name->text, &descriptor, 0) : NULL;
     /* A class's __bases__, whose MROs a metaclass's Python mro() may
      * rebuild, too (bases_go): c->unbound. */
-    if (!function && object->type == SPY_CLASS && !strcmp(n->b->name.text, "__bases__")) function = object->ctx->unbound;
+    if (!function && object->type == SPY_CLASS && !strcmp(at->name->text, "__bases__")) function = object->ctx->unbound;
     if (!function) return 0;
     c->entering_init = function; c->fallback = spy_retain(descriptor);
     return 1;
@@ -21713,7 +21718,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
         if (calls && key && (object->type == SPY_INSTANCE || key->type == SPY_INSTANCE || key->type == SPY_TUPLE ||
                              (object->type == SPY_DICT && eq_keyed(object)) || (object->type == SPY_MEMORYVIEW && value->type == SPY_INSTANCE)) &&
             store_hooked(c, object, key, value)) status = 1;
-        else if (object && (key || n->kind == N_ATTR)) status = key ? set_index(c, object, key, value) : node_set_attribute(c, object, n, value);
+        else if (object && (key || n->kind == N_ATTR)) status = key ? set_index(c, object, key, value) : operand_set_attribute(c, object, &n->attribute, value);
         spy_release(object); spy_release(key);
         return status;
     }
@@ -31744,7 +31749,7 @@ static SPYValue *method_got(SPYContext *c, Machine *m, SPYValue *state, SPYValue
     return callk(c, m, result, argc, args, method_called, result);
 }
 /* Method call attr() on object, which it takes, whose lookup calls the
- * Python getter node_attribute left (attribute_step), the step's call
+ * Python getter operand_attribute left (attribute_step), the step's call
  * (callk): a property's getter, a descriptor's __get__ or a
  * __getattribute__, then the __getattr__ after its AttributeError, then
  * the attribute (method_got), with the stacked arguments above the object
@@ -31780,11 +31785,11 @@ static SPYValue *method_searched(SPYContext *c, Machine *m, SPYValue *state, SPY
     spy_release(key); spy_release(count);
     return result;
 }
-static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, SPYValue *object, int stacked) {
+static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, AttributeOperand *at, SPYValue *object, int stacked) {
     if (UNLIKELY(c->annotating == 2)) {
         /* Its __dict__ searched on m first (dict_searches, method_searched). */
         c->annotating = 0;
-        SPYValue *count = int_value(c, stacked), *result = count ? search_begin(c, m, object, attr->b->name.text, count, method_searched) : NULL;
+        SPYValue *count = int_value(c, stacked), *result = count ? search_begin(c, m, object, at->name->text, count, method_searched) : NULL;
         spy_release(count); spy_release(object);
         if (!result && !c->k_fn) method_drop(m, stacked);
         return result;
@@ -31792,13 +31797,13 @@ static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, 
     if (UNLIKELY(c->annotating == 3)) {
         /* A computed attribute (wrapper_computes) read on m, then called (method_got). */
         c->annotating = 0;
-        SPYValue *count = int_value(c, stacked), *key = spy_string(c, attr->b->name.text, strlen(attr->b->name.text));
+        SPYValue *count = int_value(c, stacked), *key = spy_string(c, at->name->text, strlen(at->name->text));
         SPYValue *state = count && key ? spy_tuple(c, 4, (SPYValue *[]){object, c->none, key, count}) : NULL;
         spy_release(count); spy_release(key);
         if (!state) { spy_release(object); method_drop(m, stacked); return NULL; }
-        return wrapper_computed(c, m, object, attr->b->name.text, method_got, state);
+        return wrapper_computed(c, m, object, at->name->text, method_got, state);
     }
-    return method_getter_of(c, m, attr->b->name.text, c->fallback ? c->fallback : spy_retain(attr->attr_method), object, stacked);
+    return method_getter_of(c, m, at->name->text, c->fallback ? c->fallback : spy_retain(at->method), object, stacked);
 }
 /* method_getter's call of function, which it takes, the getter for name
  * of object, which it owns. */
@@ -31837,7 +31842,7 @@ static ALWAYS_INLINE SPYValue *operand_callee(SPYContext *c, Frame *f, Node *n, 
     if (n->a->kind == N_ATTR) {
         Node *object = n->a->a;
         SPYValue *found = object->kind == N_NAME ? name_fast(f->env, &object->name) : NULL;
-        if (found) a = method_of(c, n->a, spy_retain(found), argv, method, 1);
+        if (found) { relocate(c, n->a); a = method_of(c, &n->a->attribute, spy_retain(found), argv, method, 1); }
         done = argv[0] != NULL;
     } else if ((a = name_fast(f->env, &n->a->name))) spy_retain(a);
     if (!a) return NULL;
@@ -31877,10 +31882,10 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
  * and fixed, so a method found now is found again at the call, which then
  * takes object with c->unbound above it; any other attribute is the
  * callee. */
-static NO_INLINE void method_load(SPYContext *c, Machine *m, Node *n, SPYValue *object) {
+static NO_INLINE void method_load(SPYContext *c, Machine *m, AttributeOperand *at, SPYValue *object) {
     SPYValue *self = NULL;
     int method = -1;
-    SPYValue *callee = method_of(c, n, spy_retain(object), &self, &method, 0);
+    SPYValue *callee = method_of(c, at, spy_retain(object), &self, &method, 0);
     if (callee && (self || method >= 0)) {
         spy_release(callee); spy_release(self);
         if (!machine_push(c, m, object)) machine_push(c, m, spy_retain(c->unbound));
@@ -31904,11 +31909,11 @@ static NO_INLINE SPYValue *join_step(SPYContext *c, Machine *m, int count) {
     for (int i = 0; i < count; i++) spy_release(machine_pop(m));
     return joined;
 }
-/* BC_LOAD_TARGET with arg 1, of target n: its object's, and a
- * subscript's key's, copies on m's stack, the last one to push, for the
- * BC_INDEX or BC_ATTR after it. */
-static NO_INLINE SPYValue *target_copies(SPYContext *c, Machine *m, Node *n) {
-    if (n->kind != N_INDEX) return spy_retain(m->stack[m->len - 1]);
+/* BC_LOAD_TARGET ins with arg 1: its object's, and a subscript's key's,
+ * copies on m's stack, the last one to push, for the BC_INDEX or BC_ATTR
+ * after it. */
+static NO_INLINE SPYValue *target_copies(SPYContext *c, Machine *m, Instruction *ins) {
+    if (ins->attribute) return spy_retain(m->stack[m->len - 1]);
     if (machine_push(c, m, spy_retain(m->stack[m->len - 2]))) return NULL;
     return spy_retain(m->stack[m->len - 2]);
 }
@@ -32416,9 +32421,10 @@ static void search_span(SPYContext *c, SPYValue *seq, int method, size_t argc, S
 static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc - 1], *object = argv[0], *self = NULL, *result = NULL;
     int method = -1;
-    SPYValue *callee = method_of(c, n->a, spy_retain(object), &self, &method, calls);
+    relocate(c, n->a);
+    SPYValue *callee = method_of(c, &n->a->attribute, spy_retain(object), &self, &method, calls);
     relocate(c, n);
-    if (!callee && self) return method_getter(c, m, n->a, self, (int)argc);
+    if (!callee && self) return method_getter(c, m, &n->a->attribute, self, (int)argc);
     if (self) spy_release(object); /* The stack holds it; a native method's callee is the reference passed. */
     /* A method takes the object first; another callee, the arguments after it. */
     size_t skip = !self;
@@ -37502,23 +37508,23 @@ static SPYValue *attribute_searched(SPYContext *c, Machine *m, SPYValue *state, 
     spy_release(state);
     return value;
 }
-/* Attribute step n's call on v, which it owns: its property's getter
+/* Attribute step at's call on v, which it owns: its property's getter
  * (CALL_MACHINE); else, with v and the __getattr__ that follows the call
  * (getter_fallback) on m's stack (CALL_CHECKED), the call c->fallback
  * gives (getter_function). The function to enter, its kind
  * c->entering_kind, else NULL. */
-static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYValue *v, SPYValue **env) {
+static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, AttributeOperand *at, SPYValue *v, SPYValue **env) {
     if (UNLIKELY(c->annotating == 2)) {
         /* A __dict__ search on m (dict_searches), the read going on after it (attribute_searched). */
         c->annotating = 0;
-        SPYValue *result = search_begin(c, m, v, n->b->name.text, c->none, attribute_searched);
+        SPYValue *result = search_begin(c, m, v, at->name->text, c->none, attribute_searched);
         spy_release(v);
         if (result) machine_push(c, m, result);
         return NULL;
     }
     if (UNLIKELY(c->annotating == 3)) {
         c->annotating = 0;
-        SPYValue *result = wrapper_computed(c, m, v, n->b->name.text, wrapper_value, NULL);
+        SPYValue *result = wrapper_computed(c, m, v, at->name->text, wrapper_value, NULL);
         if (result) machine_push(c, m, result);
         return NULL;
     }
@@ -37534,8 +37540,8 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     size_t argc = 1;
     c->fallback = NULL;
     c->entering_kind = CALL_MACHINE;
-    if (function) return getter_enter(c, m, v, n->b->name.text, function, env);
-    function = getter_bound(c, spy_retain(n->attr_method->as.property.get), argv, &argc);
+    if (function) return getter_enter(c, m, v, at->name->text, function, env);
+    function = getter_bound(c, spy_retain(at->method->as.property.get), argv, &argc);
     if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
     spy_release(function);
     return NULL;
@@ -38424,7 +38430,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
             size_t at = m->len - (below == c->defaulting ? 3 : 2);
             spy_clear_error(c);
             args[0] = spy_retain(m->stack[getattr ? at : m->len - 1]);
-            args[1] = getattr ? spy_retain(m->stack[at - 1]) : spy_string(c, ins->node->b->name.text, strlen(ins->node->b->name.text));
+            args[1] = getattr ? spy_retain(m->stack[at - 1]) : spy_string(c, ins->attribute->name->text, strlen(ins->attribute->name->text));
             SPYValue *env = NULL, *function = args[1] ? special_env(c, m, fallback, args[0], args[1], NULL, &env) : NULL;
             spy_release(args[0]); spy_release(args[1]); spy_release(fallback);
             Call *call = function ? call_enter(c, function, env, m) : NULL;
@@ -38453,7 +38459,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     }
     if (!result) {
         /* As attribute: an AttributeError names the attribute and object. */
-        if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], ins->node->b->name.text);
+        if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], ins->attribute->name->text);
         /* So does getattr() (getattr_call). */
         else if (m->stack[m->len - 1] == c->unbound) {
             SPYValue *saved = c->attribute_name;
@@ -39974,8 +39980,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
-            if (ins->other && builtin_receiver(a)) { method_load(c, m, n, a); a = NULL; break; }
-            if (!(value = node_attribute(c, a, n, 1)) && !c->error_type[0]) goto enter_getter;
+            if (ins->arg && builtin_receiver(a)) { method_load(c, m, ins->attribute, a); a = NULL; break; }
+            if (!(value = operand_attribute(c, a, ins->attribute, 1)) && !c->error_type[0]) goto enter_getter;
             machine_push(c, m, value); break;
         CASE(BC_COMPARE) {
             b = machine_pop(m); a = machine_pop(m);
@@ -40106,32 +40112,32 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(a); spy_release(b); a = b = NULL;
             goto enter_k;
         CASE(BC_SET_TARGET)
-            if (ins->arg || (n->kind == N_INDEX && store_calls(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) goto store_step;
-            if (n->kind == N_INDEX && UNLIKELY(slice_source(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) {
+            if (ins->arg || (!ins->attribute && store_calls(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) goto store_step;
+            if (!ins->attribute && UNLIKELY(slice_source(c, m->stack[m->len - 2], m->stack[m->len - 1], m->stack[m->len - 3]))) {
                 if (slice_listing(c, m)) goto consume_generator;
                 break;
             }
-            if (n->kind == N_INDEX) b = machine_pop(m);
+            if (!ins->attribute) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, m->stack[m->len - 1]);
             /* A Python setter takes the object back atop the value. */
-            else if (node_store_attribute(c, a, n, m->stack[m->len - 1]) > 0) { machine_push(c, m, a); a = NULL; goto store_step; }
+            else if (operand_store_attribute(c, a, ins->attribute, m->stack[m->len - 1]) > 0) { machine_push(c, m, a); a = NULL; goto store_step; }
             break;
         CASE(BC_LOAD_TARGET)
-            if (n->kind == N_INDEX && !ins->arg && (m->stack[m->len - 1]->type == SPY_INSTANCE ||
+            if (!ins->attribute && !ins->arg && (m->stack[m->len - 1]->type == SPY_INSTANCE ||
                                                      walk_reaches(c, m->stack[m->len - 1]))) {
                 a = spy_retain(m->stack[m->len - 1]); goto display_hash;
             }
-            value = ins->arg ? target_copies(c, m, n) : n->kind == N_INDEX ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
-                node_attribute(c, m->stack[m->len - 1], n, 0);
+            value = ins->arg ? target_copies(c, m, ins) : !ins->attribute ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
+                operand_attribute(c, m->stack[m->len - 1], ins->attribute, 0);
             machine_push(c, m, value); break;
         CASE(BC_SAVE_TARGET)
-            if (n->kind == N_INDEX && store_calls(c, m->stack[m->len - 3], m->stack[m->len - 2], m->stack[m->len - 1])) goto store_step;
+            if (!ins->attribute && store_calls(c, m->stack[m->len - 3], m->stack[m->len - 2], m->stack[m->len - 1])) goto store_step;
             value = machine_pop(m);
-            if (n->kind == N_INDEX) b = machine_pop(m);
+            if (!ins->attribute) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, value);
-            else if (node_store_attribute(c, a, n, value) > 0) { machine_push(c, m, a); machine_push(c, m, value); a = NULL; goto store_step; }
+            else if (operand_store_attribute(c, a, ins->attribute, value) > 0) { machine_push(c, m, a); machine_push(c, m, value); a = NULL; goto store_step; }
             spy_release(value); break;
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m);
@@ -40875,7 +40881,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     enter_getter:
         /* A property's Python getter or a __getattr__ is a call (BC_ATTR),
          * or an __annotate__ m's call (callk). */
-        if (!(value = getter_call(c, m, n, a, &callee_env))) {
+        if (!(value = getter_call(c, m, ins->attribute, a, &callee_env))) {
             if (UNLIKELY(c->k_fn)) goto enter_k;
             continue;
         }
