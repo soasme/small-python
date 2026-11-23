@@ -1502,7 +1502,15 @@ static void free_scope(Scope *);
  * released (release) or, at shutdown, dropped. */
 static void free_scope_tree(SPYContext *c, Scope *s, int release) {
     if (!s) return;
-    for (Scope *child = s->children, *next; child; child = next) { next = child->sibling; free_scope_tree(c, child, release); }
+    /* A module's or class's __annotate__ scope is adopted only when its
+     * body ends (collect_end); a definition's belongs to its parent. */
+    Scope *annotate = s->annotate && s->annotate->parent == s ? s->annotate : NULL;
+    for (Scope *child = s->children, *next; child; child = next) {
+        next = child->sibling;
+        if (child == annotate) annotate = NULL;
+        free_scope_tree(c, child, release);
+    }
+    free_scope_tree(c, annotate, release);
     drop_kept(c, s, release); free_scope(s);
 }
 /* Drop the kept environments of s and the scopes within it (shutdown). */
@@ -8597,9 +8605,10 @@ static Scope *annotation_scope(SPYContext *c, Scope *scope, size_t line) {
     Scope *annotate = scope_new(c, NULL, S_FUNCTION);
     if (!annotate) return NULL;
     annotate->parent = scope; annotate->within = "an annotation";
+    scope->annotate = annotate;
     Symbol *format = scope_add(c, annotate, "format", line);
     if (format) format->flags |= S_PARAM;
-    return scope->annotate = format ? annotate : NULL;
+    return format ? annotate : NULL;
 }
 /* Annotation functions run in their own scope. Unlike methods, they see the
  * names of an enclosing class body. */
