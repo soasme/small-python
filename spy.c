@@ -156,8 +156,9 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
 /* A body's: its symbols, and as its values run it, its programs, owned:
  * a generator's (code), or a function's or class's on the machine (flat);
  * a function's or lambda's parameters (signature), their names borrowed;
- * and its code object, made once (code_value). */
-struct Scope { Node *owner; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+ * and its code object, made once (code_value). Its line is its
+ * definition's, or a module's first statement's. */
+struct Scope { Node *owner; size_t line; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line, statics_len, statics_cap; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -289,7 +290,7 @@ struct SPYValue {
         struct {
             SPYValue *env, *unit, *name, *qualname, *code, *frame; /* frame: gi_frame, once read */
             SPYValue *origin; /* cr_origin, or an asynchronous generator's finalizer hook */
-            Node *node;
+            Scope *def;
             Machine *machine;
             int running, done, started, returned, async_running, async_closed, hooked;
             size_t line; /* where a suspended generator resumes, 0 before it starts */
@@ -8287,7 +8288,7 @@ static Scope *scope_new(SPYContext *c, Scope *parent, int kind) {
  * compile_generator) or now; analysis places it within parent. */
 static Scope *scope_of(SPYContext *c, Node *n, Scope *parent, int kind) {
     if (!n->scope) n->scope = scope_new(c, NULL, kind);
-    if (n->scope) { scope_adopt(parent, n->scope); n->scope->owner = n; }
+    if (n->scope) { scope_adopt(parent, n->scope); n->scope->owner = n; n->scope->line = n->line; }
     return n->scope;
 }
 /* Binds the name n, reporting errors at the node `at` covers. */
@@ -8970,6 +8971,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0);
         if (!c->error_type[0]) {
             unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
+            if (unit->as.unit.scope && unit->as.unit.body) unit->as.unit.scope->line = unit->as.unit.body->line;
             if (unit->as.unit.scope && !scope_walk(c, unit->as.unit.scope, unit->as.unit.body) &&
                 !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) scope_resolve(c, unit->as.unit.scope);
         }
@@ -16126,7 +16128,7 @@ struct Machine {
     int awaiting, drop; /* drop: a yield statement's resumption pushes no sent value. */
     int outermost; /* CALL_OUTERMOST: run_machine returns when it does, a generator's or a call's entered from C. */
     Frame frame; /* Borrowed from its generator or call. */
-    Node *owner; /* A module body's: the node its steps of no node tick on. */
+    Scope *owner; /* A module body's: the scope whose line its steps of no line tick on. */
     /* A generator's: the generator, borrowed; while a loop step resumed it
      * in its own run_machine, that step's machine, and what the generator's
      * frame set aside from the context. */
@@ -19511,7 +19513,7 @@ static NO_INLINE Call *unit_enter(SPYContext *c, SPYValue *unit, SPYValue *env, 
         if ((code || !setup_annotations(c, &frame, unit->as.unit.setup_annotations)) &&
             ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c))) {
             Call *call = c->calls[c->calls_len++];
-            call->m.code = code ? code : unit->as.unit.flat; call->m.pc = call->m.code->entry; call->m.owner = unit->as.unit.body;
+            call->m.code = code ? code : unit->as.unit.flat; call->m.pc = call->m.code->entry; call->m.owner = unit->as.unit.body ? unit->as.unit.scope : NULL;
             call->m.frame = frame;
             call->caller = caller; call->fn = unit;
             call->caller_env = c->eval_env; c->eval_env = env;
@@ -19565,7 +19567,7 @@ static NO_INLINE Call *compare_enter(SPYContext *c, Machine *m, SPYValue *x, SPY
         spy_release(x); spy_release(y);
         return NULL;
     }
-    Node *owner = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : function_node(((Call *)m)->fn);
+    Scope *owner = m->generator ? m->generator->as.generator.def : m->owner ? m->owner : ((Call *)m)->fn->as.function.def;
     Call *call = c->calls[c->calls_len++];
     call->m.code = c->compare_code; call->m.pc = 2 * (size_t)rich; call->m.outermost = kind;
     call->m.frame = m->frame; call->m.owner = owner;
@@ -21859,7 +21861,7 @@ static SPYValue *comprehension_of(SPYContext *c, Frame *f, Node *n, SPYValue *it
         else declare_locals(c, env);
         result->as.generator.env = spy_retain(env);
         result->as.generator.unit = spy_retain(f->unit);
-        result->as.generator.node = n;
+        result->as.generator.def = n->scope;
         result->as.generator.code = definition_code(c, f->unit, n);
         Machine *m = result->as.generator.machine = machine_new(c, n->scope->code, env, f->unit);
         if (m) {
@@ -21906,7 +21908,7 @@ static void generator_close(SPYValue *v) {
         v->as.generator.frame = NULL;
         if (frame->refs > 1) {
             frame->as.frame.owner = spy_retain(v->as.generator.code); frame->as.frame.generator = NULL;
-            frame->as.frame.line = v->as.generator.line ? v->as.generator.line : v->as.generator.node ? v->as.generator.node->line : 0;
+            frame->as.frame.line = v->as.generator.line ? v->as.generator.line : v->as.generator.def ? v->as.generator.def->line : 0;
         }
         spy_release(frame);
     }
@@ -23782,7 +23784,7 @@ static NO_INLINE int trace_call(SPYContext *c) {
     else if (owner->type == V_UNIT) top->line = 0;
     else if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) {
         /* A resumed generator continues the line where it was suspended. */
-        top->line = owner->as.generator.line ? owner->as.generator.line : owner->as.generator.node ? owner->as.generator.node->line : top->line;
+        top->line = owner->as.generator.line ? owner->as.generator.line : owner->as.generator.def ? owner->as.generator.def->line : top->line;
         if (owner->as.generator.line) top->traced = top->line;
     }
     return trace_event(c, TRACE_CALL, NULL);
@@ -25635,7 +25637,7 @@ static Result module_body(SPYContext *c, Frame *f) {
     c->pause_entry = 0;
     if (!m) return (Result){body ? FLOW_ERROR : FLOW_NORMAL, NULL};
     m->pc = m->code->entry;
-    m->owner = body; m->frame.interactive = f->interactive;
+    m->owner = unit->as.unit.scope; m->frame.interactive = f->interactive;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
     if (pausable) c->pause_root = m;
@@ -26595,7 +26597,7 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     if (!v) return NULL;
     if (!(v->as.generator.machine = machine_new(c, n->scope->code, f->env, f->unit))) { spy_release(v); return NULL; }
     v->as.generator.machine->generator = v;
-    v->as.generator.node = n;
+    v->as.generator.def = n->scope;
     v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
     v->as.generator.qualname = spy_retain(name_local(function->as.function.metadata, "__qualname__"));
     SPYValue *code = name_local(function->as.function.metadata, "__code__");
@@ -26971,7 +26973,7 @@ static void finish_delegate(SPYContext *c, Machine *m) {
      * returned. */
     SPYValue *d = m->delegate;
     if (d && error_is(c, "StopIteration") &&
-        (d->type != SPY_COROUTINE || d->as.generator.node->kind != N_COMPREHENSION || d->as.generator.returned))
+        (d->type != SPY_COROUTINE || d->as.generator.def->kind != S_COMPREHENSION || d->as.generator.returned))
         machine_push(c, m, stop_value(c));
     else if ((m->awaiting == AWAIT_NEXT || m->await_target) && error_is(c, "StopAsyncIteration")) {
         spy_clear_error(c); m->pc = m->await_target;
@@ -39996,7 +39998,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* An instruction of no line ticks on its definition's, keeping
              * the frame's line; while only a line would be recorded, it need
              * not. A finalizer the machine runs waits for a step with a line. */
-            Node *n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : function_node(c->calls[c->calls_len - 1]->fn);
+            Scope *n = m->generator ? m->generator->as.generator.def : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
             size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
             if (tick_full(c, &f, n->line, TICK_DEFINITION)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
@@ -40807,7 +40809,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         Machine *resumer = m->resumer;
         SPYValue *g = m->generator;
         m->resumer = NULL;
-        if (eager_comprehension(g->as.generator.node)) {
+        if (eager_comprehension(g->as.generator.def->owner)) {
             c->eval_env = m->outer_env;
             value = comprehension_end(c, g, flow);
             m = resumer;
@@ -41059,7 +41061,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     if (!g->as.generator.started && thrown) {
         size_t line = c->line;
         if (enter_frame(c, g->as.generator.env, g)) return NULL;
-        c->frames[c->py_depth - 1].line = g->as.generator.node ? g->as.generator.node->line : line;
+        c->frames[c->py_depth - 1].line = g->as.generator.def ? g->as.generator.def->line : line;
         raise_thrown(c, thrown, NULL); leave_frame(c, NULL); c->line = line;
         generator_close(g); return NULL;
     }
@@ -41106,7 +41108,7 @@ static SPYValue *generator_end(SPYContext *c, SPYValue *g, Result result) {
         SPYValue *exception = exception_create(c, name_local(c->classes, g->type == SPY_ASYNC_GENERATOR ? "StopAsyncIteration" : "StopIteration"),
             result.value && result.value->type != SPY_NONE ? 1 : 0, &result.value);
         if (exception) { raise_value(c, exception); spy_release(exception); }
-    } else if (!(g->as.generator.node->kind == N_COMPREHENSION && g->as.generator.node->op != N_TUPLE) &&
+    } else if (!(g->as.generator.def->kind == S_COMPREHENSION && g->as.generator.def->owner->op != N_TUPLE) &&
                (error_is(c, "StopIteration") || (g->type == SPY_ASYNC_GENERATOR && error_is(c, "StopAsyncIteration")))) {
         int async_stop = error_is(c, "StopAsyncIteration");
         error_from_cause(c, "RuntimeError", g->type == SPY_ASYNC_GENERATOR ?
@@ -42316,7 +42318,7 @@ static size_t frame_line(SPYContext *c, SPYValue *frame) {
     SPYValue *owner = frame_owner(frame);
     /* A suspended generator's frame is where it resumes; a finished one's, where it ended. */
     if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR)
-        return owner->as.generator.line ? owner->as.generator.line : owner->as.generator.node ? owner->as.generator.node->line : 0;
+        return owner->as.generator.line ? owner->as.generator.line : owner->as.generator.def ? owner->as.generator.def->line : 0;
     return frame->as.frame.line;
 }
 /* Whether frame runs a function or a generator expression, whose locals
