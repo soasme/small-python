@@ -1503,8 +1503,8 @@ static void free_scope(Scope *);
 static void free_scope_tree(SPYContext *c, Scope *s, int release) {
     if (!s) return;
     /* A module's or class's __annotate__ scope is adopted only when its
-     * body ends (collect_end); a definition's belongs to its parent. */
-    Scope *annotate = s->annotate && s->annotate->parent == s ? s->annotate : NULL;
+     * body ends (collect_end); a def's belongs to its parent. */
+    Scope *annotate = s->kind == S_MODULE || s->kind == S_CLASS ? s->annotate : NULL;
     for (Scope *child = s->children, *next; child; child = next) {
         next = child->sibling;
         if (child == annotate) annotate = NULL;
