@@ -209,3 +209,34 @@ with assert_raises(ValueError):
 
 with assert_raises(TypeError):
     bool(TestLenThrowError())
+
+# A __bool__ whose descriptor raises AttributeError is absent: __len__, if
+# any, decides, a Python one, a sized builtin base's or a native method;
+# with none, as for a number base, the value is true.
+class MissingBool:
+    def __get__(self, obj, cls): raise AttributeError("no bool")
+class SizedBehind:
+    __bool__ = MissingBool()
+    def __init__(self, n): self.n = n
+    def __len__(self): return self.n
+class ListBehind(list):
+    __bool__ = MissingBool()
+class NativeBehind:
+    __bool__ = MissingBool()
+    __len__ = [].__len__
+class NothingBehind:
+    __bool__ = MissingBool()
+assert_eq([bool(SizedBehind(0)), bool(SizedBehind(2)), bool(NothingBehind()), not SizedBehind(3), all([SizedBehind(1), SizedBehind(0)])],
+          [False, True, True, False, False])
+assert_eq([bool(ListBehind()), bool(ListBehind([1])), "yes" if ListBehind() else "no", bool(NativeBehind())], [False, True, "no", False])
+class StrBehind(str):
+    __bool__ = MissingBool()
+class TupleBehind(tuple):
+    __bool__ = MissingBool()
+class DictBehind(dict):
+    __bool__ = MissingBool()
+class IntBehind(int):
+    __bool__ = MissingBool()
+assert_eq([bool(StrBehind("")), not StrBehind(""), bool(StrBehind("a")), bool(TupleBehind()), bool(DictBehind(a=1)),
+           bool(IntBehind(0)), not IntBehind(0), list(filter(None, [ListBehind(), ListBehind([0])]))],
+          [False, True, True, False, True, True, False, [[0]]])

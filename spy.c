@@ -2401,11 +2401,20 @@ static int truth_result(SPYContext *c, SPYValue *v, int boolean, SPYValue *resul
     spy_release(result);
     return !c->error_type[0] && length != 0;
 }
+/* The truth of v with no __len__ of a Python class: a builtin base's
+ * own __len__, which no Python class overrides, decides; else true. */
+static int base_truth(SPYContext *c, SPYValue *v) {
+    SPYValue *base = builtin_base(c, v, "__len__", NULL);
+    return !base || !(UINT64_C(1) << base->type & (UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
+                                                  UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET |
+                                                  UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BYTEARRAY)) ||
+           truthy(base);
+}
 /* The truth of v whose class defines a __bool__ that is absent
  * (slot_nb_bool): that of what its __len__ returns, or true with none. */
 static int length_fallback(SPYContext *c, SPYValue *v) {
     SPYValue *method = special_method_maybe(c, v, "__len__");
-    if (!method) return !c->error_type[0];
+    if (!method) return !c->error_type[0] && base_truth(c, v);
     SPYValue *result = call(c, method, 0, NULL);
     spy_release(method);
     int truth = result && truthy(result);
@@ -35711,10 +35720,10 @@ static SPYValue *truth_special(SPYContext *c, SPYValue *v, int *length) {
     return function && descriptor_getter(c, function) ? function : NULL;
 }
 /* What a descriptor __bool__ of v whose read raises AttributeError gives
- * (special_env): True, or c->missing when v's class has a __len__, the
- * truth of whose result v's is then (truth_length). */
+ * (special_env): c->missing when v's class has a __len__, the truth of
+ * whose result v's is then (truth_length); else its base's (base_truth). */
 static SPYValue *truth_absent(SPYContext *c, SPYValue *v) {
-    return class_lookup(value_class(c, v), "__len__") ? c->missing : c->booleans[1];
+    return class_lookup(value_class(c, v), "__len__") ? c->missing : c->booleans[base_truth(c, v)];
 }
 /* For a truth step whose descriptor __bool__ of v, owned, was absent
  * (truth_absent): v and c->missing, marking the truth of what __len__
