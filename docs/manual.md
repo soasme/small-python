@@ -1206,7 +1206,8 @@ returns what the continuation does. A callback that returns a value after
 API failures use `NULL` or `-1`, with details available through
 `spy_error_type`, `spy_error_message`, `spy_error_filename`, and
 `spy_error_line`. These strings belong to the context. `spy_clear_error` resets
-them. `spy_error_value` returns the pending exception object, creating it from
+them; while Python code runs, the location goes back to its running line, so an
+error raised after a cleared one is located where it is raised. `spy_error_value` returns the pending exception object, creating it from
 the record if needed, and leaves the error set. `spy_raise` raises an exception
 instance or class, so a native callback can fail with any exception.
 

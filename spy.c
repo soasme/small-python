@@ -1035,7 +1035,11 @@ void spy_clear_error(SPYContext *c) {
     if (c->error_text) { mem_free(c->error_text); c->error_text = NULL; }
     if (c->error_name) { mem_free(c->error_name); c->error_name = NULL; }
     c->error_type[0] = c->error_message[0] = c->filename[0] = 0; c->filename_from = c->quiet_unit = NULL;
-    c->line = 0;
+    /* Running code is back at its frame's line, where a later error is. */
+    struct ActiveFrame *top = c->py_depth ? &c->frames[c->py_depth - 1] : NULL;
+    SPYValue *unit = top ? frame_unit(top) : NULL;
+    c->line = top ? top->line : 0;
+    if (unit && unit->as.unit.filename) put_text(c->filename, sizeof(c->filename), unit->as.unit.filename);
 }
 enum { POOL = 16384, SPARES = 64 };
 /* Engine memory (docs/metering.md 3.3). A block starts with its size and

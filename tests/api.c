@@ -1098,11 +1098,14 @@ int main(int argc, char **argv) {
         "class W:\n    def __eq__(self, o): return False\n[W(), 2].index(1)\n",
         "class M:\n    def __eq__(self, o):\n        for _ in (): pass\n        return False\n[M(), 2].index(1)\n",
         "class R:\n    def __eq__(self, o):\n        for _ in (): pass\n        raise KeyError(o)\n[R(), 2].index(1)\n",
+        /* An error that replaces a cleared one is at the running line. */
+        "def g(*a): pass\ndef h(c):\n    x = 1\n    return g(*c)\nh(1)\n",
+        "try:\n    compile('(', 'in.py', 'exec')\nexcept SyntaxError:\n    [] + 1\n",
     };
-    const size_t callback_lines[] = {3, 5, 4};
+    const size_t callback_lines[] = {3, 5, 4, 4, 4};
     for (size_t i = 0; i < sizeof callbacks / sizeof *callbacks; i++) {
         assert(spy_exec(c, callbacks[i], "callback.py") == -1);
-        assert(spy_error_line(c) == callback_lines[i]);
+        assert(spy_error_line(c) == callback_lines[i] && !strcmp(spy_error_filename(c), "callback.py"));
         spy_clear_error(c);
     }
     spy_set_limit(c, SPY_LIMIT_STEPS, 100);
