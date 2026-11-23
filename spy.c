@@ -15946,9 +15946,9 @@ typedef struct {
     union {
         struct { uint32_t target, other; };
         SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit. */
-        NameOperand *name; /* BC_NAME, or BC_STORE's name: spelling and lookup cache, borrowed from the source unit. */
+        NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, or a keyword's BC_ARG: spelling and lookup cache, borrowed from the source unit. */
         const ImportRecord *import; /* BC_IMPORT: its program's. */
-        AttributeOperand *attribute; /* BC_ATTR, or a target step of an attribute: borrowed from the source unit. */
+        AttributeOperand *attribute; /* BC_ATTR, or an attribute's target step or BC_DELETE: borrowed from the source unit. */
     };
     Node *node; /* Source location; some older instructions also execute this tree. */
 } Instruction;
@@ -16273,8 +16273,10 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     else p->items[p->len++] = (Instruction){.node = n, .arg = arg, .other = (uint32_t)test};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     if (op == BC_LOAD) p->items[pc].constant = n->constant;
-    if (op == BC_NAME || (op == BC_STORE && n->kind == N_NAME)) p->items[pc].name = &n->name;
-    if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET) && n->kind == N_ATTR) p->items[pc].attribute = &n->attribute;
+    if (op == BC_NAME || ((op == BC_STORE || op == BC_NAMED || op == BC_DELETE) && n->kind == N_NAME) || (op == BC_ARG && arg == N_KEYWORD))
+        p->items[pc].name = &n->name;
+    if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET || op == BC_DELETE) && n->kind == N_ATTR)
+        p->items[pc].attribute = &n->attribute;
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
@@ -16664,7 +16666,9 @@ static void compile_operation(SPYContext *c, Program *p, Node *n) {
     }
     size_t first = p->len;
     for (Node *cmp = n->args; cmp; cmp = cmp->next) {
-        compile_expr(c, p, cmp->a); emit(c, p, BC_COMPARE, cmp, cmp->next != NULL);
+        compile_expr(c, p, cmp->a);
+        size_t pc = emit(c, p, BC_COMPARE, cmp, cmp->next != NULL);
+        if (pc != SIZE_MAX) p->items[pc].other = (uint32_t)cmp->op;
     }
     for (size_t i = first; i < p->len; i++)
         if (p->items[i].op == BC_COMPARE && !p->items[i].target) p->items[i].target = p->len;
@@ -24763,31 +24767,30 @@ static int delete_attribute(SPYContext *c, SPYValue *object, const char *name) {
     return delete_attribute_default(c, object, name);
 }
 static int delete_index(SPYContext *, SPYValue *, SPYValue *);
-static void delete_evaluated(SPYContext *, Node *, SPYValue *, SPYValue *);
+static void delete_evaluated(SPYContext *, SPYValue *, SPYValue *);
 /* Delete name n (BC_DELETE 0). */
-static NO_INLINE int name_unbind(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *owner = binding_env(c, f->env, name_of(n->name.text));
+static NO_INLINE int name_unbind(SPYContext *c, Frame *f, NameOperand *n) {
+    SPYValue *owner = binding_env(c, f->env, name_of(n->text));
     if (owner->as.map.namespace && owner->as.map.namespace->type != SPY_DICT && owner->as.map.flags != 3) {
-        int status = clear_binding(c, owner, n->name.text);
+        int status = clear_binding(c, owner, n->text);
         if (status) {
             spy_clear_error(c);
-            name_error(c, n->name.text, 0);
+            name_error(c, n->text, 0);
         }
         return status;
     }
-    SPYValue *value = name_local(owner, n->name.text);
+    SPYValue *value = name_local(owner, n->text);
     if (!value || value->type == V_UNBOUND) {
-        if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->name.text);
+        if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->text);
         else if (value && owner->type == V_ENV && ((owner->as.map.scope && owner->as.map.scope->kind != S_MODULE) || owner->as.map.flags == 4))
-            name_error(c, n->name.text, 1);
-        else name_error(c, n->name.text, 0);
+            name_error(c, n->text, 1);
+        else name_error(c, n->text, 0);
         return -1;
     }
-    return clear_binding(c, f->env, n->name.text);
+    return clear_binding(c, f->env, n->text);
 }
-/* Delete the attribute or item a target names, its object and key evaluated. */
-static void delete_evaluated(SPYContext *c, Node *n, SPYValue *object, SPYValue *key) {
-    if (n->kind == N_ATTR) { delete_attribute(c, object, n->b->name.text); return; }
+/* Delete the item at key of object, both evaluated. */
+static void delete_evaluated(SPYContext *c, SPYValue *object, SPYValue *key) {
     SPYValue *base = builtin_base(c, object, "__delitem__", NULL);
     delete_index(c, base ? base : object, key);
 }
@@ -33114,7 +33117,7 @@ static int step_operation(Instruction *ins, int *op) {
     if (ins->op == BC_BINARY) { *op = ins->arg; return rich_kind(*op) < 0 ? OPERATE_BINARY : OPERATE_COMPARE; }
     if (ins->op == BC_UNARY) { *op = ins->arg; return OPERATE_UNARY; }
     if (ins->op == BC_INPLACE) { *op = ins->arg; return OPERATE_INPLACE; }
-    if (ins->op == BC_COMPARE) { *op = n->op; return OPERATE_COMPARE; }
+    if (ins->op == BC_COMPARE) { *op = (int)ins->other; return OPERATE_COMPARE; }
     if (ins->op == BC_INDEX || n->kind == N_INDEX) return OPERATE_INDEX;
     if (n->kind == N_COMPARE) { *op = n->args->op; return OPERATE_COMPARE; }
     *op = n->op;
@@ -34666,7 +34669,7 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         }
         if (hash_kept(c, key, hashed, hash)) {
             relocate(c, ins->node);
-            if (deletion) delete_evaluated(c, ins->node, object, item);
+            if (deletion) delete_evaluated(c, object, item);
             else set_index(c, object, item, value);
             if (!c->error_type[0] && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
         }
@@ -34914,7 +34917,7 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
     } else index = index_result(c, key, result);
     relocate(c, ins->node);
     if (index && index->type == SPY_INT && index->as.integer_data.big) errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key));
-    else if (index && deletion) delete_evaluated(c, ins->node, object, index);
+    else if (index && deletion) delete_evaluated(c, object, index);
     else if (index && !set_index(c, object, index, value) && (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
     release_all(5, (SPYValue *[]){index, object, item, value, key});
 }
@@ -36740,11 +36743,11 @@ static SPYValue *name_deleted(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 /* BC_DELETE 3: del of name n in a class or module body, whose namespace's Python
  * __delitem__ is m's call (callk, name_deleted); else name_unbind's.
  * None, or NULL. */
-static NO_INLINE SPYValue *name_delete(SPYContext *c, Machine *m, Frame *f, Node *n) {
-    SPYValue *owner = binding_env(c, f->env, name_of(n->name.text)), *namespace = owner->as.map.namespace;
+static NO_INLINE SPYValue *name_delete(SPYContext *c, Machine *m, Frame *f, NameOperand *n) {
+    SPYValue *owner = binding_env(c, f->env, name_of(n->text)), *namespace = owner->as.map.namespace;
     SPYValue *function = namespace && namespace->type != SPY_DICT && owner->as.map.flags != 3 ? store_function(c, namespace, "__delitem__") : NULL;
     if (!function) return name_unbind(c, f, n) ? NULL : spy_none(c);
-    SPYValue *name = spy_string(c, n->name.text, strlen(n->name.text));
+    SPYValue *name = spy_string(c, n->text, strlen(n->text));
     return name ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(name)}, name_deleted, name) : NULL;
 }
 /* BC_NAME past its cache: namespace __getitem__ and key comparisons run
@@ -36866,7 +36869,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         }
         relocate(c, n);
         if (function) return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
-        delete_evaluated(c, n, args[0], args[1]);
+        delete_evaluated(c, args[0], args[1]);
         release_all(2, args);
         return NULL;
     }
@@ -39993,8 +39996,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); break;
         CASE(BC_COMPARE) {
             b = machine_pop(m); a = machine_pop(m);
-            int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
-            value = order >= 0 ? spy_bool(c, order) : compare_operand(c, n->op, &a, b);
+            int op = (int)ins->other, order = ordering(op) ? number_order(op, a, b) : -1;
+            value = order >= 0 ? spy_bool(c, order) : compare_operand(c, op, &a, b);
             if (!value && !c->error_type[0]) { x = a; y = b; goto operator_step; }
             if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(b); }
             else {
@@ -40036,7 +40039,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             a = machine_pop(m);
             SPYValue *keywords = m->stack[m->len - 1], *args = m->stack[m->len - 2], *fn = m->stack[m->len - 3];
             if (ins->arg == N_KEYWORD) {
-                b = spy_string(c, n->name.text, strlen(n->name.text));
+                b = spy_string(c, ins->name->text, strlen(ins->name->text));
                 if (!b || !UNLIKELY(eq_keyed(keywords))) {
                     if (b && merge_keyword(c, m, keywords, b, a, fn) && c->k_fn) { spy_release(a); spy_release(b); a = b = NULL; goto enter_k; }
                     break;
@@ -40226,7 +40229,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* A comprehension binds its target in the enclosing scope. */
             SPYValue *env = f.env;
             while (env->type == V_ENV && env->as.map.flags == 2) env = env->as.map.parent;
-            name_set(c, env, n->name.text, m->stack[m->len - 1]); break;
+            name_set(c, env, ins->name->text, m->stack[m->len - 1]); break;
         }
         CASE(BC_JUMP)
             /* A backward jump shows a trace function its line again. */
@@ -40536,14 +40539,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); break;
         }
         CASE(BC_DELETE)
-            if (!ins->arg) { name_unbind(c, &f, n); break; }
+            if (!ins->arg) { name_unbind(c, &f, ins->name); break; }
             if (ins->arg == 3) {
-                value = name_delete(c, m, &f, n);
+                value = name_delete(c, m, &f, ins->name);
                 if (c->k_fn) goto enter_k;
                 machine_push(c, m, value); break;
             }
             b = ins->arg == 2 ? machine_pop(m) : NULL; a = machine_pop(m);
-            delete_evaluated(c, n, a, b); break;
+            if (b) delete_evaluated(c, a, b);
+            else delete_attribute(c, a, ins->attribute->name->text);
+            break;
         CASE(BC_STAR_RERAISE) {
             Block *block = &m->blocks[m->block_len - 1];
             SPYValue *rest = block->value->as.seq.items[0], *raised = block->value->as.seq.items[1], *kept = NULL;
