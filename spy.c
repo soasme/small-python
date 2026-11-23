@@ -15916,10 +15916,6 @@ static int set_attribute(SPYContext *c, SPYValue *object, const char *name, SPYV
 }
 
 typedef struct { SPYValue *env, *unit; int interactive; } Frame;
-/* A literal's value or a name found along the fast path, borrowed. */
-static ALWAYS_INLINE SPYValue *leaf_operand(Frame *f, Node *n) {
-    return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, &n->name) : NULL;
-}
 /* FLOW_HALT: an error raised before a suspended generator resumed, which stays suspended. */
 /* FLOW_PAUSE: a pausable call paused at a step (docs/metering.md 3.8). */
 enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR, FLOW_YIELD, FLOW_HALT, FLOW_PAUSE };
@@ -40322,8 +40318,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_YIELD)
             if (ins->arg & 1) {
-                /* Its plain steps run when the name is not at hand. */
-                if (!(value = leaf_operand(&f, n->a))) continue;
+                /* Its plain steps, the operand's first, run when the name is not at hand. */
+                if (!(value = leaf_step(&f, &code[pc]))) continue;
                 spy_retain(value); pc = ins->target;
             } else value = machine_pop(m);
             m->awaiting = AWAIT_YIELD; m->drop = ins->arg >> 1;
