@@ -305,9 +305,6 @@ struct SPYValue {
         } generator;
     } as;
 };
-/* The definition node of Python function fn, which code with no
- * definition, a module's, lacks. */
-static Node *function_node(SPYValue *fn) { return fn->as.function.def ? fn->as.function.def->owner : NULL; }
 /* Class flags. CLASS_ABSTRACT is set by assigning a true __abstractmethods__
  * to the class (20.2.8), not by binding it in the class body. */
 /* The intrinsic exception classes the engine itself refers to (exceptions). */
@@ -3322,8 +3319,7 @@ static SPYValue *binding_env(SPYContext *c, SPYValue *env, Name name) {
 static int annotation_env(SPYValue *e) {
     if (e->type != V_ENV) return 0;
     if (e->as.map.flags == 5) return 1;
-    Node *owner = e->as.map.scope ? e->as.map.scope->owner : NULL;
-    return owner && (owner->flags & F_ANNOTATE);
+    return e->as.map.scope && (e->as.map.scope->flags & F_ANNOTATE);
 }
 /* The value of the key name in a dict namespace, borrowed: a key that is
  * not a str but equal to name is found by comparison, as a dict lookup
@@ -12703,15 +12699,16 @@ static int error_is(SPYContext *c, const char *name) {
 }
 static SPYValue *suspended_delegate(SPYContext *, SPYValue *);
 static SPYValue *qualified_name(SPYContext *, Scope *);
-static SPYValue *definition_code(SPYContext *c, SPYValue *unit, Node *definition) {
-    if (!definition->scope->code_value) {
+/* The code object of body s of unit, made once. */
+static SPYValue *definition_code(SPYContext *c, SPYValue *unit, Scope *s) {
+    if (!s->code_value) {
         SPYValue *code = value_new(c, SPY_CODE);
         if (!code) return NULL;
         code->as.unit.owner = spy_retain(unit);
-        code->as.unit.definition = definition;
-        definition->scope->code_value = code;
+        code->as.unit.definition = s->owner;
+        s->code_value = code;
     }
-    return spy_retain(definition->scope->code_value);
+    return spy_retain(s->code_value);
 }
 /* A missing module attribute that a lazy import named as a submodule
  * (sys.lazy_modules holds "module.name" or a name below it) imports it. */
@@ -13315,7 +13312,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         if (!strcmp(name, "__code__")) {
             SPYValue *code = name_local(v->as.function.metadata, "__code__");
-            return code ? spy_retain(code) : definition_code(c, v->as.function.unit, function_node(v));
+            return code ? spy_retain(code) : definition_code(c, v->as.function.unit, v->as.function.def);
         }
         if (!strcmp(name, "__closure__")) return function_closure(c, v);
         if (!strcmp(name, "__dict__")) {
@@ -15180,7 +15177,7 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
      * changes compare equal. */
     SPYValue *owner = code->as.unit.owner ? code->as.unit.owner : code;
     Node *def = code->as.unit.definition;
-    base = def ? definition_code(c, owner, def) : spy_retain(owner);
+    base = def ? definition_code(c, owner, def->scope) : spy_retain(owner);
     if (!base || !(replaced = value_new(c, SPY_DICT))) goto done;
     int signature = 0;
     for (size_t i = 0; i < FIELDS && !c->error_type[0]; i++) {
@@ -18296,14 +18293,14 @@ static int cell_set(SPYContext *c, SPYValue *cell, SPYValue *value) {
 static SPYValue *function_closure(SPYContext *c, SPYValue *fn) {
     SPYValue *cached = name_local(fn->as.function.metadata, "__closure__");
     if (cached) return spy_retain(cached);
-    Node *def = function_node(fn);
+    Scope *def = fn->as.function.def;
     if (!def) return spy_none(c);
-    SPYValue *names = closure_names(c, def->scope, 0), *closure = NULL;
+    SPYValue *names = closure_names(c, def, 0), *closure = NULL;
     if (!names) return NULL;
     closure = names->as.seq.len ? value_new(c, SPY_TUPLE) : spy_none(c);
     for (size_t i = 0; closure && closure->type == SPY_TUPLE && i < names->as.seq.len; i++) {
         const char *name = names->as.seq.items[i]->as.string.data;
-        Scope *binding = free_binding(def->scope, name);
+        Scope *binding = free_binding(def, name);
         SPYValue *env = fn->as.function.env;
         for (; env && env != c->builtins; env = env->as.map.parent) {
             if (env->type != V_ENV) continue;
@@ -21913,7 +21910,7 @@ static SPYValue *comprehension_of(SPYContext *c, Frame *f, Scope *s, SPYValue *i
         result->as.generator.env = spy_retain(env);
         result->as.generator.unit = spy_retain(f->unit);
         result->as.generator.def = s;
-        result->as.generator.code = definition_code(c, f->unit, s->owner);
+        result->as.generator.code = definition_code(c, f->unit, s);
         Machine *m = result->as.generator.machine = machine_new(c, s->code, env, f->unit);
         if (m) {
             m->generator = result;
@@ -26643,12 +26640,12 @@ static SPYValue *coroutine_origin(SPYContext *c) {
     return origin;
 }
 static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
-    Node *n = function_node(function);
+    Scope *n = function->as.function.def;
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
     if (!v) return NULL;
-    if (!(v->as.generator.machine = machine_new(c, n->scope->code, f->env, f->unit))) { spy_release(v); return NULL; }
+    if (!(v->as.generator.machine = machine_new(c, n->code, f->env, f->unit))) { spy_release(v); return NULL; }
     v->as.generator.machine->generator = v;
-    v->as.generator.def = n->scope;
+    v->as.generator.def = n;
     v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
     v->as.generator.qualname = spy_retain(name_local(function->as.function.metadata, "__qualname__"));
     SPYValue *code = name_local(function->as.function.metadata, "__code__");
@@ -42309,9 +42306,9 @@ static int local_cell(Scope *scope, SPYValue *cells, const char *name) {
  * co_cellvars order, then the free names of a function in co_freevars order. */
 static SPYValue *local_snapshot(SPYContext *c, SPYValue *env) {
     Scope *scope = env->as.map.scope;
-    Node *def = scope && scope->kind != S_MODULE ? scope->owner : NULL;
-    SPYValue *result = value_new(c, SPY_DICT), *cells = closure_names(c, def ? def->scope : NULL, 1);
-    SPYValue *frees = cells && def && scope->kind == S_FUNCTION ? closure_names(c, def->scope, 0) : value_new(c, SPY_TUPLE);
+    Scope *def = scope && scope->kind != S_MODULE ? scope : NULL;
+    SPYValue *result = value_new(c, SPY_DICT), *cells = closure_names(c, def, 1);
+    SPYValue *frees = cells && def && scope->kind == S_FUNCTION ? closure_names(c, def, 0) : value_new(c, SPY_TUPLE);
     if (!result || !cells || !frees) { spy_release(result); spy_release(cells); spy_release(frees); return NULL; }
     for (size_t i = 0; i < env->as.map.len && !c->error_type[0]; i++) {
         Entry *entry = &map_items(env)[i];
@@ -42471,7 +42468,7 @@ static SPYValue *frame_attribute(SPYContext *c, SPYValue *frame, const char *nam
     }
     Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
     if (!strcmp(name, "f_code") && owner->type == V_UNIT && scope && scope->kind == S_CLASS && scope->owner)
-        return definition_code(c, owner, scope->owner);
+        return definition_code(c, owner, scope);
     if (!strcmp(name, "f_code"))
         return owner->type == SPY_FUNCTION ? attribute(c, owner, "__code__") : owner->type == V_UNIT || owner->type == SPY_CODE ? spy_retain(owner) :
                spy_retain(owner->as.generator.code);
