@@ -16771,7 +16771,7 @@ static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line,
 /* Whether x's target, and its other, are steps of the expression it is in. */
 static int steps_target(const Instruction *x) {
     switch (x->op) {
-    case BC_FALSE: case BC_TEST: case BC_STACKED_TEST: case BC_OPERATE: case BC_STACKED: case BC_JUMP: case BC_SHORT: case BC_CALLF: case BC_COMPARE: case BC_STORE_AT: return 1;
+    case BC_FALSE: case BC_TEST: case BC_STACKED_TEST: case BC_OPERATE: case BC_STACKED: case BC_JUMP: case BC_SHORT: case BC_CALLF: case BC_COMPARE: case BC_STORE_AT: case BC_ASSIGN: return 1;
     default: return x->op == BC_YIELD && x->arg == 1;
     }
 }
@@ -17377,17 +17377,22 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
     int item = t->kind == N_INDEX, augmented = n->op != '=';
     if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
     int shape = operator_right(n->b) ? SHAPE_FUSED : operand_shape(c, n->b);
-    size_t fused = emit(c, p, BC_ASSIGN, n, item | augmented << 1 | shape << 2 | (augmented ? item ? 3 : 1 : 0) << 5);
-    if (fused != SIZE_MAX && augmented) p->items[fused].other = (uint32_t)operators[n->op - T_ADDEQ].token;
+    Mark target = mark(p);
     if (augmented) {
         compile_expr(c, p, item ? t->a : t);
         if (item) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
         compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
         emit(c, p, item ? BC_SAVE_TARGET : BC_STORE, t, !item);
     } else if (item) {
-        compile_expr(c, p, n->b); compile_expr(c, p, t->a); compile_expr(c, p, t->b);
+        /* The value is evaluated before the item's object and key. */
+        compile_expr(c, p, t->a); compile_expr(c, p, t->b);
+        Mark value = mark(p);
+        compile_expr(c, p, n->b);
+        emit_after(p, target, value, NULL);
         emit(c, p, BC_SET_TARGET, t, 0); emit(c, p, BC_POP, n, 0);
     } else { compile_expr(c, p, n->b); emit(c, p, BC_STORE, t, 1); }
+    size_t fused = c->error_type[0] ? SIZE_MAX : emit_before(c, p, target.at, BC_ASSIGN, n, item | augmented << 1 | shape << 2 | (augmented ? item ? 3 : 1 : 0) << 5);
+    if (fused != SIZE_MAX && augmented) p->items[fused].other = (uint32_t)operators[n->op - T_ADDEQ].token;
     patch(p, fused, p->len);
 }
 /* The clauses of an if statement n, which the parser compiles as it
