@@ -13888,21 +13888,16 @@ static HOT SPYValue *operand_attribute(SPYContext *c, SPYValue *v, AttributeOper
     }
     return calls ? attribute_step(c, v, at->name->text) : attribute(c, v, at->name->text);
 }
-/* Assign value to the attribute at of v, as set_attribute. The key a
- * new entry takes is kept on its name. */
 static ALWAYS_INLINE int operand_set_own(SPYContext *, SPYValue *, AttributeOperand *, SPYValue *);
-static HOT int operand_set_attribute(SPYContext *c, SPYValue *v, AttributeOperand *at, SPYValue *value) {
-    if (!plain_instance(v) || !(operand_access(c, v, at) & ATTR_WRITE)) return set_attribute(c, v, at->name->text, value);
-    return operand_set_own(c, v, at, value);
-}
 static int setter_called(SPYContext *, SPYValue *, AttributeOperand *);
-/* operand_set_attribute for a machine step, which returns 1, storing nothing,
- * for a Python setter (store_call). */
+/* Assign value to the attribute at of v, as set_attribute, for a machine
+ * step, which returns 1, storing nothing, for a Python setter (store_call). */
 static HOT int operand_store_attribute(SPYContext *c, SPYValue *v, AttributeOperand *at, SPYValue *value) {
     if (!plain_instance(v) || !(operand_access(c, v, at) & ATTR_WRITE)) return setter_called(c, v, at) ? 1 : set_attribute(c, v, at->name->text, value);
     return operand_set_own(c, v, at, value);
 }
-/* operand_set_attribute's store into v's own entries. */
+/* An attribute store into v's own entries, the key a new entry takes
+ * kept on at's name. */
 static ALWAYS_INLINE int operand_set_own(SPYContext *c, SPYValue *v, AttributeOperand *at, SPYValue *value) {
     Entry *e = dict_slot(v, at->name);
     if (e && e->key->type == SPY_STRING) {
@@ -15938,7 +15933,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_WITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_INCREMENT) X(BC_DISPLAY) X(BC_ASSIGN) X(BC_STACKED) X(BC_STACKED_TEST)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_INCREMENT) X(BC_DISPLAY) X(BC_ASSIGN) X(BC_STACKED) X(BC_STACKED_TEST) X(BC_STORE_AT)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
@@ -16513,23 +16508,30 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
 }
 static void compile_body(SPYContext *, Program *, Node *);
 static void compile_target(SPYContext *, Program *, Node *);
-/* Store the value on top of the stack in target n, then pop it. */
-/* Whether target n is BC_STORE's: a name, or an attribute or item of
- * literals or names (store_operand), outside a class body and while calls
- * cannot pause, when a Python __setitem__ or setter is BC_SET_TARGET's. */
+/* Whether attribute or item target n of literals or names is stored at
+ * hand (store_operands), outside a class body and while calls cannot pause. */
 static int store_at_hand(Program *p, Node *n) {
-    if (n->kind == N_NAME) return 1;
     return (n->kind == N_ATTR || (n->kind == N_INDEX && at_hand(n->b))) && at_hand(n->a) && !p->loads && p->calls != PAUSING;
 }
+static void compile_targeted(SPYContext *, Program *, Node *, Node *);
+/* Store the value on top of the stack in target n, then pop it at at. */
 static void compile_store(SPYContext *c, Program *p, Node *n, Node *at) {
-    if (store_at_hand(p, n)) emit(c, p, BC_STORE, n, 1);
-    else { compile_target(c, p, n); emit(c, p, BC_POP, at, 0); }
+    if (n->kind == N_NAME) emit(c, p, BC_STORE, n, 1);
+    else compile_targeted(c, p, n, at);
 }
 static void compile_target(SPYContext *c, Program *p, Node *n) {
-    /* Any other subscript's or attribute's object and key are evaluated
-     * first (BC_SET_TARGET), a target list unpacked (BC_UNPACK). */
-    if (store_at_hand(p, n)) { emit(c, p, BC_STORE, n, 0); return; }
+    if (n->kind == N_NAME) emit(c, p, BC_STORE, n, 0);
+    else compile_targeted(c, p, n, NULL);
+}
+/* Target n, no name, of the value on top of the stack, popped after it
+ * at popped when set. A subscript's or attribute's object and key are
+ * evaluated first (BC_SET_TARGET), those at hand stored by a fused step
+ * before them (BC_STORE_AT), which jumps past them; a target list is
+ * unpacked (BC_UNPACK). */
+static void compile_targeted(SPYContext *c, Program *p, Node *n, Node *popped) {
+    size_t fused = SIZE_MAX;
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
+        if (store_at_hand(p, n)) fused = emit(c, p, BC_STORE_AT, n, popped != NULL);
         compile_expr(c, p, n->a);
         if (n->kind == N_INDEX) compile_expr(c, p, n->b);
         emit(c, p, BC_SET_TARGET, n, 0);
@@ -16539,6 +16541,8 @@ static void compile_target(SPYContext *c, Program *p, Node *n) {
             compile_store(c, p, item->kind == N_STAR ? item->a : item, item);
         }
     }
+    if (popped) emit(c, p, BC_POP, popped, 0);
+    patch(p, fused, p->len);
 }
 /* The step taking loop n's next item into target: a name on the loop's
  * line, outside a class body, is stored by the step itself (other 1). */
@@ -21674,7 +21678,7 @@ static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, cons
     else if ((function = descriptor_setter(c, owner, name, descriptor, deleting)) == *descriptor) return function;
     return function && machine_function(c, function) ? function : NULL;
 }
-/* Whether a store to attribute at of object, which operand_set_attribute
+/* Whether a store to attribute at of object, which operand_store_attribute
  * would not store at once, calls a Python setter on the machine: then
  * store_call enters c->entering_init with the descriptor c->fallback. */
 static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, AttributeOperand *at) {
@@ -21695,33 +21699,11 @@ static NO_INLINE SPYValue *name_mapping(SPYContext *c, SPYValue *env, Name name)
     SPYValue *namespace = env->type == V_ENV && env->as.map.flags != ENV_FORWARD && env->as.map.flags != 3 ? namespace_map(env) : env;
     return namespace != env && setitem_function(c, namespace) ? namespace : NULL;
 }
-/* store_operand past the fast path: a literal's value or the name looked up. */
-static NO_INLINE SPYValue *store_name(SPYContext *c, Frame *f, Node *n) {
-    if (n->kind != N_NAME) return spy_retain(literal_value(c, n));
-    return !strcmp(n->name.text, "__debug__") ? spy_bool(c, 1) : name_find(c, f->env, node_name(n));
-}
-/* A literal or name operand of a store target at hand, owned: as it is
- * along the fast path, else store_name's. */
-static ALWAYS_INLINE SPYValue *store_operand(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *v = leaf_operand(f, n);
-    return v ? spy_retain(v) : store_name(c, f, n);
-}
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls) {
+    /* An import is the step's (import_step). */
     if (n->kind == N_IMPORT || n->kind == N_FROM) return 1;
     /* A machine's store leaves a due finalizer to the machine (TICK_DEFER). */
     if (calls ? !quiet(c, f) && tick_full(c, f, n, TICK_DEFER) < 0 : tick(c, f, n)) return -1;
-    /* An attribute or item of a literal or name (store_at_hand) takes them
-     * as they are, held across the store. */
-    if (n->kind == N_ATTR || n->kind == N_INDEX) {
-        SPYValue *object = store_operand(c, f, n->a), *key = object && n->kind == N_INDEX ? store_operand(c, f, n->b) : NULL;
-        int status = -1;
-        if (calls && key && (object->type == SPY_INSTANCE || key->type == SPY_INSTANCE || key->type == SPY_TUPLE ||
-                             (object->type == SPY_DICT && eq_keyed(object)) || (object->type == SPY_MEMORYVIEW && value->type == SPY_INSTANCE)) &&
-            store_hooked(c, object, key, value)) status = 1;
-        else if (object && (key || n->kind == N_ATTR)) status = key ? set_index(c, object, key, value) : operand_set_attribute(c, object, &n->attribute, value);
-        spy_release(object); spy_release(key);
-        return status;
-    }
     /* Else a name. */
     Entry *entry = name_slot(f->env, &n->name);
     if (!entry) return calls && name_mapping(c, f->env, node_name(n)) ? 1 : name_bind(c, f->env, node_name(n), value);
@@ -21732,6 +21714,32 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
     return 0;
 }
 static SPYValue *machine_pop(Machine *);
+/* BC_STORE_AT ins, of an attribute or item of literals or names (store_at_hand),
+ * the value atop m's stack: 1 when it stored it at hand, the operands its
+ * plain steps after it load held across the store, and popped it with
+ * arg 1; else 0 with an error, or for those steps, then BC_SET_TARGET's,
+ * to run, as when Python code would. */
+static NO_INLINE int store_operands(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
+    /* A machine's store leaves a due finalizer to the machine (TICK_DEFER). */
+    if (!quiet(c, f) && tick_full(c, f, ins->node, TICK_DEFER) < 0) return 0;
+    int item = ins[2].op != BC_SET_TARGET, status = 1;
+    SPYValue *value = m->stack[m->len - 1], *object = leaf_step(f, ins + 1), *key = object && item ? leaf_step(f, ins + 2) : NULL;
+    if (!object || (item && !key)) return 0;
+    spy_retain(object); spy_retain(key);
+    if (!item) {
+        AttributeOperand *at = ins[2].attribute;
+        if (plain_instance(object) && operand_access(c, object, at) & ATTR_WRITE) status = operand_set_own(c, object, at, value);
+        /* A Python setter, or a class's __bases__, is BC_SET_TARGET's (setter_called). */
+        else if (!(setter_object(object) && setter_function(c, object, at->name->text, &(SPYValue *){NULL}, 0)) &&
+                 !(object->type == SPY_CLASS && !strcmp(at->name->text, "__bases__"))) status = set_attribute(c, object, at->name->text, value);
+    } else if (!((object->type == SPY_INSTANCE || key->type == SPY_INSTANCE || key->type == SPY_TUPLE || (object->type == SPY_DICT && eq_keyed(object)) ||
+                 (object->type == SPY_MEMORYVIEW && value->type == SPY_INSTANCE)) && store_hooked(c, object, key, value)))
+        status = set_index(c, object, key, value);
+    spy_release(object); spy_release(key);
+    if (status) return 0;
+    if (ins->arg & 1) spy_release(machine_pop(m));
+    return 1;
+}
 static Result run_machine(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 /* Whether comprehension n runs to its value when it is evaluated: a list,
  * set or dictionary comprehension that does not await. */
@@ -36799,7 +36807,8 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     Node *n = ins->op == BC_NEXT ? ins->node->args : ins->node;
     c->entering_kind = CALL_STORE;
     SPYValue *args[3];
-    if (n->kind == N_ATTR) {
+    if ((ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET) && ins->attribute) {
+        const char *name = ins->attribute->name->text;
         /* BC_SET_TARGET's attribute setter (setter_called), the object atop
          * the value, or BC_SAVE_TARGET's, the value atop the object; or
          * BC_SET_TARGET 1's deleter of the object atop m's stack, else
@@ -36809,11 +36818,11 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         int deleting = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = ins->op == BC_SAVE_TARGET ? machine_pop(m) : NULL, *object = machine_pop(m), *function, *descriptor;
         if (deleting) {
-            function = setter_object(object) ? setter_function(c, object, n->b->name.text, &descriptor, 1) : NULL;
+            function = setter_object(object) ? setter_function(c, object, name, &descriptor, 1) : NULL;
             spy_retain(function ? descriptor : NULL);
         } else { function = c->entering_init; descriptor = c->fallback; c->fallback = NULL; }
         relocate(c, n);
-        if (!function) { delete_attribute(c, object, n->b->name.text); spy_release(object); return NULL; }
+        if (!function) { delete_attribute(c, object, name); spy_release(object); return NULL; }
         if (function->type == SPY_PROPERTY) {
             /* A missing setter or deleter (setter_function). */
             property_missingk(c, m, function, object, deleting ? 2 : 1);
@@ -36827,13 +36836,13 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
             if (state) bases_go(c, m, state, ins);
             return NULL;
         }
-        SPYValue *name = descriptor ? NULL : spy_string(c, n->b->name.text, strlen(n->b->name.text));
-        SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : object, descriptor ? object : name,
+        SPYValue *key = descriptor ? NULL : spy_string(c, name, strlen(name));
+        SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : object, descriptor ? object : key,
                             deleting ? NULL : value ? value : m->stack[m->len - 1]};
         size_t skip = descriptor && descriptor->type == SPY_PROPERTY;
-        *env = descriptor || name ? function_env(c, function, 3 - skip - (size_t)deleting, argv + skip, NULL, 0) : NULL;
+        *env = descriptor || key ? function_env(c, function, 3 - skip - (size_t)deleting, argv + skip, NULL, 0) : NULL;
         function = *env ? spy_retain(function) : NULL;
-        release_all(4, (SPYValue *[]){name, object, value, descriptor});
+        release_all(4, (SPYValue *[]){key, object, value, descriptor});
         return function;
     }
     if (ins->op == BC_SET_TARGET && ins->arg) {
@@ -36865,11 +36874,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         args[2] = spy_retain(m->stack[m->len - 1]);
         if (!args[1]) { release_all(3, args); return NULL; }
     } else if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
-    else if (ins->op == BC_SET_TARGET) { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
-    else {
-        args[0] = spy_retain(leaf_operand(f, n->a)); args[1] = spy_retain(leaf_operand(f, n->b));
-        args[2] = spy_retain(m->stack[m->len - 1]);
-    }
+    else { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
     if (args[0]->type == SPY_FRAME_LOCALS && frame_key_calls(c, args[1])) {
         /* A FrameLocalsProxy's key looked up on m (frame_operatek). */
         relocate(c, n);
@@ -40089,6 +40094,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (store_into(c, &f, n, m->stack[m->len - 1], 1) > 0) goto store_step;
             if (ins->arg) a = machine_pop(m);
             NEXT_RELEASE;
+        CASE(BC_STORE_AT)
+            /* An attribute or item at hand goes on past its plain steps, which else run. */
+            if (store_operands(c, m, &f, ins)) pc = ins->target;
+            NEXT;
         CASE(BC_UNPACK)
             a = unpack_step(c, m, &f, n);
             if (a) for (size_t i = a->as.seq.len; i; i--)
