@@ -15933,7 +15933,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_WITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_INCREMENT) X(BC_DISPLAY) X(BC_ASSIGN) X(BC_STACKED) X(BC_STACKED_TEST) X(BC_STORE_AT)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_INCREMENT) X(BC_DISPLAY) X(BC_ASSIGN) X(BC_STACKED) X(BC_STACKED_TEST) X(BC_STORE_AT) X(BC_IMPORT)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
@@ -15946,8 +15946,8 @@ typedef struct {
     union {
         struct { uint32_t target, other; };
         SPYValue *constant; /* BC_LOAD: borrowed from the owning source unit. */
-        NameOperand *name; /* BC_NAME: spelling and lookup cache, borrowed from the source unit. */
-        const ImportRecord *import; /* BC_STORE of an import statement (arg 2): its program's. */
+        NameOperand *name; /* BC_NAME, or BC_STORE's name: spelling and lookup cache, borrowed from the source unit. */
+        const ImportRecord *import; /* BC_IMPORT: its program's. */
         AttributeOperand *attribute; /* BC_ATTR, or a target step of an attribute: borrowed from the source unit. */
     };
     Node *node; /* Source location; some older instructions also execute this tree. */
@@ -16272,7 +16272,7 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
     else p->items[p->len++] = (Instruction){.node = n, .arg = arg, .other = (uint32_t)test};
     p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     if (op == BC_LOAD) p->items[pc].constant = n->constant;
-    if (op == BC_NAME) p->items[pc].name = &n->name;
+    if (op == BC_NAME || (op == BC_STORE && n->kind == N_NAME)) p->items[pc].name = &n->name;
     if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET) && n->kind == N_ATTR) p->items[pc].attribute = &n->attribute;
     return pc;
 }
@@ -17123,7 +17123,7 @@ static void emit_import(SPYContext *c, Program *p, Node *n) {
         each->as = item->b != NULL;
     }
     emit(c, p, BC_NONE, n, 0);
-    size_t pc = emit(c, p, BC_STORE, n, 2);
+    size_t pc = emit(c, p, BC_IMPORT, n, 1);
     if (pc != SIZE_MAX) p->items[pc].import = r;
 }
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
@@ -21611,7 +21611,7 @@ static size_t target_count(Node *n, size_t *star) {
     }
     return count;
 }
-static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls);
+static int store_slow(SPYContext *c, Frame *f, Node *n, NameOperand *name, SPYValue *value, int calls);
 /* A name stored in its remembered slot cannot fail, so it skips the step
  * bookkeeping unless a trace function watches, as eval's names do. */
 /* Store value, taking it, in the entry of env remembered for a name. */
@@ -21627,19 +21627,19 @@ static ALWAYS_INLINE void entry_store(SPYContext *c, SPYValue *env, Entry *entry
 }
 /* The entry name target n is remembered at in f's environment, unless a
  * trace function watches; else NULL. */
-static ALWAYS_INLINE Entry *stored_entry(SPYContext *c, Frame *f, Node *n) {
+static ALWAYS_INLINE Entry *stored_entry(SPYContext *c, Frame *f, NameOperand *name) {
     SPYValue *env = f->env;
-    return n->kind != N_NAME || c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, &n->name) : remembered_local(env, &n->name);
+    return c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, name) : remembered_local(env, name);
 }
 /* Store value to target n; with calls, a machine step's store, which
  * returns 1, storing nothing, for a Python __setitem__ (store_call). */
-static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls) {
-    Entry *entry = stored_entry(c, f, n);
-    if (!entry) return store_slow(c, f, n, value, calls);
+static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, NameOperand *name, SPYValue *value, int calls) {
+    Entry *entry = stored_entry(c, f, name);
+    if (!entry) return store_slow(c, f, n, name, value, calls);
     entry_store(c, f->env, entry, spy_retain(value));
     return 0;
 }
-static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, value, 0); }
+static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, &n->name, value, 0); }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 static int store_hooked(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static int store_collides(SPYContext *, SPYValue *, SPYValue *);
@@ -21699,14 +21699,11 @@ static NO_INLINE SPYValue *name_mapping(SPYContext *c, SPYValue *env, Name name)
     SPYValue *namespace = env->type == V_ENV && env->as.map.flags != ENV_FORWARD && env->as.map.flags != 3 ? namespace_map(env) : env;
     return namespace != env && setitem_function(c, namespace) ? namespace : NULL;
 }
-static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls) {
-    /* An import is the step's (import_step). */
-    if (n->kind == N_IMPORT || n->kind == N_FROM) return 1;
+static int store_slow(SPYContext *c, Frame *f, Node *n, NameOperand *name, SPYValue *value, int calls) {
     /* A machine's store leaves a due finalizer to the machine (TICK_DEFER). */
     if (calls ? !quiet(c, f) && tick_full(c, f, n, TICK_DEFER) < 0 : tick(c, f, n)) return -1;
-    /* Else a name. */
-    Entry *entry = name_slot(f->env, &n->name);
-    if (!entry) return calls && name_mapping(c, f->env, node_name(n)) ? 1 : name_bind(c, f->env, node_name(n), value);
+    Entry *entry = name_slot(f->env, name);
+    if (!entry) return calls && name_mapping(c, f->env, operand_name(name)) ? 1 : name_bind(c, f->env, operand_name(name), value);
     SPYValue *old = entry->value;
     class_changed(f->env);
     entry->value = spy_retain(value);
@@ -36757,7 +36754,7 @@ static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, const I
  * or BC_STORE 1's. */
 static SPYValue *store_ended(SPYContext *c, Machine *m, Instruction *ins) {
     if (!ins) ins = &m->code->items[m->pc - 1];
-    if (ins->op == BC_NEXT || (ins->op == BC_STORE && ins->arg)) spy_release(machine_pop(m));
+    if (ins->op == BC_NEXT || ((ins->op == BC_STORE || ins->op == BC_IMPORT) && ins->arg)) spy_release(machine_pop(m));
     return c->stepped;
 }
 /* What the Python __index__ of the byte state[2] to store at index state[1]
@@ -36803,7 +36800,7 @@ static SPYValue *frame_stored(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue
     return failed ? NULL : store_ended(c, m, NULL);
 }
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
-    if (ins->op == BC_STORE && ins->arg == 2) return import_step(c, m, f, ins->import, env);
+    if (ins->op == BC_IMPORT) return import_step(c, m, f, ins->import, env);
     Node *n = ins->op == BC_NEXT ? ins->node->args : ins->node;
     c->entering_kind = CALL_STORE;
     SPYValue *args[3];
@@ -36868,9 +36865,10 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         release_all(2, args);
         return NULL;
     }
-    if (n->kind == N_NAME) {
+    NameOperand *name = ins->op == BC_NEXT ? &n->name : ins->op == BC_STORE ? ins->name : NULL;
+    if (name) {
         /* A name bound through its namespace's Python __setitem__ (name_mapping). */
-        args[0] = spy_retain(name_mapping(c, f->env, node_name(n))); args[1] = spy_string(c, n->name.text, strlen(n->name.text));
+        args[0] = spy_retain(name_mapping(c, f->env, operand_name(name))); args[1] = spy_string(c, name->text, strlen(name->text));
         args[2] = spy_retain(m->stack[m->len - 1]);
         if (!args[1]) { release_all(3, args); return NULL; }
     } else if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
@@ -36923,7 +36921,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     relocate(c, n);
     return (*env = function_env(c, function, 3, args, NULL, 1)) ? spy_retain(function) : NULL;
 }
-/* BC_STORE of import statement n, None atop m's stack (store_slow): when
+/* BC_IMPORT of import statement n, None atop m's stack: when
  * the first module it imports, or the first package before it, is not
  * yet in sys.modules and is source, its unit, to enter in *env, the new
  * module, its import begun (module_begin) as a call (CALL_IMPORT); m holds
@@ -38599,7 +38597,7 @@ static NO_INLINE int assign_fused(SPYContext *c, Frame *f, Instruction *code, si
     SPYValue *value = shape == SHAPE_FUSED ? fused_value(c, f, at) : spy_retain(step_operand(c, f, at, shape)), *result;
     if (!value) return c->error_type[0] != 0;
     if (!(arg & 1)) {
-        Entry *entry = stored_entry(c, f, code[ins->target - 1].node);
+        Entry *entry = stored_entry(c, f, code[ins->target - 1].name);
         result = !entry ? NULL : !(arg & 2) ? spy_retain(value) : entry->value ? number_fast(c, (int)ins->other, entry->value, value, 0) : NULL;
         if (result) entry_store(c, f->env, entry, result);
     } else {
@@ -38717,10 +38715,10 @@ static SPYValue *delegate_thrown(Machine *m) {
  * step stores (compile_next), or pushed. One bound through a namespace's
  * Python __setitem__ is pushed for that call (loop_stored): 1. */
 static ALWAYS_INLINE int loop_item(SPYContext *c, Machine *m, Frame *f, Instruction *next, SPYValue *item) {
-    Entry *entry = next->other ? stored_entry(c, f, next->node->args) : NULL;
+    Entry *entry = next->other ? stored_entry(c, f, &next->node->args->name) : NULL;
     /* A remembered name takes the item's reference. */
     if (entry) { entry_store(c, f->env, entry, item); return 0; }
-    int stores = next->other && store_slow(c, f, next->node->args, item, 1) > 0;
+    int stores = next->other && store_slow(c, f, next->node->args, &next->node->args->name, item, 1) > 0;
     if (!next->other || stores) machine_push(c, m, item);
     else spy_release(item);
     return stores;
@@ -39797,7 +39795,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (UNLIKELY(c->k_fn != NULL)) goto enter_k;
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
-                        if (result && (code[pc - 1].op == BC_NEXT || (code[pc - 1].op == BC_STORE && code[pc - 1].arg)))
+                        if (result && (code[pc - 1].op == BC_NEXT || ((code[pc - 1].op == BC_STORE || code[pc - 1].op == BC_IMPORT) && code[pc - 1].arg)))
                             spy_release(machine_pop(m));
                     } else if (kind == CALL_CHECKED) {
                         m = checked_returned(c, m, &code[pc - 1], result, pc);
@@ -40091,9 +40089,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); break;
         CASE(BC_STORE)
-            if (store_into(c, &f, n, m->stack[m->len - 1], 1) > 0) goto store_step;
+            if (store_into(c, &f, n, ins->name, m->stack[m->len - 1], 1) > 0) goto store_step;
             if (ins->arg) a = machine_pop(m);
             NEXT_RELEASE;
+        CASE(BC_IMPORT) goto store_step;
         CASE(BC_STORE_AT)
             /* An attribute or item at hand goes on past its plain steps, which else run. */
             if (store_operands(c, m, &f, ins)) pc = ins->target;
@@ -40408,7 +40407,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (!a) pc = ins->target;
                 else if (ins->other) {
                     /* A name bound through a namespace's Python __setitem__ is BC_STORE's (store_call). */
-                    if (UNLIKELY(store_into(c, &f, n->args, a, 1) > 0)) { machine_push(c, m, a); a = NULL; goto loop_stored; }
+                    if (UNLIKELY(store_into(c, &f, n->args, &n->args->name, a, 1) > 0)) { machine_push(c, m, a); a = NULL; goto loop_stored; }
                     /* The body and the jump back, while no pass is counted or
                      * watched and the iterator steps itself without raising. */
                     if (ins->other == 4 && !watched(c)) {
