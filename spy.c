@@ -16420,7 +16420,7 @@ typedef struct {
  * inlined comprehension's, whose program's uses follow (USE_INLINE). */
 enum { USE_NONE, USE_NAME, USE_ALWAYS, USE_INLINE };
 typedef struct Operand { struct Operand *next; int use; Scope *inlined; AttributeOperand attribute; NameOperand name; char text[]; } Operand;
-struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, plain, loads; ImportRecord *imports; Operand *operands, *last; SPYValue **values; size_t values_len, values_cap; };
+struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, loads; ImportRecord *imports; Operand *operands, *last; SPYValue **values; size_t values_len, values_cap; };
 /* The values a program owns (emit_value). */
 static void program_edges(Program *code, Visit visit, void *data) {
     for (size_t i = 0; code && i < code->values_len; i++) visit(code->values[i], data);
@@ -16776,6 +16776,16 @@ static int steps_target(const Instruction *x) {
     }
 }
 static int steps_other(const Instruction *x) { return x->op == BC_FALSE || x->op == BC_TEST || x->op == BC_STACKED_TEST; }
+/* Remove step at of the expression it is in, which no step jumps to. */
+static void emit_drop(Program *p, size_t at) {
+    memmove(p->items + at, p->items + at + 1, (--p->len - at) * sizeof(*p->items));
+    for (size_t i = at; i < p->len; i++) {
+        Instruction *x = &p->items[i];
+        if (steps_target(x) && x->target > at) x->target--;
+        if (steps_other(x) && x->other > at + 1) x->other--;
+    }
+    if (p->tested > at + 1) p->tested--;
+}
 /* Emit op as emit does, but at at, before the steps of the expression
  * from there on, which jump only among themselves; its index, or
  * SIZE_MAX with an error. */
@@ -16830,6 +16840,7 @@ static void patch(Program *p, size_t pc, size_t target) {
     if (p->items[pc].op == BC_FALSE && p->items[pc].other) p->items[p->items[pc].other - 1].target = target;
 }
 static void compile_expr(SPYContext *, Program *, Node *);
+static void compile_node(SPYContext *, Program *, Node *, int);
 /* The shape of an operand at hand (item_at_hand), as its plain steps take
  * it: a literal, a name, an item of those, or a name's attribute; a left
  * operand not at hand is atop the stack (compile_stacked). */
@@ -16857,10 +16868,10 @@ static void compile_operation(SPYContext *, Program *, Node *);
 static void compile_fused(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth) {
     int shape = operand_shape(c, right), steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
     size_t start = p->len;
-    p->plain++;
     if (left == SHAPE_STACK) compile_operation(c, p, n);
-    else compile_expr(c, p, n);
-    p->plain--;
+    else compile_node(c, p, n, 0);
+    /* An item operand is its plain steps alone. */
+    for (size_t i = start; i < p->len; i++) if (p->items[i].op == BC_OPERATE) emit_drop(p, i--);
     size_t fused = c->error_type[0] ? SIZE_MAX :
         emit_before(c, p, start, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6 | fused_operation(n) << 8);
     patch(p, fused, p->len);
@@ -16976,7 +16987,9 @@ static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
     if (method && call != SIZE_MAX) p->items[call].attribute = attribute_operand(c, p, n->a);
     if (!plain && call != SIZE_MAX) p->items[call].constant = keyword_names(c, p, n);
 }
-static void compile_expr(SPYContext *c, Program *p, Node *n) {
+static void compile_expr(SPYContext *c, Program *p, Node *n) { compile_node(c, p, n, 1); }
+/* The steps of n; with fuse, a fused step first where one takes it. */
+static void compile_node(SPYContext *c, Program *p, Node *n, int fuse) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
     if (n->constant || (at_hand(n) && n->kind != N_NAME)) { SPYValue *value = literal_value(c, n); if (value) emit_value(c, p, n, spy_retain(value)); return; }
@@ -16986,7 +16999,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
      * machine steps. */
     /* While calls can pause, a name's dictionary may hold a key with a
      * Python __eq__ (name_load): an expression loading one takes steps. */
-    if (!p->plain && !expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) &&
+    if (fuse && !expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) &&
         !(p->calls == PAUSING && n->kind != N_NAME && loads_name(n))) {
         if (operator_right(n)) { compile_operator(c, p, n, 0); return; }
         if (stacked_right(n)) { compile_stacked(c, p, n, 0); return; }
