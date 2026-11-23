@@ -16764,6 +16764,62 @@ static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line,
     }
     return pc;
 }
+/* Whether x's target, and its other, are steps of the expression it is in. */
+static int steps_target(const Instruction *x) {
+    switch (x->op) {
+    case BC_FALSE: case BC_TEST: case BC_STACKED_TEST: case BC_OPERATE: case BC_STACKED: case BC_JUMP: case BC_SHORT: case BC_CALLF: case BC_COMPARE: return 1;
+    default: return x->op == BC_YIELD && x->arg == 1;
+    }
+}
+static int steps_other(const Instruction *x) { return x->op == BC_FALSE || x->op == BC_TEST || x->op == BC_STACKED_TEST; }
+/* Emit op as emit does, but at at, before the steps of the expression
+ * from there on, which jump only among themselves; its index, or
+ * SIZE_MAX with an error. */
+static size_t emit_before(SPYContext *c, Program *p, size_t at, int op, Node *n, int arg) {
+    if (emit(c, p, op, n, arg) == SIZE_MAX) return SIZE_MAX;
+    Instruction inserted = p->items[p->len - 1];
+    memmove(p->items + at + 1, p->items + at, (p->len - 1 - at) * sizeof(*p->items));
+    p->items[at] = inserted;
+    for (size_t i = at + 1; i < p->len; i++) {
+        Instruction *x = &p->items[i];
+        if (steps_target(x) && x->target >= at) x->target++;
+        if (steps_other(x) && x->other > at) x->other++;
+    }
+    if (p->tested > at) p->tested++;
+    return at;
+}
+/* A place in p's steps and operands, where an expression's begin. */
+typedef struct { size_t at; Operand *last; } Mark;
+static Mark mark(Program *p) { return (Mark){p->len, p->last}; }
+/* Move the steps and operands of the expressions from a on after those
+ * from b on, which follow them to the end, each jumping only among its
+ * own; with *pc a step from b on, its index after. Where the moved ones
+ * begin. */
+static Mark emit_after(Program *p, Mark a, Mark b, size_t *pc) {
+    size_t first = b.at - a.at, second = p->len - b.at;
+    Mark moved = {a.at + second, p->last == b.last ? a.last : p->last};
+    if (!first || !second) return b.at == p->len ? a : moved;
+    for (size_t i = a.at; i < p->len; i++) {
+        Instruction *x = &p->items[i];
+        /* A step of the first jumps within its steps or to their end. */
+        size_t lo = i < b.at ? a.at : b.at, hi = i < b.at ? b.at : p->len;
+        ptrdiff_t by = i < b.at ? (ptrdiff_t)second : -(ptrdiff_t)first;
+        if (steps_target(x) && x->target >= lo && x->target <= hi && (i < b.at || x->target > lo)) x->target = (uint32_t)(x->target + by);
+        if (steps_other(x) && x->other > lo && x->other <= hi) x->other = (uint32_t)(x->other + by);
+    }
+    if (p->tested > b.at) p->tested -= first;
+    else if (p->tested > a.at) p->tested += second;
+    if (pc) *pc -= first;
+    Instruction *items = p->items + a.at;
+    size_t n = first + second;
+    for (size_t i = 0, j = n - 1; i < j; i++, j--) { Instruction t = items[i]; items[i] = items[j]; items[j] = t; }
+    for (size_t i = 0, j = second - 1; i < j; i++, j--) { Instruction t = items[i]; items[i] = items[j]; items[j] = t; }
+    for (size_t i = second, j = n - 1; i < j; i++, j--) { Instruction t = items[i]; items[i] = items[j]; items[j] = t; }
+    if (b.last == a.last || p->last == b.last) return moved;
+    Operand **head = a.last ? &a.last->next : &p->operands, *start = *head;
+    *head = b.last->next; p->last->next = start; b.last->next = NULL; p->last = b.last;
+    return moved;
+}
 static void patch(Program *p, size_t pc, size_t target) {
     if (pc == SIZE_MAX) return;
     p->items[pc].target = target;
@@ -16796,11 +16852,13 @@ static void compile_operation(SPYContext *, Program *, Node *);
  * hand's, at once past the stack's, and from bit 8 n's operation. */
 static void compile_fused(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth) {
     int shape = operand_shape(c, right), steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
-    size_t fused = emit(c, p, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6 | fused_operation(n) << 8);
+    size_t start = p->len;
     p->plain++;
     if (left == SHAPE_STACK) compile_operation(c, p, n);
     else compile_expr(c, p, n);
     p->plain--;
+    size_t fused = c->error_type[0] ? SIZE_MAX :
+        emit_before(c, p, start, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6 | fused_operation(n) << 8);
     patch(p, fused, p->len);
     if (truth && fused != SIZE_MAX) p->tested = fused + 1;
 }
@@ -16841,11 +16899,14 @@ static void compile_test(SPYContext *c, Program *p, Node *n) {
 /* A call's or class header's arguments, each added by BC_ARG: the
  * positional and starred ones first, then the keywords. */
 static void compile_arguments(SPYContext *c, Program *p, Node *args) {
-    for (int pass = 0; pass < 2; pass++) for (Node *a = args; a; a = a->next) {
+    Mark keywords = mark(p);
+    for (Node *a = args; a && !c->error_type[0]; a = a->next) {
         int keyword = a->kind == N_KEYWORD || a->kind == N_MAPPING;
-        if (keyword != pass) continue;
+        Mark start = mark(p);
         compile_expr(c, p, keyword || a->kind == N_STAR ? a->a : a);
         emit(c, p, BC_ARG, a, a->kind);
+        /* A positional argument goes before the keywords before it. */
+        if (!keyword) keywords = emit_after(p, keywords, start, NULL);
     }
 }
 /* The applications of decorators, the last first, each on its own line. */
@@ -16935,10 +16996,11 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         for (Node *part = n->args; part; part = part->next, parts++) compile_expr(c, p, part);
         emit(c, p, BC_JOIN, n, (int)parts); break;
     case N_TEMPLATE:
-        emit(c, p, BC_NEW, n, SPY_LIST);
+        parts = p->len;
         for (Node *part = n->args; part; part = part->next) {
             compile_expr(c, p, part); emit(c, p, BC_ADD, part, 0);
         }
+        if (!c->error_type[0]) emit_before(c, p, parts, BC_NEW, n, SPY_LIST);
         emit(c, p, BC_TEMPLATE, n, 0); break;
     case N_INTERPOLATION:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INTERPOLATION, n, n->op); break;
@@ -16963,9 +17025,9 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
          * past the plain steps that run when the name is not at hand; while
          * calls can pause, a name takes those alone. */
         if (n->kind == N_YIELD && !n->op && n->a && ((n->a->kind == N_NAME && p->calls != PAUSING) || n->a->constant)) {
-            size_t fused = emit(c, p, BC_YIELD, n, 1);
+            size_t start = p->len;
             compile_expr(c, p, n->a); emit(c, p, BC_YIELD, n, 0);
-            patch(p, fused, p->len); break;
+            patch(p, c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_YIELD, n, 1), p->len); break;
         }
         compile_expr(c, p, n->a);
         emit(c, p, n->op || n->kind == N_AWAIT ? BC_DELEGATE : BC_YIELD, n, n->kind == N_AWAIT); break;
@@ -16984,10 +17046,17 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     case N_SLICE:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); compile_expr(c, p, n->c);
         emit(c, p, BC_SLICE, n, 0); break;
-    case N_COND:
+    case N_COND: {
+        /* The test is evaluated first. */
+        Mark value = mark(p);
+        compile_expr(c, p, n->a);
+        Mark test = mark(p);
         branch = compile_branch(c, p, n->b, n);
-        compile_expr(c, p, n->a); end = emit(c, p, BC_JUMP, n, 0);
+        if (c->error_type[0]) break;
+        emit_after(p, value, test, &branch);
+        end = emit(c, p, BC_JUMP, n, 0);
         patch(p, branch, p->len); compile_expr(c, p, n->c); patch(p, end, p->len); break;
+    }
     case N_COMPARE: compile_expr(c, p, n->a); compile_operation(c, p, n); break;
     case N_LIST: case N_TUPLE: case N_SET: case N_DICT:
         if (packed(n)) {
@@ -16997,10 +17066,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_NEW, n, (n->kind == N_LIST ? SPY_LIST : SPY_TUPLE) | count << 8);
             break;
         }
-        /* A tuple without a starred item is allocated its size, its other. */
-        size_t display = emit(c, p, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT);
-        for (Node *a = n->args; a && n->kind == N_TUPLE && display != SIZE_MAX; a = a->next)
-            p->items[display].other = a->kind == N_STAR ? 0 : p->items[display].other + 1;
+        size_t display = p->len;
         for (Node *a = n->args; a; a = a->next) {
             if (a->kind == N_STAR || a->kind == N_MAPPING) {
                 compile_expr(c, p, a->a); emit(c, p, BC_EXTEND, a, n->kind == N_TUPLE && !a->next);
@@ -17011,13 +17077,18 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
                 compile_expr(c, p, a); emit(c, p, BC_NONE, a, 0); emit(c, p, BC_MAP, a, 0);
             } else { compile_expr(c, p, a); emit(c, p, BC_ADD, a, n->kind == N_TUPLE && !a->next); }
         }
+        /* A tuple without a starred item is allocated its size, its other. */
+        if (c->error_type[0] || emit_before(c, p, display, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT) == SIZE_MAX) break;
+        for (Node *a = n->args; a && n->kind == N_TUPLE; a = a->next)
+            p->items[display].other = a->kind == N_STAR ? 0 : p->items[display].other + 1;
         break;
     case N_CALL:
         if (plain_call(n) && (n->a->kind == N_ATTR || at_hand(n->a)) && !expands(n->a->kind == N_ATTR ? n->a->a : n->a, modes(p)) && !list_expands(n->args, modes(p)) &&
             !sort_call(n) && fused_arguments(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
             /* The fused call, then its plain steps. */
-            size_t fused = emit(c, p, BC_CALLF, n, 0);
+            size_t start = p->len;
             compile_stack_call(c, p, n);
+            size_t fused = c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_CALLF, n, 0);
             if (fused != SIZE_MAX) call_operands(p, fused, n);
             patch(p, fused, p->len);
             break;
@@ -17033,10 +17104,11 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         if (n->op != N_TUPLE && n->asynchronous) emit(c, p, BC_DELEGATE, n, DELEGATE_COMPREHENSION);
         break;
     default: /* N_LAMBDA, the last expression that can contain a yield */
-        emit(c, p, BC_FUNCTION, n, 0);
+        parts = p->len;
         for (Node *a = n->args; a; a = a->next) if (a->a) {
             compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, a->op == P_KWONLY);
         }
+        if (!c->error_type[0]) emit_before(c, p, parts, BC_FUNCTION, n, 0);
         break;
     }
 }
