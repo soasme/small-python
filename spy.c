@@ -15984,6 +15984,8 @@ typedef struct {
         NameOperand *name; /* BC_NAME, and a name's BC_STORE, BC_NAMED or BC_DELETE, a keyword's BC_ARG, or a parameter's BC_DEFAULT: spelling and lookup cache, borrowed from the source unit. */
         const ImportRecord *import; /* BC_IMPORT: its program's. */
         AttributeOperand *attribute; /* BC_ATTR, or an attribute's target step or BC_DELETE, or a method call's BC_CALLN: borrowed from the source unit. */
+        Node *definition; /* BC_FUNCTION, BC_GENERIC_FUNCTION, BC_COMPREHENSION, BC_CLASS and BC_ANNOTATE: the function, comprehension,
+                           * class, alias or annotation entry they make or record, borrowed from the source unit. */
     };
     Node *node; /* Source location; some older instructions also execute this tree. */
 } Instruction;
@@ -16312,6 +16314,8 @@ static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
         p->items[pc].name = &n->name;
     if ((op == BC_ATTR || op == BC_SET_TARGET || op == BC_LOAD_TARGET || op == BC_SAVE_TARGET || op == BC_DELETE) && n->kind == N_ATTR)
         p->items[pc].attribute = &n->attribute;
+    if (op == BC_FUNCTION || op == BC_GENERIC_FUNCTION || op == BC_COMPREHENSION || op == BC_CLASS || op == BC_ANNOTATE)
+        p->items[pc].definition = n;
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
@@ -25567,7 +25571,7 @@ static NO_INLINE SPYValue *module_annotations(SPYContext *c, Machine *m, Frame *
  * (start_annotations), through its namespace's Python __setitem__ on the
  * machine (class_names_call). */
 static NO_INLINE SPYValue *annotation_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
-    Node *entry = ins->node;
+    Node *entry = ins->definition;
     if (ins->arg == 17) return module_annotations(c, m, f);
     if (ins->arg == 12) return annotations_begin(c, f, entry);
     if (ins->arg == 13) {
@@ -37969,11 +37973,11 @@ static NO_INLINE SPYValue *header_step(SPYContext *c, Machine *m, Frame *f, Inst
         return pair;
     }
     c->k_fn = spy_retain(f->unit); c->k_env = spy_retain(m->stack[m->len - 1]->as.seq.items[0]); c->k_unit = 1;
-    c->k_code = ins->node->params->flat; c->k = unchanged; c->k_ctx = NULL;
+    c->k_code = ins->definition->params->flat; c->k = unchanged; c->k_ctx = NULL;
     return NULL;
 }
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
-    if (ins->arg == 11) return alias_step(c, m, f, ins->node);
+    if (ins->arg == 11) return alias_step(c, m, f, ins->definition);
     if (ins->arg >= 18) return header_step(c, m, f, ins);
     if (ins->arg >= 12) return annotation_step(c, m, f, ins);
     if (ins->arg == 7) {
@@ -37981,7 +37985,7 @@ static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instr
         int list = state->type == SPY_LIST;
         if (list && ((cls = class_callback(c, m->stack[m->len - 1], state, env)) || c->error_type[0])) return cls;
         cls = machine_pop(m); classcell = machine_pop(m); state = machine_pop(m);
-        if (ins->node->params) spy_release(machine_pop(m));
+        if (ins->definition->params) spy_release(machine_pop(m));
         spy_release(machine_pop(m));
         if (state != c->none)
             class_made(c, cls, state->as.seq.items[list ? 0 : 6], state->as.seq.items[list ? 1 : 3], classcell == c->none ? NULL : classcell);
@@ -38096,7 +38100,7 @@ static SPYValue *class_names_call(SPYContext *c, Machine *m, Frame *f, SPYValue 
     return callk(c, m, getter, 2, argv, class_names_stored, state);
 }
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
-    Node *n = ins->node;
+    Node *n = ins->definition;
     SPYValue *bases = NULL, *arguments = NULL, *name, *body = NULL;
     if (ins->arg == 9)
         /* The body's implicit names that class_body_begin left (class_names_call). */
@@ -38495,7 +38499,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
         /* A class's base's __mro_entries__ returned, its step running
          * again (class_part); or its __prepare__. */
-        if (m->stack[m->len - 1] != c->unbound) class_prepared(c, m, ins->node, result);
+        if (m->stack[m->len - 1] != c->unbound) class_prepared(c, m, ins->definition, result);
         else if (result && !mro_entries_add(c, m->stack[m->len - 4]->as.seq.items[1], result)) m->pc = pc - 1;
         return m;
     }
@@ -40042,7 +40046,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
 
         CASE(BC_NONE) machine_push(c, m, spy_none(c)); NEXT;
         CASE(BC_ANNOTATE)
-            value = record_annotation(c, m, &f, n);
+            value = record_annotation(c, m, &f, ins->definition);
             if (c->k_fn) goto enter_k;
             machine_push(c, m, value); break;
         CASE(BC_POP) spy_release(machine_pop(m)); NEXT;
@@ -40273,7 +40277,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             a = b = NULL;
             if (c->k_fn) goto enter_k;
             machine_push(c, m, value); break;
-        CASE(BC_FUNCTION) machine_push(c, m, function_new(c, &f, n)); break;
+        CASE(BC_FUNCTION) machine_push(c, m, function_new(c, &f, ins->definition)); break;
         CASE(BC_DEFAULT)
             a = machine_pop(m); function_default(c, m->stack[m->len - 1], ins->arg, ins->name->text, a); break;
         CASE(BC_COMPREHENSION)
@@ -40290,14 +40294,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             a = machine_pop(m);
             if (a == c->unbound) { spy_release(a); a = NULL; b = machine_pop(m); }
-            if (!eager_comprehension(n)) {
-                machine_push(c, m, b ? comprehension_of(c, &f, n, b) : comprehension_from(c, &f, n, a));
+            if (!eager_comprehension(ins->definition)) {
+                machine_push(c, m, b ? comprehension_of(c, &f, ins->definition, b) : comprehension_from(c, &f, ins->definition, a));
                 b = NULL;
                 break;
             }
             /* An eager comprehension runs on in this run_machine, returning
              * into this machine (generator_left). */
-            value = b ? comprehension_of(c, &f, n, b) : comprehension_new(c, &f, n, a);
+            value = b ? comprehension_of(c, &f, ins->definition, b) : comprehension_new(c, &f, ins->definition, a);
             b = NULL;
             if (!value) break;
             spy_release(a);
@@ -40614,7 +40618,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             for (size_t i = m->len - (size_t)ins->arg; defaults && i < m->len; i++)
                 if (sequence_append(c, defaults, m->stack[i])) { spy_release(defaults); defaults = NULL; }
             for (int i = 0; i < ins->arg; i++) spy_release(machine_pop(m));
-            value = defaults ? generic_function(c, m, &f, n, defaults) : NULL;
+            value = defaults ? generic_function(c, m, &f, ins->definition, defaults) : NULL;
             spy_release(defaults);
             if (c->k_fn) goto enter_k;
             machine_push(c, m, value); break;
