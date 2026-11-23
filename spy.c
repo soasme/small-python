@@ -17850,9 +17850,11 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             else emit(c, p, BC_SAVE_TARGET, target, 0);
             break;
         }
-        /* The value is evaluated before its targets are stored. */
+        /* The value is evaluated before its targets are stored; a name's
+         * store has no steps of its own before it. */
         Mark targets = mark(p);
         Node *target = n->a;
+        if (target->kind == N_NAME && !n->args) { compile_expr(c, p, n->b); compile_store(c, p, target, n); break; }
         for (Node *next = n->args; next; target = next, next = next->next) compile_target(c, p, target);
         compile_store(c, p, target, n);
         Mark value = mark(p);
