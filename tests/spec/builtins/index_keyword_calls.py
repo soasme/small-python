@@ -46,3 +46,12 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(results(), expected)
+
+# A keyword unpacked from a dict, or given with starred positional
+# arguments, converts the same way.
+class UnpackedIndex:
+    def __index__(self): return 1
+unpacked_args = ("a b c",)
+assert_eq([str.split(*unpacked_args, maxsplit=UnpackedIndex()), "a b c".split(**{"maxsplit": UnpackedIndex()}),
+           "a b c".split(" ", **{"maxsplit": UnpackedIndex()})], [["a", "b c"]] * 3)
+assert_eq([int.to_bytes(*(5,), length=UnpackedIndex()), (5).to_bytes(**{"length": UnpackedIndex()})], [b"\x05"] * 2)

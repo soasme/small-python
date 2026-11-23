@@ -695,6 +695,14 @@ int main(int argc, char **argv) {
     SPYValue *host_str = spy_get_global(c, "host_str"), *host_contains = spy_get_global(c, "host_contains"), *two_held = spy_int(c, 2);
     SPYValue *shown_text = spy_call(c, host_str, 0, NULL), *held_two = spy_call(c, host_contains, 1, &two_held);
     assert(shown_text && !strcmp(spy_as_string(c, shown_text, NULL), "shown") && held_two && spy_truth(c, held_two) == 1);
+    /* And type.__new__, which makes the class in C. */
+    execute(c, "host_type_new = type.__new__\ndef type_made(k): return 1 if type(k) is type and k.__name__ == 'Made' and k.y == 3 else 0\n");
+    SPYValue *host_type_new = spy_get_global(c, "host_type_new"), *type_made = spy_get_global(c, "type_made");
+    SPYValue *new_args[] = {spy_eval(c, "type", "host.py"), spy_string(c, "Made", 4), spy_eval(c, "()", "host.py"), spy_eval(c, "{'y': 3}", "host.py")};
+    SPYValue *made_type = spy_call(c, host_type_new, 4, new_args);
+    assert(made_type && integer(c, spy_call(c, type_made, 1, &made_type)) == 1);
+    spy_release(made_type); spy_release(type_made); spy_release(host_type_new);
+    for (int i = 0; i < 4; i++) spy_release(new_args[i]);
     spy_release(shown_text); spy_release(held_two); spy_release(host_str); spy_release(host_contains); spy_release(two_held);
     spy_release(build); spy_release(q_parts[0]); spy_release(q_parts[1]);
     /* The host calls a class body's function, which returns None, and a

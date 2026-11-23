@@ -65,3 +65,17 @@ def g(**k): return k
 not_subscriptable = "'function' object is not subscriptable"
 for f in (lambda: g(**holder), lambda: {**holder}, lambda: dict(holder), lambda: {}.update(holder), lambda: g(b=1, **holder)):
     assert_eq(run(f), (not_subscriptable, ["keys"]))
+
+# A callable instance, which has no __qualname__, is named by its str():
+# object's repr, or a native __repr__'s text.
+class UnnamedCallable:
+    def __call__(self, **kw): return kw
+class NativeShownCallable(UnnamedCallable):
+    __repr__ = "shown".__str__
+unnamed_messages = []
+for unnamed in (UnnamedCallable(), NativeShownCallable()):
+    try: unnamed(**{"a": 1}, **{"a": 2})
+    except TypeError as e: unnamed_messages.append(str(e))
+object_shown, rest = unnamed_messages[0].split(" object at ")
+assert_eq([object_shown, rest.split("> ")[1], unnamed_messages[1]],
+          ["<" + __name__ + ".UnnamedCallable", "got multiple values for keyword argument 'a'", "shown got multiple values for keyword argument 'a'"])

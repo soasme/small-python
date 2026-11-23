@@ -144,3 +144,22 @@ for make in (lambda: bool(NarrowBool()), lambda: bool(PropertyBool()), lambda: l
     except TypeError as e: narrow_errors.append(str(e))
 narrow = "NarrowGet.__get__() takes 1 positional argument but 3 were given"
 assert_eq(narrow_errors, [narrow, "PropertyBool.<lambda>() takes 0 positional arguments but 1 was given", narrow, narrow, narrow])
+
+# A __hash__ descriptor raising AttributeError leaves the instance
+# unhashable; a metaclass's __repr__ descriptor raising it gives the
+# class the default repr, named by its metaclass.
+class DescriptorNoHash:
+    @property
+    def __hash__(self): raise AttributeError("x")
+hash_messages = []
+for hash_f in (lambda: hash(DescriptorNoHash()), lambda: {DescriptorNoHash(): 1}, lambda: {DescriptorNoHash()}):
+    try: hash_f()
+    except TypeError as e: hash_messages.append(str(e))
+assert_eq(hash_messages, ["unhashable type: 'DescriptorNoHash'", "cannot use 'DescriptorNoHash' as a dict key (unhashable type: 'DescriptorNoHash')",
+                          "cannot use 'DescriptorNoHash' as a set element (unhashable type: 'DescriptorNoHash')"])
+class ReprlessMeta(type):
+    @property
+    def __repr__(cls): raise AttributeError("x")
+class Reprless(metaclass=ReprlessMeta): pass
+assert_eq([t.split(" at ")[0] for t in (repr(Reprless), str(Reprless), f"{Reprless}", "%r" % Reprless, str([Reprless]))],
+          ["<ReprlessMeta object"] * 4 + ["[<ReprlessMeta object"])
