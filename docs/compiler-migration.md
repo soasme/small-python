@@ -300,6 +300,23 @@ owning a root scope (a string annotation's). Compiling 20,000 lines of
 33 MB, down from 47 MB, and a 20,000-line function and class at 46 MB,
 down from 124 MB.
 
+The compiler now emits every expression and statement in the order the
+parser reads it, except match patterns (a mapping pattern still compiles
+its keys before its sub-patterns). A step that runs before parts read ahead of it is put
+in front of them once they are compiled: a fused operator, call, store,
+assignment, increment, yield or return step, a display's or template's
+new value, a function's making step, a target list's unpack. Parts that
+run in another order are rotated into it: a conditional's test before its
+value, positional arguments before keywords, an assignment's value before
+its targets, a comprehension's element inside its clauses. A rotated or
+prefixed range jumps only within itself, so moving it relocates only its
+own jumps, and its operands move with it, keeping `co_names` in order. A
+value is tested after it compiles (an `and`'s or `or`'s left operand
+before the parser has read the operator), and an item operand drops its
+own fused step when an operator fuses it. No step's shape depends on
+context compiled after it. The programs are the same as before this
+change, step for step, for every spec test in both execution modes.
+
 ## Remaining stages
 
 1. Emit expressions from the parser, in place of the finished
