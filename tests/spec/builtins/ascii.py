@@ -31,3 +31,9 @@ assert ascii(Bar()) == "h\\xe9llo"
 class NotText:
     def __repr__(self): return 1
 assert str(assert_raises(TypeError, ascii, NotText())) == "NotText.__repr__() must return a str, not int"
+
+# A native __repr__ giving no str is a TypeError for ascii(), %a and !a.
+class NativeRepr:
+    __repr__ = (5).__int__
+for ascii_f in (lambda: ascii(NativeRepr()), lambda: "%a" % NativeRepr(), lambda: f"{NativeRepr()!a}"):
+    assert_raises(TypeError, ascii_f, message="NativeRepr.__repr__() must return a str, not int")

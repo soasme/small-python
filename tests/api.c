@@ -667,7 +667,16 @@ int main(int argc, char **argv) {
     SPYValue *q_parts[] = {spy_get_global(c, "q_body"), spy_string(c, "Q2", 2)}, *made_q = spy_get_global(c, "made_q");
     SPYValue *q_class = spy_call(c, build, 2, q_parts);
     assert(q_class && integer(c, spy_call(c, made_q, 1, &q_class)) == 1);
-    spy_release(q_class); spy_release(made_q); spy_release(build); spy_release(q_parts[0]); spy_release(q_parts[1]);
+    spy_release(q_class); spy_release(made_q);
+    /* A metaclass that is no type, here slice, is called with the name,
+     * bases and namespace. */
+    execute(c, "def sliced(s): return 1 if type(s) is slice and s.start == 'Q3' and s.stop == () and s.step['y'] == 2 else 0\n");
+    SPYValue *slice_keywords = spy_eval(c, "{'metaclass': slice}", "host.py"), *sliced = spy_get_global(c, "sliced");
+    q_parts[1] = (spy_release(q_parts[1]), spy_string(c, "Q3", 2));
+    SPYValue *q_slice = spy_call_keywords(c, build, 2, q_parts, slice_keywords);
+    assert(q_slice && integer(c, spy_call(c, sliced, 1, &q_slice)) == 1);
+    spy_release(q_slice); spy_release(sliced); spy_release(slice_keywords);
+    spy_release(build); spy_release(q_parts[0]); spy_release(q_parts[1]);
     /* The host calls a class body's function, which returns None, and a
      * function of module code, which runs in its globals. */
     execute(c, "module_code = type(grab)(compile('z = 5\\n', 'code.py', 'exec'), globals())\n");

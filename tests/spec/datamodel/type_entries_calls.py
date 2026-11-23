@@ -4,7 +4,7 @@
 # the base's Python __getattr__, __getattribute__ or a descriptor, which
 # may loop: a found one is a TypeError, an AttributeError means none, and
 # other errors pass out, all after the arguments' types are checked.
-from harness import assert_eq
+from harness import assert_eq, assert_raises
 OUT = []
 def emit(*a):
     OUT.append(' '.join(str(x) for x in a))
@@ -77,3 +77,10 @@ EXPECTED = [
 assert_eq(len(OUT), len(EXPECTED))
 for got, want in zip(OUT, EXPECTED):
     assert_eq(got, want)
+
+# A base that is no class and has no __mro_entries__ goes on to the
+# metaclass check, by type() and its subclass alike.
+class EntryLess: pass
+class EntryMeta(type): pass
+for entry_f in (lambda: type("X", (5,), {}), lambda: type("X", (EntryLess(),), {}), lambda: EntryMeta("X", (5,), {})):
+    assert_raises(TypeError, entry_f, message="metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases")

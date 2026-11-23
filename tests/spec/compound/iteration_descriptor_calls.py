@@ -97,3 +97,21 @@ assert_eq(results(), expected)
 def main():
     return results()
 assert_eq(main(), expected)
+
+# A class whose metaclass's descriptor raises AttributeError lacks the
+# method the same way, named by the metaclass.
+class AbsentMeta(type):
+    @property
+    def __await__(cls): raise AttributeError("x")
+    @property
+    def __aiter__(cls): raise AttributeError("x")
+class AbsentKind(metaclass=AbsentMeta): pass
+async def meta_awaits(): await AbsentKind
+async def meta_loops():
+    async for x in AbsentKind: pass
+async def meta_comp(): return [x async for x in AbsentKind]
+meta_messages = []
+for meta_f in (meta_awaits, meta_loops, meta_comp):
+    try: meta_f().send(None)
+    except AttributeError as e: meta_messages.append(str(e))
+assert_eq(meta_messages, ["object AbsentMeta does not have __await__ method"] + ["object AbsentMeta does not have __aiter__ method"] * 2)

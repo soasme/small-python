@@ -240,3 +240,20 @@ class IntBehind(int):
 assert_eq([bool(StrBehind("")), not StrBehind(""), bool(StrBehind("a")), bool(TupleBehind()), bool(DictBehind(a=1)),
            bool(IntBehind(0)), not IntBehind(0), list(filter(None, [ListBehind(), ListBehind([0])]))],
           [False, True, True, False, True, True, False, [[0]]])
+
+# A __bool__ descriptor raising AttributeError leaves the truth to a
+# native __len__, in every test position.
+class NativeLenful:
+    @property
+    def __bool__(self): raise AttributeError("x")
+    __len__ = [1].__len__
+class NativeLenless:
+    @property
+    def __bool__(self): raise AttributeError("x")
+    __len__ = [].__len__
+native_truths = []
+for native_o in (NativeLenful(), NativeLenless()):
+    native_truths += [bool(native_o), not native_o, 1 if native_o else 0, (native_o and 1) is 1, (native_o or 2) is 2]
+    while native_o: break
+    else: native_truths.append("w")
+assert_eq(native_truths, [True, False, 1, True, False, False, True, 0, False, True, "w"])
