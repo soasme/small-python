@@ -1,5 +1,5 @@
 # spec: PLS-315 16.6.2, 17.2
-# description: a module's __annotate__ and __annotations__ replace each other; __annotate__ cannot be deleted.
+# description: a module's __annotate__ and __annotations__ replace each other; __annotate__ cannot be deleted. A native __annotate__ is called too.
 from harness import *
 import annotated
 
@@ -30,3 +30,19 @@ M = type(__import__("builtins"))
 named = M("it's")
 named.__file__ = 5
 assert_eq(repr(named), "<module \"it's\" from 5>")
+
+# A native __annotate__ of a function, class or module is called with format
+# 1 (VALUE) too; what it returns must be a dict.
+def nf(): pass
+nf.__annotate__ = {1: {"a": int}}.get
+assert_eq(nf.__annotations__, {"a": int})
+def ng(): pass
+ng.__annotate__ = {1: 5}.get
+with assert_raises(TypeError, message="__annotate__() must return a dict, not int"):
+    ng.__annotations__
+class NC: pass
+NC.__annotate__ = {1: {"b": str}}.get
+assert_eq(NC.__annotations__, {"b": str})
+mod = type(__build_class__.__self__)("m")
+mod.__annotate__ = {1: {"c": float}}.get
+assert_eq(mod.__annotations__, {"c": float})
