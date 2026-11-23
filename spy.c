@@ -34124,6 +34124,11 @@ static NO_INLINE SPYValue *missing_found(SPYContext *c, SPYValue *callee, size_t
     } else if (!native_absent(c, map, key)) return NULL;
     return missing_env(c, missing, self, key, env);
 }
+/* The attribute of method call step ins: BC_CALLN's, or that of the
+ * BC_CALLN ending a fused call's plain steps. */
+static AttributeOperand *call_attribute(Instruction *ins) {
+    return ins->op == BC_CALLF ? ins[ins->arg >> CALLF_DISTANCE].attribute : ins->attribute;
+}
 static Machine *call_hashed(SPYContext *c, Machine *m, Instruction *ins, SPYValue *key, int hashed, int64_t hash) {
     SPYValue *count = machine_pop(m), *number = machine_pop(m), *args[3];
     size_t argc = (size_t)count->as.integer_data.small;
@@ -34135,7 +34140,7 @@ static Machine *call_hashed(SPYContext *c, Machine *m, Instruction *ins, SPYValu
     if (hash_kept(c, key, hashed, hash)) {
         relocate(c, ins->node);
         if (method < 0 && (function = missing_found(c, callee, argc, args, key, &env))) call = call_enter(c, function, env, m);
-        SPYValue *result = function ? NULL : call_plain(c, callee, method, method >= 0 ? &ins->node->a->attribute : NULL, argc, args);
+        SPYValue *result = function ? NULL : call_plain(c, callee, method, method >= 0 ? call_attribute(ins) : NULL, argc, args);
         if (result) machine_push(c, m, result);
     }
     c->found_key = NULL;
