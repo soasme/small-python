@@ -49189,16 +49189,16 @@ static int print_unit(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPY
     if (c->error_type[0]) { spy_release(writer); return -1; }
     if (repr_job(c, c->types[SPY_STRING], value)) {
         /* A container's repr job (repr_call) above the write, the state,
-         * the position and c->replacing. */
+         * the position and c->replacing; it reaches a Python __repr__, so
+         * it stops at that call. */
         SPYValue *call_env = NULL;
         if (machine_push(c, m, writer ? writer : spy_none(c)) || machine_push(c, m, spy_retain(state)) ||
             machine_push(c, m, int_value(c, (int64_t)at + 1)) || machine_push(c, m, spy_retain(c->replacing)) ||
             machine_push(c, m, spy_retain(c->types[SPY_STRING])) || machine_push(c, m, spy_retain(value)) || !(text = repr_call(c, m, &call_env)))
             return -1;
-        if (call_env) { spy_release(text); *function = c->entering_init; *env = call_env; return 1; }
-        for (int k = 0; k < 3; k++) spy_release(machine_pop(m));
-        if ((writer = machine_pop(m)) == c->none) { spy_release(writer); writer = NULL; }
-    } else text = stringify(c, value, 0);
+        spy_release(text); *function = c->entering_init; *env = call_env; return 1;
+    }
+    text = stringify(c, value, 0);
     if (!text) { spy_release(writer); return -1; }
     return print_call(c, m, state, at + 2, writer, text, function, env);
 }
