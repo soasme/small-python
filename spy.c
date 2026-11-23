@@ -42849,9 +42849,6 @@ static SPYValue *frame_attribute(SPYContext *c, SPYValue *frame, const char *nam
         if (frame->as.frame.index > 1) return frame_object(c, frame->as.frame.index - 2);
         return spy_retain(frame->as.frame.back && !frame->as.frame.index ? frame->as.frame.back : c->none);
     }
-    Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
-    if (!strcmp(name, "f_code") && owner->type == V_UNIT && scope && scope->kind == S_CLASS && scope->form)
-        return definition_code(c, owner, scope);
     if (!strcmp(name, "f_code"))
         return owner->type == SPY_FUNCTION ? attribute(c, owner, "__code__") : owner->type == V_UNIT || owner->type == SPY_CODE ? spy_retain(owner) :
                spy_retain(owner->as.generator.code);
