@@ -143,7 +143,8 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * statics chain its methods' self.attr stores through static_next; its
  * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
  * its first build. */
-struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+/* children: the scopes whose parent this is, linked through sibling. */
+struct Scope { Node *owner, *statics; Scope *parent, *children, *sibling; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, return_line; int kind, stars, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -8264,9 +8265,13 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
     c->depth--;
     return status ? -1 : 0;
 }
+static void scope_adopt(Scope *parent, Scope *child) {
+    child->parent = parent;
+    if (parent) { child->sibling = parent->children; parent->children = child; }
+}
 static Scope *scope_new(SPYContext *c, Scope *parent, int kind) {
     Scope *s = allocate(c, sizeof(*s));
-    if (s) { s->parent = parent; s->kind = kind; }
+    if (s) { s->kind = kind; scope_adopt(parent, s); }
     return s;
 }
 /* Binds the name n, reporting errors at the node `at` covers. */
@@ -8541,7 +8546,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         if (n->kind == N_CLASS && scope_walk(c, outer, n->args)) return -1;
         /* A parsed def already owns its compile-time properties. Lambdas,
          * classes and synthesized annotation functions get their scope here. */
-        if (n->scope) n->scope->parent = outer;
+        if (n->scope) scope_adopt(outer, n->scope);
         else n->scope = scope_new(c, outer, n->kind == N_CLASS ? S_CLASS : S_FUNCTION);
         if (!n->scope) return -1;
         n->scope->owner = n;
@@ -17996,15 +18001,10 @@ static int closure_scope(ClosureNames *w, Scope *scope) {
     }
     return 0;
 }
-static int closure_walk(ClosureNames *w, Node *n, int depth) {
-    for (; n && depth < 1000; n = n->next) {
-        if (n->scope && n->scope != w->self && scope_within(n->scope, w->self) && closure_scope(w, n->scope)) return -1;
-        if (closure_walk(w, n->a, depth + 1) || closure_walk(w, n->b, depth + 1) || closure_walk(w, n->c, depth + 1) ||
-            closure_walk(w, n->args, depth + 1) || closure_walk(w, n->decorators, depth + 1) || closure_walk(w, n->params, depth + 1) ||
-            /* A definition's annotation function, not the owner it points back to. */
-            (!(n->flags & F_ANNOTATE) && closure_walk(w, n->annotate, depth + 1)))
-            return -1;
-    }
+/* The names of scope and the scopes within it. */
+static int closure_scopes(ClosureNames *w, Scope *scope) {
+    if (closure_scope(w, scope)) return -1;
+    for (Scope *child = scope->children; child; child = child->sibling) if (closure_scopes(w, child)) return -1;
     return 0;
 }
 /* co_names: the global, builtin, and attribute names code uses, in the
@@ -18142,8 +18142,7 @@ static int needs_classdict(Node *n, int depth, int future) {
 static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     ClosureNames w = {c, def ? def->scope : NULL, value_new(c, SPY_TUPLE), cells};
     if (!w.names || !w.self) return w.names;
-    if (closure_scope(&w, w.self) || closure_walk(&w, def->a, 0) || closure_walk(&w, def->b, 0) || closure_walk(&w, def->c, 0) ||
-        closure_walk(&w, def->args, 0) || closure_walk(&w, def->params, 0)) { spy_release(w.names); return NULL; }
+    if (closure_scopes(&w, w.self)) { spy_release(w.names); return NULL; }
     if (cells && def->kind == N_CLASS && needs_classdict(def->b, 0, def->flags & F_FUTURE)) {
         SPYValue *text = spy_string(c, "__classdict__", 13);
         if (!text || sequence_append(c, w.names, text)) { spy_release(text); spy_release(w.names); return NULL; }

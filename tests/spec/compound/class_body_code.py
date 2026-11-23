@@ -53,6 +53,8 @@ free_cases = [
     ("def f(a):\n    class C(metaclass=a): pass\n    return C\n", (), ()),
     ("def f():\n    a = 1\n    class C:\n        nonlocal a\n        a = 2\n    return C\n", (), ("a",)),
     ("def f(z, a):\n    class C:\n        def m(self): return __class__, z, a\n    return C\n", ("__class__", "__classdict__"), ("a", "z")),
+    # The class's annotation function is within its body, so its names are too.
+    ("def f(a):\n    class C:\n        x: a\n    return C\n", ("__classdict__",), ("a",)),
 ]
 for source, cells, free in free_cases:
     ns = {"a": "global"}

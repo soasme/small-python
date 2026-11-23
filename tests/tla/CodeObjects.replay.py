@@ -21,6 +21,18 @@ def source(p):
 
 
 def outcome(p):
+    if p["op"] == "class":
+        import builtins
+        bodies = []
+
+        def build(func, name, *bases, **kw):
+            bodies.append(func.__code__)
+            return builtins.__build_class__(func, name, *bases, **kw)
+
+        line = "a: v" if p["annotated"] else "b = 1"
+        exec("def outer():\n    v = 1\n    class C:\n        " + line + "\n    return C\nouter()\n",
+             {"__builtins__": dict(vars(builtins), __build_class__=build)})
+        return "%r %r" % (bodies[0].co_cellvars, bodies[0].co_freevars)
     if p["op"] in ("module", "methods"):
         co = compile(('"doc"\n' if p["doc"] else "") + "v = 1\n", "m", "exec")
         if p["op"] == "methods":
