@@ -198,3 +198,22 @@ def hashed_body():
     except ValueError as e: p = e.__traceback__.tb_frame.f_locals
     return [p[HashedName("x")], HashedName("zz") in p, HashedOther() in p, hashed_only]
 assert_eq(hashed_body(), [1, False, False, ["x", "zz", "other"]])
+
+# pop() and deletion of an extra local find it by the key's Python
+# __hash__ and __eq__ too; a deleted one is gone.
+class ExtraHashed:
+    def __hash__(self): return hash("q")
+    def __eq__(self, other): return isinstance(other, ExtraHashed)
+def extra_suspended():
+    a = 1
+    yield
+extra_gen = extra_suspended(); next(extra_gen)
+extra_proxy = extra_gen.gi_frame.f_locals
+extra_proxy[ExtraHashed()] = 3
+assert_eq([extra_proxy.pop(ExtraHashed()), extra_proxy.pop(ExtraHashed(), "d")], [3, "d"])
+extra_proxy[ExtraHashed()] = 4
+extra_proxy.__delitem__(ExtraHashed())
+extra_proxy[ExtraHashed()] = 5
+del extra_proxy[ExtraHashed()]
+assert_raises(KeyError, extra_proxy.__delitem__, ExtraHashed())
+assert_eq([ExtraHashed() in extra_proxy, len(extra_proxy)], [False, 1])
