@@ -43,3 +43,11 @@ assert_eq([message(lambda: open(*["f"] * 9, mode="r")), message(lambda: open(*["
            "open() takes at most 8 arguments (9 given)", "argument for open() given by name ('encoding') and position (4)",
            "open() got an unexpected keyword argument 'bogus'", "open() missing required argument 'file' (pos 1)",
            "open() missing required argument 'file' (pos 1)"])
+# In a function, with no arguments or more than eight.
+def arity():
+    out, a = [], 1
+    for call in (lambda: open(), lambda: open(a, a, a, a, a, a, a, a, a)):
+        try: call()
+        except TypeError as e: out.append(str(e))
+    return out
+assert_eq(arity(), ["open() missing required argument 'file' (pos 1)", "open() takes at most 8 arguments (9 given)"])
