@@ -13520,7 +13520,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "__self__")) return spy_retain(v->as.super.self ? v->as.super.self : c->none);
         if (!strcmp(name, "__self_class__")) return spy_retain(v->as.super.owner ? v->as.super.owner : c->none);
         /* Then super's own attributes, bound to the super object. */
-        if ((definition = class_lookup(c->types[SPY_SUPER], name))) return descriptor_get(c, definition, v, c->types[SPY_SUPER]);
+        if ((definition = instance_lookup(c->types[SPY_SUPER], name))) return descriptor_get(c, definition, v, c->types[SPY_SUPER]);
         return errorf(c, "AttributeError", "'super' object has no attribute '%s'", name);
     }
     if (v->type != SPY_INSTANCE && v->type != SPY_CLASS && (!strcmp(name, "__hash__") || !strcmp(name, "__round__"))) {
