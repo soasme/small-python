@@ -37911,6 +37911,11 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, con
         switch (stage) {
         case IM_START: {
             if (!r->from) { stage = IM_ITEM; continue; }
+            /* At module level, a from-import __lazy_modules__ or the mode
+             * names is lazy (lazy_import). */
+            int lazy = r->compat ? lazy_import(c, f, r, NULL, NULL) : 0;
+            if (lazy < 0) goto failed;
+            if (lazy) { lazy_statement(c, f, r, NULL); goto done; }
             SPYValue *fromlist = value_new(c, SPY_TUPLE);
             for (size_t i = 0; fromlist && i < r->count && !c->error_type[0]; i++) {
                 SPYValue *string = spy_string(c, r->items[i].name, strlen(r->items[i].name));
@@ -37930,6 +37935,10 @@ static NO_INLINE SPYValue *import_stage(SPYContext *c, Machine *m, Frame *f, con
         case IM_ITEM:
             if (!item) goto done;
             if (!r->from) {
+                /* So is a module of an import (lazy_import). */
+                int lazy = r->compat ? lazy_import(c, f, r, item, NULL) : 0;
+                if (lazy < 0 || (lazy && lazy_statement(c, f, r, item))) goto failed;
+                if (lazy) { item = (size_t)++at < r->count ? &r->items[at] : NULL; continue; }
                 if (!(function = import_hook(c, f, item->name, NULL, 0, args))) goto failed;
                 argc = 5; stage = IM_IMPORTED;
                 break;
@@ -38154,10 +38163,9 @@ static NO_INLINE SPYValue *import_step(SPYContext *c, Machine *m, Frame *f, cons
     }
     mem_free(name);
     if (c->error_type[0]) return NULL;
-    /* An eager statement goes on as import_go; a lazy one, or a future
-     * statement, runs here. */
-    if (!unit && !r->lazy && !(r->compat && (c->settings[SET_LAZY_IMPORTS] || name_local(globals, "__lazy_modules__"))) &&
-        !(r->from && !r->level && !strcmp(source, "__future__"))) {
+    /* A statement goes on as import_go, which finds the imports that
+     * are lazy; a lazy statement, or a future statement, runs here. */
+    if (!unit && !r->lazy && !(r->from && !r->level && !strcmp(source, "__future__"))) {
         SPYValue *items[8] = {int_value(c, IM_START), c->none, c->none, int_value(c, 0), int_value(c, 0), c->booleans[0], c->none, c->none};
         SPYValue *progress = items[0] && items[3] ? spy_tuple(c, 8, items) : NULL;
         spy_release(items[0]); spy_release(items[3]); spy_release(items[4]);
