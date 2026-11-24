@@ -28,6 +28,8 @@ def param(p):
     query = p["query"]
     if query == "type":
         return type(t).__name__
+    if query == "module":
+        return t.__module__
     return text(getattr(t, {"bound": "__bound__", "constraints": "__constraints__", "default": "__default__",
                             "infer": "__infer_variance__"}[query]))
 
@@ -69,7 +71,19 @@ def alias(p):
     return {"repr": repr(made), "name": made.__name__, "params": text(made.__type_params__)}[p["query"]]
 
 
-PARTS = {"param": param, "visible": visible, "syntax": syntax, "class": klass, "alias": alias}
+def construct(p):
+    # A constructor called by code whose globals are module m's.
+    cls = type(run("def g[T, *Ts, **P](): pass\ntype A = int\nresult = g.__type_params__ + (A,)")[
+        ("TypeVar", "TypeVarTuple", "ParamSpec", "TypeAliasType").index(p["cls"])])
+    args = "('X', int)" if p["cls"] == "TypeAliasType" else "('X')"
+    call = "cls%s.__module__" % args
+    source = "result = " + call if p["where"] == "module" else "def f(): return %s\nresult = f()" % call
+    namespace = {"__name__": "m", "cls": cls}
+    exec(source, namespace)
+    return namespace["result"]
+
+
+PARTS = {"param": param, "visible": visible, "syntax": syntax, "class": klass, "alias": alias, "construct": construct}
 
 
 def outcome(p):

@@ -21484,6 +21484,15 @@ static SPYValue *frame_module_name(SPYContext *c, size_t depth) {
     if (frame->owner->type == SPY_FUNCTION) return attribute(c, frame->owner, "__module__");
     return spy_retain(globals_name(c, frame->env));
 }
+/* The intrinsics' _caller_module(): the module of the innermost frame
+ * outside them, which CPython's caller() names as a typing constructor's
+ * __module__. */
+static SPYValue *caller_module(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)argc; (void)argv; (void)data;
+    size_t depth = 0;
+    while (depth < c->py_depth && module_env(c, c->frames[c->py_depth - 1 - depth].env) == c->intrinsics) depth++;
+    return frame_module_name(c, depth);
+}
 static SPYValue *lazy_registry(SPYContext *c) {
     if (!c->lazy_modules) c->lazy_modules = value_new(c, SPY_SET);
     return c->lazy_modules;
@@ -21720,7 +21729,8 @@ static SPYValue *intrinsics_begin(SPYContext *c, SPYValue **unit) {
     if (module) module->as.map.parent = spy_retain(c->builtins);
     if (module) module->as.map.namespace = value_new(c, SPY_DICT);
     int failed = !module || !module_name || !module->as.map.namespace ||
-        name_set(c, module, "__builtins__", c->builtins) || name_set(c, module, "__name__", module_name) || file_natives(c, module);
+        name_set(c, module, "__builtins__", c->builtins) || name_set(c, module, "__name__", module_name) || file_natives(c, module) ||
+        define_native(c, module, "_caller_module", caller_module, NULL);
     spy_release(module_name);
     Buffer source = {.ctx = c};
     for (size_t i = 0; !failed && i < sizeof(intrinsics_source) / sizeof(*intrinsics_source); i++)

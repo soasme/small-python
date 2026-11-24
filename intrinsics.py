@@ -22,9 +22,12 @@ def _final(name):
 
 
 def _type_name(obj):
-    module = type(obj).__module__
-    name = type(obj).__qualname__
-    return name if module == 'builtins' else f'{module}.{name}'
+    # tname (PLS-315 5.2.6): CPython's C types outside builtins prefix their
+    # module; any other class is its name.
+    cls = type(obj)
+    if cls.__module__ in ('types', 'typing', '_io', 'string.templatelib'):
+        return f'{cls.__module__}.{cls.__name__}'
+    return cls.__name__
 
 
 def _alias_repr_item(p):
@@ -538,8 +541,8 @@ class _ConstEvaluator:
 _UNSET = object()
 
 
-def _param_init(self, name, bound, covariant, contravariant, infer_variance, default):
-    if not isinstance(name, str):
+def _param_init(self, name, bound, covariant, contravariant, infer_variance, default, module):
+    if not _is(name, str):
         raise TypeError(f"{type(self).__name__.lower()}() argument 'name' must be str, not {_type_name(name)}")
     if covariant and contravariant:
         raise ValueError('Bivariant types are not supported.')
@@ -556,7 +559,7 @@ def _param_init(self, name, bound, covariant, contravariant, infer_variance, def
     object.__setattr__(self, '_evaluate_bound', None)
     object.__setattr__(self, '_evaluate_constraints', None)
     object.__setattr__(self, '_evaluate_default', None)
-    object.__setattr__(self, '__module__', 'typing')
+    object.__setattr__(self, '__module__', module)
 
 
 def _lazy(self, value_name, evaluate_name, missing):
@@ -661,7 +664,7 @@ class TypeVar:
 
     def __init__(self, name, *constraints, bound=None, covariant=False, contravariant=False,
                  infer_variance=False, default=NoDefault):
-        _param_init(self, name, None, covariant, contravariant, infer_variance, default)
+        _param_init(self, name, None, covariant, contravariant, infer_variance, default, _caller_module())
         if constraints and bound is not None:
             raise TypeError('Constraints cannot be combined with bound=...')
         if len(constraints) == 1:
@@ -729,7 +732,7 @@ class TypeVarTuple:
 
     def __init__(self, name, *, bound=None, covariant=False, contravariant=False,
                  infer_variance=False, default=NoDefault):
-        _param_init(self, name, bound, covariant, contravariant, infer_variance, default)
+        _param_init(self, name, bound, covariant, contravariant, infer_variance, default, _caller_module())
 
     __setattr__ = _param_setattr
     __delattr__ = _param_delattr
@@ -803,7 +806,7 @@ class ParamSpecArgs:
         return f"{self.__origin__.__name__}.args"
 
     def __eq__(self, other):
-        if not isinstance(other, ParamSpecArgs):
+        if not _is(other, ParamSpecArgs):
             return NotImplemented
         return self.__origin__ == other.__origin__
 
@@ -831,7 +834,7 @@ class ParamSpecKwargs:
         return f"{self.__origin__.__name__}.kwargs"
 
     def __eq__(self, other):
-        if not isinstance(other, ParamSpecKwargs):
+        if not _is(other, ParamSpecKwargs):
             return NotImplemented
         return self.__origin__ == other.__origin__
 
@@ -848,7 +851,7 @@ class ParamSpec:
 
     def __init__(self, name, *, bound=None, covariant=False, contravariant=False,
                  infer_variance=False, default=NoDefault):
-        _param_init(self, name, None, covariant, contravariant, infer_variance, default)
+        _param_init(self, name, None, covariant, contravariant, infer_variance, default, _caller_module())
         if bound is not None:
             object.__setattr__(self, '_bound', _type_check(bound, 'Bound must be a type.'))
 
@@ -1192,19 +1195,19 @@ class TypeAliasType:
         name, value = arguments + tuple(keywords[key] for key in ('name', 'value')[len(arguments):])
         type_params = keywords.get('type_params', ())
         qualname = keywords.get('qualname')
-        if not isinstance(name, str):
+        if not _is(name, str):
             raise TypeError(f"typealias() argument 'name' must be str, not {_type_name(name)}")
-        if not isinstance(type_params, tuple):
+        if not _is(type_params, tuple):
             raise TypeError("type_params must be a tuple")
         default_seen = False
         for param in type_params:
-            if not isinstance(param, (TypeVar, ParamSpec, TypeVarTuple)):
+            if not _is(param, (TypeVar, ParamSpec, TypeVarTuple)):
                 raise TypeError(f"Expected a type param, got {param!r}")
             if param.has_default():
                 default_seen = True
             elif default_seen:
                 raise TypeError(f"non-default type parameter '{param!r}' follows default type parameter")
-        if qualname is not None and not isinstance(qualname, str):
+        if qualname is not None and not _is(qualname, str):
             raise TypeError('qualname must be a string')
         object.__setattr__(self, '_name', name)
         object.__setattr__(self, '__name__', name)
@@ -1212,8 +1215,9 @@ class TypeAliasType:
         object.__setattr__(self, '_value', value)
         object.__setattr__(self, '_evaluate_value', None)
         object.__setattr__(self, '_type_params', type_params)
-        object.__setattr__(self, '__module__', 'typing')
-        object.__setattr__(self, '_defining_module', 'typing')
+        module = _caller_module()
+        object.__setattr__(self, '__module__', module)
+        object.__setattr__(self, '_defining_module', module)
 
     def __setattr__(self, name, value):
         if name != '__module__':
@@ -1254,7 +1258,7 @@ class TypeAliasType:
     def __getitem__(self, parameters):
         if not self._type_params:
             raise TypeError("Only generic type aliases are subscriptable")
-        if not isinstance(parameters, tuple):
+        if not _is(parameters, tuple):
             parameters = (parameters,)
         return GenericAlias(self, parameters)
 
@@ -1281,7 +1285,7 @@ def _type_param(kind, name, bound, constraints, default):
     # A PEP 695 type parameter; bound, constraints and default are lazy evaluators.
     cls = (TypeVar, TypeVarTuple, ParamSpec)[kind]
     param = object.__new__(cls)
-    _param_init(param, name, _UNSET, False, False, True, _UNSET)
+    _param_init(param, name, _UNSET, False, False, True, _UNSET, 'typing')
     if bound is None:
         object.__setattr__(param, '_bound', None)
     else:
@@ -2039,4 +2043,3 @@ def open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None,
     except BaseException:
         raw.close()
         raise
-
