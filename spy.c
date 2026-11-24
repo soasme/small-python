@@ -4708,6 +4708,9 @@ typedef struct {
 static Node *emit_parsed(Parser *, Node *, size_t);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
+static Node *parsed_steps(Parser *, Node *, size_t);
+static size_t short_begin(Parser *, Node *);
+static Node *short_end(Parser *, Node *, size_t);
 static EmitMark emit_mark(Parser *);
 static void emit_back(Parser *, EmitMark);
 static Scope *scope_new(SPYContext *, Scope *, int);
@@ -6628,8 +6631,10 @@ static Node *expression_inner(Parser *p, int min, int named) {
             } while (prec == 3);
         } else {
             n->op = op; p->pos += (size_t)width;
+            size_t branch = op == O_AND || op == O_OR ? short_begin(p, n) : SIZE_MAX;
             n->b = expression(p, op == T_POW ? 10 : prec + 1);
             if (!n->b) return NULL;
+            if (branch != SIZE_MAX && !short_end(p, n, branch)) return NULL;
         }
         span(p, n, first);
         if (!(left = finished(p, n))) return NULL;
@@ -17457,13 +17462,32 @@ static void compile_body(SPYContext *, Program *, Node *);
 /* Compile n now, its steps from at on: its operands' already, the rest
  * its own (compile_expr); a folded negation's are its operand's. */
 static Node *emit_parsed(Parser *p, Node *n, size_t at) {
+    if (!n->constant || n->kind != N_UNARY) compile_expr(p->ctx, p->emitting, n);
+    return parsed_steps(p, n, at);
+}
+/* n's steps are those from at to the end. */
+static Node *parsed_steps(Parser *p, Node *n, size_t at) {
     SPYContext *c = p->ctx;
     if (grow(c, (void **)&p->emitted, &p->emitted_cap, p->emitted_len + 1, sizeof(*p->emitted))) return NULL;
-    if (!n->constant || n->kind != N_UNARY) compile_expr(c, p->emitting, n);
     n->steps_at = (uint32_t)at; n->steps_end = (uint32_t)p->emitting->len;
     n->flags |= F_EMITTED;
     p->emitted[p->emitted_len++] = n;
     return c->error_type[0] ? NULL : n;
+}
+/* An and or or n, compiled as it is parsed: its left operand's test and
+ * the branch past its right, emitted when its left was, returned
+ * (SIZE_MAX if not); when its right was emitted after, the branch's end. */
+static size_t short_begin(Parser *p, Node *n) {
+    Program *program = p->emitting;
+    if (!program || p->ctx->error_type[0] || !(n->a->flags & F_EMITTED) || n->a->steps_end != program->len) return SIZE_MAX;
+    retest(p->ctx, program, n->a, n->a->steps_at);
+    return emit(p->ctx, program, BC_SHORT, n, n->op);
+}
+static Node *short_end(Parser *p, Node *n, size_t branch) {
+    Program *program = p->emitting;
+    if (!program || !(n->b->flags & F_EMITTED) || n->b->steps_at != branch + 1 || n->b->steps_end != program->len) return n;
+    patch(program, branch, program->len);
+    return parsed_steps(p, n, n->a->steps_at);
 }
 /* Operator n, parsed. A negated number is a constant, as CPython folds
  * it. While its statement emits, n compiles now when its operands did,
