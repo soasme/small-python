@@ -3406,6 +3406,11 @@ static const char *const programs[] = {
     "print(eg.split(lambda e: T())[0] is not None, range(5).count(EqAll()))\n"
     "print(complex(C()), list(filter(lambda x: T(), [1])))\n"
     "with Ex(): raise KeyError\n",
+    /* A function's first intrinsic loads them on the machine. */
+    "def f():\n"
+    "    for i in range(1): pass\n"
+    "    return len(repr(list[int]))\n"
+    "print(f())\n",
 };
 
 static char *read_file(const char *path) {
