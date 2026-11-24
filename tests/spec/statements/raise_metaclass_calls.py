@@ -85,3 +85,22 @@ assert_eq([outcome(r1), outcome(r7)], [expected[0], expected[6]])
 try: raise Swap from N
 except Swap as e: assert_eq((repr(e.args[0]), e.__cause__), ("Other('o')", None))
 assert_eq(log, expected[6][3])
+# A metaclass whose __call__ is a native class makes its instance; one of
+# another class is called again with it, in a function, a generator's
+# throw and with a cause.
+class NativeMeta(type):
+    __call__ = ValueError
+class Natively(Exception, metaclass=NativeMeta): pass
+def native_raises():
+    out = []
+    try: raise Natively
+    except Exception as e: out.append((type(e).__name__, repr(e.args)))
+    def gen():
+        yield 1
+    g = gen(); next(g)
+    try: g.throw(Natively)
+    except Exception as e: out.append((type(e).__name__, repr(e.args)))
+    try: raise Natively from KeyError()
+    except Exception as e: out.append((type(e).__name__, e.__cause__))
+    return out
+assert_eq(native_raises(), [("ValueError", "(ValueError(),)")] * 2 + [("ValueError", None)])
