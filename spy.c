@@ -7780,6 +7780,8 @@ static Node *type_alias(Parser *p) {
 }
 static Node *statement_body(Parser *, int);
 static Node *expression_statement(Parser *, Node *);
+static Node *return_statement(Parser *, Node *);
+static Node *emitted_statement(Parser *, Node *, Node *(*)(Parser *, Node *));
 static void emitted_drop(Parser *);
 /* invalid_match_stmt: a soft-keyword line that failed to parse as anything
  * else may still be a misplaced match header or case clause. */
@@ -8160,10 +8162,7 @@ static Node *statement_body(Parser *p, int emits) {
         n = node(p, N_RETURN);
         if (!n) return NULL;
         if (outside) p->deferred_node = n;
-        if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
-        if (keyword(p, "for")) return syntax(p, "invalid syntax");
-        if (n->a && !p->returned.node && !p->returned.line) p->returned.node = n;
-        return n;
+        return emits ? emitted_statement(p, n, return_statement) : return_statement(p, n);
     }
     if (keyword(p, "break") || keyword(p, "continue")) {
         if (!p->loops) defer(p, keyword(p, "break") ? "'break' outside loop" : "'continue' not properly in loop");
@@ -8256,23 +8255,24 @@ static Node *statement_body(Parser *p, int emits) {
         if (n->a && at(p, '=')) return syntax_at(p, n->a, "assignment to yield expression not possible");
         return n->a ? n : NULL;
     }
-    if (!emits) return expression_statement(p, n);
-    /* A held-back statement compiles first. */
+    return emits ? emitted_statement(p, n, expression_statement) : expression_statement(p, n);
+}
+/* Statement n, the rest parsed by rest, emitted as it is parsed into
+ * its body's program, once a held-back statement compiles. An
+ * expression statement, an assignment of a value to a name, or a return
+ * of a value keeps its steps when its value's are all emitted; other
+ * statements compile when they end, their emitted steps undone. */
+static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
     Program *program = p->body.program;
     p->emitting_from = emitted(program);
     p->emitting = program;
-    Node *statement = expression_statement(p, n);
-    p->emitting = NULL;
-    /* An expression statement, or an assignment of a value to a name,
-     * keeps its steps when its value's are all emitted; other statements
-     * compile when they end, their emitted steps undone. */
-    Node *value = !statement ? NULL : statement->kind == N_EXPR ? statement->a :
+    Node *statement = rest(p, n);
+    Node *value = !statement ? NULL : statement->kind == N_EXPR || statement->kind == N_RETURN ? statement->a :
                   statement->kind == N_ASSIGN && statement->op == '=' && !statement->args && statement->a->kind == N_NAME ? statement->b : NULL;
-    if (!value || !(value->flags & F_EMITTED) || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING)) {
-        p->emitting = program; emitted_drop(p); p->emitting = NULL;
-    }
-    p->emitted_len = 0;
+    if (!value || !(value->flags & F_EMITTED) || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING))
+        emitted_drop(p);
+    p->emitting = NULL; p->emitted_len = 0;
     return statement;
 }
 /* Undo what the statement emitting emitted so far: its targets', as its '=' is read. */
@@ -8281,6 +8281,13 @@ static void emitted_drop(Parser *p) {
     for (size_t i = 0; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
     p->emitted_len = 0;
     emit_undo(p->emitting, p->emitting_from);
+}
+/* The value of return statement n. */
+static Node *return_statement(Parser *p, Node *n) {
+    if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
+    if (keyword(p, "for")) return syntax(p, "invalid syntax");
+    if (n->a && !p->returned.node && !p->returned.line) p->returned.node = n;
+    return n;
 }
 /* The rest of an expression, assignment or annotation statement n. */
 static Node *expression_statement(Parser *p, Node *n) {
@@ -18277,7 +18284,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
          * the plain steps that run when the name is not at hand; one through
          * a namespace, or any while calls can pause, takes those alone. */
         branch = n->a && ((n->a->kind == N_NAME && !p->loads && p->calls != PAUSING) || n->a->constant);
-        end = p->len;
+        end = n->a && (n->a->flags & F_EMITTED) ? n->a->steps_at : p->len;
         compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN);
         if (branch && !c->error_type[0]) emit_before(c, p, end, BC_RETURN, n, 0);
         break;
