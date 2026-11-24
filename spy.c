@@ -4708,9 +4708,14 @@ typedef struct {
 static Node *emit_parsed(Parser *, Node *, size_t);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
+static int call_stream(Parser *, Node *, Node *, size_t, int);
+static Node *call_end(Parser *, Node *);
+/* A call's steps while its arguments are parsed (call_stream). */
+enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
 static size_t short_begin(Parser *, Node *);
 static Node *short_end(Parser *, Node *, size_t);
+static int emitted_operands(Program *, Node *[3], Node *);
 static EmitMark emit_mark(Parser *);
 static void emit_back(Parser *, EmitMark);
 static Scope *scope_new(SPYContext *, Scope *, int);
@@ -6388,6 +6393,8 @@ static void star_expression_error(Parser *p, size_t star) {
 static int call_arguments(Parser *p, Node *n) {
     Node **tail = &n->args;
     int keywords = 0, mapping = 0;
+    /* A call's steps emit as its arguments do (call_stream). */
+    int stream = n->kind == N_CALL && p->emitting && (n->a->flags & F_EMITTED) && n->a->steps_end == program_len(p->emitting) ? CALL_PLAIN : 0;
     if (!at(p, ')')) do {
         Node *arg;
         size_t first = p->pos;
@@ -6509,9 +6516,11 @@ static int call_arguments(Parser *p, Node *n) {
             break;
         }
         *tail = arg; tail = &arg->next;
+        if (stream && !(stream = call_stream(p, n, arg, before.steps.mark.at, stream)) && p->ctx->error_type[0]) return -1;
         if (!take(p, ',')) break;
     } while (!at(p, ')'));
     if (!expect(p, ')', "invalid syntax")) return -1;
+    if (stream == CALL_GENERAL && !call_end(p, n)) return -1;
     return 0;
 }
 static Node *expression_inner(Parser *p, int min, int named) {
@@ -17489,6 +17498,35 @@ static Node *short_end(Parser *p, Node *n, size_t branch) {
     patch(program, branch, program->len);
     return parsed_steps(p, n, n->a->steps_at);
 }
+/* Call n's steps, as its argument arg is parsed, its steps from start
+ * on, while all before it were: a plain call's are its operands', which
+ * it takes on the stack (finished); its first starred or ninth argument
+ * makes it a general call, which adds each argument after its value
+ * (BC_ARG), once the callee readied it (BC_ARGS). The call's state, or 0
+ * when its steps cannot follow its arguments': a keyword's before such
+ * an argument, or an argument before a keyword's, moves (compile_arguments). */
+static int call_stream(Parser *p, Node *n, Node *arg, size_t start, int state) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    Node *value = arg->kind == N_KEYWORD || arg->kind == N_STAR || arg->kind == N_MAPPING ? arg->a : arg, *args[9];
+    size_t count = 0;
+    int keywords = 0;
+    for (Node *a = n->args; a != arg; a = a->next) { keywords |= a->kind == N_KEYWORD || a->kind == N_MAPPING; args[count++ % 9] = a; }
+    if (!(value->flags & F_EMITTED) || value->steps_at != start || value->steps_end != program_len(program)) return 0;
+    if (state == CALL_PLAIN) {
+        if (arg->kind != N_STAR && arg->kind != N_MAPPING && count < 8) return CALL_PLAIN;
+        if (keywords || !emitted_operands(program, (Node *[3]){n->a}, n->args)) return 0;
+        /* The earlier arguments' steps, then the callee's. */
+        for (size_t i = count; i-- > 0;)
+            if (emit_before(c, program, args[i]->steps_end, BC_ARG, args[i], args[i]->kind) == SIZE_MAX) return 0;
+        if (emit_before(c, program, n->a->steps_end, BC_ARGS, n, 0) == SIZE_MAX) return 0;
+    } else if (keywords && arg->kind != N_KEYWORD && arg->kind != N_MAPPING) return 0;
+    return emit(c, program, BC_ARG, arg, arg->kind) == SIZE_MAX ? 0 : CALL_GENERAL;
+}
+/* General call n's last step, its arguments' after. */
+static Node *call_end(Parser *p, Node *n) {
+    return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
+}
 /* Operator n, parsed. A negated number is a constant, as CPython folds
  * it. While its statement emits, n compiles now when its operands did,
  * one after another up to the program's end; a chained comparison, a
@@ -17528,8 +17566,8 @@ static Node *finished(Parser *p, Node *n) {
     }
     return emit_parsed(p, n, first ? first->steps_at : program->len);
 }
-/* Whether the operands fixed, then those of list (a keyword's value for
- * a keyword), were emitted one after another up to p's end. */
+/* Whether the operands fixed, then those of list (a keyword's, starred
+ * or mapping argument's value for one), were emitted one after another up to p's end. */
 static int emitted_operands(Program *p, Node *fixed[3], Node *list) {
     Node *last = NULL;
     for (int i = 0; i < 3; i++) {
@@ -17538,7 +17576,7 @@ static int emitted_operands(Program *p, Node *fixed[3], Node *list) {
         last = fixed[i];
     }
     for (Node *a = list; a; a = a->next) {
-        Node *value = a->kind == N_KEYWORD ? a->a : a;
+        Node *value = a->kind == N_KEYWORD || a->kind == N_STAR || a->kind == N_MAPPING ? a->a : a;
         if (!(value->flags & F_EMITTED) || (last && last->steps_end != value->steps_at)) return 0;
         last = value;
     }
