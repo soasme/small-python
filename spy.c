@@ -6416,9 +6416,12 @@ static int call_arguments(Parser *p, Node *n) {
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
             size_t start = p->pos;
+            Emitted before = p->emitting ? emitted(p->emitting) : (Emitted){{0, NULL}, 0, 0, 0};
             arg = expression_mode(p, 0, 2);
             if (arg && at(p, '=')) {
                 Token *name = &p->tokens[start];
+                /* A keyword's name, parsed as a name, emits nothing. */
+                if (arg->flags & F_EMITTED) { arg->flags &= ~F_EMITTED; p->emitted_len--; emit_undo(p->emitting, before); }
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {
                     char message[64];
                     snprintf(message, sizeof(message), "cannot assign to %s", expression_name(arg));
@@ -17248,11 +17251,20 @@ static void call_operands(Program *p, size_t fused, Node *n) {
  * run code or raise, any but literals. */
 static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
     int argc = 0, plain = plain_call(n) && !sort_call(n), method = n->a->kind == N_ATTR && plain, literals = literal_arguments(n);
-    compile_expr(c, p, method ? n->a->a : n->a);
-    if (method && !literals) emit(c, p, BC_ATTR, n->a, 1);
+    AttributeOperand *attribute = NULL;
+    if (method && (n->a->flags & F_EMITTED)) {
+        /* The method's attribute, emitted as it was parsed, ends its
+         * steps: it finds the method, or goes and the call holds it. */
+        size_t at = n->a->steps_end - 1;
+        if (literals) { attribute = p->items[at].attribute; emit_drop(p, at); }
+        else p->items[at].arg = 1;
+    } else {
+        compile_expr(c, p, method ? n->a->a : n->a);
+        if (method && !literals) emit(c, p, BC_ATTR, n->a, 1);
+    }
     for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
     size_t call = emit(c, p, plain ? BC_CALLN : BC_CALLK, n, argc | (method && literals ? CALL_OBJECT : 0));
-    if (method && call != SIZE_MAX) p->items[call].attribute = attribute_operand(c, p, n->a);
+    if (method && call != SIZE_MAX) p->items[call].attribute = attribute ? attribute : attribute_operand(c, p, n->a);
     if (!plain && call != SIZE_MAX) p->items[call].constant = keyword_names(c, p, n);
 }
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
@@ -17372,7 +17384,6 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         if (plain_call(n) && (n->a->kind == N_ATTR || at_hand(n->a)) && !expands(n->a->kind == N_ATTR ? n->a->a : n->a, modes(p)) && !list_expands(n->args, modes(p)) &&
             !sort_call(n) && fused_arguments(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
             /* The fused call, then its plain steps. */
-            size_t start = p->len;
             compile_stack_call(c, p, n);
             size_t fused = c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_CALLF, n, 0);
             if (fused != SIZE_MAX) call_operands(p, fused, n);
@@ -17421,13 +17432,16 @@ static Node *finished(Parser *p, Node *n) {
         !(n->constant = unary(c, '-', n->a->constant))) return NULL;
     if (!n || !p->emitting || c->error_type[0] || (n->flags & F_EMITTED)) return n;
     Program *program = p->emitting;
-    Node *operands[2] = {n->a, NULL};
-    if (n->kind == N_INDEX) operands[1] = n->b;
-    else if (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR) operands[1] = n->b;
-    else if (n->kind == N_COMPARE && !n->args->next) operands[1] = n->args->a;
+    /* A call's are its callee and at most 8 arguments' values (plain_call). */
+    Node *operands[9] = {n->a};
+    size_t count = 1;
+    if (n->kind == N_INDEX || (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR)) operands[count++] = n->b;
+    else if (n->kind == N_COMPARE && !n->args->next) operands[count++] = n->args->a;
+    else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n)))
+        for (Node *a = n->args; a; a = a->next) operands[count++] = a->kind == N_KEYWORD ? a->a : a;
     else if (n->kind != N_UNARY && n->kind != N_ATTR) return n;
-    for (int i = 0; i < 2 && operands[i]; i++) {
-        size_t next = i == 0 && operands[1] ? operands[1]->steps_at : program->len;
+    for (size_t i = 0; i < count; i++) {
+        size_t next = i + 1 < count ? operands[i + 1]->steps_at : program->len;
         if (!(operands[i]->flags & F_EMITTED) || operands[i]->steps_end != next) return n;
     }
     if (n->constant) {
