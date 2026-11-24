@@ -27,7 +27,8 @@
 (*                | unbound (one returning type.__call__(cls, *a, **k))    *)
 (*                                                                         *)
 (* where __new__ and __init__ take *args and **kw (recording args and the  *)
-(* keyword items), then evaluates C(), C(1), C(k=1), or C()(2). The        *)
+(* keyword items), then evaluates C(), C(1), C(k=1), or C()(2), by its     *)
+(* name or as an attribute of a computed object (box[0].C, box[0].c). The *)
 (* outcome is the result (its type, and args if recorded or an             *)
 (* exception's), or the exception. A builtin base's __new__ makes the      *)
 (* instance: list's then initializes from an iterable, and                 *)
@@ -37,7 +38,7 @@ EXTENDS Naturals, Sequences
 
 Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other", "classmethod", "descriptor"},
              init : {"none", "records", "returns", "descriptor"}, call : {"none", "class", "instance", "meta", "super", "unbound"},
-             op : {"C()", "C(1)", "C(k=1)", "C()(2)"}]
+             op : {"C()", "C(1)", "C(k=1)", "C()(2)"}, via : {"name", "attribute"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -75,6 +76,8 @@ Done == outcome # Pending
 TypeLookup == Done /\ program.op = "C()(2)" /\ program.call = "instance" => outcome = "TypeError"
 \* A metaclass's super().__call__ creates the instance as a plain call does.
 SuperCreates == Done /\ program.call = "super" => outcome = Run([program EXCEPT !.call = "none"])
+\* A class or instance read as an attribute is called as by its name.
+AttributeCalls == Done /\ program.via = "attribute" => outcome = Run([program EXCEPT !.via = "name"])
 \* So does type.__call__ called unbound with the class.
 UnboundCreates == Done /\ program.call = "unbound" => outcome = Run([program EXCEPT !.call = "none"])
 =============================================================================

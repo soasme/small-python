@@ -32,17 +32,24 @@ def outcome(p):
     header = META.get(p["call"], "") + "class C(%s%s):\n    pass\n" % (p["base"], ", metaclass=M" if meta else "")
     exec(header + NEW[p["new"]] + INIT[p["init"]] + CALL[p["call"]], namespace)
     C = namespace["C"]
+
+    class Box:
+        pass
+    box = [Box()]
+    box[0].C = C
+    attribute = p["via"] == "attribute"
     try:
         if p["op"] == "C()":
-            return describe(C())
+            return describe(box[0].C() if attribute else C())
         if p["op"] == "C(1)":
-            return describe(C(1))
+            return describe(box[0].C(1) if attribute else C(1))
         if p["op"] == "C(k=1)":
-            return describe(C(k=1))
-        c = C()
+            return describe(box[0].C(k=1) if attribute else C(k=1))
+        c = box[0].C() if attribute else C()
         if p["call"] == "instance" and type(c) is C:
             c.__call__ = lambda *a: a
-        return repr(c(2))
+        box[0].c = c
+        return repr(box[0].c(2) if attribute else c(2))
     except TypeError:
         return "TypeError"
 

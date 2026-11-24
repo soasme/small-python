@@ -33278,6 +33278,23 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Instruct
         spy_release(object);
         return class_stack_call(c, m, cls, argc, 1, env);
     }
+    /* So is a class or an instance read as the attribute: its Python
+     * __call__, or its metaclass's, with it as self (bound_function), or
+     * a class's Python __init__ or __new__ (class_stack_call). */
+    SPYValue *function = callee && method < 0 && skip && (callee->type == SPY_CLASS || callee->type == SPY_INSTANCE) ? bound_function(c, callee) : NULL;
+    if (function) {
+        spy_retain(function);
+        spy_release(object); argv[0] = callee;
+        m->len -= argc + 1;
+        if ((*env = function_env(c, function, argc + 1, argv, NULL, 1))) return function;
+        spy_release(function);
+        return NULL;
+    }
+    if (callee && method < 0 && skip && callee->type == SPY_CLASS) {
+        spy_release(object); argv[0] = callee;
+        if ((result = class_stack_call(c, m, callee, argc, 0, env)) || c->k_fn || c->error_type[0]) return result;
+        spy_retain(callee);
+    }
     if (callee && method < 0 && machine_function(c, callee)) {
         m->len -= argc + 1;
         if (skip) spy_release(object);
