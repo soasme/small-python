@@ -4680,6 +4680,7 @@ typedef struct {
      * its leaves emit into emitting as they are read, and are listed in
      * emitted; emits says the statement line_statements begins may. */
     Program *emitting; Node **emitted; size_t emitted_len, emitted_cap; int emits;
+    Emitted emitting_from; /* Where the statement's steps begin. */
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
@@ -7776,6 +7777,7 @@ static Node *type_alias(Parser *p) {
 }
 static Node *statement_body(Parser *, int);
 static Node *expression_statement(Parser *, Node *);
+static void emitted_drop(Parser *);
 /* invalid_match_stmt: a soft-keyword line that failed to parse as anything
  * else may still be a misplaced match header or case clause. */
 static void soft_keyword_error(Parser *p, size_t start) {
@@ -8255,19 +8257,27 @@ static Node *statement_body(Parser *p, int emits) {
     /* A held-back statement compiles first. */
     if (body_statements(p, p->body.head, NULL)) return NULL;
     Program *program = p->body.program;
-    Emitted before = emitted(program);
+    p->emitting_from = emitted(program);
     p->emitting = program;
     Node *statement = expression_statement(p, n);
     p->emitting = NULL;
-    /* An assignment, annotation or expression whose steps are not all
-     * emitted compiles when it ends, its emitted steps undone. */
-    if (!statement || statement->kind != N_EXPR || !(statement->a->flags & F_EMITTED) ||
-        (p->ctx->optimize > 1 && statement->a->kind == N_STRING)) {
-        for (size_t i = 0; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
-        emit_undo(program, before);
+    /* An expression statement, or an assignment of a value to a name,
+     * keeps its steps when its value's are all emitted; other statements
+     * compile when they end, their emitted steps undone. */
+    Node *value = !statement ? NULL : statement->kind == N_EXPR ? statement->a :
+                  statement->kind == N_ASSIGN && statement->op == '=' && !statement->args && statement->a->kind == N_NAME ? statement->b : NULL;
+    if (!value || !(value->flags & F_EMITTED) || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING)) {
+        p->emitting = program; emitted_drop(p); p->emitting = NULL;
     }
     p->emitted_len = 0;
     return statement;
+}
+/* Undo what the statement emitting emitted so far: its targets', as its '=' is read. */
+static void emitted_drop(Parser *p) {
+    if (!p->emitting) return;
+    for (size_t i = 0; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
+    p->emitted_len = 0;
+    emit_undo(p->emitting, p->emitting_from);
 }
 /* The rest of an expression, assignment or annotation statement n. */
 static Node *expression_statement(Parser *p, Node *n) {
@@ -8311,11 +8321,13 @@ static Node *expression_statement(Parser *p, Node *n) {
         }
         if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
         p->pos++; n->kind = N_ASSIGN; n->op = op;
+        if (op == '=') emitted_drop(p);
         n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
         if (!n->b) return NULL;
         Node **tail = &n->args;
         while (op == '=' && take(p, '=')) {
             if (!target(p, n->b)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
+            emitted_drop(p);
             *tail = n->b; tail = &n->b->next;
             n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->b) return NULL;
@@ -17690,6 +17702,8 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
     if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
     int shape = operator_right(n->b) ? SHAPE_FUSED : operand_shape(c, n->b);
     Mark target = mark(p);
+    /* A name's value emitted as it was parsed begins the steps. */
+    if (n->b->flags & F_EMITTED) target.at = n->b->steps_at;
     if (augmented) {
         compile_expr(c, p, item ? t->a : t);
         if (item) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
