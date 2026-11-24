@@ -192,7 +192,21 @@ def calls(p):
     return "%s;%d" % (out, len(log))
 
 
-PARTS = {"calls": calls, "function": function, "class": klass, "local": local, "lazy": lazy, "scope": scope, "replace": replace,
+def star(p):
+    expression = {"one": "[7]", "two": "[1, 2]", "none": "[]", "int": "1"}[p["items"]]
+    namespace = {}
+    exec("def f(a,\n      *args: *" + expression + "): pass\n", namespace)
+    f = namespace["f"]
+    try:
+        return render(f.__annotations__)
+    except (TypeError, ValueError) as error:
+        tb = error.__traceback__
+        while tb.tb_next:
+            tb = tb.tb_next
+        return "%s %d" % (type(error).__name__, tb.tb_lineno - f.__code__.co_firstlineno)
+
+
+PARTS = {"star": star, "calls": calls, "function": function, "class": klass, "local": local, "lazy": lazy, "scope": scope, "replace": replace,
          "order": order, "partial": partial}
 
 

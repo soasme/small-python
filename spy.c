@@ -7133,6 +7133,8 @@ static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
     fn->a = name; fn->args = format; fn->b = body; body->args = entries;
     fn->flags = F_ANNOTATE; fn->annotate = owner;
     fn->line = body->line = entries ? entries->line : fn->line;
+    /* A function's starred annotation unpacks at its def line, as CPython's. */
+    if (owner && owner->kind == N_DEF) body->line = owner->line;
     return fn;
 }
 /* Mark n and the nodes within it, and the nodes after it, F_KEEP. */
@@ -17929,7 +17931,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             }
             int star = entry->a->kind == N_STAR;
             compile_expr(c, p, star ? entry->a->a : entry->a);
-            if (star) emit(c, p, BC_CLASS, entry, 16);
+            if (star) emit(c, p, BC_CLASS, n, 16);
             SPYValue *key = n->op == 1 ? NULL : spy_string(c, entry->name.text, strlen(entry->name.text));
             if (n->op != 1 && (!key || grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)))) { spy_release(key); break; }
             if (key) p->values[p->values_len++] = key;

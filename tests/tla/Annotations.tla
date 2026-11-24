@@ -39,6 +39,9 @@
 (* or a list, by the attribute, getattr(), or a staticmethod of it, which  *)
 (* keeps the dict too. The outcome is the annotations, value, names, or    *)
 (* exception, and for a calls program the calls made.                      *)
+(* A star program annotates  *args: *E  on the line after the def's, with  *)
+(* E unpacking to one, two, or no items, or an int: one item is the        *)
+(* value, and the others raise at the def's line (the outcome's offset).   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -51,6 +54,7 @@ Programs == [part : {"function"}, ann : Anns, op : {"annotations", "format1", "f
             \cup [part : {"replace"}, target : {"function", "class"}, op : {"annotations", "annotate", "bad", "delete"}]
             \cup [part : {"order"}, where : {"class", "module", "conditional"}]
             \cup [part : {"partial"}, stop : BOOLEAN]
+            \cup [part : {"star"}, items : {"one", "two", "none", "int"}]
             \cup [part : {"calls"}, owner : {"function", "class", "metaclassed", "hooked"}, annotate : {"compiled", "dict", "list"},
                   read : {"attribute", "getattr", "wrapper"}]
 
@@ -74,6 +78,9 @@ Run(p) ==
       [] p.part = "order" -> IF p.where = "class" THEN "a,x,b,__annotate_func__,__static_attributes__,__classdictcell__"
                              ELSE "__annotate__,__conditional_annotations__,a,x,b"
       [] p.part = "partial" -> IF p.stop THEN "x=int" ELSE "x=int,y=str"
+      [] p.part = "star" -> CASE p.items = "one" -> "args=7"
+                              [] p.items = "int" -> "TypeError 0"
+                              [] OTHER -> "ValueError 0"
       \* The first read calls __annotate__ and keeps a dict; a list is
       \* TypeError at each read, so it is called twice.
       [] p.part = "calls" -> CASE p.annotate = "compiled" -> "x=str;1"
