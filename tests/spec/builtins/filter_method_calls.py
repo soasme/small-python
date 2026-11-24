@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.5, 27.1.9
+# spec: PLS-315 27.1.5, 27.1.6
 # description: filter() of a bound method calls it once per item as the
 # filter reaches it: a Python method, a slot wrapper bound to an instance
 # whose class's Python __missing__ or __eq__ it reaches, or a property's

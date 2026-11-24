@@ -28018,18 +28018,11 @@ static int next_resumes(SPYValue *f) {
     return f->type == SPY_BOUND_METHOD && !f->as.bound.module && f->as.bound.method == M_NEXT && resumable(f->as.bound.self);
 }
 static SPYValue *bound_function(SPYContext *, SPYValue *);
-/* Whether callable iterator v, not ended, calls a Python function, bound
- * method or callable instance, or resumes a generator, on the machine
- * (sentinel_call). */
-static int sentinel_calls(SPYContext *c, SPYValue *v) {
-    SPYValue *f = v->as.iterator.source;
-    return !v->as.iterator.done && (machine_function(c, f) || next_resumes(f) || bound_function(c, f));
-}
 static SPYValue *adapted_generator(SPYValue *);
 static int zip_of_generator(SPYValue *);
 /* Whether an adapter's iterable s may give its next item by a call
  * (adapts): a map, a filter, a zip or enumerate that adapts, a zip or
- * enumerate taking a generator's item, a callable iterator of a Python function (sentinel_calls), a
+ * enumerate taking a generator's item, a callable iterator not ended (sentinel_call), a
  * __getitem__ or reversed iterator over a Python __getitem__
  * (getitem_call), or an instance whose __next__ is on the machine now. */
 static int adapted_source(SPYContext *c, SPYValue *s) {
@@ -28039,7 +28032,7 @@ static int adapted_source(SPYContext *c, SPYValue *s) {
     case I_MAP: case I_FILTER: return 1;
     case I_ZIP: return adapts(s) || ((s->as.iterator.removed & 1) && zip_of_generator(s));
     case I_ENUMERATE: return adapts(s);
-    case I_CALLABLE: return sentinel_calls(c, s);
+    case I_CALLABLE: return !s->as.iterator.done;
     case I_GETITEM: case I_REVERSED: return getitem_function(c, s->as.iterator.source) != NULL;
     default: return 0;
     }
@@ -28342,7 +28335,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
     if (adapts(v)) return 1;
-    if (kind == I_CALLABLE) return sentinel_calls(c, v);
+    if (kind == I_CALLABLE) return !v->as.iterator.done;
     if (kind == I_FILTER && !v->as.iterator.done && filter_fetches(c, v)) return 1;
     SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
     /* A filter testing by truth or a builtin may call an item's Python
@@ -39642,16 +39635,19 @@ static SPYValue *sentinel_function(SPYContext *c, SPYValue *sentinel, SPYValue *
 }
 /* The next call of kind, Python __eq__ function of self and other, left
  * in c->k_fn comparing callable iterator v's item, which it takes, with
- * its sentinel: item, sentinel, round, which of them self is (booleans)
- * or none for the reflected method's call, and v on m's stack under
- * c->converting (sentinel_compared); NULL, an error when it fails. */
+ * its sentinel: item, sentinel, round, which of them self is (booleans),
+ * none for the reflected method's call or c->converting for the truth of
+ * its result (sentinel_compared), and v on m's stack under c->converting;
+ * NULL, an error when it fails. */
+static int sentinel_wait(SPYContext *c, Machine *m, SPYValue *v, SPYValue *item, SPYValue *sentinel, SPYValue *round) {
+    return machine_push(c, m, item) || machine_push(c, m, spy_retain(sentinel)) || machine_push(c, m, spy_retain(round)) ||
+           machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->converting));
+}
 static SPYValue *sentinel_eq(SPYContext *c, Machine *m, SPYValue *v, SPYValue *item, SPYValue *sentinel, SPYValue *round,
                              SPYValue *function, SPYValue *self, SPYValue *other, int kind) {
     SPYValue *args[] = {spy_retain(self), spy_retain(other)};
     size_t depth = m->len;
-    if (machine_push(c, m, item) || machine_push(c, m, spy_retain(sentinel)) || machine_push(c, m, spy_retain(round)) ||
-        machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->converting)) ||
-        !(c->k_env = function_env(c, function, 2, args, NULL, 1))) {
+    if (sentinel_wait(c, m, v, item, sentinel, round) || !(c->k_env = function_env(c, function, 2, args, NULL, 1))) {
         while (m->len > depth) spy_release(machine_pop(m));
         return NULL;
     }
@@ -39678,16 +39674,30 @@ static NO_INLINE SPYValue *sentinel_returned(SPYContext *c, Machine *m, SPYValue
     spy_release(sentinel);
     return sentinel_tested(c, v, result, stop);
 }
+static NO_INLINE SPYValue *item_converted(SPYContext *, Machine *, SPYValue *, int);
 /* What the Python __eq__ of a sentinel_eq call of kind returned in test,
  * taking it: after the first's NotImplemented the other's Python method
  * (sentinel_eq again), or its native one (rich_method); after both, the
- * default; whose truth tests the item (sentinel_tested). The item, the
- * sentinel, the round and the iterator leave m's stack. */
+ * default; whose truth, a Python __bool__ or __len__ the next call
+ * (convert_call) converted on its return (item_converted), tests the item
+ * (sentinel_tested). The item, the sentinel, the round and the iterator
+ * leave m's stack. */
 static NO_INLINE SPYValue *sentinel_compared(SPYContext *c, Machine *m, SPYValue *test, int kind) {
     spy_release(machine_pop(m));
     SPYValue *v = machine_pop(m), *round = machine_pop(m), *sentinel = machine_pop(m), *item = machine_pop(m), *result = NULL;
-    SPYValue *self = round == c->booleans[1] ? sentinel : item, *other = self == item ? sentinel : item;
-    if (test == c->not_implemented && round != c->none) {
+    SPYValue *self = round == c->booleans[1] ? sentinel : item, *other = self == item ? sentinel : item, *truth, *fn, *env;
+    int length = 0;
+    if (round == c->converting) {
+        size_t depth = m->len - 3;
+        test = item_converted(c, m, test, kind);
+        /* An absent __bool__'s __len__ is the next call (item_converted). */
+        if (!test && c->k_fn) {
+            if (!sentinel_wait(c, m, v, item, sentinel, round)) goto done;
+            item = NULL;
+            spy_release(c->k_fn); spy_release(c->k_env); c->k_fn = c->k_env = NULL;
+            while (m->len > depth) spy_release(machine_pop(m));
+        }
+    } else if (test == c->not_implemented && round != c->none) {
         /* The reflected method of the one not called: self now. */
         SPYValue *function = self->type == SPY_INSTANCE && !self->as.map.base ? class_lookup(self->as.map.parent, "__eq__") : NULL;
         spy_release(test);
@@ -39699,6 +39709,21 @@ static NO_INLINE SPYValue *sentinel_compared(SPYContext *c, Machine *m, SPYValue
     } else if (test == c->not_implemented) {
         spy_release(test);
         test = comparison_declined(c, T_EQ, sentinel, item);
+    }
+    if (item && test && (test->type == SPY_INSTANCE || metaclassed(test)) && (truth = truth_special(c, test, &length))) {
+        SPYValue *name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8);
+        size_t depth = m->len;
+        if (name && convert_call(c, m, truth, test, name, NULL, &fn, &env) > 0) {
+            if (!sentinel_wait(c, m, v, item, sentinel, c->converting)) {
+                c->k_fn = fn; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
+                spy_release(test);
+                goto done;
+            }
+            item = NULL;
+            spy_release(fn); spy_release(env);
+        }
+        while (m->len > depth) spy_release(machine_pop(m));
+        spy_release(test); test = NULL;
     }
     int stop = test && truthy(test);
     spy_release(test);
@@ -39749,18 +39774,18 @@ static ALWAYS_INLINE int filtering(SPYValue *v) {
 static NO_INLINE int sentinel_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function = v->as.iterator.source;
     if (v->as.iterator.done) return 0;
-    if (next_resumes(function)) {
-        /* A generator's __next__ is a call step of its own, the call of
-         * c->unbound left in c->k_fn (map_convert). */
+    /* A bound method's or callable instance's self goes first (bound_function). */
+    SPYValue *called = machine_function(c, function) ? function : bound_function(c, function);
+    if (!called) {
+        /* Any other callable, a generator's __next__ among them, is a call
+         * step of its own, the call of c->unbound left in c->k_fn
+         * (map_convert). */
         SPYValue *none = value_new(c, SPY_TUPLE);
         if (!none) return -1;
         c->k_fn = spy_retain(function); c->k_env = none; c->k = NULL; c->k_ctx = NULL; c->k_unit = 2 + COMPARE_CALL;
         *fn = spy_retain(c->unbound);
     } else {
-        /* A bound method's or callable instance's self goes first (bound_function). */
-        SPYValue *called = machine_function(c, function) ? function : bound_function(c, function);
         SPYValue *self = called == function ? NULL : function->type == SPY_METHOD ? function->as.method.self : function;
-        if (!called) return 0;
         if (!(*env = function_env(c, called, self != NULL, &self, NULL, 0))) return -1;
         *fn = spy_retain(called);
     }

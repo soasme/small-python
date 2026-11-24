@@ -266,6 +266,13 @@ SOURCES = {
                      "    @x.deleter\n    def x(s): log.append('d%d' % s.v)\n"
                      "result = (list(map(P.x.__get__, [P(4)])), list(map(P.x.__set__, [P(0)], [5])),"
                      " list(map(P.x.__delete__, [P(0)])), log)"),
+    "callable_native_truth": ("log = []\nclass T:\n    def __init__(s, v, n): s.v = v; s.n = n\n"
+                              "    def __bool__(s):\n        log.append('b%d' % s.n); return s.v\n"
+                              "class S:\n    def __init__(s, n): s.n = n\n"
+                              "    def __len__(s):\n        log.append('l%d' % s.n); return int(s.n == 2)\n"
+                              "class E:\n    def __eq__(s, o):\n        log.append('e%d' % o); return T(o == 3, o)\n"
+                              "class F:\n    def __eq__(s, o):\n        log.append('e%d' % o); return S(o)\n"
+                              "result = (list(iter(iter([1, 2, 3]).__next__, E())), list(iter(iter([0, 2]).__next__, F())), log)"),
     "filter_result_truth": "log = []\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n"
                            "        log.append(s.v); return s.v\ndef gen(*a):\n    for x in a: yield x\n"
                            "def obj(x):\n    for _ in (): pass\n    return T(x > 1)\n"
