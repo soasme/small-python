@@ -66,3 +66,23 @@ assert_eq([entry_got.__bases__, type(entry_got.__orig_bases__[0])], [(int,), Get
 assert_raises(KeyError, lambda: __build_class__(entry_body, "Fails", GetattrEntry(), metaclass=RaisingPrepare))
 assert_raises(TypeError, lambda: __build_class__(entry_body, "Fails", GetattrEntry(), metaclass=NativePrepare),
               message="dict.__getitem__() takes exactly one argument (2 given)")
+# Its base's __mro_entries__ read by a Python __getattr__ raising
+# AttributeError means none; a Python property gives the entries.
+build_log = []
+class BuildMissing:
+    def __getattr__(self, name):
+        for _ in (): pass
+        build_log.append(name); raise AttributeError(name)
+class BuildEntries:
+    @property
+    def __mro_entries__(self):
+        for _ in (): pass
+        build_log.append("prop"); return lambda bases: (object,)
+def build_body(): pass
+def build_reads():
+    out = []
+    try: __build_class__(build_body, "N", BuildMissing())
+    except TypeError as e: out.append(str(e))
+    out.append(__build_class__(build_body, "E", BuildEntries()).__mro__[1].__name__)
+    return out, build_log
+assert_eq(build_reads(), (["BuildMissing() takes no arguments", "object"], ["__mro_entries__", "prop"]))
