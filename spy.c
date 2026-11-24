@@ -28323,12 +28323,15 @@ static int class_converts(SPYContext *c, SPYValue *cls) {
 }
 /* Whether filter's function is a call step of its own (filter_call): a
  * Python class, a callable instance, a bound Python method, a builtin that
- * may go on on the machine (map_steps), or a slot wrapper bound to an
- * instance (slot_steps); not while tracing (map_convert). */
+ * may go on on the machine (map_steps), a slot wrapper bound to an
+ * instance (slot_steps) or a dict lookup that may compare by Python
+ * (keyed_lookup); not while tracing (map_convert). */
 static int slot_steps(SPYValue *, size_t, SPYValue *const *);
+static int keyed_lookup(SPYValue *, int);
 static int filter_steps(SPYContext *c, SPYValue *function) {
     return ((function->type == SPY_CLASS && !builtin_class(c, function)) || function->type == SPY_INSTANCE || metaclassed(function) ||
-            bound_function(c, function) || map_steps(function) || (function->type == SPY_METHOD && slot_steps(function, 0, NULL))) &&
+            bound_function(c, function) || map_steps(function) || (function->type == SPY_METHOD && slot_steps(function, 0, NULL)) ||
+            keyed_lookup(function, -1)) &&
            !c->settings[SET_TRACE] && !c->settings[SET_PROFILE];
 }
 static int next_calls(SPYContext *c, SPYValue *v) {
@@ -28345,7 +28348,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
          (function->type == SPY_CLASS && builtin_class(c, function))))
         return v->as.iterator.source->as.seq.items[1]->type != SPY_ITERATOR || v->as.iterator.source->as.seq.items[1]->as.iterator.kind != I_RANGE;
     return function && (machine_function(c, function) || (kind == I_FILTER && filter_steps(c, function)) ||
-                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD ||
+                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD || keyed_lookup(function, -1) ||
                                            (function->type == SPY_CLASS && class_converts(c, function)))));
 }
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
@@ -30772,8 +30775,18 @@ static int hashing_call(SPYContext *, SPYValue *, int, size_t, SPYValue *const *
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv may be a hashing_call: a dict's get, setdefault or pop,
  * or a native function, an instance, a class with a metaclass, a tuple, a
- * frozen mapping or a view among its first two arguments. */
+ * frozen mapping or a view among its first two arguments; or a dict's
+ * get, setdefault or pop where a stored key may compare by Python
+ * (eq_keyed). */
+/* Whether callee, method number method of it or -1, is a dict's get,
+ * setdefault or pop, bound or not, whose stored key may compare by Python
+ * (eq_keyed), the lookup a hashing_call. */
+static ALWAYS_INLINE int keyed_lookup(SPYValue *callee, int method) {
+    if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    return callee->type == SPY_DICT && eq_keyed(callee) && (method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP);
+}
 static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    int keyed = keyed_lookup(callee, method);
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) method = callee->as.bound.method;
     int native = method >= 0 ? method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP :
                  callee->type == SPY_NATIVE || (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE);
@@ -30781,7 +30794,8 @@ static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPY
     uint64_t hashing = UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_MEMORYVIEW;
     if (!argc) return callee->type == SPY_METHOD && callee->as.method.self->type == SPY_MEMORYVIEW;
     return native && (instance_like(argv[0]) || (UINT64_C(1) << argv[0]->type & hashing) ||
-                      (argc == 2 && (instance_like(argv[1]) || (UINT64_C(1) << argv[1]->type & hashing))));
+                      (argc == 2 && (instance_like(argv[1]) || (UINT64_C(1) << argv[1]->type & hashing))) ||
+                      keyed);
 }
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *hashed_map(SPYValue *, int, size_t, SPYValue *const *, size_t *);
@@ -31150,6 +31164,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Attribut
                                argv[1]->type == SPY_FROZENDICT)) ||
                 /* hash() of a view (memory_hasher) */
                 (argc == 1 && argv[0]->type == SPY_MEMORYVIEW && memory_hasher(c, argv[0])) ||
+                /* a dict whose stored key may compare by Python (keyed_lookup) */
+                UNLIKELY(keyed_lookup(callee, method)) ||
                 UNLIKELY(proxy_unwrapped(c, callee, method, argc, argv))
               /* a view's bound __hash__ (memory_hasher) */
               : method < 0 && callee->type == SPY_METHOD && callee->as.method.self->type == SPY_MEMORYVIEW && memory_hasher(c, callee->as.method.self)) &&
@@ -32231,7 +32247,9 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Attri
                                 /* bytes choices (buffered_choice), a dict's tuple key (hashing_call) */
                                 (argv[0]->type == SPY_TUPLE && (((method == M_STARTSWITH || method == M_ENDSWITH) && callee->type != SPY_STRING) ||
                                                                 ((method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP) &&
-                                                                 argv[0]->listed && !argv[0]->as.seq.plain))))) ||
+                                                                 argv[0]->listed && !argv[0]->as.seq.plain))) ||
+                                /* a dict whose stored key may compare by Python (keyed_lookup) */
+                                UNLIKELY(keyed_lookup(callee, method)))) ||
                       /* a slice's parts (slice_part) */
                       method == M_INDICES) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR ||
@@ -40026,6 +40044,7 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
          index_arguments(c, callee, -1, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 2 && is_builtin(callee, B_ROUND) && is_number(items->as.seq.items[0]) && index_function(c, items->as.seq.items[1])) ||
          (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) || slot_steps(callee, items->as.seq.len, items->as.seq.items) ||
+         keyed_lookup(callee, -1) ||
          (items->as.seq.len == 1 && repr_job(c, is_builtin(callee, B_ASCII) ? c->field_calls[0] : callee, items->as.seq.items[0])))) {
         /* A builtin whose call may go on on the machine, an argument's
          * __index__ among them (index_arguments), or a staticmethod, is a call step of
@@ -40197,7 +40216,7 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         if (!callee) return 0;
         if (!(function = machine_function(c, callee) ? callee : bound_function(c, callee)))
             return callee->type == SPY_NATIVE || callee->type == SPY_CLASS || callee->type == SPY_STATICMETHOD ||
-                   (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) ?
+                   (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) || keyed_lookup(callee, -1) ?
                    map_convert(c, m, v, fn, env) : 0;
         if (!(args = zip_items(c, v))) return -1;
         /* A bound method or callable instance's self goes first. */
@@ -46360,7 +46379,8 @@ static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue 
 }
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv hashes a key that enters a Python __hash__ (hash_calls)
- * first, or compares it by a Python __eq__ (eq_reaches), *key then: in its
+ * first, or compares it by a Python __eq__ (eq_reaches), or a stored key
+ * may (eq_keyed), *key then: in its
  * dict or set (hashed_map), though pop of an empty dict hashes none, or a
  * tuple, frozen mapping or view hash() takes, or a view's own __hash__. */
 static NO_INLINE int hashing_call(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **key) {
@@ -46371,7 +46391,7 @@ static NO_INLINE int hashing_call(SPYContext *c, SPYValue *callee, int method, s
     if (view) return hash_calls(c, *key = view);
     if ((!map && (method >= 0 || argc != 1 || (argv[0]->type != SPY_TUPLE && argv[0]->type != SPY_FROZENDICT && argv[0]->type != SPY_MEMORYVIEW) ||
                   !(is_builtin(callee, B_HASH) || (argv[0]->type == SPY_MEMORYVIEW && memory_hash_method(callee))))) ||
-        !(hash_calls(c, argv[at]) || (map && eq_reaches(argv[at])))) return 0;
+        !(hash_calls(c, argv[at]) || (map && (eq_reaches(argv[at]) || eq_keyed(map))))) return 0;
     *key = argv[at];
     return !map || (method != M_DICT_POP && (callee->type != SPY_BOUND_METHOD || callee->as.bound.method != M_DICT_POP)) || map->as.map.len;
 }

@@ -63,6 +63,9 @@ SOURCES = {
     "ctor_iter_keywords_fails": "class G:\n    def __iter__(s):\n        for _ in (): pass\n        yield 'a', 1\n        raise LookupError('g')\n"
                                 "d = {}\ntry: d.update(G(), z=1)\nexcept LookupError: pass\nresult = d",
     "ctor_two_positional": 'result = dict({}, {})',
+    "get_keyed_eq": ("log = []\nclass K(str):\n    def __eq__(s, o):\n        log.append(o); return str.__eq__(s, o)\n"
+                     "    __hash__ = str.__hash__\nd = {'a': 1, K('k'): 2}\n"
+                     "result = (d.get('k'), d.setdefault('k', 0), list(map(d.get, ['k', 'a'])), d.pop('k'), log)"),
     "fromkeys": "result = (dict.fromkeys('ab'), dict.fromkeys([1, 2], 0), type(Missing.fromkeys('a')).__name__)",
     "fromkeys_shared": "d = dict.fromkeys('ab', [])\nd['a'].append(1)\nresult = d",
     "fromkeys_hashed": "H.log.clear()\nd = dict.fromkeys([H(1), 2, H(3), H(1)], 0)\nresult = ([getattr(k, 'v', k) for k in d], list(d.values()), H.log)",
