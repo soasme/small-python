@@ -10,7 +10,8 @@ def make(method, where):
         raise StopAsyncIteration
 
     namespace = {"__aiter__": lambda self: self, "__anext__": anext, "__await__": lambda self: iter(()),
-                 "__iter__": lambda self: iter(()), "__bool__": lambda self: False}
+                 "__iter__": lambda self: iter(()), "__bool__": lambda self: False,
+                 "__hash__": lambda self: 0}
     found = namespace[method]
 
     def read(self):
@@ -29,7 +30,9 @@ async def statement(method, c):
         if c:
             return "True"
         return "False"
-    if method == "__iter__":
+    if method == "__hash__":
+        {c}
+    elif method == "__iter__":
         for _ in c:
             pass
     elif method == "__await__":
@@ -45,6 +48,9 @@ def outcome(p):
         if p["via"] == "builtin":
             if p["method"] == "__bool__":
                 return repr(bool(c))
+            if p["method"] == "__hash__":
+                hash(c)
+                return "ok"
             made = aiter(c) if p["method"] == "__aiter__" else iter(c) if p["method"] == "__iter__" else anext(c)
             if p["method"] == "__anext__":
                 made.close()

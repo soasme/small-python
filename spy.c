@@ -34440,16 +34440,43 @@ static int based_declines(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
  * __contains__; c->unbound when in takes y's items on the machine
  * (contains_step); else NULL. */
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
-/* The Python __hash__ of key, a machine function, also of a builtin's
- * subclass defining it before the builtin, or of a class's metaclass; or
- * NULL. */
+/* The __hash__ that hashing key finds: its class's, also of a builtin's
+ * subclass defining it before the builtin, or a class's metaclass's,
+ * borrowed; or NULL. */
+static ALWAYS_INLINE SPYValue *hash_defined(SPYContext *c, SPYValue *key) {
+    return key == c->hashed ? NULL :
+           key->type == SPY_INSTANCE && (!key->as.map.base || !builtin_base(c, key, "__hash__", NULL)) ?
+           class_lookup(key->as.map.parent, "__hash__") : metaclassed(key) ? class_lookup(key->as.map.meta, "__hash__") : NULL;
+}
+/* The Python __hash__ of key (hash_defined), a machine function; or NULL. */
 static SPYValue *hash_function(SPYContext *c, SPYValue *key) {
-    SPYValue *function = key == c->hashed ? NULL :
-                         key->type == SPY_INSTANCE && (!key->as.map.base || !builtin_base(c, key, "__hash__", NULL)) ?
-                         class_lookup(key->as.map.parent, "__hash__") : metaclassed(key) ? class_lookup(key->as.map.meta, "__hash__") : NULL;
+    SPYValue *function = hash_defined(c, key);
     /* A method object stays bound to its own self (hash_self). */
     if (function && function->type == SPY_METHOD) function = function->as.method.function;
     return function && machine_function(c, function) ? function : NULL;
+}
+/* hash_function, or else a __hash__ descriptor with a Python __get__
+ * (descriptor_getter), whose read comes first (hash_read); or NULL. */
+static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
+static SPYValue *hash_entry(SPYContext *c, SPYValue *key) {
+    SPYValue *function = hash_defined(c, key);
+    if (!function) return NULL;
+    if (function->type == SPY_METHOD) function = function->as.method.function;
+    if (machine_function(c, function)) return function;
+    return (function->type == SPY_INSTANCE || function->type == SPY_PROPERTY) && descriptor_getter(c, function) ? function : NULL;
+}
+/* The read of key's __hash__ descriptor d (hash_entry) to enter on m
+ * for a step's hash, owned, with *env: the call of what it gives follows
+ * (descripted), and its AttributeError makes key unhashable, as
+ * slot_tp_hash does; else NULL. */
+static SPYValue *special_env(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **);
+static NO_INLINE SPYValue *hash_read(SPYContext *c, Machine *m, SPYValue *key, SPYValue *d, SPYValue **env) {
+    char message[256];
+    snprintf(message, sizeof(message), "unhashable type: '%s'", class_tname(value_class(c, key)));
+    SPYValue *text = spy_string(c, message, strlen(message)), *absent = text ? tuple_of(c, 1, &text) : NULL;
+    SPYValue *function = absent ? special_env(c, m, d, key, NULL, absent, env) : NULL;
+    spy_release(text); spy_release(absent);
+    return function;
 }
 /* What key's Python __hash__ (hash_function) is called with: key, or the
  * self of the method object its class holds, borrowed. */
@@ -34467,7 +34494,7 @@ static SPYValue *walk_item(SPYValue *v, size_t i) { return v->type == SPY_TUPLE 
  * (hash_entered) within depth nested walks; a sealed tuple holds no
  * instance (seal_tuple). */
 static SPYValue *hash_first(SPYContext *c, SPYValue *key, int depth) {
-    if (!hash_walked(key)) return hash_function(c, key);
+    if (!hash_walked(key)) return hash_entry(c, key);
     int walks = key->type == SPY_TUPLE ? key->listed && !key->as.seq.hashed : 1;
     for (size_t i = 0; walks && depth && i < walk_len(key); i++) {
         SPYValue *item = walk_item(key, i), *function;
@@ -34538,8 +34565,10 @@ static SPYValue *tuple_next(SPYContext *c, Machine *m, SPYValue **env, int64_t *
         item = walk_item(tuple, i);
         if (hash_walked(item) && hash_entered(c, item)) {
             if (walk_push(c, m, item)) break;
-        } else if ((function = hash_function(c, item))) {
-            if ((*env = function_env(c, function, 1, (SPYValue *[]){hash_self(item)}, NULL, 0))) return spy_retain(function);
+        } else if ((function = hash_entry(c, item))) {
+            if (function->type == SPY_INSTANCE || function->type == SPY_PROPERTY) {
+                if ((function = hash_read(c, m, item, function, env))) return function;
+            } else if ((*env = function_env(c, function, 1, (SPYValue *[]){hash_self(item)}, NULL, 0))) return spy_retain(function);
             break;
         } else if (hash_value(c, item, &part) || tuple_fold(c, m, part)) break;
     }
@@ -34625,7 +34654,8 @@ static int walk_reaches(SPYContext *c, SPYValue *key) {
 static ALWAYS_INLINE int hash_calls(SPYContext *c, SPYValue *key) {
     return key->type == SPY_TUPLE ? key->listed && !key->as.seq.plain && hash_reaches(c, key, 0) :
            UNLIKELY(key->type == SPY_FROZENDICT) ? !key->as.map.flags && hash_entered(c, key) :
-           UNLIKELY(key->type == SPY_MEMORYVIEW) ? memory_hasher(c, key) != NULL : hash_function(c, key) != NULL;
+           UNLIKELY(key->type == SPY_MEMORYVIEW) ? memory_hasher(c, key) != NULL :
+           hash_entry(c, key) != NULL;
 }
 /* The Python __hash__ that hashing key enters first (hash_entered),
  * owned, with its env, to enter on m (CALL_HASH) with the key on the
@@ -34640,8 +34670,11 @@ static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, s
     for (size_t i = 0; i < count; i++) if (machine_push(c, m, spy_retain(operands[i]))) return NULL;
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_HASH;
-    if (hash_walked(key) ? !walk_push(c, m, key) && (function = tuple_next(c, m, env, &hash))
-                               : !!(*env = function_env(c, function, 1, (SPYValue *[]){hash_self(key)}, NULL, 0))) {
+    if (!hash_walked(key) && (function->type == SPY_INSTANCE || function->type == SPY_PROPERTY)) {
+        /* A descriptor's read comes first (hash_read). */
+        if ((function = hash_read(c, m, key, function, env))) return function;
+    } else if (hash_walked(key) ? !walk_push(c, m, key) && (function = tuple_next(c, m, env, &hash))
+                                : !!(*env = function_env(c, function, 1, (SPYValue *[]){hash_self(key)}, NULL, 0))) {
         /* A view stays exported while its exporter hashes (memory_hash). */
         if (key->type == SPY_MEMORYVIEW) key->as.memory.exports++;
         return key->type == SPY_TUPLE ? function : spy_retain(function);
