@@ -3085,8 +3085,8 @@ int main(int argc, char **argv) {
         assert(integer(fresh, run_paused(fresh, spy_eval(fresh, "f()", "firsts.py"), SPY_STOP_STEPS, &pauses)) == 9 + (i == 1) && pauses > 2);
         spy_context_free(fresh);
     }
-    /* Programs whose f() returns 7 while calls can pause: a chained
-     * comparison's result whose truth is a Python __bool__, or __len__. */
+    /* Programs whose f() returns 7 while calls can pause: chained
+     * comparisons whose result's truth is a Python __bool__, or __len__. */
     static const char *const pausing[] = {
         "class T:\n    def __init__(s, t): s.t = t\n    def __bool__(s):\n        for _ in (): pass\n        return s.t\n"
         "class L:\n    def __init__(s, n): s.n = n\n    def __len__(s):\n        for _ in (): pass\n        return s.n\n"
@@ -3100,6 +3100,10 @@ int main(int argc, char **argv) {
         "class C:\n    def __init__(s, r): s.r = r\n    def __lt__(s, o): return s.r\n"
         "class Q(P):\n    __len__ = [].__len__\n"
         "def f():\n    r = [(C(P(0)) < C(P(1)) < 1).n, (C(P(1)) < C(P(0)) < 1).n, (C(Q(1)) < C(P(1)) < 1).n]\n    return 7 if r == [0, 0, 1] else 0\n",
+        /* Keyword calls of a function, a class and a callable instance. */
+        "def g(a, b=0): return a + b\n"
+        "class K:\n    def __init__(s, a=0): s.a = a\n    def __call__(s, b=0): return s.a + b\n"
+        "def f():\n    k = K(a=2)\n    return g(1, b=2) + k(b=2)\n",
     };
     for (size_t i = 0; i < sizeof(pausing) / sizeof(*pausing); i++) {
         SPYContext *paused = spy_context_new();
