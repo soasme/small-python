@@ -10,6 +10,13 @@ def user(p):
         body["__class_getitem__"] = lambda cls, key: "cg %s %s" % (cls.__name__, key.__name__)
     elif p["cg"] == "classmethod":
         body["__class_getitem__"] = classmethod(lambda cls, key: "cg %s %s" % (cls.__name__, key.__name__))
+    elif p["cg"] in ("class", "instance"):
+        def text(cls, key):
+            for _ in (): pass
+            return "cg %s %s" % (cls.__name__, key.__name__)
+        made = type("Alias", (), {"__new__": lambda alias, cls, key: text(cls, key)}) if p["cg"] == "class" \
+            else type("Maker", (), {"__call__": lambda self, cls, key: text(cls, key)})()
+        body["__class_getitem__"] = classmethod(made)
     if p["item"]:
         body["__getitem__"] = lambda self, key: "item"
     meta = type("Meta", (type,), {"__getitem__": lambda cls, key: "meta"}) if p["meta"] else type

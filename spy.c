@@ -35862,11 +35862,16 @@ static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, Instruction *in
     SPYValue *function = class_item_function(c, x, &generic);
     if (generic) function = intrinsic(c, "_class_getitem");
     if (function && machine_function(c, function)) return last_call(c, m, function, x, y, x, y, env);
-    if (generic || function || x == c->types[SPY_CLASS] || (x->as.map.meta && class_lookup(x->as.map.meta, "__getitem__"))) return NULL;
-    /* Else x's __class_getitem__, read by attribute_step or a Python
-     * lookup (attribute_callk), is called on m (class_item_read). */
+    if (generic || x == c->types[SPY_CLASS] || (!function && x->as.map.meta && class_lookup(x->as.map.meta, "__getitem__"))) return NULL;
     SPYValue *state = item_state(c, m, ins, x, y), *method;
     if (!state) return NULL;
+    if (function) {
+        /* Another callable, such as a class, is called with x and y on m. */
+        method = callk(c, m, function, 2, (SPYValue *[]){spy_retain(x), spy_retain(y)}, item_called, state);
+        return item_queued(c, state, method);
+    }
+    /* Else x's __class_getitem__, read by attribute_step or a Python
+     * lookup (attribute_callk), is called on m (class_item_read). */
     if (!(method = attribute_step(c, x, "__class_getitem__")) && !c->error_type[0] && c->fallback) {
         function = c->fallback;
         c->fallback = NULL;

@@ -9,7 +9,9 @@
 (* builtin containers such as list and dict return a generic alias.        *)
 (*                                                                         *)
 (* A program defines class C with __class_getitem__ absent, a plain        *)
-(* function, or a classmethod, each returning ("cg", cls.__name__, key);   *)
+(* function, or a classmethod, each returning ("cg", cls.__name__, key),   *)
+(* or a classmethod of a class whose Python __new__, or of an instance     *)
+(* whose Python __call__, returns that;                                    *)
 (* with or without __getitem__ returning "item"; under a metaclass with or *)
 (* without __getitem__ returning "meta"; and subscripts C[int] or C()[int].*)
 (* A builtin program takes repr(list[int]), repr(dict[str, int]),          *)
@@ -25,7 +27,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"user"}, cg : {"none", "plain", "classmethod"}, item : BOOLEAN, meta : BOOLEAN,
+Programs == [part : {"user"}, cg : {"none", "plain", "classmethod", "class", "instance"}, item : BOOLEAN, meta : BOOLEAN,
              subject : {"class", "instance"}]
             \cup [part : {"builtin"}, name : {"list", "dict", "tuple", "type"}]
             \cup [part : {"read"}, read : {"getattribute", "getattr", "meta_attribute", "stored", "static", "missing", "raising"}]
