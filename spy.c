@@ -17628,6 +17628,25 @@ static void pattern_close(SPYContext *c, Program *p, PatternFail *fail, Node *n)
     *fail = (PatternFail){.names = fail->names, .count = fail->count};
 }
 static void compile_pattern(SPYContext *, Program *, Node *, size_t, PatternFail *);
+/* Move the steps of the patterns from a on after those from b on
+ * (emit_after), with the exits of fail among them; where they begin. */
+static Mark pattern_after(Program *p, PatternFail *fail, Mark a, Mark b) {
+    size_t first = b.at - a.at, second = p->len - b.at;
+    for (size_t i = 0; i < fail->len; i++) {
+        size_t *pc = &fail->exits[i].pc;
+        if (*pc >= b.at) *pc -= first;
+        else if (*pc >= a.at) *pc += second;
+    }
+    return emit_after(p, a, b, NULL);
+}
+/* The patterns compiled from step at on, with the exits of fail from
+ * exit on, depth values deeper than they were compiled: each capture's
+ * slot is that much further below, and so is each exit's drop. */
+static void pattern_deepen(Program *p, PatternFail *fail, size_t at, size_t exit, size_t depth) {
+    for (size_t i = at; i < p->len; i++)
+        if (p->items[i].op == BC_PATTERN && (p->items[i].arg & 31) == P_BIND) p->items[i].arg += (int)depth << 5;
+    for (size_t i = exit; i < fail->len; i++) fail->exits[i].temps += depth;
+}
 /* The capture of the value atop the stack by name, temps values above
  * the case's slots, into its slot; a name the parse rejects has none. */
 static void pattern_bind(SPYContext *c, Program *p, Node *n, Node *name, size_t temps, PatternFail *fail) {
@@ -17682,30 +17701,40 @@ static void compile_sequence_pattern(SPYContext *c, Program *p, Node *n, size_t 
 }
 /* A mapping pattern (16.6.6), as CPython compiles it: after the type and
  * length checks, every key is evaluated, then every value looked up, a
- * missing key failing the match, before the sub-patterns match them. */
+ * missing key failing the match, before the sub-patterns match them.
+ * Each key and sub-pattern compiles in source order, the key moved
+ * before the sub-patterns so far (pattern_after); once the entries end,
+ * the lookups go between them and the sub-patterns sink below them. */
 static void compile_mapping_pattern(SPYContext *c, Program *p, Node *n, size_t temps, PatternFail *fail) {
-    size_t size = 0, index = 0;
-    for (Node *entry = n->args; entry; entry = entry->next) size++;
+    size_t size = 0, length = SIZE_MAX, exit = fail->len;
     emit_pattern(c, p, n, P_MAPPING, 0);
     pattern_test(c, p, n, fail, temps);
+    Mark patterns = mark(p);
+    for (Node *entry = n->args; entry; entry = entry->next, size++) {
+        if (!size) {
+            length = emit_pattern(c, p, n, P_LENGTH, 0);
+            pattern_test(c, p, n, fail, temps);
+            patterns = mark(p); exit = fail->len;
+        }
+        Mark key = mark(p);
+        compile_expr(c, p, entry->a);
+        patterns = pattern_after(p, fail, patterns, key);
+        /* subject, keys, missing, the keys seen, get, then each value found. */
+        compile_pattern(c, p, entry->b, temps + 3 - size, fail);
+    }
     if (!size && !n->c) { emit(c, p, BC_POP, n, 0); return; }
     if (size) {
-        size_t pc = emit_pattern(c, p, n, P_LENGTH, 0);
-        if (pc != SIZE_MAX) { p->items[pc].target = (uint32_t)size; p->items[pc].other = 1; }
-        pattern_test(c, p, n, fail, temps);
-    }
-    /* subject, keys, missing, the keys seen, get, then each value found. */
-    for (Node *entry = n->args; entry; entry = entry->next) compile_expr(c, p, entry->a);
-    if (size) {
+        if (length != SIZE_MAX) { p->items[length].target = (uint32_t)size; p->items[length].other = 1; }
+        pattern_deepen(p, fail, patterns.at, exit, 2 * size);
+        Mark lookups = mark(p);
         emit_pattern(c, p, n, P_GET, size);
-        for (index = 0; index < size; index++) {
+        for (size_t index = 0; index < size; index++) {
             size_t pc = emit_pattern(c, p, n, P_LOOKUP, index);
             if (pc != SIZE_MAX) p->items[pc].target = (uint32_t)size;
             pattern_test(c, p, n, fail, temps + size + 3 + index);
         }
         if (size > 1) emit_pattern(c, p, n, P_REVERSE, size);
-        index = 0;
-        for (Node *entry = n->args; entry; entry = entry->next, index++) compile_pattern(c, p, entry->b, temps + 2 * size + 3 - index, fail);
+        pattern_after(p, fail, patterns, lookups);
         if (n->c) emit_pattern(c, p, n, P_DROP, 3);
     }
     if (n->c) {

@@ -300,15 +300,15 @@ owning a root scope (a string annotation's). Compiling 20,000 lines of
 33 MB, down from 47 MB, and a 20,000-line function and class at 46 MB,
 down from 124 MB.
 
-The compiler now emits every expression and statement in the order the
-parser reads it, except match patterns (a mapping pattern still compiles
-its keys before its sub-patterns). A step that runs before parts read ahead of it is put
+The compiler now emits every expression, statement and pattern in the
+order the parser reads it. A step that runs before parts read ahead of it is put
 in front of them once they are compiled: a fused operator, call, store,
 assignment, increment, yield or return step, a display's or template's
 new value, a function's making step, a target list's unpack. Parts that
 run in another order are rotated into it: a conditional's test before its
 value, positional arguments before keywords, an assignment's value before
-its targets, a comprehension's element inside its clauses. A rotated or
+its targets, a comprehension's element inside its clauses, a mapping pattern's
+keys before its sub-patterns, which sink below its lookups. A rotated or
 prefixed range jumps only within itself, so moving it relocates only its
 own jumps, and its operands move with it, keeping `co_names` in order. A
 value is tested after it compiles (an `and`'s or `or`'s left operand
