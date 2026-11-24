@@ -22445,9 +22445,24 @@ static void generator_close(SPYValue *v) {
 }
 static int bytearray_exported(SPYContext *, SPYValue *);
 static int bytearray_resize(SPYContext *, SPYValue *, size_t);
+/* The list or bytearray instance v of a subclass carries, else NULL. */
+static SPYValue *repeated_base(SPYContext *c, SPYValue *v) {
+    SPYValue *base = builtin_value(c, v, SPY_LIST);
+    return base ? base : builtin_value(c, v, SPY_BYTEARRAY);
+}
+static SPYValue *inplace(SPYContext *, int, SPYValue *, SPYValue *);
+/* x *= y of a list's or bytearray's subclass instance whose plain * and
+ * y's reflected one declined: its value repeated in place; x. */
+static SPYValue *repeat_declined(SPYContext *c, SPYValue *x, SPYValue *y) {
+    SPYValue *result = inplace(c, T_MULEQ, repeated_base(c, x), y);
+    if (!result) return NULL;
+    spy_release(result);
+    return spy_retain(x);
+}
 /* list *= rhs, in place. */
 static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *rhs) {
     int64_t count;
+    if (!is_int(rhs) && !index_defined(c, rhs)) return errorf(c, "TypeError", "can't multiply sequence by non-int of type '%s'", type_name(rhs));
     if (index_size(c, rhs, &count)) return NULL;
     size_t len = old->as.seq.len;
     if (count <= 0) {
@@ -22469,7 +22484,8 @@ static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *r
 static SPYValue *augmented(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     const Operator *operation = &operators[op - T_ADDEQ];
     int token = operation->token;
-    SPYValue *base = token == '*' && old->type == SPY_INSTANCE ? builtin_base(c, old, operation->inplace, NULL) : old;
+    /* A subclass's own __mul__ comes before y's reflected one, as a binary operator's. */
+    SPYValue *base = token == '*' && old->type == SPY_INSTANCE ? builtin_base(c, old, operation->inplace, operation->direct) : old;
     if (base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) && (token == '+' || token == '*') && special_dispatch(rhs)) {
         SPYValue *result = try_operator(c, rhs, operation->reflected, old, NULL, 0);
         if (result || c->error_type[0]) return result;
@@ -36153,7 +36169,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
          * its subclass inherits in C (inplace) but a sequence's repetition,
          * else the plain one's rule. */
         else if (kind == OPERATE_INPLACE && o->token == '*' && x->type == SPY_INSTANCE && x->as.map.base &&
-                 (x->as.map.base->type == SPY_LIST || x->as.map.base->type == SPY_BYTEARRAY) && builtin_base(c, x, o->inplace, NULL) &&
+                 (x->as.map.base->type == SPY_LIST || x->as.map.base->type == SPY_BYTEARRAY) && builtin_base(c, x, o->inplace, o->direct) &&
                  (function = item_special(c, y, reflected))) {
             /* A list's or bytearray's subclass repeats in place after y's
              * reflected method (augmented). */
@@ -36358,6 +36374,7 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
     if (!o && negated && declined_bases(c, op, x, y, name, self)) return c->unbound;
     *result = !name ? NULL : o ? try_operator(c, *self, name, other, NULL, 0) : rich_method(c, *self == y ? rich_reflected[rich] : rich, *self, other);
     if (!*result && !c->error_type[0] && name && o && *self == x) *result = builtin_operand(c, o, x, y);
+    if (!*result && !c->error_type[0] && op == T_MULEQ && repeated_base(c, x)) *result = repeat_declined(c, x, y);
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
     return NULL;
 }
@@ -36977,10 +36994,12 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             }
             spy_release(x); spy_release(y);
             return m;
-        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_INPLACE && (x->type == SPY_LIST || x->type == SPY_BYTEARRAY) &&
+        } else if (phase == OPERATOR_REFLECTED && kind == OPERATE_INPLACE &&
+                   (x->type == SPY_LIST || x->type == SPY_BYTEARRAY || (op == T_MULEQ && repeated_base(c, x))) &&
                    !(op == T_MULEQ && y->type == SPY_INSTANCE && index_special(c, y))) {
-            /* Their own in-place operation then (operator_call). */
-            result = c->error_type[0] ? NULL : inplace(c, op, x, y);
+            /* Their own in-place operation then (operator_call), also a
+             * subclass's repetition once its plain * declined. */
+            result = c->error_type[0] ? NULL : x->type == SPY_INSTANCE ? repeat_declined(c, x, y) : inplace(c, op, x, y);
         } else if (phase == OPERATOR_REFLECTED && (kind == OPERATE_BINARY ? op == '*' && repeats(x) : op == T_MULEQ) && y->type == SPY_INSTANCE &&
                    index_special(c, y)) {
             /* The repetition, or a list's or bytearray's own *=, then

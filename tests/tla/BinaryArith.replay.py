@@ -105,6 +105,12 @@ SOURCES = {
                                    "    def __rsub__(self, o):\n        for _ in (): pass\n        log.append('rsub')\n        return 'rsub'\n"
                                    "class L(list): pass\nclass S(set): pass\n"
                                    "x = L([1])\nx *= R()\ny = S({1})\ny -= R()\nresult = (x, y, log)"),
+    "inplace_mul_first": ("class R:\n    def __rmul__(self, o): return 'rmul'\n"
+                          "class M(list):\n    def __mul__(self, n): return 'mul'\n"
+                          "class N(list):\n    def __mul__(self, n): return NotImplemented\n"
+                          "x = M([1])\nx *= R()\ny = N([1])\nz = y\ny *= 2\n"
+                          "try:\n    z *= 'a'\nexcept TypeError as e:\n    m = str(e)\n"
+                          "result = (x, y, y is z, m)"),
     "inplace_inherited": "class SO(set):\n    def __or__(s, o):\n        for _ in (): pass\n        return 'or'\n"
                          "class DO(dict):\n    def __or__(s, o):\n        for _ in (): pass\n        return 'or'\n"
                          "x = SO({1})\nz = x\nx |= {2}\ny = DO(a=1)\nw = y\ny |= {'b': 2}\nresult = (sorted(x), x is z, y, y is w, SO() | {1})",
