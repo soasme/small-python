@@ -10115,6 +10115,15 @@ static SPYValue *length_hint_sized(SPYContext *c, Machine *m, SPYValue *v, SPYVa
     spy_release(result); spy_release(v);
     return failed ? NULL : spy_int(c, done || index > len ? 0 : reversed ? index : len - index);
 }
+/* The Python __len__ of the instance that v, a __getitem__ or reversed
+ * iterator not exhausted, iterates, which v's __length_hint__ calls
+ * (length_hint_sized), borrowed; else NULL. */
+static SPYValue *iterator_sized(SPYContext *c, SPYValue *v) {
+    SPYValue *source = v->as.iterator.source, *function;
+    return !v->as.iterator.done && (v->as.iterator.kind == I_GETITEM || (v->as.iterator.kind == I_REVERSED && v->as.iterator.index)) &&
+           source->type == SPY_INSTANCE && (function = class_lookup(source->as.map.parent, "__len__")) && machine_function(c, function) ?
+           function : NULL;
+}
 static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     SPYValue *owner = c->iterator_types[(intptr_t)data];
     const char *owner_name = iterator_names[(intptr_t)data];
@@ -10125,11 +10134,9 @@ static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue 
         return errorf(c, "TypeError", "descriptor '__length_hint__' for '%s' objects doesn't apply to a '%s' object", owner_name, type_name(argv[0]));
     if (argc != 1) return errorf(c, "TypeError", "%s.__length_hint__() takes no arguments (%zu given)", owner_name, argc - 1);
     /* One over an instance with a Python __len__ calls it on the step's machine (length_hint_sized). */
-    SPYValue *source = v->as.iterator.source, *function;
-    Machine *m = !v->as.iterator.done && (v->as.iterator.kind == I_GETITEM || (v->as.iterator.kind == I_REVERSED && v->as.iterator.index)) &&
-                 source->type == SPY_INSTANCE &&
-                 (function = class_lookup(source->as.map.parent, "__len__")) && machine_function(c, function) ? step_machine(c) : NULL;
-    if (m) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(source)}, length_hint_sized, spy_retain(v));
+    SPYValue *function = iterator_sized(c, v);
+    Machine *m = function ? step_machine(c) : NULL;
+    if (m) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(v->as.iterator.source)}, length_hint_sized, spy_retain(v));
     return iterator_length_hint(c, v);
 }
 /* LengthHint (7.7.7) of o, which it takes: its __len__, else, when that
@@ -10166,12 +10173,29 @@ static SPYValue *length_hint_read(SPYContext *c, Machine *m, SPYValue *o, SPYVal
     spy_release(method);
     return result;
 }
+/* What the Python __len__ of the instance that iterator state[0] iterates
+ * returned, result, for the __length_hint__ of state[1] (LengthHint). */
+static SPYValue *length_hint_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *hint = length_hint_sized(c, m, spy_retain(state->as.seq.items[0]), result);
+    SPYValue *o = spy_retain(state->as.seq.items[1]);
+    spy_release(state);
+    return length_hinted(c, m, o, hint);
+}
 static SPYValue *length_hint_method(SPYContext *c, Machine *m, SPYValue *o) {
     SPYValue *function = instance_special(c, o, "__length_hint__");
     if (function && !machine_function(c, function)) return descriptor_readk(c, m, function, o, length_hint_read, o);
     if (function) return callk(c, m, function, 1, (SPYValue *[]){spy_retain(o)}, length_hinted, o);
     SPYValue *method = special_method(c, o, "__length_hint__");
     if (!method) { spy_release(o); return NULL; }
+    /* A builtin iterator's own, of a subclass's instance, calls the Python
+     * __len__ of what it iterates on m (iterator_sized). */
+    SPYValue *native = method->type == SPY_METHOD && method->as.method.self == o ? method->as.method.function : NULL;
+    SPYValue *v = native && native->type == SPY_NATIVE && native->as.native.call == iterator_length_hint_call ? builtin_value(c, o, SPY_ITERATOR) : NULL;
+    if (v && c->iterator_types[iterator_class_id(v)] == c->iterator_types[(intptr_t)native->as.native.data] && (function = iterator_sized(c, v))) {
+        SPYValue *state = spy_tuple(c, 2, (SPYValue *[]){v, o});
+        spy_release(method); spy_release(o);
+        return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(v->as.iterator.source)}, length_hint_iterated, state) : NULL;
+    }
     SPYValue *result = callk(c, m, method, 0, NULL, length_hinted, o);
     spy_release(method);
     return result;
