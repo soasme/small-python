@@ -77,3 +77,17 @@ assert_eq(inside(), expected())
 def gen():
     yield results()
 assert_eq(next(gen()), expected())
+# A mapping's key with a name's hash whose Python __eq__ raises stops the
+# keyword's store with that error.
+class EqRaises:
+    def __hash__(self): return hash("a")
+    def __eq__(self, other):
+        for _ in (): pass
+        raise KeyError("eq")
+def eq_raises():
+    out = []
+    for f in (lambda: dict({EqRaises(): 1}, a=2), lambda: frozendict({EqRaises(): 1}, a=2), lambda: dict({EqRaises(): 1}, b=3, a=2)):
+        try: out.append(len(f()))
+        except KeyError as e: out.append(("KeyError", str(e)))
+    return out
+assert_eq(eq_raises(), [("KeyError", "'eq'")] * 3)
