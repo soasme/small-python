@@ -134,6 +134,7 @@ static SPYValue *loader(SPYContext *c, void *data, const char *name) {
     if (!strcmp(name, "registered")) { spy_new_module(c, name, fill_registered); return NULL; }
     if (!strcmp(name, "hostpkg.__init__")) return spy_bytes(c, "", 0);
     if (!strcmp(name, "hostpkg.part")) return spy_bytes(c, "value = 3", 9);
+    if (!strcmp(name, "unread")) return spy_bytes(c, "answer = 42", 11);
     if (strcmp(name, "sample")) return NULL;
     const char *source = "answer = 42\ndef add(x):\n    return x + answer\n";
     return spy_bytes(c, source, strlen(source));
@@ -3434,6 +3435,26 @@ int main(int argc, char **argv) {
         "assert type(__lazy_import__('json')).__name__ == 'lazy_import'\n"
         "lazy import sys as lazy_sys\n"
         "assert lazy_sys.maxsize > 0\n");
+    /* Read by the host, outside any step machine: lazy imports' placeholders
+     * reified in C, of a module and of a name from one, and a global under
+     * a str subclass's key. */
+    execute(c, "lazy import sys as host_sys\nlazy from sys import maxsize as host_maxsize\n"
+               "lazy import hostpkg.part as host_part\nlazy from unread import answer as host_answer\n"
+               "class Key(str): pass\nglobals()[Key('keyed')] = 7\nglobals()[1] = 0\n");
+    SPYValue *host_part = spy_get_global(c, "host_part"), *host_answer = spy_get_global(c, "host_answer");
+    SPYValue *part_value = host_part ? spy_get_attr(c, host_part, "value") : NULL;
+    int64_t three = 0, answer = 0;
+    assert(part_value && !spy_as_int(c, part_value, &three) && three == 3);
+    assert(host_answer && !spy_as_int(c, host_answer, &answer) && answer == 42);
+    assert(!spy_get_global(c, "never_bound"));
+    spy_clear_error(c);
+    spy_release(part_value); spy_release(host_part); spy_release(host_answer);
+    SPYValue *host_sys = spy_get_global(c, "host_sys"), *host_maxsize = spy_get_global(c, "host_maxsize"), *keyed = spy_get_global(c, "keyed");
+    SPYValue *sys_name = host_sys ? spy_get_attr(c, host_sys, "__name__") : NULL;
+    int64_t maxsize = 0, seven = 0;
+    assert(sys_name && !strcmp(spy_as_string(c, sys_name, NULL), "sys") && host_maxsize && !spy_as_int(c, host_maxsize, &maxsize) && maxsize > 0);
+    assert(keyed && !spy_as_int(c, keyed, &seven) && seven == 7);
+    spy_release(sys_name); spy_release(host_sys); spy_release(host_maxsize); spy_release(keyed);
 
     SPYContext *other = spy_context_new();
     assert(other);

@@ -9,7 +9,8 @@
 # __getitem__ raises KeyError for it. An error from any of those calls
 # propagates and makes no class. Under PEP 563 an attribute's annotation alone sets
 # up __annotations__, and no def or annotation needs __classdictcell__.
-# Inside functions as at module level.
+# Inside functions as at module level. A generic class's namespace whose
+# keys include one that is not a str reads __name__ from the globals too.
 from harness import *
 
 log = []
@@ -99,3 +100,15 @@ class Preset(type):
     def __prepare__(mcls, name, bases): return {"__annotations__": {"b": 2}}
 exec("from __future__ import annotations\nclass P(metaclass=Preset):\n    y: int\n", ns2 := {"Preset": Preset})
 assert_eq((ns["__annotations__"], ns2["P"].__annotations__), ({"a": 1, "x": "int"}, {"b": 2, "y": "int"}))
+
+# A generic class's namespace with a __missing__ and a key that is not a
+# str: __name__ is not found among its keys and is read from the globals.
+class Missing(dict):
+    def __missing__(self, key):
+        raise KeyError(key)
+class Keyed(type):
+    @classmethod
+    def __prepare__(mcls, name, bases): return Missing({1: 2})
+    def __new__(mcls, name, bases, ns): return super().__new__(mcls, name, bases, dict(ns))
+class G[T](metaclass=Keyed): pass
+assert_eq((G.__module__, G.__dict__[1]), (__name__, 2))

@@ -6,7 +6,8 @@
 # imported lazily, and any other exception propagates. Imports in a
 # class body, a function or a try, and lazy imports, read nothing.
 # Inside functions and generators as at module level. An unlisted dotted
-# import with as binds the attribute path below what __import__ returned.
+# import with as binds the attribute path below what __import__ returned,
+# with plain globals or a dict subclass's.
 from harness import *
 log = []
 class Globals(dict):
@@ -73,3 +74,11 @@ assert_eq((names["x"], names["top"] is top, imported), ("leaf", True, ["top.b.c"
 top.b = Part()
 assert_eq(str(assert_raises(ImportError, exec, "import top.b.c as y", names)),
           "cannot import name 'c' from '<unknown module name>' (unknown location)")
+# The same through globals whose __getitem__ is Python's, which looks up
+# __lazy_modules__ before the import.
+g = Globals()
+dict.__setitem__(g, "__builtins__", {"__import__": import_top})
+del imported[:], log[:]
+top.b.c = "leaf"
+exec("import top.b.c as x", g)
+assert_eq((dict.__getitem__(g, "x"), imported, log), ("leaf", ["top.b.c"], ["__lazy_modules__"]))
