@@ -11304,8 +11304,6 @@ static double complex complex_divide(double complex x, double complex y, int rea
     return complex_parts(real, imag);
 }
 static SPYValue *complex_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
-    if ((!is_number(a) && a->type != SPY_COMPLEX) || (!is_number(b) && b->type != SPY_COMPLEX))
-        return spy_error(c, "TypeError", "unsupported complex operands");
     double complex x = numeric_complex(c, a), y = numeric_complex(c, b), result;
     if (c->error_type[0]) return NULL;
     int real_left = a->type != SPY_COMPLEX, real_right = b->type != SPY_COMPLEX;
@@ -11677,7 +11675,9 @@ static SPYValue *binary_builtin(SPYContext *c, int op, SPYValue *a, SPYValue *b)
         if (op == '@' || (inexact && bitwise) || (has_complex && (op == T_FLOORDIV || op == '%')))
             return operand_error(c, binary_symbol(op), a, b, NULL);
     }
-    if (a->type == SPY_COMPLEX || b->type == SPY_COMPLEX) return complex_binary(c, op, a, b);
+    /* A complex number declines any other operand, which may be a sequence. */
+    if ((a->type == SPY_COMPLEX || b->type == SPY_COMPLEX) && (is_number(a) || a->type == SPY_COMPLEX) &&
+        (is_number(b) || b->type == SPY_COMPLEX)) return complex_binary(c, op, a, b);
     if (a->type == SPY_BOOL && b->type == SPY_BOOL && (op == '&' || op == '|' || op == '^')) {
         int x = (int)a->as.integer_data.small, y = (int)b->as.integer_data.small;
         return spy_bool(c, op == '&' ? x & y : op == '|' ? x | y : x ^ y);

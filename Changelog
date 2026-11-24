@@ -775,6 +775,7 @@ Unreleased (0.10.0):
 - `super.__new__()` makes a super of no class that `__init__` binds; a super object finds `super`'s own attributes after its MRO's
 - a subclass of `reversed` has `reversed`'s `__length_hint__`, which `list()` asks
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
+- a complex number's operators decline a non-number: `'b' * 1j` and `1j + 'b'` raise the sequence's or the operator's TypeError
 - `x *= n` of a list or bytearray subclass calls its own `__mul__` first and repeats in place once that declines; `[1] *= 'a'` reports a sequence's non-int count
 
 2026-11-10 0.9.0:
