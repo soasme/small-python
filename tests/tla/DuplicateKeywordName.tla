@@ -4,6 +4,7 @@
 (* specifies FunctionStr, for every call                                   *)
 (*                                                                         *)
 (*     f( **{"a": 1}, **{"a": 2})     # or f( **{"a": 1}, a=2)             *)
+(*     f( **{"a": 1}, **mappingproxy({"a": 2}))                            *)
 (*                                                                         *)
 (* of a callable instance whose Python __getattribute__, which may loop,   *)
 (* gives its __qualname__ (a str), raises AttributeError, or raises        *)
@@ -16,7 +17,7 @@ EXTENDS Sequences
 
 Qualnames == {"str", "absent", "error"}
 Modules == {"str", "none", "builtins", "absent", "error"}
-Programs == [merge : {"double", "keyword"}, qualname : Qualnames, module : Modules, text : {"str", "other"}]
+Programs == [merge : {"double", "keyword", "proxy"}, qualname : Qualnames, module : Modules, text : {"str", "other"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

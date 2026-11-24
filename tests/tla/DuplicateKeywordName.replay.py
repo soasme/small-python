@@ -34,6 +34,8 @@ def outcome(p):
     try:
         if p["merge"] == "double":
             Callee()(**{"a": 1}, **{"a": 2})
+        elif p["merge"] == "proxy":
+            Callee()(**{"a": 1}, **type(type.__dict__)({"a": 2}))
         else:
             Callee()(**{"a": 1}, a=2)
     except TypeError as e:

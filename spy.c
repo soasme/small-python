@@ -29375,9 +29375,10 @@ static NO_INLINE int keywords_merge(SPYContext *c, Machine *m, SPYValue *keyword
         return 1;
     }
     /* A dict's duplicate keyword for a callee named by Python is named
-     * on m (keyword_namedk). */
-    for (size_t i = 0; keywords->as.map.len && a->type == SPY_DICT && !named_plainly(c, fn) && i < a->as.map.len; i++) {
-        Entry entry = map_items(a)[i];
+     * on m (keyword_namedk), a mappingproxy's of a dict too. */
+    SPYValue *d = a->type == SPY_MAPPINGPROXY && a->as.bound.self->type == SPY_DICT ? a->as.bound.self : a;
+    for (size_t i = 0; keywords->as.map.len && d->type == SPY_DICT && !named_plainly(c, fn) && i < d->as.map.len; i++) {
+        Entry entry = map_items(d)[i];
         if (entry.key->type != SPY_STRING) break;
         if (map_find_hash(keywords, entry.key, entry.hash) >= 0) { keyword_namedk(c, m, fn, entry.key); spy_release(a); return 0; }
     }
