@@ -65,8 +65,19 @@ def built(p):
                 return builtins.__build_class__
             raise KeyError(key)
 
+    class Key:
+        def __hash__(self):
+            return hash("__build_class__")
+
+        def __eq__(self, other):
+            for _ in ():
+                pass
+            if "eq" not in log:  # how often a probe compares is not specified
+                log.append("eq")
+            return False
+
     try:
-        exec("class C(base()): pass", {"__builtins__": Logging(), "__name__": "replay"})
+        exec("class C(base()): pass", {"__builtins__": Logging({Key(): 0} if p["keyed"] else {}), "__name__": "replay"})
         ended = []
     except NameError:
         ended = ["NameError"]

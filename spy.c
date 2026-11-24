@@ -20593,11 +20593,14 @@ static NO_INLINE SPYValue *callk_keywords(SPYContext *c, Machine *m, SPYValue *f
         SPYValue *result = class_callk(c, m, fn, argc, argv, k, ctx);
         if (result || c->k_fn || c->error_type[0]) return result;
     }
-    if (m && machine_function(c, function) && n + argc <= 9) {
-        SPYValue *args[9];
-        if (n) args[0] = spy_retain(fn->type == SPY_METHOD ? fn->as.method.self : fn);
-        if (argc) memcpy(args + n, argv, argc * sizeof(*argv));
-        if (!(c->k_env = function_env(c, function, n + argc, args, keywords, 1))) return k(c, m, ctx, NULL);
+    if (m && machine_function(c, function) && (!n || argc < 9)) {
+        SPYValue *args[9], **given = argv;
+        if (n) {
+            args[0] = spy_retain(fn->type == SPY_METHOD ? fn->as.method.self : fn);
+            if (argc) memcpy(args + 1, argv, argc * sizeof(*argv));
+            given = args;
+        }
+        if (!(c->k_env = function_env(c, function, n + argc, given, keywords, 1))) return k(c, m, ctx, NULL);
         c->k_fn = spy_retain(function); c->k = k; c->k_ctx = ctx;
         return NULL;
     }
@@ -23697,29 +23700,45 @@ static SPYValue *builder_found(SPYContext *c, Machine *m, SPYValue *ctx, SPYValu
     if (!result && !c->stopped && error_is(c, "KeyError")) { spy_clear_error(c); spy_error(c, "NameError", "__build_class__ not found"); }
     return result;
 }
+/* What builder_step's search of its builtins' dict found, state (the
+ * builtins, the dict, the name): the entry's value, or their __missing__
+ * called on m (callk, builder_found). */
+static SPYValue *builder_searched(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *namespace = items[0]->as.map.namespace, *function;
+    ptrdiff_t i = result ? (ptrdiff_t)result->as.integer_data.small : -1;
+    spy_release(result);
+    if (!result || i >= 0) result = result ? spy_retain(namespace_map(items[1])->as.map.items[i].value) : NULL;
+    else if (namespace && (function = item_function(c, namespace, "__missing__")))
+        result = callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(items[2])}, builder_found, NULL);
+    else result = spy_error(c, "NameError", "__build_class__ not found");
+    spy_release(state);
+    return result;
+}
 /* The __build_class__ a class statement in frame f calls, looked up in its
  * builtins before its arguments are evaluated (16.4.1), owned; a Python
  * __getitem__ or __missing__ of theirs is m's call when m is given
  * (callk, builder_found). */
+static SPYValue *builder_searched(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *builder_step(SPYContext *c, Machine *m, Frame *f) {
     SPYValue *builtins = module_env(c, f->env)->as.map.parent, *function;
     Name name = name_of("__build_class__");
+    /* A key that is not a str compares on m (map_findk, builder_searched). */
+    SPYValue *missing = m && builtins ? missing_storage(c, builtins) : NULL, *dict = missing ? missing : m && builtins ? name_dict(builtins) : NULL;
+    int compares = dict && !name_getitem(c, builtins) && name_compares(c, dict, name);
+    if (compares) {
+        SPYValue *key = spy_string(c, name.text, name.len), *state = NULL, *result = NULL;
+        int64_t hash;
+        if (key && !hash_value(c, key, &hash) && (state = tuple_of(c, 3, (SPYValue *[]){builtins, dict, key})))
+            result = map_findk(c, m, dict, key, hash, map_cursor(namespace_map(dict), hash), builder_searched, state);
+        spy_release(key);
+        return result;
+    }
     if (builtins && ((function = name_getitem(c, builtins)) || (function = name_missing(c, builtins, name)))) {
         SPYValue *key = spy_string(c, name.text, name.len);
         return key ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(builtins->as.map.namespace), key}, builder_found, NULL) : NULL;
     }
     SPYValue *builder = builtins ? name_lookup(c, builtins, name) : NULL;
     return builder || c->error_type[0] ? builder : spy_error(c, "NameError", "__build_class__ not found");
-}
-/* The class statement n calls builder, a __build_class__ of its builtins
- * (builder_step) other than the builtin one, with more arguments than a
- * call on the machine takes, with its body as a function. */
-static SPYValue *class_statement(SPYContext *c, Frame *f, Scope *n, SPYValue *name, SPYValue *bases,
-                                 SPYValue *arguments, SPYValue *type_params, SPYValue *builder) {
-    SPYValue *args = builder_arguments(c, f, n, name, bases, type_params);
-    SPYValue *cls = args ? call_keywords(c, builder, args->as.seq.len, args->as.seq.items, arguments) : NULL;
-    spy_release(args);
-    return cls;
 }
 /* builtins.__build_class__(func, name, /, *bases, metaclass=..., **kwds). */
 static SPYValue *build_job(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *);
@@ -38874,23 +38893,10 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
          * alone for the call tuple() after it (class_built). */
         SPYValue *args = builder_arguments(c, f, n, name, bases, n->generic ? m->stack[m->len - 1]->as.seq.items[1] : NULL);
         if (args) {
-            SPYValue *argv[64], **items = args->as.seq.items;
-            size_t argc = args->as.seq.len;
-            if (argc <= 64) {
-                for (size_t i = 0; i < argc; i++) argv[i] = spy_retain(items[i]);
-                body = callk_keywords(c, m, builder, argc, argv, arguments->as.map.len ? arguments : NULL, class_built, NULL);
-                spy_release(args);
-                goto done;
-            }
+            for (size_t i = 0; i < args->as.seq.len; i++) spy_retain(args->as.seq.items[i]);
+            body = callk_keywords(c, m, builder, args->as.seq.len, args->as.seq.items, arguments->as.map.len ? arguments : NULL, class_built, NULL);
             spy_release(args);
         }
-    }
-    if (!builtin) {
-        SPYValue *params = n->generic ? m->stack[m->len - 1]->as.seq.items[1] : NULL;
-        SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, params, builder);
-        SPYValue *alone = cls ? tuple_of(c, 1, &cls) : NULL;
-        spy_release(cls);
-        if (alone && !machine_push(c, m, alone)) body = spy_retain(c->types[SPY_TUPLE]);
         goto done;
     }
     size_t at = 0;

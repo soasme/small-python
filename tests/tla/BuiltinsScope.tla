@@ -33,7 +33,7 @@ EXTENDS Naturals, Sequences
 Programs == [part : {"lookup"}, builtins : {"absent", "module", "custom", "empty", "missing"}, shadow : BOOLEAN,
              name : {"len", "added", "import"}]
             \cup [part : {"insert"}]
-            \cup [part : {"builder"}, lacking : BOOLEAN]
+            \cup [part : {"builder"}, lacking : BOOLEAN, keyed : BOOLEAN]
             \cup [part : {"keyed"}, where : {"callee", "argument", "twice"}]
 
 VARIABLES program, outcome
@@ -50,8 +50,12 @@ Lookup(p) ==
           [] standard -> "builtin"
           [] OTHER -> "NameError"
 
-\* __build_class__ is looked up before the bases are evaluated (16.4.1).
-Built(p) == IF p.lacking THEN "__build_class__ NameError" ELSE "__build_class__ base"
+\* __build_class__ is looked up before the bases are evaluated (16.4.1);
+\* a stored key of its hash is compared before __missing__ is called.
+Built(p) == CASE p.keyed /\ p.lacking -> "eq __build_class__ NameError"
+              [] p.keyed -> "eq __build_class__ base"
+              [] p.lacking -> "__build_class__ NameError"
+              [] OTHER -> "__build_class__ base"
 
 Keyed(p) == CASE p.where = "callee" -> "2 1" [] p.where = "argument" -> "builtin_function_or_method 1" [] OTHER -> "0 2"
 
