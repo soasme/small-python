@@ -726,6 +726,17 @@ int main(int argc, char **argv) {
     assert(!spy_call(c, host_close, 0, NULL) && !strcmp(spy_error_type(c), "ValueError"));
     spy_clear_error(c);
     spy_release(z); spy_release(parts_keywords); spy_release(complex_ok); spy_release(host_complex); spy_release(host_close);
+    /* close() of a coroutine awaiting anext() with a default, whose
+     * __anext__ answers GeneratorExit with StopAsyncIteration, from the
+     * host: the await takes the default and the coroutine returns it. */
+    execute(c, "class Fut:\n    def __await__(self):\n        yield 'fut'\n"
+               "class Ending:\n    def __aiter__(self): return self\n"
+               "    async def __anext__(self):\n        try: await Fut()\n        except GeneratorExit: raise StopAsyncIteration\n"
+               "async def takes(): return await anext(Ending(), 'd')\n"
+               "taking = takes()\ntaking.send(None)\nhost_take_close = taking.close\n");
+    SPYValue *host_take_close = spy_get_global(c, "host_take_close"), *taken = spy_call(c, host_take_close, 0, NULL);
+    assert(taken && !strcmp(spy_as_string(c, taken, NULL), "d"));
+    spy_release(taken); spy_release(host_take_close);
     /* And type.__new__, which makes the class in C. */
     execute(c, "host_type_new = type.__new__\ndef type_made(k): return 1 if type(k) is type and k.__name__ == 'Made' and k.y == 3 else 0\n");
     SPYValue *host_type_new = spy_get_global(c, "host_type_new"), *type_made = spy_get_global(c, "type_made");
