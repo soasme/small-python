@@ -1695,8 +1695,10 @@ static void generator_close(SPYValue *);
 /* Keep a dying instance alive for its __del__, a suspended generator or
  * coroutine for its close(), or an exporter's memoryview for its
  * __release_buffer__, once per object: 1. 2 for a generator past that whose
- * frame lives on (frame_take). */
-static int finalize_later(SPYValue *v) {
+ * frame lives on (frame_take). A collection's garbage (collecting) is not
+ * closed here: closing would release values the collection holds, and the
+ * collection frees them all and decides by marking which frames live on. */
+static int finalize_later(SPYValue *v, int collecting) {
     if (!(UINT64_C(1) << v->type & (UINT64_C(1) << SPY_GENERATOR | UINT64_C(1) << SPY_COROUTINE |
         UINT64_C(1) << SPY_ASYNC_GENERATOR | UINT64_C(1) << SPY_MEMORYVIEW | UINT64_C(1) << SPY_INSTANCE))) return 0;
     if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) {
@@ -1704,7 +1706,7 @@ static int finalize_later(SPYValue *v) {
         if (v->finalized || !(v->as.generator.started || hooked) || v->as.generator.running || v->as.generator.done) {
             /* Its execution state goes first, as in gen_dealloc: the
              * tracebacks of the exceptions it handles may hold the frame. */
-            if (v->as.generator.frame && v->as.generator.frame->refs > 1 && !v->as.generator.running) generator_close(v);
+            if (!collecting && v->as.generator.frame && v->as.generator.frame->refs > 1 && !v->as.generator.running) generator_close(v);
             return v->as.generator.frame && v->as.generator.frame->refs > 1 ? 2 : 0;
         }
     } else if (v->finalized) return 0;
@@ -1745,7 +1747,7 @@ static NO_INLINE void release_dead(SPYValue *v) {
     v->pending = NULL;
     while (pending) {
         v = pending; pending = v->pending;
-        int later = finalize_later(v);
+        int later = finalize_later(v, 0);
         if (later) {
             if (later == 1) v->refs = 1;
             else frame_take(v, 0);
@@ -1802,7 +1804,7 @@ static size_t collect_once(SPYContext *c, int *only) {
     Work kept = { dead < end ? mem_block(c, NULL, (size_t)(end - dead) * sizeof(SPYValue *), ARRAY(sizeof(SPYValue *))) : NULL, 0 };
     if (!kept.items) { mem_free(work.items); return *only = 0; }
     for (at = dead; at < end; at++)
-        if (!(*at)->marked && finalize_later(*at) == 1) { (*at)->refs++; (*at)->marked = 1; kept.items[kept.len++] = *at; }
+        if (!(*at)->marked && finalize_later(*at, 1) == 1) { (*at)->refs++; (*at)->marked = 1; kept.items[kept.len++] = *at; }
     for (size_t i = 0; i < kept.len; i++) edges(kept.items[i], mark_edge, &kept);
     /* So does a generator past that whose frame survives, the frame's
      * (frame_take), which may keep another's frame. */

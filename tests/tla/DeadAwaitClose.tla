@@ -5,7 +5,8 @@
 (* specify it. The awaited one is live, or was closed (ended) before the   *)
 (* other dies; the other dies when dropped or as part of a cycle that a   *)
 (* collection reclaims, requested or started by the engine while the       *)
-(* program allocates. Its close first closes a live awaited one, which     *)
+(* program allocates; it may also hold the other's frame, in its cycle    *)
+(* when it has one. Its close first closes a live awaited one, which       *)
 (* logs "inner", then raises GeneratorExit at the await, whose handler     *)
 (* logs "exit" and then finishes, raises KeyError, or yields (awaits, for  *)
 (* a coroutine), which is a RuntimeError the close reports. An enclosing   *)
@@ -13,7 +14,7 @@
 (* cleared without running it. The outcome is the log.                     *)
 (***************************************************************************)
 Programs == [kind : {"asyncgen", "coroutine"}, inner : {"live", "ended"}, death : {"drop", "cycle", "automatic"},
-             handler : {"finish", "raise", "yield"}]
+             handler : {"finish", "raise", "yield"}, frame : {"free", "held"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -30,7 +31,7 @@ Execute == outcome = Pending /\ UNCHANGED program /\ outcome' = Log(program)
 Spec == Init /\ [][Execute]_vars
 
 -----------------------------------------------------------------------------
-\* How it dies never changes what its close runs.
+\* How it dies, and whether its frame is held, never changes what its close runs.
 DeathUnseen == outcome # Pending =>
     \A q \in Programs : (q.kind = program.kind /\ q.inner = program.inner /\ q.handler = program.handler) => Log(q) = outcome
 =============================================================================

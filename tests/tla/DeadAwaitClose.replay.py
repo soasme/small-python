@@ -64,10 +64,11 @@ def outcome(p):
     if p["inner"] == "ended":
         inner.close()
     del inner, log[:]
+    held = (g.ag_frame if p["kind"] == "asyncgen" else g.cr_frame) if p["frame"] == "held" else None
     if p["death"] != "drop":
-        box = [g]
+        box = [g, held]
         box.append(box)
-        del box
+        del box, held
     del g
     if p["death"] == "automatic":
         # Allocate cycles until a collection the engine starts reclaims it.
@@ -77,7 +78,9 @@ def outcome(p):
             junk.append(junk)
             n += 1
     else:
-        host.collect()
+        # A close the handler ignored leaves it suspended for later collections.
+        for _ in range(3):
+            host.collect()
     return " ".join(log)
 
 
