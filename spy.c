@@ -634,6 +634,7 @@ static int bases_named(SPYValue *object, SPYValue *name) {
 }
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static SPYValue *bases_of(SPYValue *);
+static int repeat_kept(SPYContext *, SPYValue *);
 static SPYValue *contained_base(SPYContext *, SPYValue *);
 static int special_dispatch(SPYValue *);
 static int index_defined(SPYContext *, SPYValue *);
@@ -11634,6 +11635,8 @@ static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b
                (op == '*' && repeats(y) && (!right || builtin_base(c, b, o->direct, NULL)));
         if (!kept) return operand_error(c, binary_symbol(op), a, b, NULL);
     }
+    /* x's class dropped its repetition: y's repeats by x. */
+    if (op == '*' && left && !repeat_kept(c, a) && repeat_kept(c, b)) return binary_builtin(c, op, y, a);
     /* A concatenation reads a subclass's buffer by its own __buffer__. */
     if (op == '+' && (x->type == SPY_BYTES || x->type == SPY_BYTEARRAY) && (own_buffer(a) || own_buffer(b)) && concatenable(y))
         return bytes_concat(c, x, a, b);
@@ -22452,6 +22455,33 @@ static SPYValue *repeated_base(SPYContext *c, SPYValue *v) {
     return base ? base : builtin_value(c, v, SPY_BYTEARRAY);
 }
 static SPYValue *inplace(SPYContext *, int, SPYValue *, SPYValue *);
+/* Whether v repeats by itself (sq_repeat): a sequence, or a subclass's
+ * instance whose class defines no __mul__ before the builtin's. */
+static int repeat_kept(SPYContext *c, SPYValue *v) {
+    return repeats(v) || (v->type == SPY_INSTANCE && v->as.map.base && repeats(v->as.map.base) && builtin_base(c, v, "__mul__", NULL));
+}
+/* Whether Type(x) has sequence methods (tp_as_sequence): the builtin
+ * sequences, mappings, sets and views, and every other class but the
+ * builtin ones, ExceptionGroup aside, and five typing classes. */
+static int sequence_methods(SPYContext *c, SPYValue *x) {
+    static const char *const fixed[] = {"GenericAlias", "Union", "NoDefaultType", "TypeAliasType", "generic_alias_iterator"};
+    SPYValue *cls = x->type == SPY_INSTANCE ? x->as.map.parent : x->type == SPY_CLASS ? x->as.map.meta : NULL;
+    if (cls) {
+        if (static_type(c, cls)) return cls == c->exceptions[X_EXCEPTION_GROUP];
+        for (size_t i = 0; c->intrinsics && i < sizeof(fixed) / sizeof(*fixed); i++) if (name_local(c->intrinsics, fixed[i]) == cls) return 0;
+        return 1;
+    }
+    return UINT64_C(1) << x->type & (UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_BYTES |
+                                     UINT64_C(1) << SPY_BYTEARRAY | UINT64_C(1) << SPY_DICT | UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET |
+                                     UINT64_C(1) << SPY_FROZENSET | UINT64_C(1) << SPY_RANGE | UINT64_C(1) << SPY_DICT_KEYS | UINT64_C(1) << SPY_DICT_VALUES |
+                                     UINT64_C(1) << SPY_DICT_ITEMS | UINT64_C(1) << SPY_MEMORYVIEW | UINT64_C(1) << SPY_MAPPINGPROXY |
+                                     UINT64_C(1) << SPY_TEMPLATE | UINT64_C(1) << SPY_FRAME_LOCALS) ? 1 : 0;
+}
+/* Whether x *= y, its methods declined, raises instead of repeating y
+ * by x: x has sequence methods but no repetition of its own. */
+static int repeat_refused(SPYContext *c, SPYValue *x, SPYValue *y) {
+    return repeat_kept(c, y) && !repeat_kept(c, x) && !repeated_base(c, x) && sequence_methods(c, x);
+}
 /* x *= y of a list's or bytearray's subclass instance whose plain * and
  * y's reflected one declined: its value repeated in place; x. */
 static SPYValue *repeat_declined(SPYContext *c, SPYValue *x, SPYValue *y) {
@@ -22568,6 +22598,12 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         return spy_retain(old);
     }
     if (op == T_MULEQ && old->type == SPY_LIST) return list_repeat(c, old, rhs);
+    if (token == '*' && repeat_refused(c, old, rhs)) {
+        result = special_dispatch(old) || special_dispatch(rhs) ? binary_special(c, operation, old, rhs, NULL) : NULL;
+        if (result || c->error_type[0]) return result;
+        operand_error(c, "*", old, rhs, NULL); augmented_error(c, token, old, rhs);
+        return NULL;
+    }
     result = binary(c, token, old, rhs);
     if (!result && error_is(c, "TypeError")) augmented_error(c, token, old, rhs);
     return result;
@@ -29776,7 +29812,7 @@ static int sort_reversed(SPYContext *c, Machine *m, Consumer *s, SPYValue *resul
 /* Which of an operator's special method calls one is: x's own first, y's
  * reflected one first, or the last. */
 enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST, OPERATOR_INDEX };
-static SPYValue *operator_declined(SPYContext *, const Operator *, int, SPYValue *, SPYValue *, int, SPYValue **, SPYValue **, int *);
+static SPYValue *operator_declined(SPYContext *, const Operator *, int, SPYValue *, SPYValue *, int, int, SPYValue **, SPYValue **, int *);
 static SPYValue *rich_entry(SPYContext *, SPYValue *, int, int *);
 static int rich_default(SPYContext *, SPYValue *, int);
 static SPYValue *truth_function(SPYContext *, SPYValue *, int *);
@@ -30176,7 +30212,7 @@ static SPYValue *consumer_compared(SPYContext *c, Machine *m, SPYValue *state, S
     if (result == c->not_implemented) {
         spy_release(result);
         if (index & 1) test = comparison_declined(c, T_EQ, left, right);
-        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test, NULL)))
+        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, 0, &self, &test, NULL)))
             consumer_compare(c, m, item, hash, cursor, i, 1, candidate, function, self, left);
     }
     if (!function && test) {
@@ -30283,7 +30319,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         SPYValue *x = s->result, *y = s->item, *self;
         if (key == c->not_implemented) {
             spy_release(key);
-            SPYValue *function = operator_declined(c, operator_of('+'), '+', x, y, s->phase, &self, &key, NULL);
+            SPYValue *function = operator_declined(c, operator_of('+'), '+', x, y, s->phase, 0, &self, &key, NULL);
             if (function) {
                 s->best = spy_retain(function); s->phase = OPERATOR_LAST; s->swapped = self == y;
                 return 0;
@@ -35179,7 +35215,7 @@ static NO_INLINE Machine *lookup_returned(SPYContext *c, Machine *m, Instruction
     if (result == c->not_implemented) {
         spy_release(result);
         if (index->as.integer_data.small & 1) test = comparison_declined(c, T_EQ, left, right);
-        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test, NULL)))
+        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, 0, &self, &test, NULL)))
             function = lookup_push(c, m, storage, key, h, cursor, i, candidate, 1, function, self, left, &env);
     }
     if (function || c->error_type[0]) m = lookup_enter(c, m, ins, map, key, h, function, env, -1, pc);
@@ -36364,7 +36400,7 @@ static NO_INLINE int declined_step(SPYContext *c, Machine *m, Instruction *ins, 
     return step_operation(ins, &op) == OPERATE_COMPARE && rich_kind(op) >= 0 && declined_bases(c, op, x, y, NULL, &self) &&
            declined_k(c, m, ins, x, y, op, self);
 }
-static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, int op, SPYValue *x, SPYValue *y, int phase,
+static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, int op, SPYValue *x, SPYValue *y, int phase, int inplace,
                                              SPYValue **self, SPYValue **result, int *negated) {
     int rich = rich_kind(op);
     SPYValue *other = phase == OPERATOR_FIRST ? x : y;
@@ -36382,6 +36418,7 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
     *result = !name ? NULL : o ? try_operator(c, *self, name, other, NULL, 0) : rich_method(c, *self == y ? rich_reflected[rich] : rich, *self, other);
     if (!*result && !c->error_type[0] && name && o && *self == x) *result = builtin_operand(c, o, x, y);
     if (!*result && !c->error_type[0] && op == T_MULEQ && repeated_base(c, x)) *result = repeat_declined(c, x, y);
+    if (!*result && !c->error_type[0] && inplace && o->token == '*' && repeat_refused(c, x, y)) *result = operand_error(c, "*", x, y, NULL);
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
     return NULL;
 }
@@ -36414,7 +36451,7 @@ static SPYValue *equal_returned(SPYContext *c, Machine *m, SPYValue *state, SPYV
     if (result == c->not_implemented) {
         spy_release(result);
         if (state->as.seq.items[2] == c->booleans[1]) test = comparison_declined(c, T_EQ, left, right);
-        else function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test, NULL);
+        else function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, 0, &self, &test, NULL);
     }
     if (function) {
         Continuation k;
@@ -36975,6 +37012,8 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     } else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {
         spy_release(result);
         const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : kind == OPERATE_BINARY ? operator_of(op) : NULL;
+        /* An in-place operator's, or the plain one it falls back to (c->augmenting). */
+        int augmenting = kind == OPERATE_INPLACE || (m->len && m->stack[m->len - 1] == c->augmenting);
         if (phase == OPERATOR_FIRST && kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
             /* A declined in-place method leaves the plain operator, its
              * Python method a call. */
@@ -37007,10 +37046,27 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             /* Their own in-place operation then (operator_call), also a
              * subclass's repetition once its plain * declined. */
             result = c->error_type[0] ? NULL : x->type == SPY_INSTANCE ? repeat_declined(c, x, y) : inplace(c, op, x, y);
-        } else if (phase == OPERATOR_REFLECTED && (kind == OPERATE_BINARY ? op == '*' && repeats(x) : op == T_MULEQ) && y->type == SPY_INSTANCE &&
-                   index_special(c, y)) {
-            /* The repetition, or a list's or bytearray's own *=, then
-             * takes y's Python __index__ (operator_call). */
+        } else if (kind == OPERATE_BINARY && op == '*' && !augmenting && x->type == SPY_INSTANCE && !repeat_kept(c, x) && repeat_kept(c, y) &&
+                   index_special(c, x) && !(phase == OPERATOR_FIRST && item_function(c, y, "__rmul__"))) {
+            /* y then repeats by x's Python __index__ (operator_call), once
+             * x's * and y's reflected one declined. */
+            size_t depth = m->len;
+            int pushed = !operator_push(c, m, y, x, OPERATOR_INDEX);
+            SPYValue *env = NULL, *entered = pushed ? special_env(c, m, index_special(c, x), x, NULL, NULL, &env) : NULL;
+            Call *call = entered ? call_enter(c, entered, env, m) : NULL;
+            if (call) {
+                spy_release(x); spy_release(y);
+                call->m.outermost = CALL_OPERATOR;
+                return &call->m;
+            }
+            while (m->len > depth) spy_release(machine_pop(m));
+            result = NULL;
+        } else if ((phase == OPERATOR_REFLECTED ||
+                    (phase == OPERATOR_FIRST && op == T_MULEQ && x->type == SPY_INSTANCE && repeated_base(c, x) && !item_function(c, y, o->reflected))) &&
+                   (kind == OPERATE_BINARY ? op == '*' && repeats(x) : op == T_MULEQ) && y->type == SPY_INSTANCE && index_special(c, y)) {
+            /* The repetition, or a list's or bytearray's own *=, also a
+             * subclass's once its plain * declined, then takes y's Python
+             * __index__ (operator_call). */
             size_t depth = m->len;
             int pushed = !operator_push(c, m, x, y, OPERATOR_INDEX);
             SPYValue *env = NULL, *entered = pushed ? special_env(c, m, index_special(c, y), y, NULL, NULL, &env) : NULL;
@@ -37024,7 +37080,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             result = NULL;
         } else {
             int negated = 0;
-            SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result, &negated);
+            SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, augmenting, &self, &result, &negated);
             if (function == c->unbound) {
                 /* Self's comparison runs on the machine (declined_bases):
                  * its mapping's, or its items', first. */

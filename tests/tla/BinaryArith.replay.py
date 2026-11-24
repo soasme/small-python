@@ -105,6 +105,13 @@ SOURCES = {
                                    "    def __rsub__(self, o):\n        for _ in (): pass\n        log.append('rsub')\n        return 'rsub'\n"
                                    "class L(list): pass\nclass S(set): pass\n"
                                    "x = L([1])\nx *= R()\ny = S({1})\ny -= R()\nresult = (x, y, log)"),
+    "repetition_slots": ("def error(f):\n    try:\n        f()\n    except TypeError as e:\n        return str(e)\n"
+                         "class S(str):\n    def __mul__(self, o): return NotImplemented\n"
+                         "    def __index__(self):\n        for _ in (): pass\n        return 3\n"
+                         "class C:\n    def __index__(self): return 2\n"
+                         "def augment(x, y):\n    x *= y\n"
+                         "x = 2\nx *= 'b'\n"
+                         "result = (S('a') * 'b', error(lambda: augment(S('a'), 'b')), error(lambda: augment(C(), 'b')), x)"),
     "complex_declines": ("def error(f):\n    try:\n        f()\n    except TypeError as e:\n        return str(e)\n"
                          "result = (error(lambda: 'b' * 1j), error(lambda: 'b' + 1j), error(lambda: 1j + 'b'))"),
     "inplace_mul_first": ("class R:\n    def __rmul__(self, o): return 'rmul'\n"

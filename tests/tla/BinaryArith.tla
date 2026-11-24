@@ -47,7 +47,7 @@ Cases == {"int_float", "true_div", "floor_div", "mod_sign", "divmod", "complex_m
           "bool_matmul", "complex_shift", "divmod_complex", "complex_zero_div", "pow3_instance", "pow3_methods", "divmod_methods", "builtin_declines", "divmod_descriptor", "divmod_slot_declines",
           "pow3_float", "pow3_complex", "pow3_zero", "pow3_inverse", "inplace_messages", "inplace_pow_message",
           "sequence_reflected", "sequence_declined", "set_dict_operand", "cross_builtin_operand", "inplace_inherited",
-          "inplace_subclass_reflected", "inplace_mul_first", "complex_declines", "plain_body_operator"}
+          "inplace_subclass_reflected", "inplace_mul_first", "complex_declines", "repetition_slots", "plain_body_operator"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}]
             \cup [op : Ops, left : Kinds, right : {"same"}, relation : {"same"}]
             \cup [case : Cases]
@@ -179,6 +179,9 @@ Case(c) ==
       \* it declines, *= repeats the list in place
       \* A complex number declines a sequence, which repeats by it or
       \* concatenates under its own message
+      \* S drops str's repetition: S * 'b' repeats 'b' by S's __index__; in
+      \* place, a Python class's instance never repeats y by itself, an int does
+      [] c = "repetition_slots" -> "('bbb', \"unsupported operand type(s) for *=: 'S' and 'str'\", \"unsupported operand type(s) for *=: 'C' and 'str'\", 'bb')"
       [] c = "complex_declines" -> "(\"can't multiply sequence by non-int of type 'complex'\", 'can only concatenate str (not \"complex\") to str', \"unsupported operand type(s) for +: 'complex' and 'str'\")"
       [] c = "inplace_mul_first" -> "('mul', [1, 1], True, \"can't multiply sequence by non-int of type 'str'\")"
       \* A call-free function body calls V's Python __add__ and __isub__

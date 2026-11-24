@@ -134,9 +134,6 @@ pinned CPython oracle), then fix what they show.
     inherited `__length_hint__`.
   - Builtin adapters (`zip`, `enumerate`, `map`, `filter`) do not pass on
     the `StopIteration` value of the generator they end on.
-  - `LA([1]) *= 2` with a list subclass defining `__mul__`: CPython calls
-    `__mul__`; spy and the standard (7.6.3 step 3) keep list's `__imul__`.
-    The standard is wrong; fix it, then spy.
   - A trace function sees a `line` event for a function's docstring, and
     under `-OO` for a class's removed docstring; CPython reports neither.
     A function body compiles its docstring as an expression statement, and
