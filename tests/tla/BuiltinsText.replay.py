@@ -52,6 +52,8 @@ SOURCES = {
                          "result = (str.format('{}|{k:x}', G('a'), k=G('b')), '{k}'.format_map({'k': G('c')}), positional())",
     "ascii_container_calls": "log = []\nclass S:\n    def __init__(s, t): s.t = t\n    def __repr__(s):\n        for _ in (): pass\n        log.append(s.t)\n        return s.t\n"
                              "result = (ascii([S('a'), (S('\\xe9'),)]), len(log))",
+    "fstring_ascii_calls": "log = []\nclass S:\n    def __init__(s, t): s.t = t\n    def __repr__(s):\n        for _ in (): pass\n        log.append(s.t)\n        return s.t\n"
+                           "result = (f'{S(\"\\xe9\")!a:>6}', f'{[S(\"b\")]!a}', len(log))",
     "object_format_calls": "log = []\nclass S:\n    def __str__(s):\n        for _ in (): pass\n        log.append('str')\n        return 's'\n"
                            "f = object.__format__\nresult = (object.__format__(S(), ''), f(S(), ''), log)",
     "format_object_spec": "result = format(object(), 'x')",

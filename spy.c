@@ -600,6 +600,7 @@ struct SPYContext {
     SPYValue *pattern_calls[2]; /* The builtin len and isinstance, as a pattern's steps call them (pattern_step). */
     Node *node_open; /* The node of the last compile-time SyntaxError, while analysis runs (analysis_defer). */
     SPYValue *next_call; /* The builtin next, as dict.fromkeys calls it on a machine (fromkeys_items). */
+    SPYValue *ascii_field; /* The builtin ascii, as an f-string's !a field calls it while calls can pause. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -17121,11 +17122,10 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     case N_FORMAT:
         compile_expr(c, p, n->a);
         if (p->calls == PAUSING) {
-            /* While calls can pause, a field's str(), repr() and format()
-             * are calls on the machine, their callee before the value;
-             * the f-string joins a str subclass's text. */
-            if (n->op == 's' || n->op == 'r') { emit(c, p, BC_CONVERT, n, n->op | CONVERT_CALL); emit(c, p, BC_CALLN, n, 1); }
-            else if (n->op) emit(c, p, BC_CONVERT, n, n->op);
+            /* While calls can pause, a field's str(), repr(), ascii() and
+             * format() are calls on the machine, their callee before the
+             * value; the f-string joins a str subclass's text. */
+            if (n->op) { emit(c, p, BC_CONVERT, n, n->op | CONVERT_CALL); emit(c, p, BC_CALLN, n, 1); }
             emit(c, p, BC_CONVERT, n, 'f' | CONVERT_CALL);
             if (n->b) compile_expr(c, p, n->b);
             emit(c, p, BC_CALLN, n, 1 + !!n->b); break;
@@ -32727,11 +32727,12 @@ static NO_INLINE void method_load(SPYContext *c, Machine *m, AttributeOperand *a
     if (callee) machine_push(c, m, callee);
 }
 /* BC_CONVERT: field conversion arg of value; or, with CONVERT_CALL, value
- * after the callee of its conversion or format ('f'), str, repr or format,
- * for the call after it. */
+ * after the callee of its conversion or format ('f'), str, repr, ascii or
+ * format, for the call after it. */
 static NO_INLINE SPYValue *convert_step(SPYContext *c, Machine *m, SPYValue *value, int arg) {
     if (arg < CONVERT_CALL) return convert_field(c, value, arg);
-    SPYValue *callee = arg == ('s' | CONVERT_CALL) ? c->types[SPY_STRING] : c->field_calls[arg == ('f' | CONVERT_CALL)];
+    SPYValue *callee = arg == ('s' | CONVERT_CALL) ? c->types[SPY_STRING] : arg == ('a' | CONVERT_CALL) ? c->ascii_field :
+                       c->field_calls[arg == ('f' | CONVERT_CALL)];
     return machine_push(c, m, spy_retain(callee)) ? NULL : spy_retain(value);
 }
 /* BC_JOIN: the str of the f-string's count parts on top of m's stack,
@@ -52831,6 +52832,7 @@ SPYContext *spy_context_new(void) {
         if (i == B_REPR || i == B_FORMAT) c->field_calls[i == B_FORMAT] = spy_retain(v);
         if (i == B_SORTED) c->sorter = spy_retain(v);
         if (i == B_NEXT) c->next_call = spy_retain(v);
+        if (i == B_ASCII) c->ascii_field = spy_retain(v);
         if (i == B_LEN || i == B_ISINSTANCE) c->pattern_calls[i == B_ISINSTANCE] = spy_retain(v);
         int status = name_set(c, c->builtins, names[i], v);
         spy_release(v);
