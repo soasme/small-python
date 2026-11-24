@@ -732,8 +732,20 @@ int main(int argc, char **argv) {
     SPYValue *new_args[] = {spy_eval(c, "type", "host.py"), spy_string(c, "Made", 4), spy_eval(c, "()", "host.py"), spy_eval(c, "{'y': 3}", "host.py")};
     SPYValue *made_type = spy_call(c, host_type_new, 4, new_args);
     assert(made_type && integer(c, spy_call(c, type_made, 1, &made_type)) == 1);
-    spy_release(made_type); spy_release(type_made); spy_release(host_type_new);
+    spy_release(made_type); spy_release(type_made);
     for (int i = 0; i < 4; i++) spy_release(new_args[i]);
+    /* type() and type.__new__ of a base whose metaclass has its own
+     * __new__, which makes the class. */
+    execute(c, "class Derived(type):\n    def __new__(m, name, bases, ns): return super().__new__(m, name + '!', bases, ns)\n"
+               "class Based(metaclass=Derived): pass\nhost_type = type\n"
+               "def derived_made(k): return 1 if type(k) is Derived and k.__name__ == 'D!' else 0\n");
+    SPYValue *host_type = spy_get_global(c, "host_type"), *derived_made = spy_get_global(c, "derived_made");
+    SPYValue *derived_args[] = {spy_eval(c, "type", "host.py"), spy_string(c, "D", 1), spy_eval(c, "(Based,)", "host.py"), spy_eval(c, "{}", "host.py")};
+    SPYValue *by_type = spy_call(c, host_type, 3, derived_args + 1), *by_new = spy_call(c, host_type_new, 4, derived_args);
+    assert(by_type && integer(c, spy_call(c, derived_made, 1, &by_type)) == 1 && by_new && integer(c, spy_call(c, derived_made, 1, &by_new)) == 1);
+    spy_release(by_type); spy_release(by_new); spy_release(host_type); spy_release(derived_made);
+    for (int i = 0; i < 4; i++) spy_release(derived_args[i]);
+    spy_release(host_type_new);
     spy_release(shown_text); spy_release(held_two); spy_release(host_str); spy_release(host_contains); spy_release(two_held);
     spy_release(build); spy_release(q_parts[0]); spy_release(q_parts[1]);
     /* The host calls a class body's function, which returns None, and a

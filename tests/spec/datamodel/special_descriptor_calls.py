@@ -163,3 +163,22 @@ class ReprlessMeta(type):
 class Reprless(metaclass=ReprlessMeta): pass
 assert_eq([t.split(" at ")[0] for t in (repr(Reprless), str(Reprless), f"{Reprless}", "%r" % Reprless, str([Reprless]))],
           ["<ReprlessMeta object"] * 4 + ["[<ReprlessMeta object"])
+# A getter whose parameters do not take the call raises its TypeError.
+class ArityGet:
+    def __get__(self): return len
+class ArityHolder:
+    __len__ = property(lambda: 5)
+    __repr__ = property(lambda: 5)
+class ArityGot:
+    __len__ = ArityGet()
+    __index__ = ArityGet()
+    __iter__ = ArityGet()
+def arity_errors():
+    out = []
+    for f in (lambda: len(ArityHolder()), lambda: repr(ArityHolder()), lambda: len(ArityGot()), lambda: [1][ArityGot()],
+              lambda: list(ArityGot()), lambda: format(ArityHolder()), lambda: str(ArityHolder())):
+        try: f()
+        except TypeError as e: out.append(str(e))
+    return out
+lambda_error, get_error = "ArityHolder.<lambda>() takes 0 positional arguments but 1 was given", "ArityGet.__get__() takes 1 positional argument but 3 were given"
+assert_eq(arity_errors(), [lambda_error] * 2 + [get_error] * 3 + [lambda_error] * 2)
