@@ -23,6 +23,8 @@ def define(p):
 def show(namespace, f, attr):
     if attr == "call":
         return repr(f())
+    if attr == "annotate_qualname":
+        return "None" if f.__annotate__ is None else repr(f.__annotate__.__qualname__)
     value = getattr(f, attr)
     if attr == "__closure__":
         return "None" if value is None else "cells " + " ".join(repr(c.cell_contents) for c in value)

@@ -17,7 +17,8 @@
 (* at module level, in a class C, or nested in a function g (where it      *)
 (* refers to g's local v = 5), with or without a docstring and a -> int    *)
 (* annotation; f returns its parameters' values. It then reads one         *)
-(* attribute, or writes one and reads it back (or calls f()).              *)
+(* attribute (annotate_qualname: f.__annotate__.__qualname__), or writes   *)
+(* one and reads it back (or calls f()).                                   *)
 (*                                                                         *)
 (* The outcome is the repr of what is read or returned, or the exception.  *)
 (***************************************************************************)
@@ -26,7 +27,7 @@ EXTENDS Naturals, Sequences
 Params == {"plain", "default", "kwonly", "both", "generic"}
 Places == {"module", "class", "nested"}
 Reads == {"__defaults__", "__kwdefaults__", "__closure__", "__doc__", "__name__", "__qualname__", "__module__",
-          "__annotations__", "__annotate__", "__type_params__", "__dict__", "__globals__", "__builtins__", "call"}
+          "__annotations__", "__annotate__", "annotate_qualname", "__type_params__", "__dict__", "__globals__", "__builtins__", "call"}
 Writes == {"__name__ = 'g'", "__name__ = 1", "__qualname__ = 'q'", "__qualname__ = 1", "__defaults__ = (2,)",
            "__defaults__ = 1", "__defaults__ = None", "__kwdefaults__ = {'x': 3}", "__kwdefaults__ = 1",
            "__doc__ = 1", "__module__ = 1", "__closure__ = None", "__globals__ = {}", "__builtins__ = {}",
@@ -64,6 +65,11 @@ Read(p, attr) ==
       [] attr = "__module__" -> "'m'"
       [] attr = "__annotations__" -> Annotations(p)
       [] attr = "__annotate__" -> IF p.annotated THEN "function" ELSE "None"
+      \* A top-level generic function's annotate function is not qualified.
+      [] attr = "annotate_qualname" ->
+            CASE ~p.annotated -> "None"
+              [] p.params = "generic" /\ p.place = "module" -> "'__annotate__'"
+              [] OTHER -> "'" \o Qualname(p) \o ".__annotate__'"
       [] attr = "__type_params__" -> IF p.params = "generic" THEN "(T,)" ELSE "()"
       [] attr = "__dict__" -> "{}"
       [] attr = "__globals__" -> "the module's globals"

@@ -18597,6 +18597,10 @@ static int append_qualname(Buffer *out, Scope *scope) {
         return puts_buffer(out, scope_name(scope));
     }
     if (scope->flags & F_ANNOTATE) {
+        /* Directly inside a module-level generic definition's parameter
+         * scope, CPython names it by its name alone. */
+        Scope *parent = scope->parent;
+        if (parent && parent->form == N_GENERIC && parent->parent && parent->parent->kind == S_MODULE) return puts_buffer(out, "__annotate__");
         if (scope->annotate && (append_qualname(out, scope->annotate) || puts_buffer(out, "."))) return -1;
         return puts_buffer(out, "__annotate__");
     }
