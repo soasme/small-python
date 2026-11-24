@@ -79,6 +79,10 @@ SOURCES = {
     "fromkeys_iter_source": ("log = []\nclass I:\n    def __iter__(s):\n        for _ in (): pass\n        log.append('i'); return iter([4])\n"
                              "class S(dict): pass\nclass F(frozendict): pass\n"
                              "result = (S.fromkeys(I()), F.fromkeys(I(), 1), dict.fromkeys(I()), log)"),
+    "update_bound_merge": ("log = []\nclass K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 0\n"
+                           "    def __eq__(s, o):\n        for _ in (): pass\n        log.append((s.n, o.n)); return s.n == o.n\n"
+                           "d = {K(1): 'a'}\nbox = [d]\nbox[0].update({K(1): 'b'})\nu = d.update\n"
+                           "for i in range(2): u({K(2): i})\nresult = (sorted((k.n, v) for k, v in d.items()), log)"),
     "fromkeys": "result = (dict.fromkeys('ab'), dict.fromkeys([1, 2], 0), type(Missing.fromkeys('a')).__name__)",
     "fromkeys_shared": "d = dict.fromkeys('ab', [])\nd['a'].append(1)\nresult = d",
     "fromkeys_hashed": "H.log.clear()\nd = dict.fromkeys([H(1), 2, H(3), H(1)], 0)\nresult = ([getattr(k, 'v', k) for k in d], list(d.values()), H.log)",

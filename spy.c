@@ -33354,11 +33354,15 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Instruct
         spy_release(callee);
         return result;
     }
-    if (callee && method == M_UPDATE && argc == 1 && merges(callee, argv[1])) {
-        /* A dict's update of a dict (update_call). */
+    /* A dict's update of a dict (update_call), bound too. */
+    SPYValue *updated = !callee || argc != 1 ? NULL : method == M_UPDATE ? callee :
+                        method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_UPDATE ?
+                        callee->as.bound.self : NULL;
+    if (updated && merges(updated, argv[1])) {
         SPYValue *source = spy_retain(argv[1]);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-        return update_call(c, m, callee, source, env);
+        spy_retain(updated); spy_release(callee);
+        return update_call(c, m, updated, source, env);
     }
     /* A list's pop() or insert() of an index with a Python __index__, and the others
      * of index_arguments, bound too, a native method bound to a value made
