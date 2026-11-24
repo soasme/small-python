@@ -63,7 +63,7 @@ Instance(v, args) == CASE v = "1" -> Contains(args, "int")
 
 Cases == {"list_int", "dict_args", "tuple_ellipsis", "call_origin", "no_runtime_check", "isinstance_fails",
           "issubclass_fails", "eq", "unpacked", "unpack_non_tuple", "type_of_origin", "getattr_forward",
-          "dir_like", "class_getitem", "subclass_alias", "nested_param", "too_many_args", "not_generic",
+          "dir_like", "class_getitem", "subclass_alias", "nested_param", "nested_list_subst", "param_identity", "repr_list_shrinks", "too_many_args", "not_generic",
           "subscript_int", "union_or", "union_dedup", "union_none", "union_isinstance",
           "union_generic_isinstance", "union_nested", "union_bad", "union_bad_left", "union_hash",
           "union_generic_alias", "union_param", "union_getitem_noparams", "union_origin", "union_subclass",
@@ -100,6 +100,11 @@ Case(c) ==
       [] c = "class_getitem" -> "('cgi', <class 'int'>)"
       [] c = "subclass_alias" -> "(True, True)"
       [] c = "nested_param" -> "((T,), 'list[int]', 'dict[str, int]')"
+      \* Parameters inside nested list arguments are substituted, by identity.
+      [] c = "nested_list_subst" -> "(<class 'str'>, [[<class 'int'>], (<class 'int'>,)])"
+      [] c = "param_identity" -> "(2, (('s', <class 'int'>), ('s', <class 'str'>)))"
+      \* A list argument's length is read once before its items.
+      [] c = "repr_list_shrinks" -> "IndexError: list index out of range"
       [] c = "too_many_args" -> "TypeError: Too many arguments for list[T]; actual 2, expected 1"
       [] c = "not_generic" -> "TypeError: list[int] is not a generic class"
       [] c = "subscript_int" -> "TypeError: type 'int' is not subscriptable"

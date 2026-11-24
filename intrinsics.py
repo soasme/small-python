@@ -142,23 +142,28 @@ def _unpack_args(*args):
     return newargs
 
 
+def _param_index(params, x):
+    # x's position among params, compared by identity; None when absent.
+    return next((i for i, p in enumerate(params) if p is x), None)
+
+
 def _make_parameters(args):
-    # The free type variables of arguments, in first-seen order.
+    # The free type variables of arguments, in first-seen order, each once.
     parameters = []
     for t in args:
         if _is(t, type):
             continue
-        if _is(t, (tuple, list)):
-            for x in _make_parameters(t):
-                if x not in parameters:
-                    parameters.append(x)
-        elif hasattr(t, '__typing_subst__'):
-            if t not in parameters:
-                parameters.append(t)
+        if hasattr(t, '__typing_subst__'):
+            found = (t,)
         else:
-            for x in getattr(t, '__parameters__', ()):
-                if x not in parameters:
-                    parameters.append(x)
+            found = getattr(t, '__parameters__', None)
+            if found is None and _is(t, (tuple, list)):
+                found = _make_parameters(t)
+            if not _is(found, tuple):
+                continue
+        for x in found:
+            if _param_index(parameters, x) is None:
+                parameters.append(x)
     return tuple(parameters)
 
 
@@ -200,13 +205,13 @@ def _subs_tvars(obj, params, argitems):
         return obj
     subargs = []
     for arg in subparams:
-        iparam = params.index(arg)
-        param = params[iparam]
-        arg = argitems[iparam]
-        if _is(param, TypeVarTuple) and _is(arg, tuple):
-            subargs.extend(arg)
-        else:
-            subargs.append(arg)
+        iparam = _param_index(params, arg)
+        if iparam is not None:
+            param, arg = params[iparam], argitems[iparam]
+            if hasattr(type(param), '__iter__') and _is(arg, tuple):
+                subargs.extend(arg)
+                continue
+        subargs.append(arg)
     return obj[tuple(subargs)]
 
 
@@ -228,17 +233,24 @@ def _subs_parameters(alias, args, params, item):
             newargs.append(arg)
             continue
         if _is(arg, (tuple, list)):
-            sub = [_subs_tvars(x, params, item) if not hasattr(x, '__typing_subst__')
-                   else x.__typing_subst__(item[params.index(x)]) for x in arg]
-            newargs.append(type(arg)(sub))
+            # Parameters in a list or tuple argument, nested ones too.
+            sub = _subs_parameters(alias, arg, params, item)
+            newargs.append(list(sub) if _is(arg, list) else sub)
             continue
         unpack = _is_unpacked_typevartuple(arg)
+        original = arg
         subst = getattr(arg, '__typing_subst__', None)
         if subst:
-            arg = subst(item[params.index(arg)])
+            index = _param_index(params, arg)
+            if index is None:
+                raise TypeError(f"argument {arg!r} with __typing_subst__ was not found in __parameters__")
+            arg = subst(item[index])
         else:
             arg = _subs_tvars(arg, params, item)
-        if unpack and _is(arg, tuple):
+        if unpack:
+            if not _is(arg, tuple):
+                raise TypeError(f"expected __typing_subst__ of {type(original).__qualname__} objects to return a tuple,"
+                                f" not {type(arg).__qualname__}")
             newargs.extend(arg)
         else:
             newargs.append(arg)
@@ -392,7 +404,8 @@ class GenericAlias:
         if not args:
             items = '()'
         else:
-            items = ', '.join('[' + ', '.join(_alias_repr_item(x) for x in a) + ']'
+            # A list's length is taken once; an item's repr may shrink it.
+            items = ', '.join('[' + ', '.join(_alias_repr_item(a[i]) for i in range(len(a))) + ']'
                               if type(a) is list else _alias_repr_item(a) for a in args)
         star = '*' if self.__unpacked__ else ''
         return f'{star}{_alias_repr_item(self.__origin__)}[{items}]'

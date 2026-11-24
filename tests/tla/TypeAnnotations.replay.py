@@ -37,6 +37,12 @@ SOURCES = {
     "class_getitem": 'result = C[int]',
     "subclass_alias": "a = G[int]\nresult = (repr(a).endswith('G[int]'), a.__origin__ is G)",
     "nested_param": 'def f[T](): return T\nT = f()\na = list[T]\nresult = (a.__parameters__, repr(a[int]), repr(dict[str, T][int]))',
+    "nested_list_subst": 'def f[T, U](): return f.__type_params__\nT, U = f()\nresult = dict[T, [[U], (U,)]][str, int].__args__',
+    "param_identity": ('class S:\n    def __eq__(s, o): return True\n    __hash__ = object.__hash__\n'
+                       '    def __typing_subst__(s, a): return ("s", a)\n'
+                       'a = dict[S(), S()]\nresult = (len(a.__parameters__), a[int, str].__args__)'),
+    "repr_list_shrinks": ('l = []\nclass X:\n    def __repr__(s):\n        l.clear(); return "x"\n'
+                          'l += [X(), 1]\nresult = repr(type(list[int])(int, l))'),
     "too_many_args": 'def f[T](): return T\nT = f()\nresult = list[T][int, str]',
     "not_generic": 'result = list[int][int]',
     "subscript_int": 'result = int[str]',
