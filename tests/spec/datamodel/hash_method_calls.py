@@ -66,3 +66,22 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(results(), expected)
+# A __hash__ descriptor whose __get__ raises AttributeError makes the
+# object unhashable, an instance or a metaclass's class.
+class FailsGet:
+    def __get__(self, obj, owner): raise AttributeError("nope")
+class GetFails:
+    __hash__ = FailsGet()
+class GetFailsMeta(type):
+    __hash__ = FailsGet()
+class GetFailsClass(metaclass=GetFailsMeta): pass
+def failing_gets():
+    out = []
+    for f in (lambda: hash(GetFails()), lambda: {GetFails()}, lambda: GetFails() in {1: 2}, lambda: hash(GetFailsClass),
+              lambda: hash((GetFails(),)), lambda: list(map(hash, [GetFails()]))):
+        try: out.append(f())
+        except TypeError as e: out.append(str(e))
+    return out
+assert_eq(failing_gets(), ["unhashable type: 'GetFails'", "cannot use 'GetFails' as a set element (unhashable type: 'GetFails')",
+                           "cannot use 'GetFails' as a dict key (unhashable type: 'GetFails')", "unhashable type: 'GetFailsMeta'",
+                           "unhashable type: 'GetFails'", "unhashable type: 'GetFails'"])
