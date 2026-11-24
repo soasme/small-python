@@ -217,3 +217,23 @@ extra_proxy[ExtraHashed()] = 5
 del extra_proxy[ExtraHashed()]
 assert_raises(KeyError, extra_proxy.__delitem__, ExtraHashed())
 assert_eq([ExtraHashed() in extra_proxy, len(extra_proxy)], [False, 1])
+# A str subclass with a Python __hash__ and str's __eq__ finds a local by
+# name; one whose hash collides with a local's name is not it.
+str_log = []
+class StrHashed(str):
+    def __hash__(s):
+        for _ in (): pass
+        str_log.append(str(s)); return str.__hash__(s)
+class StrCollides(str):
+    def __hash__(s):
+        for _ in (): pass
+        str_log.append("c"); return hash("a")
+def str_hashed():
+    a, b = 1, 2
+    try: raise KeyError
+    except KeyError as e: p = e.__traceback__.tb_frame.f_locals
+    out = [p[StrHashed("a")], StrHashed("b") in p, StrHashed("zz") in p, p.get(StrHashed("a")), p.get(StrHashed("q"), "d"),
+           StrCollides("x") in p, p.get(StrCollides("y"), "none")]
+    p[StrHashed("b")] = 5
+    return out + [b], str_log
+assert_eq(str_hashed(), ([1, True, False, 1, "d", False, "none", 5], ["a", "b", "zz", "a", "q", "c", "c", "b"]))
