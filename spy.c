@@ -4710,6 +4710,14 @@ static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
 static int call_stream(Parser *, Node *, Node *, size_t, int);
 static Node *call_end(Parser *, Node *);
+static size_t emit_display(Parser *, Node *);
+static size_t display_item(Parser *, Node *, size_t, size_t);
+static Node *display_end(Parser *, Node *, size_t);
+static size_t cond_test(Parser *, Node *, EmitMark, EmitMark);
+static size_t branch_parsed(SPYContext *, Program *, Node *, Node *);
+static size_t loop_open(SPYContext *, Program *, Node *);
+static size_t compile_branch(SPYContext *, Program *, Node *, Node *);
+static Node *cond_end(Parser *, Node *, size_t, EmitMark);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -6253,11 +6261,14 @@ static Node *atom_node(Parser *p) {
     }
     int close = open == '[' ? ']' : open == '{' ? '}' : ')';
     Node **tail = &n->args;
+    size_t display = SIZE_MAX; /* A dictionary's or set's first step, emitted as it is parsed. */
     if (!at(p, close)) {
         do {
             Node *item;
             size_t item_at = p->pos;
             EmitMark element = emit_mark(p);
+            if (open == '{' && !n->args && p->emitting && (display = emit_display(p, n)) == SIZE_MAX) return NULL;
+            size_t item_start = display != SIZE_MAX ? program_len(p->emitting) : 0;
             if (take(p, T_POW)) {
                 item = node(p, N_MAPPING);
                 if (!item || !(item->a = expression(p, 4))) return NULL;
@@ -6322,10 +6333,12 @@ static Node *atom_node(Parser *p) {
             }
             *tail = item; tail = &item->next;
             if (keyword(p, "for") || keyword(p, "async")) {
+                display = SIZE_MAX;
                 if (!comprehension(p, n, awaits, element)) return NULL;
                 if (at(p, ':') && item->kind == N_MAPPING) return syntax_span(p, item_at, item_at + 1, "cannot use dict unpacking here");
                 break;
             }
+            if (display != SIZE_MAX) display = display_item(p, item, item_start, display);
             if (!take(p, ',')) {
                 if (open == '(' && n->args == item) {
                     if (item->kind == N_STAR) return at(p, ')') ? syntax_at(p, item, "cannot use starred expression here") : syntax(p, "invalid syntax");
@@ -6336,7 +6349,8 @@ static Node *atom_node(Parser *p) {
             }
         } while (!at(p, close));
     }
-    return expect(p, close, "invalid syntax") ? n : NULL;
+    if (!expect(p, close, "invalid syntax")) return NULL;
+    return display == SIZE_MAX ? n : display_end(p, n, display);
 }
 static int operator_info(Parser *p, int *width, int *prec) {
     int op = peek(p)->kind;
@@ -6527,6 +6541,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
     Node *left;
     /* Operations begin where their first operand does, parentheses included. */
     size_t first = p->pos;
+    EmitMark value = min == 0 ? emit_mark(p) : (EmitMark){0}; /* A conditional's value's steps begin here. */
     if (keyword(p, "lambda")) {
         if (min) return syntax(p, "invalid syntax");
         p->pos++;
@@ -6651,8 +6666,10 @@ static Node *expression_inner(Parser *p, int min, int named) {
     if (min == 0 && take_word(p, "if")) {
         Node *n = node(p, N_COND);
         if (!n) return NULL;
+        EmitMark test = emit_mark(p);
         n->a = left; n->b = expression(p, 1);
         if (!n->b) return NULL;
+        size_t jump = cond_test(p, n, value, test);
         /* invalid_expression and invalid_if_expression */
         if (!take_word(p, "else")) {
             if (at(p, ':')) return syntax(p, "invalid syntax");
@@ -6668,7 +6685,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
             spy_clear_error(p->ctx);
             return syntax(p, "expected expression after 'else', but statement is given");
         }
-        if (!n->c) return NULL;
+        if (!n->c || (jump != SIZE_MAX && !cond_end(p, n, jump, value))) return NULL;
         extend(p, n, left);
         left = n;
     }
@@ -7035,6 +7052,22 @@ static int analyse_statements(Parser *, Node *);
 static int header_ready(Parser *p, Node *start) {
     return nodes_finish(p, start) || body_statements(p, p->body.head, NULL);
 }
+/* A compound statement's header expression, emitted as it is parsed
+ * into the body's program, a statement the body held back compiled
+ * first: from is where its steps begin. It keeps them when they are
+ * all its own (header_kept), else they are undone and it compiles from
+ * its nodes. */
+static int header_emit(Parser *p, EmitMark *from) {
+    if (body_statements(p, p->body.head, NULL)) return -1;
+    p->emitting = p->body.program; *from = emit_mark(p);
+    return 0;
+}
+static int header_kept(Parser *p, Node *n, EmitMark from) {
+    int kept = n && (n->flags & F_EMITTED) && n->steps_at == from.steps.mark.at && n->steps_end == program_len(p->emitting);
+    if (!kept) emit_back(p, from);
+    p->emitting = NULL; p->emitted_len = 0;
+    return kept;
+}
 /* A compound statement's suite after its header; with emits, its
  * statements compiled in place, as a body's are (body_end). */
 static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
@@ -7055,10 +7088,13 @@ static Node *if_statement(Parser *p, int emits) {
     size_t line = keyword_line(p), branch = 0, end = 0;
     const char *what = p->tokens[p->pos - 1].len == 4 ? "'elif' statement" : "'if' statement";
     size_t condition = p->pos;
+    EmitMark from = {0};
+    if (emits && header_emit(p, &from)) return NULL;
     n->a = expression(p, 0);
+    int kept = emits && header_kept(p, n->a, from);
     if (n->a && at(p, '=')) return condition_equals_error(p, condition);
     if (!n->a || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
-    if (emits) branch = if_begin(p->ctx, p->body.program, n);
+    if (emits) branch = kept ? branch_parsed(p->ctx, p->body.program, n->a, n) : if_begin(p->ctx, p->body.program, n);
     if (!(n->b = suite_of(p, what, line, emits))) return NULL;
     if (emits) end = if_else(p->ctx, p->body.program, n, branch);
     if (take_word(p, "elif")) {
@@ -7823,6 +7859,7 @@ static Node *type_alias(Parser *p) {
 static Node *statement_body(Parser *, int);
 static Node *expression_statement(Parser *, Node *);
 static Node *return_statement(Parser *, Node *);
+static Node *raise_statement(Parser *, Node *);
 static Node *emitted_statement(Parser *, Node *, Node *(*)(Parser *, Node *));
 static void emitted_drop(Parser *);
 /* invalid_match_stmt: a soft-keyword line that failed to parse as anything
@@ -8007,15 +8044,7 @@ static Node *statement_body(Parser *p, int emits) {
     if (take_word(p, "raise")) {
         n = node(p, N_RAISE);
         if (!n) return NULL;
-        if (keyword(p, "from")) return syntax_span(p, p->pos - 1, p->pos + 1, "did you forget an expression between 'raise' and 'from'?");
-        if (!at(p, T_NL) && !at(p, ';')) {
-            if (!(n->a = expression(p, 0))) return NULL;
-            if (take_word(p, "from") && !(n->b = expression(p, 0))) {
-                p->pos--; spy_clear_error(p->ctx);
-                return syntax(p, "did you forget an expression after 'from'?");
-            }
-        }
-        return n;
+        return emits ? emitted_statement(p, n, raise_statement) : raise_statement(p, n);
     }
     if (take_word(p, "try")) {
         /* With emits compiled in place, as compile_statement does (try_begin). */
@@ -8136,12 +8165,18 @@ static Node *statement_body(Parser *p, int emits) {
             if (!n->args || !take_word(p, "in")) return syntax(p, "invalid syntax");
         }
         size_t condition = p->pos;
+        /* A while's block begins before its test. */
+        EmitMark from = {0};
+        if (emits && header_emit(p, &from)) return NULL;
+        if (emits && !is_for) { loop = loop_open(p->ctx, p->body.program, n); from = emit_mark(p); }
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
+        int kept = emits && header_kept(p, n->a, from);
         if (!n->a) return NULL;
         if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
         /* With emits compiled in place, as compile_statement does (loop_begin). */
         if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
-        if (emits) branch = loop_begin(p->ctx, p->body.program, n, &loop);
+        if (emits && !is_for) branch = kept ? branch_parsed(p->ctx, p->body.program, n->a, n) : compile_branch(p->ctx, p->body.program, n->a, n);
+        else if (emits) branch = loop_begin(p->ctx, p->body.program, n, &loop);
         p->loops++; n->b = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
         if (!n->b) return NULL;
         if (emits) loop_else(p->ctx, p->body.program, n, loop, branch);
@@ -8301,24 +8336,25 @@ static Node *statement_body(Parser *p, int emits) {
 }
 /* Statement n, the rest parsed by rest, emitted as it is parsed into
  * its body's program, once a held-back statement compiles. An
- * expression statement, an assignment, augmented to a name, or a
- * return of a value keeps its steps when its value's are all emitted; other
+ * expression statement, an assignment, augmented to a name, a return
+ * of a value or a raise keeps its steps when they are its operands',
+ * one after another from its start to the end: its value's, after an
+ * augmented name's; a raise's exception's, then its cause's. Other
  * statements compile when they end, their emitted steps undone. */
 static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
     Program *program = p->body.program;
     p->emitting_from = (EmitMark){emitted(program), 0};
     p->emitting = program;
-    Node *statement = rest(p, n);
-    Node *value = !statement ? NULL : statement->kind == N_EXPR || statement->kind == N_RETURN ? statement->a :
-                  statement->kind == N_ASSIGN && (statement->op == '=' || statement->a->kind == N_NAME) ? statement->b : NULL;
-    /* Its steps are its value's, after an augmented name's, from the
-     * statement's start to the end. */
-    Node *first = value && statement->kind == N_ASSIGN && statement->op != '=' ? statement->a : value;
-    if (value && (!(first->flags & F_EMITTED) || !(value->flags & F_EMITTED) || first->steps_at != p->emitting_from.steps.mark.at ||
-                  (first != value && first->steps_end != value->steps_at) || value->steps_end != program_len(program))) value = NULL;
-    if (!value || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING))
-        emitted_drop(p);
+    Node *statement = rest(p, n), *first = NULL, *last = NULL;
+    int kind = statement ? statement->kind : N_PASS;
+    if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
+    else if (kind == N_ASSIGN && (statement->op == '=' || statement->a->kind == N_NAME))
+        first = statement->op == '=' ? statement->b : statement->a, last = statement->b;
+    else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
+    int kept = first && (first->flags & F_EMITTED) && (last->flags & F_EMITTED) && first->steps_at == p->emitting_from.steps.mark.at &&
+               (first == last || first->steps_end == last->steps_at) && last->steps_end == program_len(program);
+    if (!kept || (p->ctx->optimize > 1 && kind == N_EXPR && first->kind == N_STRING)) emitted_drop(p);
     p->emitting = NULL; p->emitted_len = 0;
     return statement;
 }
@@ -8331,6 +8367,18 @@ static void emit_back(Parser *p, EmitMark m) {
     for (size_t i = m.nodes; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
     p->emitted_len = m.nodes;
     emit_undo(p->emitting, m.steps);
+}
+/* The exception and cause of raise statement n. */
+static Node *raise_statement(Parser *p, Node *n) {
+    if (keyword(p, "from")) return syntax_span(p, p->pos - 1, p->pos + 1, "did you forget an expression between 'raise' and 'from'?");
+    if (!at(p, T_NL) && !at(p, ';')) {
+        if (!(n->a = expression(p, 0))) return NULL;
+        if (take_word(p, "from") && !(n->b = expression(p, 0))) {
+            p->pos--; spy_clear_error(p->ctx);
+            return syntax(p, "did you forget an expression after 'from'?");
+        }
+    }
+    return n;
 }
 /* The value of return statement n. */
 static Node *return_statement(Parser *p, Node *n) {
@@ -17523,6 +17571,55 @@ static int call_stream(Parser *p, Node *n, Node *arg, size_t start, int state) {
     } else if (keywords && arg->kind != N_KEYWORD && arg->kind != N_MAPPING) return 0;
     return emit(c, program, BC_ARG, arg, arg->kind) == SIZE_MAX ? 0 : CALL_GENERAL;
 }
+/* A dictionary or set display n compiled as it is parsed: its first
+ * step, a dictionary's until an element makes it a set (display_end);
+ * after each item's steps, from start on, those adding it; display's
+ * index, or SIZE_MAX once an item's are not all emitted there. */
+static size_t emit_display(Parser *p, Node *n) { return emit(p->ctx, p->emitting, BC_NEW, n, SPY_DICT); }
+static size_t display_item(Parser *p, Node *item, size_t start, size_t display) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    int unpacked = item->kind == N_MAPPING || item->kind == N_STAR, pair = item->kind == N_ASSIGN;
+    Node *fixed[3] = {unpacked || pair ? item->a : item, pair ? item->b : NULL};
+    if (!emitted_operands(program, fixed, NULL) || fixed[0]->steps_at != start) return SIZE_MAX;
+    if (unpacked) return emit(c, program, BC_EXTEND, item, 0) == SIZE_MAX ? SIZE_MAX : display;
+    if (!pair && emit(c, program, BC_NONE, item, 0) == SIZE_MAX) return SIZE_MAX;
+    return emit(c, program, BC_MAP, item, 0) == SIZE_MAX ? SIZE_MAX : display;
+}
+static Node *display_end(Parser *p, Node *n, size_t display) {
+    p->emitting->items[display].arg = n->kind == N_SET ? SPY_SET : SPY_DICT;
+    return parsed_steps(p, n, display);
+}
+/* Test n, emitted as it was parsed, made the test of branch at, as
+ * compile_branch makes it: a not is no step. The branch, or SIZE_MAX. */
+static size_t branch_parsed(SPYContext *c, Program *program, Node *n, Node *at) {
+    int negated = 0;
+    for (; n->kind == N_UNARY && n->op == O_NOT; n = n->a) { negated ^= 1; emit_drop(program, program->len - 1); }
+    retest(c, program, n, n->steps_at);
+    if (negated) program->tested = 0;
+    return emit(c, program, BC_FALSE, at, negated);
+}
+/* Conditional expression n as it is parsed, its value's steps from value
+ * on, its test's from test on: once both were emitted, the test and its
+ * branch go before the value, which jumps past the alternative; the
+ * jump, or SIZE_MAX. The alternative emitted after it, the jump's end. */
+static size_t cond_test(Parser *p, Node *n, EmitMark value, EmitMark test) {
+    Program *program = p->emitting;
+    if (!program || p->ctx->error_type[0] || !(n->a->flags & F_EMITTED) || n->a->steps_at != value.steps.mark.at || n->a->steps_end != test.steps.mark.at ||
+        !(n->b->flags & F_EMITTED) || n->b->steps_at != test.steps.mark.at || n->b->steps_end != program->len) return SIZE_MAX;
+    size_t branch = branch_parsed(p->ctx, program, n->b, n);
+    if (branch == SIZE_MAX) return SIZE_MAX;
+    emit_after(program, value.steps.mark, test.steps.mark, &branch);
+    size_t jump = emit(p->ctx, program, BC_JUMP, n, 0);
+    patch(program, branch, program->len);
+    return jump;
+}
+static Node *cond_end(Parser *p, Node *n, size_t jump, EmitMark value) {
+    Program *program = p->emitting;
+    if (!(n->c->flags & F_EMITTED) || n->c->steps_at != jump + 1 || n->c->steps_end != program->len) return n;
+    patch(program, jump, program->len);
+    return parsed_steps(p, n, value.steps.mark.at);
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -17882,9 +17979,13 @@ static size_t if_else(SPYContext *c, Program *p, Node *n, size_t branch) {
  * before an else suite. */
 static size_t loop_begin(SPYContext *c, Program *p, Node *n, size_t *loop) {
     if (n->kind == N_FOR) compile_expr(c, p, n->a);
-    *loop = emit(c, p, BC_LOOP, n, n->kind == N_FOR ? 1 + n->op : 0);
-    if (*loop != SIZE_MAX) p->items[*loop].other = (uint32_t)p->len;
+    *loop = loop_open(c, p, n);
     return n->kind == N_FOR ? compile_next(c, p, n, n->args) : compile_branch(c, p, n->a, n);
+}
+static size_t loop_open(SPYContext *c, Program *p, Node *n) {
+    size_t loop = emit(c, p, BC_LOOP, n, n->kind == N_FOR ? 1 + n->op : 0);
+    if (loop != SIZE_MAX) p->items[loop].other = (uint32_t)p->len;
+    return loop;
 }
 static void loop_else(SPYContext *c, Program *p, Node *n, size_t loop, size_t branch) {
     /* A body of one assignment at hand that a loop's step stores into

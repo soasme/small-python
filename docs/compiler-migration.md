@@ -317,6 +317,46 @@ own fused step when an operator fuses it. No step's shape depends on
 context compiled after it. The programs are the same as before this
 change, step for step, for every spec test in both execution modes.
 
+The fourteenth stage emits expressions as the parser completes them. A
+simple statement at a body's top opens its program for emission; each
+literal and name is compiled as it is read, and an operator, attribute,
+subscript, slice, call, display, f-string, conditional, lambda without
+defaults or comprehension is compiled when the parser completes it, once its
+operands were emitted one after another up to the program's end. A node
+so compiled records its steps (`Node.steps_at`, `steps_end`), and
+compiling it again is no step.
+
+- A negated number is folded as it is parsed.
+- An `and` or `or` emits its left operand's test and branch as the parser
+  reads the operator, and patches the branch once the right operand is
+  emitted.
+- A call stays a plain call until an argument makes it general; then the
+  steps the general call takes between its arguments are put in after
+  those already emitted, and each later argument is added as it ends.
+- An assignment undoes what its targets emitted at each `=`, so its value
+  is emitted first and its targets compile after it at the statement's
+  end; an augmented assignment to a name keeps its name's load.
+- A dictionary or set display emits its new value at its first item and
+  adds each item as it ends; its kind is set at its close.
+- A conditional expression emits its test and branch after its value,
+  rotates them before it, and patches the jump once the alternative is
+  emitted.
+- A comprehension undoes what its element emitted, from a mark taken
+  where the element began, and emits only its first iterable.
+- A field's expression in an f-string is parsed by an inner parser that
+  emits into the same program; the text before the field is flushed
+  before the field is parsed, except before a debug field.
+
+The test of an `if`, `elif` or `while` header and the iterable of a `for`
+header are emitted the same way, after a statement the body held back and
+a `while`'s block step. An expression statement, assignment, `return` or
+`raise` keeps its steps when its operands' run from where it began to
+the program's end; otherwise it undoes every step it emitted, clears its
+nodes' marks and compiles at its end as before. The programs are the
+same, step for step, in both execution modes for every spec test except
+programs that a compile error discards, which now hold the steps their
+statements emitted before the error.
+
 ## Remaining stages
 
 1. Emit expressions from the parser, in place of the finished
