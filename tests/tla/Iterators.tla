@@ -83,7 +83,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "sequence_stop_iteration", "sequence_lookup_error", "callable_not_callable",
           "callable_sentinel_equality", "iter_of_iterator_is_self", "for_calls_iter_once",
           "list_iterator_mutation", "dict_changed_size", "set_changed_size", "dict_keys_replaced_ok",
-          "iterator_type_names", "length_hint", "hint_reversed_subclass", "hint_reversed_extend", "hint_sized", "hint_reversed_spent", "hint_len_read", "hint_hint_read", "next_dunder_direct", "zip_strict", "map_multi",
+          "iterator_type_names", "length_hint", "hint_reversed_subclass", "hint_reversed_extend", "bytes_reversed_subclass", "hint_sized", "hint_reversed_spent", "hint_len_read", "hint_hint_read", "next_dunder_direct", "zip_strict", "map_multi",
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
           "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
@@ -133,6 +133,8 @@ Case(c) ==
       [] c = "hint_reversed_subclass" -> "([2, 1, 0], ['len', 'len'])"
       \* So does list.extend, a Python __len__'s error propagating.
       [] c = "hint_reversed_extend" -> "([9, 2, 1, 0], ['len', 'len'], 'LookupError')"
+      \* bytes() and bytearray.extend iterate such an instance as its iterator, hint first.
+      [] c = "bytes_reversed_subclass" -> "(b'BA', bytearray(b'z\\x02\\x01'), ['len', 'len', 1, 0, 'len', 'len', 1, 0])"
       \* A sequence's Python __len__ for an iterator's and a reversed one's hint;
       \* a reversed one with no items left asks none.
       [] c = "hint_sized" -> "(2, 1, ['len', 'len', 'len'])"

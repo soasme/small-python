@@ -795,6 +795,7 @@ Unreleased (0.10.0):
 - An f-string field's `!a` conversion runs a Python `__repr__` without nesting on the C stack
 - Awaiting a class, or iterating it by `async for`, runs its metaclass's Python `__await__` or `__aiter__`, or a descriptor's `__get__` for one, without nesting on the C stack
 - The length hint of a `reversed` subclass's instance runs its sequence's Python `__len__` without nesting on the C stack
+- `bytes()`, `bytearray()` and `bytearray.extend` of an iterator subclass's instance run its sequence's Python methods without nesting on the C stack
 - iter(f, sentinel) of a builtin callable runs the sentinel's `__eq__` and its result's `__bool__` without nesting on the C stack, and is 2x faster
 - `bool` has its own `__and__`, `__or__`, `__xor__`, their reflections and `__invert__`; `int.__and__(True, True)` is `1`
 - error messages name a builtin class method such as `dict.__dict__['fromkeys']` a `classmethod_descriptor`

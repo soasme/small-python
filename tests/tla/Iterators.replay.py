@@ -133,6 +133,9 @@ SOURCES = {
                             "        log.append('len')\n        if s.fail and len(log) > 1: raise LookupError\n        return 3\n"
                             "    def __getitem__(s, i): return i\nclass R(reversed): pass\nl = [9]\nl.extend(R(S()))\nn = list(log)\nlog.clear()\n"
                             "try:\n    l.extend(R(S(True)))\n    e = None\nexcept LookupError as x:\n    e = type(x).__name__\nresult = (l, n, e)",
+    "bytes_reversed_subclass": "log = []\nclass S:\n    def __init__(s, items): s.items = items\n    def __len__(s):\n        for _ in (): pass\n"
+                               "        log.append('len')\n        return len(s.items)\n    def __getitem__(s, i):\n        log.append(i)\n        return s.items[i]\n"
+                               "class R(reversed): pass\nb = bytearray(b'z')\nr = bytes(R(S([65, 66])))\nb.extend(R(S([1, 2])))\nresult = (r, b, log)",
     "hint_sized": "log = []\nclass S:\n    def __len__(s):\n        for _ in (): pass\n        log.append('len')\n        return 3\n"
                   "    def __getitem__(s, i): return i\nit = iter(S())\nnext(it)\nr = reversed(S())\nnext(r)\nnext(r)\n"
                   "result = (it.__length_hint__(), r.__length_hint__(), log)",

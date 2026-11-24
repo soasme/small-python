@@ -28830,9 +28830,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     /* bytes(), bytearray() and bytearray.extend() of an iterable, an
      * instance neither a bytes source (__bytes__, __buffer__) nor a size
-     * (__index__). */
+     * (__index__), of no builtin base but an iterator's (iterator_base). */
     if ((id == B_BYTES || id == B_BYTEARRAY) && argv[0]->type == SPY_INSTANCE &&
-        (argv[0]->as.map.base || class_lookup(argv[0]->as.map.parent, "__index__") || buffer_exporter(argv[0]) ||
+        ((argv[0]->as.map.base && !iterator_base(c, argv[0])) || class_lookup(argv[0]->as.map.parent, "__index__") || buffer_exporter(argv[0]) ||
          (id == B_BYTES && class_lookup(argv[0]->as.map.parent, "__bytes__")))) return -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN && id != B_BYTES && id != B_BYTEARRAY &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
