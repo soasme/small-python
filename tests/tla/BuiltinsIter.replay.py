@@ -249,6 +249,11 @@ SOURCES = {
                     "class L:\n    def __init__(s, v): s.v = v\n    def __len__(s):\n        for _ in (): pass\n"
                     "        log.append('l%d' % s.v)\n        return s.v\n"
                     "result = ([x.v for x in filter(None, [T(1), T(0), 0, L(3)])], [x.v for x in filter(bool, (T(0), T(1)))], log)",
+    "filter_class": ("log = []\nclass T:\n    def __init__(s, n):\n        for _ in (): pass\n        log.append('i%d' % n); s.n = n\n"
+                     "    def __bool__(s):\n        for _ in (): pass\n        log.append('b%d' % s.n); return s.n % 2 == 1\n"
+                     "class C:\n    def __call__(s, n):\n        log.append('c%d' % n); return T(n)\n"
+                     "f = filter(C(), [2, 9, 11])\n"
+                     "result = (list(filter(T, [1, 2, 3])), [x for x in filter(C(), [3])], (next(f), next(f)), log)"),
     "filter_result_truth": "log = []\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n"
                            "        log.append(s.v); return s.v\ndef gen(*a):\n    for x in a: yield x\n"
                            "def obj(x):\n    for _ in (): pass\n    return T(x > 1)\n"

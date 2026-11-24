@@ -28326,6 +28326,12 @@ static int class_converts(SPYContext *c, SPYValue *cls) {
     c->entering_kind = kind;
     return init ? machine_function(c, init) : !c->error_type[0] && new_method(c, cls);
 }
+/* Whether filter's function, a Python class or callable instance, is a
+ * call step of its own (filter_call); not while tracing (map_convert). */
+static int filter_steps(SPYContext *c, SPYValue *function) {
+    return ((function->type == SPY_CLASS && !builtin_class(c, function)) || function->type == SPY_INSTANCE || metaclassed(function)) &&
+           !c->settings[SET_TRACE] && !c->settings[SET_PROFILE];
+}
 static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
@@ -28339,7 +28345,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
         (function->type == SPY_NONE || (function->type == SPY_NATIVE && function->as.native.call == builtin) ||
          (function->type == SPY_CLASS && builtin_class(c, function))))
         return v->as.iterator.source->as.seq.items[1]->type != SPY_ITERATOR || v->as.iterator.source->as.seq.items[1]->as.iterator.kind != I_RANGE;
-    return function && (machine_function(c, function) ||
+    return function && (machine_function(c, function) || (kind == I_FILTER && filter_steps(c, function)) ||
                         (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD ||
                                            (function->type == SPY_CLASS && class_converts(c, function)))));
 }
@@ -39578,7 +39584,18 @@ static NO_INLINE int filter_call(SPYContext *c, Machine *m, SPYValue *v, SPYValu
     int status;
     if (v->as.iterator.counter && !v->as.iterator.index) return 0;
     if (function->type == SPY_NONE || function == c->types[SPY_BOOL]) return filter_truth(c, m, v, fn, env);
-    if (!machine_function(c, function)) return filter_builtin(c, m, v, function, fn, env);
+    if (!machine_function(c, function)) {
+        /* A Python class or callable instance is a call step of its own
+         * (map_convert), the item waiting in v's counter. */
+        if (!filter_steps(c, function)) return filter_builtin(c, m, v, function, fn, env);
+        if (!(item = filter_next(c, m, v, fn, env, &status))) return status;
+        SPYValue *args = value_new(c, SPY_TUPLE);
+        if (!args || sequence_append(c, args, item)) { spy_release(args); spy_release(item); return -1; }
+        v->as.iterator.counter = item;
+        c->k_fn = spy_retain(function); c->k_env = args; c->k = NULL; c->k_ctx = NULL; c->k_unit = 2 + COMPARE_CALL + 1;
+        *fn = spy_retain(c->unbound);
+        return 1;
+    }
     if (!(item = filter_next(c, m, v, fn, env, &status))) return status;
     v->as.iterator.counter = item;
     if (!(*env = function_env(c, function, 1, &item, NULL, 0))) {

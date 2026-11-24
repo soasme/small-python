@@ -776,6 +776,7 @@ Unreleased (0.10.0):
 - a subclass of `reversed` has `reversed`'s `__length_hint__`, which `list()` asks
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
 - a complex number's operators decline a non-number: `'b' * 1j` and `1j + 'b'` raise the sequence's or the operator's TypeError
+- filter() of a Python class or callable instance calls it and its result's `__bool__` without nesting on the C stack
 - `bool` has its own `__and__`, `__or__`, `__xor__`, their reflections and `__invert__`; `int.__and__(True, True)` is `1`
 - error messages name a builtin class method such as `dict.__dict__['fromkeys']` a `classmethod_descriptor`
 - a bytearray subclass's `+=` and `__iadd__` name the subclass in "can't concat" errors
