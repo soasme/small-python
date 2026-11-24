@@ -760,6 +760,7 @@ Unreleased (0.10.0):
 - closing a coroutine awaiting `anext()` with a default, whose `__anext__` ends with StopAsyncIteration, gives the await the default; it raised RuntimeError
 - `open()` reports too many arguments, or one given by name and position, as other builtins do; a builtin's "takes at most" counts keyword arguments too
 - `in`, `not in` or a subscript of a frame's `f_locals` with a key whose `__hash__` is native and `__eq__` is Python no longer crashes
+- `min()` and `max()` without a key, when an item's builtin comparison and the best's reflected Python one both decline, name the comparison as written
 
 2026-11-10 0.9.0:
 

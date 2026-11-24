@@ -33704,36 +33704,34 @@ static NO_INLINE SPYValue *search_call(SPYContext *c, Machine *m, int method, SP
 }
 /* min or max, as op '<' or '>', of seq, a list or tuple, from index at on,
  * best, owned, the least or greatest item before it: the Python comparison
- * that comparing the next item with best calls first (rich_function), the
- * item's op or best's reflected one, borrowed in c->entering_init with its
- * env (CALL_OPERATOR), the items before it compared natively; best, seq,
- * op, the operator called, the item's index, the call's two operands and
- * c->replacing pushed on m's stack (fold_returned). Else NULL, the value in
- * *value. */
+ * that the item op best calls first (rich_function), the item's or, its
+ * own declining natively, best's reflected one, borrowed in
+ * c->entering_init with its env (CALL_OPERATOR), the items before it
+ * compared natively; best, seq, op, the item's index, the item and best,
+ * c->unbound after a reflected call (compare_found), and c->replacing
+ * pushed on m's stack (fold_returned). Else NULL, the value in *value. */
 static NO_INLINE SPYValue *fold_call(SPYContext *c, Machine *m, int op, SPYValue *seq, SPYValue *best, size_t at,
                                      SPYValue **env, SPYValue **value) {
-    int other = op == '<' ? '>' : '<';
     *value = NULL;
     for (; at < seq->as.seq.len; at++) {
         SPYValue *item = seq->as.seq.items[at], *function = NULL;
-        int called = op;
+        int reflected = 0;
         if (instance_like(item) || instance_like(best)) {
             function = rich_function(c, item, best, rich_kind(op));
-            if (!function && (function = rich_reflection(c, best, item, rich_kind(other)))) called = other;
+            if (!function) reflected = (function = rich_reflection(c, best, item, rich_kind(op == '<' ? '>' : '<'))) != NULL;
         }
         if (function) {
-            SPYValue *left = called == op ? item : best, *right = called == op ? best : item;
-            SPYValue *args[] = {spy_retain(left), spy_retain(right)};
+            SPYValue *args[] = {spy_retain(reflected ? best : item), spy_retain(reflected ? item : best)};
             if (machine_push(c, m, best) || machine_push(c, m, spy_retain(seq)) || machine_push(c, m, int_value(c, op)) ||
-                machine_push(c, m, int_value(c, called)) || machine_push(c, m, int_value(c, (int64_t)at)) ||
-                machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->replacing))) {
+                machine_push(c, m, int_value(c, (int64_t)at)) || machine_push(c, m, spy_retain(item)) || machine_push(c, m, spy_retain(best)) ||
+                (reflected && machine_push(c, m, spy_retain(c->unbound))) || machine_push(c, m, spy_retain(c->replacing))) {
                 release_all(2, args); return NULL;
             }
             if ((*env = function_env(c, function, 2, args, NULL, 1))) {
                 c->entering_init = function; c->entering_kind = CALL_OPERATOR;
                 return function;
             }
-            for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
+            for (int i = 0; i < 7 + reflected; i++) spy_release(machine_pop(m));
             return NULL;
         }
         spy_retain(item);
@@ -33760,20 +33758,19 @@ static NO_INLINE Machine *fold_returned(SPYContext *c, Machine *m, SPYValue *res
     SPYValue *operands[2];
     int better = compare_found(c, m, c->replacing, call, result, &next, operands);
     if (next) return &next->m;
-    SPYValue *left = operands[0], *right = operands[1], *index = machine_pop(m), *called = machine_pop(m);
-    SPYValue *op = machine_pop(m), *seq = machine_pop(m), *best = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
-    int base = (int)op->as.integer_data.small;
-    if (better && !c->error_type[0]) { spy_release(best); best = spy_retain(call == base ? left : right); }
-    spy_release(left); spy_release(right); spy_release(called); spy_release(op);
+    SPYValue *item = operands[0], *index = machine_pop(m), *op = machine_pop(m), *seq = machine_pop(m), *best = machine_pop(m);
+    SPYValue *env = NULL, *function = NULL, *value = NULL;
+    if (better && !c->error_type[0]) { spy_release(best); best = spy_retain(item); }
+    spy_release(item); spy_release(operands[1]); spy_release(op);
     if (c->error_type[0]) spy_release(best);
-    else function = fold_call(c, m, base, seq, best, (size_t)index->as.integer_data.small + 1, &env, &value);
+    else function = fold_call(c, m, call, seq, best, (size_t)index->as.integer_data.small + 1, &env, &value);
     Call *entered = function ? call_enter(c, spy_retain(function), env, m) : NULL;
     spy_release(index); spy_release(seq);
     if (entered) {
         entered->m.outermost = CALL_OPERATOR;
         return &entered->m;
     }
-    if (function) for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
+    if (function) for (size_t i = 7 + (m->stack[m->len - 2] == c->unbound); i; i--) spy_release(machine_pop(m));
     machine_push(c, m, value);
     return m;
 }
