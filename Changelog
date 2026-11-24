@@ -773,6 +773,7 @@ Unreleased (0.10.0):
 - a starred parameter annotation's unpacking error is reported at the `def` line
 - a class's `__bases__` is the very tuple given to `type()` or assigned
 - `super.__new__()` makes a super of no class that `__init__` binds; a super object finds `super`'s own attributes after its MRO's
+- a subclass of `reversed` has `reversed`'s `__length_hint__`, which `list()` asks
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
 
 2026-11-10 0.9.0:

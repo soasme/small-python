@@ -10092,11 +10092,13 @@ static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue 
     SPYValue *owner = c->iterator_types[(intptr_t)data];
     const char *owner_name = iterator_names[(intptr_t)data];
     if (!argc) return errorf(c, "TypeError", "unbound method %s.__length_hint__() needs an argument", owner_name);
-    if (argv[0]->type != SPY_ITERATOR || c->iterator_types[iterator_class_id(argv[0])] != owner)
+    /* A subclass instance's iterator, as for the iterator itself. */
+    SPYValue *v = builtin_value(c, argv[0], SPY_ITERATOR);
+    if (!v || c->iterator_types[iterator_class_id(v)] != owner)
         return errorf(c, "TypeError", "descriptor '__length_hint__' for '%s' objects doesn't apply to a '%s' object", owner_name, type_name(argv[0]));
     if (argc != 1) return errorf(c, "TypeError", "%s.__length_hint__() takes no arguments (%zu given)", owner_name, argc - 1);
     /* One over an instance with a Python __len__ calls it on the step's machine (length_hint_sized). */
-    SPYValue *v = argv[0], *source = v->as.iterator.source, *function;
+    SPYValue *source = v->as.iterator.source, *function;
     Machine *m = !v->as.iterator.done && (v->as.iterator.kind == I_GETITEM || (v->as.iterator.kind == I_REVERSED && v->as.iterator.index)) &&
                  source->type == SPY_INSTANCE &&
                  (function = class_lookup(source->as.map.parent, "__len__")) && machine_function(c, function) ? step_machine(c) : NULL;
