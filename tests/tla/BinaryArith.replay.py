@@ -16,6 +16,8 @@ SOURCES = {
     "complex_floordiv": "1j // 2",
     "complex_mod": "1j % 2",
     "bool_arith": "result = (True + True, True * 3.5, -True, ~False, True / 2, type(True + 0).__name__)",
+    "bool_slots": "result = (bool.__and__(True, True), bool.__and__(True, 1.0), int.__and__(True, True), "
+                  "type(int.__or__(True, False)).__name__, bool.__and__ is int.__and__)",
     "int_div_zero": "1 / 0",
     "int_floordiv_zero": "1 // 0",
     "int_mod_zero": "1 % 0",

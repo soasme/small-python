@@ -51232,9 +51232,9 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__mod__", SLOT_BINARY, '%', T(SPY_INT) | T(SPY_FLOAT) | T_TEXT}, {"__rmod__", SLOT_RBINARY, '%', T(SPY_INT) | T(SPY_FLOAT) | T_TEXT},
     {"__divmod__", SLOT_BUILTIN, B_DIVMOD, T(SPY_INT) | T(SPY_FLOAT)}, {"__rdivmod__", SLOT_RBINARY, B_DIVMOD, T(SPY_INT) | T(SPY_FLOAT)},
     {"__pow__", SLOT_BUILTIN, B_POW, T_NUMBERS}, {"__rpow__", SLOT_RBINARY, T_POW, T_NUMBERS},
-    {"__and__", SLOT_BINARY, '&', T(SPY_INT) | T_SETS | T_SET_VIEWS}, {"__rand__", SLOT_RBINARY, '&', T(SPY_INT) | T_SETS | T_SET_VIEWS},
-    {"__or__", SLOT_BINARY, '|', T(SPY_INT) | T_SETS | T_DICTS | T_SET_VIEWS}, {"__ror__", SLOT_RBINARY, '|', T(SPY_INT) | T_SETS | T_DICTS | T_SET_VIEWS},
-    {"__xor__", SLOT_BINARY, '^', T(SPY_INT) | T_SETS | T_SET_VIEWS}, {"__rxor__", SLOT_RBINARY, '^', T(SPY_INT) | T_SETS | T_SET_VIEWS},
+    {"__and__", SLOT_BINARY, '&', T(SPY_INT) | T(SPY_BOOL) | T_SETS | T_SET_VIEWS}, {"__rand__", SLOT_RBINARY, '&', T(SPY_INT) | T(SPY_BOOL) | T_SETS | T_SET_VIEWS},
+    {"__or__", SLOT_BINARY, '|', T(SPY_INT) | T(SPY_BOOL) | T_SETS | T_DICTS | T_SET_VIEWS}, {"__ror__", SLOT_RBINARY, '|', T(SPY_INT) | T(SPY_BOOL) | T_SETS | T_DICTS | T_SET_VIEWS},
+    {"__xor__", SLOT_BINARY, '^', T(SPY_INT) | T(SPY_BOOL) | T_SETS | T_SET_VIEWS}, {"__rxor__", SLOT_RBINARY, '^', T(SPY_INT) | T(SPY_BOOL) | T_SETS | T_SET_VIEWS},
     {"__lshift__", SLOT_BINARY, T_LSHIFT, T(SPY_INT)}, {"__rlshift__", SLOT_RBINARY, T_LSHIFT, T(SPY_INT)},
     {"__rshift__", SLOT_BINARY, T_RSHIFT, T(SPY_INT)}, {"__rrshift__", SLOT_RBINARY, T_RSHIFT, T(SPY_INT)},
     {"__iadd__", SLOT_INPLACE, T_ADDEQ, T(SPY_LIST) | T(SPY_BYTEARRAY)}, {"__imul__", SLOT_INPLACE, T_MULEQ, T(SPY_LIST) | T(SPY_BYTEARRAY)},
@@ -51243,7 +51243,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__lt__", SLOT_COMPARE, R_LT, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)}, {"__le__", SLOT_COMPARE, R_LE, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)},
     {"__eq__", SLOT_COMPARE, R_EQ, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)}, {"__ne__", SLOT_COMPARE, R_NE, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)},
     {"__gt__", SLOT_COMPARE, R_GT, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)}, {"__ge__", SLOT_COMPARE, R_GE, T_COMPARED | T_SET_VIEWS | T_OBJECT | T(SPY_NONE)},
-    {"__neg__", SLOT_UNARY, '-', T_NUMBERS}, {"__pos__", SLOT_UNARY, '+', T_NUMBERS}, {"__invert__", SLOT_UNARY, '~', T(SPY_INT)},
+    {"__neg__", SLOT_UNARY, '-', T_NUMBERS}, {"__pos__", SLOT_UNARY, '+', T_NUMBERS}, {"__invert__", SLOT_UNARY, '~', T(SPY_INT) | T(SPY_BOOL)},
     {"__abs__", SLOT_BUILTIN, B_ABS, T_NUMBERS}, {"__bool__", SLOT_OTHER, SLOT_BOOL, T_NUMBERS | T(SPY_RANGE) | T(SPY_NONE)},
     {"__int__", SLOT_BUILTIN, B_INT, T(SPY_INT) | T(SPY_FLOAT)}, {"__float__", SLOT_BUILTIN, B_FLOAT, T(SPY_INT) | T(SPY_FLOAT)},
     {"__complex__", SLOT_OTHER, SLOT_COMPLEX, T(SPY_COMPLEX)}, {"__trunc__", SLOT_OTHER, SLOT_TRUNC, T(SPY_INT) | T(SPY_FLOAT)},
@@ -51444,7 +51444,13 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
             SPYValue *triple[] = {other, value, argv[1]};
             return slot_result(c, builtin(c, 3, triple, (void *)(intptr_t)B_POW));
         }
-        return slot_result(c, kind == SLOT_BINARY ? binary(c, op, value, other) : binary(c, op, other, value));
+        SPYValue *result = slot_result(c, kind == SLOT_BINARY ? binary(c, op, value, other) : binary(c, op, other, value));
+        /* int's own &, | and ^ of two bools give an int (long_and). */
+        if (type == SPY_INT && result && result->type == SPY_BOOL) {
+            int64_t bit = result->as.integer_data.small;
+            spy_release(result); result = int_value(c, bit);
+        }
+        return result;
     case SLOT_INPLACE: {
         /* dict.__ior__ is dict.update, of the operand itself, and list and
          * bytearray concatenation is extend: their errors propagate. */

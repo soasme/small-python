@@ -38,7 +38,7 @@ EXTENDS Naturals, Sequences
 Ops == {"+", "-", "*", "@", "**", "<<", "+=", "*="}
 Kinds == {"none", "value", "notimpl", "rop_only", "iop"}
 Cases == {"int_float", "true_div", "floor_div", "mod_sign", "divmod", "complex_mix", "complex_floordiv", "complex_mod",
-          "bool_arith", "int_div_zero", "int_floordiv_zero", "int_mod_zero", "float_div_zero", "float_mod_zero",
+          "bool_arith", "bool_slots", "int_div_zero", "int_floordiv_zero", "int_mod_zero", "float_div_zero", "float_mod_zero",
           "complex_div_zero", "pow_neg", "pow_frac_neg", "pow_zero_neg", "pow_zero_neg_float", "pow_precedence",
           "pow_overflow", "pow_float_neg_frac", "int_to_float_overflow", "int_true_div_big", "int_true_div_overflow",
           "unary_str", "unary_neg_list", "unary_invert_float", "unary_ops", "str_mul", "str_mul_float", "seq_mul_overflow", "pow_modulus_method", "pow_complex_declines",
@@ -108,6 +108,8 @@ Case(c) ==
       [] c = "complex_floordiv" -> Unsupported("//", "complex", "int")
       [] c = "complex_mod" -> Unsupported("%", "complex", "int")
       [] c = "bool_arith" -> "(2, 3.5, -1, -1, 0.5, 'int')"
+      \* bool's own & requires a bool and gives a bool; int's gives an int
+      [] c = "bool_slots" -> "(True, NotImplemented, 1, 'int', False)"
       [] c \in {"int_div_zero", "int_floordiv_zero", "int_mod_zero", "float_div_zero", "float_mod_zero",
                 "complex_div_zero", "complex_zero_div"} -> "ZeroDivisionError: division by zero"
       [] c = "pow_neg" -> "(0.5, 'float', 1, 1)"
