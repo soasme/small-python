@@ -30,3 +30,19 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(formatted(), expected)
+# A Python __buffer__ without __release_buffer__ gives %b its copy in a
+# function, and one returning bytes is a TypeError.
+class OnlyBuffer:
+    def __buffer__(self, flags):
+        for _ in (): pass
+        return memoryview(b"ab")
+class BytesBuffer:
+    def __buffer__(self, flags):
+        for _ in (): pass
+        return b"no"
+def only_buffers():
+    out = [b"%b" % (OnlyBuffer(),), b"<%b|%b>" % (OnlyBuffer(), OnlyBuffer()), bytearray(b"%b") % (OnlyBuffer(),), b"%s" % OnlyBuffer()]
+    try: b"%b" % (BytesBuffer(),)
+    except TypeError as e: out.append(str(e))
+    return out
+assert_eq(only_buffers(), [b"ab", b"<ab|ab>", bytearray(b"ab"), b"ab", "BytesBuffer.__buffer__() must return a memoryview, not bytes"])
