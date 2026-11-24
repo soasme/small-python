@@ -9,6 +9,12 @@ and errors follow CPython 3.15.
 """
 
 
+def _is(obj, cls):
+    # The type checks of CPython's C objects: an object's type, never its
+    # __class__ attribute, which isinstance() would read.
+    return issubclass(type(obj), cls)
+
+
 def _final(name):
     def __init_subclass__(cls, /, *args, **kwargs):
         raise TypeError(f"type '{name}' is not an acceptable base type")
@@ -137,9 +143,9 @@ def _make_parameters(args):
     # The free type variables of arguments, in first-seen order.
     parameters = []
     for t in args:
-        if isinstance(t, type):
+        if _is(t, type):
             continue
-        if isinstance(t, (tuple, list)):
+        if _is(t, (tuple, list)):
             for x in _make_parameters(t):
                 if x not in parameters:
                     parameters.append(x)
@@ -187,14 +193,14 @@ def _collect_type_parameters(args, *, enforce_default_ordering=True):
 
 def _subs_tvars(obj, params, argitems):
     subparams = getattr(obj, '__parameters__', None)
-    if not isinstance(subparams, tuple) or not subparams:
+    if not _is(subparams, tuple) or not subparams:
         return obj
     subargs = []
     for arg in subparams:
         iparam = params.index(arg)
         param = params[iparam]
         arg = argitems[iparam]
-        if isinstance(param, TypeVarTuple) and isinstance(arg, tuple):
+        if _is(param, TypeVarTuple) and _is(arg, tuple):
             subargs.extend(arg)
         else:
             subargs.append(arg)
@@ -205,7 +211,7 @@ def _subs_parameters(alias, args, params, item):
     # Substitute type arguments for the parameters of a GenericAlias or Union.
     if not params:
         raise TypeError(f"{alias!r} is not a generic class")
-    item = tuple(_unpack_args(*(item if isinstance(item, tuple) else (item,))))
+    item = tuple(_unpack_args(*(item if _is(item, tuple) else (item,))))
     for param in params:
         prepare = getattr(param, '__typing_prepare_subst__', None)
         if prepare is not None:
@@ -215,10 +221,10 @@ def _subs_parameters(alias, args, params, item):
                         f" actual {len(item)}, expected {len(params)}")
     newargs = []
     for arg in args:
-        if isinstance(arg, type):
+        if _is(arg, type):
             newargs.append(arg)
             continue
-        if isinstance(arg, (tuple, list)):
+        if _is(arg, (tuple, list)):
             sub = [_subs_tvars(x, params, item) if not hasattr(x, '__typing_subst__')
                    else x.__typing_subst__(item[params.index(x)]) for x in arg]
             newargs.append(type(arg)(sub))
@@ -229,7 +235,7 @@ def _subs_parameters(alias, args, params, item):
             arg = subst(item[params.index(arg)])
         else:
             arg = _subs_tvars(arg, params, item)
-        if unpack and isinstance(arg, tuple):
+        if unpack and _is(arg, tuple):
             newargs.extend(arg)
         else:
             newargs.append(arg)
@@ -237,8 +243,7 @@ def _subs_parameters(alias, args, params, item):
 
 
 def _unionable(obj):
-    # By its type: a __class__ property is not consulted.
-    return obj is None or issubclass(type(obj), (type, GenericAlias, Union, TypeAliasType, sentinel))
+    return obj is None or _is(obj, (type, GenericAlias, Union, TypeAliasType, sentinel))
 
 
 def _union_from_tuple(args):
@@ -248,7 +253,7 @@ def _union_from_tuple(args):
     for arg in args:
         if arg is None:
             arg = type(None)
-        members = arg.__args__ if isinstance(arg, Union) else (arg,)
+        members = arg.__args__ if _is(arg, Union) else (arg,)
         for member in members:
             try:
                 hash(member)
@@ -330,7 +335,7 @@ class GenericAlias:
         origin, args = arguments
         self = object.__new__(cls)
         object.__setattr__(self, '__origin__', origin)
-        object.__setattr__(self, '__args__', args if isinstance(args, tuple) else (args,))
+        object.__setattr__(self, '__args__', args if _is(args, tuple) else (args,))
         object.__setattr__(self, '__unpacked__', False)
         return self
 
@@ -367,7 +372,7 @@ class GenericAlias:
         return f'{star}{_alias_repr_item(self.__origin__)}[{items}]'
 
     def __eq__(self, other):
-        if not isinstance(other, GenericAlias):
+        if not _is(other, GenericAlias):
             return NotImplemented
         return (self.__unpacked__ == other.__unpacked__ and
                 self.__origin__ == other.__origin__ and self.__args__ == other.__args__)
@@ -459,7 +464,7 @@ class Union:
         return ' | '.join('None' if a is type(None) else _alias_repr_item(a) for a in self.__args__)
 
     def __eq__(self, other):
-        if not isinstance(other, Union):
+        if not _is(other, Union):
             return NotImplemented
         if _union_hashable(self) != _union_hashable(other):
             return False
@@ -1488,9 +1493,9 @@ def _object_reduce_newobj(obj):
     else:
         newobj = __newobj_ex__
         newargs = (cls, args, kwargs)
-    state = _object_getstate(obj, not (hasargs or isinstance(obj, (list, dict))))
-    listitems = iter(obj) if isinstance(obj, list) else None
-    dictitems = iter(obj.items()) if isinstance(obj, dict) else None
+    state = _object_getstate(obj, not (hasargs or _is(obj, (list, dict))))
+    listitems = iter(obj) if _is(obj, list) else None
+    dictitems = iter(obj.items()) if _is(obj, dict) else None
     return newobj, newargs, state, listitems, dictitems
 
 
@@ -1590,15 +1595,15 @@ class FileIO(_IOBase):
         if opener is not None:
             raise NotImplementedError("open() does not support opener")
         self._fd = -1
-        if isinstance(file, float):
+        if _is(file, float):
             raise TypeError("integer argument expected, got float")
-        if not isinstance(mode, str):
+        if not _is(mode, str):
             raise TypeError(f"FileIO() argument 'mode' must be str, not {type(mode).__name__}")
         kinds = [k for k in 'rwax' if k in mode]
         if len(kinds) != 1 or any(ch not in 'rwaxb+' for ch in mode) or any(mode.count(ch) > 1 for ch in mode):
             raise ValueError("Must have exactly one of create/read/write/append mode and at most one plus")
         kind, plus = kinds[0], '+' in mode
-        if isinstance(file, int):
+        if _is(file, int):
             raise OSError(9, "Bad file descriptor")
         self._fd = _file_open(file, kind + ('+' if plus else ''))
         if kind == 'a':
@@ -1657,7 +1662,7 @@ class FileIO(_IOBase):
         _check_open(self)
         if not self._writable:
             raise UnsupportedOperation('File not open for writing')
-        return _file_write(self._fd, bytes(data) if isinstance(data, memoryview) else data)
+        return _file_write(self._fd, bytes(data) if _is(data, memoryview) else data)
 
     def seek(self, pos, whence=0):
         _check_open(self)
@@ -1799,7 +1804,7 @@ class TextIOWrapper(_IOBase):
             raise ValueError(f"illegal newline value: {newline}")
         if encoding is None:
             encoding = 'utf-8'
-        if not isinstance(encoding, str):
+        if not _is(encoding, str):
             raise TypeError(f"TextIOWrapper() argument 'encoding' must be str or None, not {type(encoding).__name__}")
         self._codec = _encoding_name(encoding)
         self.buffer = buffer
@@ -1940,7 +1945,7 @@ class TextIOWrapper(_IOBase):
 
     def write(self, text):
         _check_open(self)
-        if not isinstance(text, str):
+        if not _is(text, str):
             raise TypeError(f"write() argument must be str, not {type(text).__name__}")
         if not self.writable():
             raise UnsupportedOperation('not writable')
@@ -1990,14 +1995,14 @@ class TextIOWrapper(_IOBase):
 
 
 def open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
-    if hasattr(file, '__fspath__') and not isinstance(file, (str, bytes)):
+    if hasattr(file, '__fspath__') and not _is(file, (str, bytes)):
         path = file.__fspath__()
-        if not isinstance(path, (str, bytes)):
+        if not _is(path, (str, bytes)):
             raise TypeError(f"expected {type(file).__name__}.__fspath__() to return str or bytes, not {type(path).__name__}")
         file = path
-    if not isinstance(file, (str, bytes, int)) or isinstance(file, bool):
+    if not _is(file, (str, bytes, int)) or _is(file, bool):
         raise TypeError(f"expected str, bytes or os.PathLike object, not {type(file).__name__}")
-    if not isinstance(mode, str):
+    if not _is(mode, str):
         raise TypeError(f"open() argument 'mode' must be str, not {type(mode).__name__}")
     if any(ch not in 'rwaxbt+' for ch in mode) or len(set(mode)) != len(mode):
         raise ValueError(f"invalid mode: {mode!r}")
