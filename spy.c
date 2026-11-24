@@ -14200,6 +14200,10 @@ static int super_binds(SPYContext *c, SPYValue *descriptor) {
     SPYValue *unbound = descriptor->type == SPY_INSTANCE && descriptor->ctx == c ? builtin_value(c, descriptor, SPY_SUPER) : NULL;
     return unbound && !unbound->as.super.self && unbound->as.super.type && super_get_inherited(c, descriptor);
 }
+/* Whether the call function, a read's c->fallback (attribute_step), is
+ * made by attribute_callk alone: a super object's class call, or a lazy
+ * import's reification. */
+static int read_callk(SPYContext *c, SPYValue *function) { return function->type == SPY_LAZY_IMPORT || super_binds(c, function); }
 /* What a descriptor of class kind calls on the machine as its __get__,
  * unbound as the descriptor slot calls it: a Python function, the one a
  * staticmethod wraps, or an instance, unbound too, whose class's __call__
@@ -14311,11 +14315,15 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
  * descriptor's __get__ (instance_getter, class_getter), else the
  * attribute itself natively; the owner's __getattr__ is called after an
  * AttributeError from any of them (getter_call, getattr_call). A
- * module's Python __getattr__ answers a name it lacks (PEP 562). */
+ * module's Python __getattr__ answers a name it lacks (PEP 562), and its
+ * lazy import's placeholder is reified (lazy_reifyk). */
 static SPYValue *super_getter(SPYContext *, SPYValue *, const char *);
 static int special_function(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_MODULE) {
+        /* A lazy import's placeholder is reified on the machine (attribute_callk). */
+        SPYValue *item = c->lazy_modules ? name_local(v, name) : NULL;
+        if (UNLIKELY(item && item->type == SPY_LAZY_IMPORT)) { c->fallback = spy_retain(item); return NULL; }
         SPYValue *fallback = name_local(v, "__getattr__"), *submodule;
         if (!fallback || !machine_function(c, fallback) || name_local(v, name) || !strcmp(name, "__dict__") ||
             !strcmp(name, "__annotate__") || !strcmp(name, "__annotations__")) return attribute(c, v, name);
@@ -15072,31 +15080,16 @@ static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
 static int machine_function(SPYContext *, SPYValue *);
 static int default_hook(SPYValue *, int, int);
 static ALWAYS_INLINE int plain_instance(SPYValue *);
-/* The Python function that a format field's step ch ('[' or '.', or 0
- * for a keyword field) of key on object calls, on the machine as its job
- * suspends (format_from): a Python __getitem__, a dict subclass's
- * __missing__ of a missing key, a property's getter, or a __getattr__
- * after an attribute lookup that runs no Python fails; else NULL, the
- * step's lookup running here. *argc is its argument count. */
-static NO_INLINE SPYValue *format_lookup(SPYContext *c, SPYValue *object, int ch, SPYValue *key, size_t *argc) {
-    *argc = 2;
-    if (ch != '.') {
-        SPYValue *function = item_function(c, object, "__getitem__"), *dict = function ? NULL : builtin_value(c, object, SPY_DICT);
-        if (function || !dict || object->type != SPY_INSTANCE) return function;
-        ptrdiff_t found = map_find(dict, key);
-        return found < 0 && !c->error_type[0] ? item_function(c, object, "__missing__") : NULL;
-    }
-    if (!plain_instance(object)) return NULL;
-    SPYValue *cls = object->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
-    if (hook && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) return NULL;
-    const char *name = key->as.string.data;
-    SPYValue *attr = class_lookup(cls, name);
-    if (attr && attr->type == SPY_PROPERTY) {
-        *argc = 1;
-        return attr->as.property.get && machine_function(c, attr->as.property.get) ? attr->as.property.get : NULL;
-    }
-    SPYValue *fallback = attr || name_local(object, name) ? NULL : class_lookup(cls, "__getattr__");
-    return fallback && machine_function(c, fallback) ? fallback : NULL;
+/* The Python function that a format field's item step of key on object,
+ * or its keyword field's of key in the keywords object, calls, on the
+ * machine as its job suspends (format_from): a Python __getitem__, or a
+ * dict subclass's __missing__ of a missing key; else NULL, the step's
+ * lookup running here. */
+static NO_INLINE SPYValue *format_lookup(SPYContext *c, SPYValue *object, SPYValue *key) {
+    SPYValue *function = item_function(c, object, "__getitem__"), *dict = function ? NULL : builtin_value(c, object, SPY_DICT);
+    if (function || !dict || object->type != SPY_INSTANCE) return function;
+    ptrdiff_t found = map_find(dict, key);
+    return found < 0 && !c->error_type[0] ? item_function(c, object, "__missing__") : NULL;
 }
 static int64_t format_field_index(SPYContext *c, const char *text, size_t start, size_t end) {
     if (start >= end) return -1;
@@ -15110,12 +15103,14 @@ static int64_t format_field_index(SPYContext *c, const char *text, size_t start,
     return accumulator;
 }
 /* The object of a field whose name is text from start to end, or c->unbound
- * when a step's lookup suspends the job (format_lookup): the object so far
- * pending, the key pending_spec, the function looking, the next step at
- * field_at. A field resumes from args->field. */
+ * when a step's lookup suspends the job: the object so far pending, the
+ * key pending_spec, the next step at field_at, and the function looking
+ * that an item's lookup calls (format_lookup), or, its looking_argc 0, the
+ * call an attribute's read leaves (attribute_step), owned. A field resumes
+ * from args->field. */
 static SPYValue *format_field_object(SPYContext *c, const char *text, size_t start, size_t end, FormatArgs *args) {
     size_t i = start, count;
-    SPYValue *object, *function;
+    SPYValue *object, *function, *key;
     if (args->field && args->field_name == start) {
         object = args->field; args->field = NULL; i = args->field_at;
         goto steps;
@@ -15132,12 +15127,10 @@ static SPYValue *format_field_object(SPYContext *c, const char *text, size_t sta
         return spy_error(c, "ValueError", "cannot switch from automatic field numbering to manual field specification");
     if (empty) index = numbering->number++;
     if (index == -1) {
-        SPYValue *key = spy_string(c, text + start, i - start);
-        if (!key) return NULL;
-        if (args->suspend && args->keywords && (function = format_lookup(c, args->keywords, 0, key, &count))) {
-            args->pending = spy_retain(args->keywords); args->pending_spec = key; args->looking = function;
-            args->field_name = start; args->field_at = i; args->looking_argc = count;
-            return c->unbound;
+        if (!(key = spy_string(c, text + start, i - start))) return NULL;
+        if (args->suspend && args->keywords && (function = format_lookup(c, args->keywords, key))) {
+            object = spy_retain(args->keywords); count = 2;
+            goto suspend;
         }
         object = args->keywords ? get_index(c, args->keywords, key) : missing_key(c, key);
         spy_release(key);
@@ -15163,16 +15156,20 @@ steps:
             return spy_error(c, "ValueError", "Only '.' or '[' may follow ']' in format field specifier");
         }
         if (name == name_end) { spy_release(object); return spy_error(c, "ValueError", "Empty attribute in format string"); }
-        SPYValue *key = item >= 0 ? spy_int(c, item) : spy_string(c, text + name, name_end - name), *next = NULL;
-        if (key && args->suspend && (function = format_lookup(c, object, ch, key, &count))) {
-            args->pending = object; args->pending_spec = key; args->looking = function;
-            args->field_name = start; args->field_at = i; args->looking_argc = count;
-            return c->unbound;
-        }
-        if (key) next = ch == '.' ? attribute(c, object, key->as.string.data) : get_index(c, object, key);
+        SPYValue *next = NULL;
+        key = item >= 0 ? spy_int(c, item) : spy_string(c, text + name, name_end - name);
+        if (key && args->suspend && ch == '.') {
+            next = attribute_step(c, object, key->as.string.data);
+            if (!next && !c->error_type[0] && c->fallback) { function = c->fallback; c->fallback = NULL; count = 0; goto suspend; }
+        } else if (key && args->suspend && (function = format_lookup(c, object, key))) { count = 2; goto suspend; }
+        else if (key) next = ch == '.' ? attribute(c, object, key->as.string.data) : get_index(c, object, key);
         spy_release(key); spy_release(object); object = next;
     }
     return object;
+suspend:
+    args->pending = object; args->pending_spec = key; args->looking = function;
+    args->field_name = start; args->field_at = i; args->looking_argc = count;
+    return c->unbound;
 }
 static int format_markup(SPYContext *c, Buffer *out, const char *text, size_t start, size_t end, FormatArgs *args, int depth);
 static SPYValue *format_build(SPYContext *c, const char *text, size_t start, size_t end, FormatArgs *args, int depth) {
@@ -21979,7 +21976,8 @@ static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals,
  * lookup reads it; plain dictionary access returns the placeholder. A root
  * resolves through __import__; a projection replays from-import lookups. */
 static SPYValue *lazy_new(SPYContext *c, SPYValue *from, SPYValue *attr, SPYValue *builtins) {
-    SPYValue *lazy = value_new(c, SPY_LAZY_IMPORT);
+    /* The registry's being there tells a read to look for one (attribute_step). */
+    SPYValue *lazy = lazy_registry(c) ? value_new(c, SPY_LAZY_IMPORT) : NULL;
     if (!lazy) return NULL;
     lazy->as.lazy.from = spy_retain(from); lazy->as.lazy.attr = spy_retain(attr);
     lazy->as.lazy.builtins = spy_retain(builtins);
@@ -22104,25 +22102,95 @@ static SPYValue *lazy_settled(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     if (!value && c->error_type[0]) lazy_cause(c, state->as.seq.items[0]);
     return k_resume(c, m, state, value);
 }
-/* What __import__ returned for state[0] (lazy_resolvek), module: a
- * placeholder's own resolution first, then the names replayed from it
- * (lazy_replay), a placeholder among them resolved after. */
-static SPYValue *lazy_imported(SPYContext *c, Machine *m, SPYValue *state, SPYValue *module) {
-    SPYValue *lazy = state->as.seq.items[0], *value = NULL, *result;
-    if (module && module->type == SPY_LAZY_IMPORT) {
-        result = lazy_resolvek(c, m, module, lazy_imported, state);
-        spy_release(module);
-        return result;
+/* The replay of lazy_replayk's state (lazy_replay_go): what the read of
+ * the name of the projection state[2] below its placeholder state[0]
+ * from state[1] gave, value, which it takes, in state[1], the next one
+ * below in state[2]; an AttributeError is that of a missing name
+ * (import_missing). 0 on an error. */
+static int lazy_put(SPYContext *c, SPYValue *state, SPYValue *value) {
+    SPYValue **items = state->as.seq.items, *p = items[0];
+    int64_t depth = items[2]->as.integer_data.small;
+    for (int64_t i = 0; i < depth; i++) p = p->as.lazy.from;
+    if (!value && !c->stopped && error_is(c, "AttributeError")) {
+        spy_clear_error(c);
+        value = import_missing(c, items[1], p->as.lazy.attr->as.string.data, 1);
     }
-    if (module) value = lazy_replay(c, module, lazy);
+    SPYValue *next = value ? int_value(c, depth - 1) : NULL;
+    if (!next) { spy_release(value); return 0; }
+    spy_release(items[1]); items[1] = value;
+    spy_release(items[2]); items[2] = next;
+    return 1;
+}
+static SPYValue *lazy_replay_go(SPYContext *, Machine *, SPYValue *);
+/* What a replay's read of a name (lazy_replay_go) returned on m, value:
+ * the replay goes on there while state[3] says it is still in the read,
+ * c->stepped, or here. */
+static SPYValue *lazy_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
+    int inside = state->as.seq.items[3] == c->booleans[1], put = lazy_put(c, state, value);
+    if (inside) { spy_release(state); return put ? c->stepped : NULL; }
+    return put ? lazy_replay_go(c, m, state) : k_resume(c, m, state, NULL);
+}
+/* lazy_replayk's names, from state, which it takes, read in turn (lazy_put),
+ * a read that calls Python or reifies a placeholder m's (attribute_callk,
+ * lazy_read), then state's continuation with the last. */
+static SPYValue *lazy_replay_go(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items;
+    for (;;) {
+        int64_t depth = items[2]->as.integer_data.small;
+        if (depth < 0) return k_resume(c, m, state, spy_retain(items[1]));
+        SPYValue *p = items[0], *object = items[1];
+        for (int64_t i = 0; i < depth; i++) p = p->as.lazy.from;
+        const char *name = p->as.lazy.attr->as.string.data;
+        SPYValue *value = attribute_step(c, object, name), *function = c->fallback, *read;
+        if (value || c->error_type[0] || !function) {
+            if (!lazy_put(c, state, value)) return k_resume(c, m, state, NULL);
+            continue;
+        }
+        c->fallback = NULL;
+        spy_release(items[3]); items[3] = spy_bool(c, 1);
+        if ((read = attribute_callk(c, m, object, name, function, lazy_read, spy_retain(state))) == c->stepped) continue;
+        if (!c->k_fn && c->error_type[0]) return k_resume(c, m, state, NULL);
+        spy_release(items[3]); items[3] = spy_bool(c, 0);
+        spy_release(state);
+        return read;
+    }
+}
+/* lazy_replay of module and lazy, both borrowed, on m (lazy_replay_go):
+ * the value given to k with ctx, which it takes. */
+static SPYValue *lazy_replayk(SPYContext *c, Machine *m, SPYValue *module, SPYValue *lazy, Continuation k, SPYValue *ctx) {
+    int64_t depth = -1;
+    for (SPYValue *p = lazy; lazy_projection(p); p = p->as.lazy.from) depth++;
+    SPYValue *at = int_value(c, depth);
+    SPYValue *state = at ? k_state(c, 4, (SPYValue *[6]){spy_retain(lazy), spy_retain(module), at, spy_bool(c, 0)}, k, ctx) : NULL;
+    if (!at) spy_release(ctx);
+    return state ? lazy_replay_go(c, m, state) : NULL;
+}
+/* What replaying the names of state[0] (lazy_replayk) gave, value: a
+ * placeholder resolved in its turn, then state's continuation. */
+static SPYValue *lazy_replayed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *value) {
+    SPYValue *lazy = state->as.seq.items[0], *result;
     lazy->as.lazy.resolving = 0;
-    spy_release(module);
     if (value && value->type == SPY_LAZY_IMPORT) {
         result = lazy_resolvek(c, m, value, lazy_settled, state);
         spy_release(value);
         return result;
     }
     return lazy_settled(c, m, state, value);
+}
+/* What __import__ returned for state[0] (lazy_resolvek), module: a
+ * placeholder's own resolution first, then the names replayed from it
+ * (lazy_replayk). */
+static SPYValue *lazy_imported(SPYContext *c, Machine *m, SPYValue *state, SPYValue *module) {
+    SPYValue *result;
+    if (module && module->type == SPY_LAZY_IMPORT) {
+        result = lazy_resolvek(c, m, module, lazy_imported, state);
+        spy_release(module);
+        return result;
+    }
+    if (!module) return lazy_replayed(c, m, state, NULL);
+    result = lazy_replayk(c, m, module, state->as.seq.items[0], lazy_replayed, state);
+    spy_release(module);
+    return result;
 }
 /* Resolve a placeholder read from env's binding of name and replace the
  * binding, unless it has meanwhile been rebound. Takes ownership. */
@@ -30881,10 +30949,10 @@ static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, 
 /* Whether a field may reach an instance with a Python __format__
  * (format_job) through one of the argc values argv, of str.format, or
  * the values of the dict argv[0], of str.format_map (kind 2), whose
- * lookups may call Python when it is an instance (format_lookup): an
- * instance or a container (repr_container). */
+ * lookups may call Python (format_field_object): an instance, a module or
+ * a container (repr_container). */
 static NO_INLINE int format_instances(int kind, size_t argc, SPYValue *const *argv) {
-    const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
+    const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_MODULE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
                               UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET;
     if (kind == 2) {
         SPYValue *dict = argv[0];
@@ -31586,9 +31654,11 @@ static SPYValue *attribute_called(SPYContext *c, Machine *m, SPYValue *state, SP
 }
 /* The read of v's attribute name, which attribute_step left to function,
  * its c->fallback, which it takes: the Python getter, __getattribute__ or
- * __getattr__ called on m, then continuation k with ctx, which it takes,
+ * __getattr__ called on m, or a module's placeholder reified there
+ * (lazy_reifyk), then continuation k with ctx, which it takes,
  * and the value, as callk calls (attribute_called). */
 static SPYValue *attribute_callk(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *function, Continuation k, SPYValue *ctx) {
+    if (function->type == SPY_LAZY_IMPORT) return lazy_reifyk(c, m, v, name, function, k, ctx);
     SPYValue *fallback = getter_fallback(v, function), *text = spy_string(c, name, strlen(name)), *argv[4] = {NULL, NULL, NULL}, *get, *state;
     size_t argc;
     if (!text) { spy_release(function); return k(c, m, ctx, NULL); }
@@ -32665,6 +32735,7 @@ static SPYValue *method_getter_of(SPYContext *c, Machine *m, const char *name, S
     SPYValue *items[4] = {object, fallback ? fallback : c->none, spy_string(c, name, strlen(name)), int_value(c, stacked)};
     SPYValue *state = items[2] && items[3] ? spy_tuple(c, 4, items) : NULL;
     spy_release(items[2]); spy_release(items[3]); spy_release(object);
+    if (state && function->type == SPY_LAZY_IMPORT) return lazy_reifyk(c, m, state->as.seq.items[0], name, function, method_got, state);
     if (state && fallback_described(c, object, function)) {
         SPYValue *result = special_callk(c, m, function, object, 1, (SPYValue *[]){spy_retain(state->as.seq.items[2])}, NULL, method_got, state);
         spy_release(function);
@@ -38372,8 +38443,8 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
 static SPYValue *getter_enter(SPYContext *c, Machine *m, SPYValue *v, const char *name, SPYValue *function, SPYValue **env) {
     SPYValue *argv[4] = {v, NULL, NULL}, *fallback = getter_fallback(v, function);
     size_t argc = 1;
-    if (super_binds(c, function)) {
-        /* Its class call is m's, the value pushed (callk). */
+    if (read_callk(c, function)) {
+        /* Its call is m's, the value pushed (callk). */
         SPYValue *result = attribute_callk(c, m, v, name, function, unchanged, NULL);
         spy_release(v);
         if (result) machine_push(c, m, result);
@@ -38570,8 +38641,8 @@ static NO_INLINE SPYValue *getattr_named(SPYContext *c, Machine *m, int defaulte
         }
         function = c->fallback;
         c->fallback = NULL;
-        if (super_binds(c, function)) {
-            /* Its class call is m's call (callk), the default given after it (getattr_bound). */
+        if (read_callk(c, function)) {
+            /* Its call is m's (callk), the default given after it (getattr_bound). */
             SPYValue *ctx = defaulted ? spy_retain(slots[3]) : spy_retain(c->unbound);
             spy_retain(v);
             m->len -= n;
@@ -50054,8 +50125,10 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
  * (conversion_method), the call *function with *env to enter
  * (CALL_CHECKED), the state, c->replacing, the method's name and the
  * object on m's stack; else the text, or NULL on an error. */
+static SPYValue *format_read(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue **function, SPYValue **env) {
     static SPYValue *const none[1];
+again:;
     SPYValue **items = state->as.seq.items, *self = items[0], *args = items[1];
     FormatArgs format = {args == c->none ? 0 : args->as.seq.len, args == c->none ? NULL : args->as.seq.len ? args->as.seq.items : none,
                          items[9] == c->none ? NULL : items[9],
@@ -50091,6 +50164,20 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
             for (int i = 0; i < 3; i++) { spy_release(items[2 + i]); items[2 + i] = parts[i]; }
             spy_release(items[nested ? 8 : 5]); items[nested ? 8 : 5] = done ? done : spy_string(c, "", 0);
             spy_release(items[11]); items[11] = place ? place : spy_none(c);
+            if (!format.looking_argc) {
+                /* An attribute's read is m's call (attribute_callk), the
+                 * field taking up its value (format_read): here when it
+                 * returned at once, its flag in ctx true until then. */
+                SPYValue *ctx = done && parts[0] && parts[1] && parts[2] && place ? spy_list(c) : NULL, *read = NULL;
+                if (ctx && !sequence_append(c, ctx, state) && !sequence_append(c, ctx, c->booleans[1]))
+                    read = attribute_callk(c, m, object, key->as.string.data, format.looking, format_read, spy_retain(ctx));
+                else spy_release(format.looking);
+                spy_release(object); spy_release(key);
+                if (read == c->stepped) { spy_release(ctx); goto again; }
+                if (ctx) slot_put(ctx, 1, spy_bool(c, 0));
+                spy_release(ctx);
+                return NULL;
+            }
             SPYValue *args[] = {spy_retain(object), key};
             if (format.looking_argc == 1) spy_release(key);
             if (!done || !parts[0] || !parts[1] || !parts[2] || !place ||
@@ -50186,6 +50273,26 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         c->entering_init = *function; c->entering_kind = CALL_CHECKED;
         return spy_retain(c->types[SPY_STRING]);
     }
+}
+/* What a format job's field's attribute read (format_from) returned,
+ * value, ctx its state and whether the read is still in format_from: the
+ * field's object, the job going on there (c->stepped), or here, a call to
+ * enter left for m (CALL_CHECKED); its text, or NULL on an error. */
+static SPYValue *format_read(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *value) {
+    SPYValue *state = ctx->as.seq.items[0], **items = state->as.seq.items, **at = items[11]->as.seq.items;
+    int inside = ctx->as.seq.items[1] == c->booleans[1];
+    SPYValue *found = value ? spy_tuple(c, 3, (SPYValue *[]){at[0], at[1], value}) : NULL;
+    spy_release(value);
+    if (found) { spy_release(items[11]); items[11] = found; }
+    if (!found || inside) { spy_release(ctx); return found ? c->stepped : NULL; }
+    SPYValue *function = NULL, *env = NULL, *result = format_from(c, m, state, &function, &env);
+    spy_release(ctx);
+    if (result && function) {
+        spy_release(result);
+        c->k_fn = spy_retain(function); c->k_env = env; c->k = NULL; c->k_kind = CALL_CHECKED;
+        return NULL;
+    }
+    return result;
 }
 /* The str.format or str.format_map call (format_target) of callee with
  * argc arguments argv, which it takes, and the keywords' dict or NULL, on
@@ -50315,7 +50422,8 @@ static NO_INLINE Machine *text_returned(SPYContext *c, Machine *m, SPYValue *tex
         call->m.outermost = CALL_CHECKED;
         return &call->m;
     }
-    if (!result) return m;
+    /* A field's read left a call (format_read). */
+    if (!result) { if (c->k_fn) c->consuming = 1; return m; }
     if (m->len && m->stack[m->len - 1] == c->replacing) return text_returned(c, m, result);
     machine_push(c, m, result);
     return m;

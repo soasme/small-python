@@ -29,7 +29,7 @@ Cases == {"unused", "used", "from_unused", "from_used", "placeholder", "from_pla
           "missing_used", "broken", "as", "not_cached", "in_function_use", "registry", "submodule",
           "in_function", "in_try", "in_class", "star", "future",
           "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function",
-          "compat_getitem", "compat_hook", "hook_used", "hook_dotted", "method_read"}
+          "compat_getitem", "compat_hook", "attribute_hook", "hook_used", "hook_dotted", "method_read"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -64,6 +64,8 @@ Run(p) ==
       [] p.case = "compat_try" -> "'module' ['pkg']"
       [] p.case = "compat_function" -> "'module' ['pkg']"
       [] p.case = "compat_getitem" -> "('lazy_import', 2) []"           \* read once per module
+      \* a module's attribute bound lazily reifies when getattr() or str.format reads it
+      [] p.case = "attribute_hook" -> "('sub', '1', ['pkg', 'pkg']) ['pkg', 'sub']"
       \* a Python __import__ hook imports an unlisted module; a listed one stays lazy
       [] p.case = "compat_hook" -> "(['other'], 'given', 'lazy_import') []"
       \* a Python __import__ hook reifies each name once, its modules run then

@@ -110,7 +110,10 @@ SOURCES = {
     "str_format_containers": "result = '{}|{!r:>8}|{!a}|{k}'.format([Spin()], (Spin(),), {1: U()}, k={Spin()})",
     "str_format_container_raises": "result = '{}'.format([Spin(), BadRepr()])",
     "str_format_container_nested": "result = '{!r:>{}}|{:{}}|{!a:{}}'.format([Spin()], 6, (Spin(),), '', [U()], '<9')",
-    "str_format_container_nested_spec": "result = '{:{}}'.format([Spin()], 'x')"
+    "str_format_container_nested_spec": "result = '{:{}}'.format([Spin()], 'x')",
+    "format_field_reads": "import builtins\nm = type(builtins)('m')\nm.__getattr__ = lambda name: name * 2\n"
+                          "class G:\n    def __getattribute__(self, name):\n        for _ in (): pass\n        return name.upper()\n"
+                          "result = '{0.ab}|{1.cd!r}|{0.e.__class__.__name__}'.format(m, G())"
 }
 
 
