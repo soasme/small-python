@@ -601,6 +601,7 @@ struct SPYContext {
     Node *node_open; /* The node of the last compile-time SyntaxError, while analysis runs (analysis_defer). */
     SPYValue *next_call; /* The builtin next, as dict.fromkeys calls it on a machine (fromkeys_items). */
     SPYValue *ascii_field; /* The builtin ascii, as an f-string's !a field calls it while calls can pause. */
+    int lazy_made; /* Whether a lazy import object was made, which a module's attribute may hold (attribute_step). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -14322,7 +14323,7 @@ static int special_function(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_MODULE) {
         /* A lazy import's placeholder is reified on the machine (attribute_callk). */
-        SPYValue *item = c->lazy_modules ? name_local(v, name) : NULL;
+        SPYValue *item = c->lazy_made ? name_local(v, name) : NULL;
         if (UNLIKELY(item && item->type == SPY_LAZY_IMPORT)) { c->fallback = spy_retain(item); return NULL; }
         SPYValue *fallback = name_local(v, "__getattr__"), *submodule;
         if (!fallback || !machine_function(c, fallback) || name_local(v, name) || !strcmp(name, "__dict__") ||
@@ -21976,9 +21977,9 @@ static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals,
  * lookup reads it; plain dictionary access returns the placeholder. A root
  * resolves through __import__; a projection replays from-import lookups. */
 static SPYValue *lazy_new(SPYContext *c, SPYValue *from, SPYValue *attr, SPYValue *builtins) {
-    /* The registry's being there tells a read to look for one (attribute_step). */
-    SPYValue *lazy = lazy_registry(c) ? value_new(c, SPY_LAZY_IMPORT) : NULL;
+    SPYValue *lazy = value_new(c, SPY_LAZY_IMPORT);
     if (!lazy) return NULL;
+    c->lazy_made = 1;
     lazy->as.lazy.from = spy_retain(from); lazy->as.lazy.attr = spy_retain(attr);
     lazy->as.lazy.builtins = spy_retain(builtins);
     return lazy;
@@ -30949,27 +30950,32 @@ static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, 
 /* Whether a field may reach an instance with a Python __format__
  * (format_job) through one of the argc values argv, of str.format, or
  * the values of the dict argv[0], of str.format_map (kind 2), whose
- * lookups may call Python (format_field_object): an instance, a module or
- * a container (repr_container). */
-static NO_INLINE int format_instances(int kind, size_t argc, SPYValue *const *argv) {
-    const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_MODULE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
+ * lookups may call Python (format_field_object): an instance, a container
+ * (repr_container), or a module with a Python __getattr__ or once a lazy
+ * import object was made (attribute_step). */
+static int module_reaches(SPYContext *c, SPYValue *v) {
+    SPYValue *fallback = v->type == SPY_MODULE ? name_local(v, "__getattr__") : NULL;
+    return v->type == SPY_MODULE && (c->lazy_made || (fallback && machine_function(c, fallback)));
+}
+static NO_INLINE int format_instances(SPYContext *c, int kind, size_t argc, SPYValue *const *argv) {
+    const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
                               UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET;
     if (kind == 2) {
         SPYValue *dict = argv[0];
         if (dict->type != SPY_DICT) return dict->type == SPY_INSTANCE;
         for (size_t i = 0; i < map_used(dict); i++)
-            if (map_items(dict)[i].key && UINT64_C(1) << map_items(dict)[i].value->type & reaching) return 1;
+            if (map_items(dict)[i].key && (UINT64_C(1) << map_items(dict)[i].value->type & reaching || module_reaches(c, map_items(dict)[i].value))) return 1;
         return 0;
     }
     for (size_t i = 0; i < argc; i++)
-        if (UINT64_C(1) << argv[i]->type & reaching) return 1;
+        if (UINT64_C(1) << argv[i]->type & reaching || module_reaches(c, argv[i])) return 1;
     return 0;
 }
 static NO_INLINE int format_reaches(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *self;
     size_t skip;
     int kind = format_target(c, callee, method, argc, argv, &self, &skip);
-    return kind && format_instances(kind, argc - skip, argv + skip);
+    return kind && format_instances(c, kind, argc - skip, argv + skip);
 }
 /* Whether callee, method number method of it or -1, may be str.format or
  * str.format_map (format_target), tested before anything slower. */
@@ -33683,7 +33689,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Instruc
     SPYValue *target;
     size_t fields;
     if (format_callee(callee, -1) && format_target(c, callee, -1, positional, argv, &target, &fields) == 1 && argc <= 8 &&
-        format_instances(1, argc - fields, argv + fields)) {
+        format_instances(c, 1, argc - fields, argv + fields)) {
         /* str.format, as a plain call's step (stack_call), with keywords. */
         SPYValue *keywords = entries_dict(c, kw, kwc), *args[8];
         for (size_t i = 0; i < positional; i++) args[i] = spy_retain(argv[i]);
