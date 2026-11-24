@@ -67,7 +67,7 @@ Cases == {"list_int", "dict_args", "tuple_ellipsis", "call_origin", "no_runtime_
           "subscript_int", "union_or", "union_dedup", "union_none", "union_isinstance",
           "union_generic_isinstance", "union_nested", "union_bad", "union_bad_left", "union_hash",
           "union_generic_alias", "union_param", "union_getitem_noparams", "union_origin", "union_subclass",
-          "union_eq_order", "union_call", "union_type_methods", "union_type_bound", "ga_instancecheck_inner", "ga_repr_nested",
+          "union_eq_order", "union_call", "union_type_methods", "union_class_property", "union_type_bound", "ga_instancecheck_inner", "ga_repr_nested",
           "ga_repr_callable_like", "ga_star_star", "ga_args_tuple_single", "ga_args_list_param",
           "ga_mro_entries", "ga_setattr", "ga_copy_attr_ok"}
 Programs == [terms : Seqs]
@@ -120,6 +120,7 @@ Case(c) ==
       [] c = "union_eq_order" -> "True"
       [] c = "union_call" -> "TypeError: 'typing.Union' object is not callable"
       [] c = "union_type_methods" -> "((<class 'int'>, <class 'str'>), (<class 'str'>, <class 'int'>), NotImplemented)"
+      [] c = "union_class_property" -> "NotImplemented"
       [] c = "union_type_bound" -> "'int | list[int]'"
       [] c = "ga_instancecheck_inner" -> "False"
       [] c = "ga_repr_nested" -> "'list[list[dict[str, ...]]]'"

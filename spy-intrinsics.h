@@ -235,7 +235,7 @@ static const char *const intrinsics_source[] = {
     "\n",
     "\n",
     "def _unionable(obj):\n",
-    "    return (obj is None or isinstance(obj, (type, GenericAlias, Union, TypeAliasType, sentinel)))\n",
+    "    return obj is None or issubclass(type(obj), (type, GenericAlias, Union, TypeAliasType, sentinel))\n",
     "\n",
     "\n",
     "def _union_from_tuple(args):\n",

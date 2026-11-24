@@ -58,3 +58,11 @@ for i, (f, expected) in enumerate(zip(all_cases, EXPECTED)):
     assert_eq(repr(run(f)), expected, str(i))
 def inside(): return [repr(run(f)) for f in all_cases]
 assert_eq(inside(), EXPECTED)
+# Whether an operand is a member is decided by its type: a __class__
+# property is not read, and the slot declines.
+class ClassProp:
+    @property
+    def __class__(self): raise KeyError("cls")
+def class_property():
+    return [type.__or__(int, ClassProp()), type.__ror__(int, ClassProp()), type.__or__(int, object())]
+assert_eq(class_property(), [NotImplemented] * 3)

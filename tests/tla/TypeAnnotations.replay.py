@@ -57,6 +57,7 @@ SOURCES = {
     "union_eq_order": 'result = (int | str | float) == (float | str | int)',
     "union_call": 'result = (int | str)()',
     "union_type_methods": 'result = (type.__or__(int, str).__args__, type.__ror__(int, str).__args__, type.__or__(int, 1))',
+    "union_class_property": 'class P:\n    @property\n    def __class__(self): raise KeyError\nresult = type.__or__(int, P())',
     "union_type_bound": 'result = repr(type.__or__.__get__(int)(list[int]))',
     "ga_instancecheck_inner": 'result = isinstance(list[int], type)',
     "ga_repr_nested": 'result = repr(list[list[dict[str, ...]]])',

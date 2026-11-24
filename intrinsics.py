@@ -237,7 +237,8 @@ def _subs_parameters(alias, args, params, item):
 
 
 def _unionable(obj):
-    return (obj is None or isinstance(obj, (type, GenericAlias, Union, TypeAliasType, sentinel)))
+    # By its type: a __class__ property is not consulted.
+    return obj is None or issubclass(type(obj), (type, GenericAlias, Union, TypeAliasType, sentinel))
 
 
 def _union_from_tuple(args):
