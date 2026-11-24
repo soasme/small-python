@@ -766,6 +766,7 @@ Unreleased (0.10.0):
 - `TypeVar()`, `TypeVarTuple()`, `ParamSpec()` and `TypeAliasType()` take their caller's module as `__module__`, and name a non-str name's class as CPython does
 - `type.__new__()`'s namespace, `str()`'s encoding and errors, a `**` unpacking of a non-mapping, an unhashable key or element, and a `with` of a non-manager name the class by its fully qualified name
 - a generic alias has `__reduce__` and CPython's store and deletion errors; a union is not iterable; a type alias iterates to its `Unpack`
+- a built-in function reports a missing required argument before a keyword repeating a positional one
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
 
 2026-11-10 0.9.0:

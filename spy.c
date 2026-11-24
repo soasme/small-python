@@ -43905,7 +43905,8 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
         return -1;
     }
     /* _PyArg_UnpackKeywords order: the total count, then required
-     * parameters, then unknown keywords. */
+     * parameters, then the first keyword naming a parameter given by
+     * position or naming none. */
     if (given > count) {
         errorf(c, "TypeError", "%s() takes at most %zu %sargument%s (%zu given)", function, count, argc ? "" : "keyword ",
                count == 1 ? "" : "s", given);
@@ -43913,16 +43914,15 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
     }
     for (size_t i = 0; i < count; i++) out[i] = i < argc ? argv[i] : NULL;
     int unknown = 0;
+    const char *clash = NULL;
+    size_t clash_at = 0;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         size_t at = keyword_start;
         while (at < count && strcmp(names[at], key)) at++;
-        if (at == count) { unknown = 1; continue; }
-        if (out[at]) {
-            errorf(c, "TypeError", "argument for %s() given by name ('%s') and position (%zu)", function, key, at + 1);
-            return -1;
-        }
-        out[at] = map_items(keywords)[i].value;
+        if (at == count) unknown = 1;
+        else if (out[at]) { if (!unknown && !clash) clash = key, clash_at = at; }
+        else out[at] = map_items(keywords)[i].value;
     }
     for (size_t i = 0; i < required; i++)
         if (!out[i]) {
@@ -43935,6 +43935,10 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
             else errorf(c, "TypeError", "%s() takes at least %zu argument%s (%zu given)", function, required, required == 1 ? "" : "s", argc);
             return -1;
         }
+    if (clash) {
+        errorf(c, "TypeError", "argument for %s() given by name ('%s') and position (%zu)", function, clash, clash_at + 1);
+        return -1;
+    }
     return unknown ? unknown_keywords(c, function, keywords, names + keyword_start, count - keyword_start) : 0;
 }
 /* types.TracebackType(tb_next, tb_frame, tb_lasti, tb_lineno) */

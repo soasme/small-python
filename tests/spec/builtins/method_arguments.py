@@ -84,6 +84,10 @@ check("exec() takes at least 1 positional argument (0 given)", lambda: exec(sour
 Module = type(__import__("harness"))
 check("module() missing required argument 'name' (pos 1)", lambda: Module(nam="x"))
 check("argument for module() given by name ('name') and position (1)", lambda: Module("m", name="x"))
+# A missing required argument is reported before a keyword clashing with a positional one.
+check("pow() missing required argument 'exp' (pos 2)", lambda: pow(2, base=2))
+check("function() missing required argument 'globals' (pos 2)", lambda: type(check)(None, code=1))
+check("argument for pow() given by name ('base') and position (1)", lambda: pow(2, 3, base=2))
 check("__lazy_import__() takes at most 5 arguments (6 given)", lambda: __lazy_import__("x", None, None, None, 0, name="y"))
 check("__lazy_import__() got an unexpected keyword argument 'bogus'", lambda: __lazy_import__("x", bogus=1))
 
