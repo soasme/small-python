@@ -3085,6 +3085,16 @@ int main(int argc, char **argv) {
         assert(integer(fresh, run_paused(fresh, spy_eval(fresh, "f()", "firsts.py"), SPY_STOP_STEPS, &pauses)) == 9 + (i == 1) && pauses > 2);
         spy_context_free(fresh);
     }
+    /* While calls can pause, a deletion looks a frame proxy's key up on
+     * the machine, its Python __hash__ and __eq__ called there. */
+    SPYContext *deleting = spy_context_new();
+    assert(deleting && !spy_set_limit(deleting, SPY_LIMIT_PAUSE, 1));
+    assert(spy_exec(deleting, "class Key:\n    def __hash__(self):\n        for _ in (): pass\n        return hash('x')\n"
+                              "    def __eq__(self, other): return other == 'x'\n"
+                              "def f():\n    try: raise KeyError\n    except KeyError as e: p = e.__traceback__.tb_frame.f_locals\n"
+                              "    p['x'] = 1\n    del p[Key()]\n    return 0 if 'x' in p else 7\n", "deleting.py") == 0);
+    assert(integer(deleting, spy_eval(deleting, "f()", "deleting.py")) == 7);
+    spy_context_free(deleting);
     spy_set_limit(c, SPY_LIMIT_PAUSE, 0);
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     /* The engine counts the bytes it holds; a memory limit stops the call
