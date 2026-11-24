@@ -39706,15 +39706,19 @@ static SPYValue *buffer_item_copied(SPYContext *c, Machine *m, SPYValue *item, S
     SPYValue *pair = tuple_of(c, 2, (SPYValue *[]){copy, item});
     spy_release(copy);
     size_t depth = m->len;
-    if (!pair || machine_push_all(c, m, 3, (SPYValue *[]){pair, spy_retain(inner), spy_retain(c->converting)}) ||
-        !(env = function_env(c, release, 2, (SPYValue *[]){item, inner}, NULL, 0))) {
-        while (m->len > depth) spy_release(machine_pop(m));
-        memory_unexport(inner); spy_release(inner);
+    int pushed = pair && !machine_push_all(c, m, 3, (SPYValue *[]){pair, spy_retain(inner), spy_retain(c->converting)});
+    if (pushed && (env = function_env(c, release, 2, (SPYValue *[]){item, inner}, NULL, 0))) {
+        spy_release(inner);
+        c->k_fn = spy_retain(release); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
         return NULL;
     }
-    spy_release(inner);
-    c->k_fn = spy_retain(release); c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
-    return NULL;
+    /* A call that cannot bind raised in __release_buffer__: the copy is
+     * the value (release_unraisable). */
+    copy = pushed ? spy_retain(pair->as.seq.items[0]) : NULL;
+    while (m->len > depth) spy_release(machine_pop(m));
+    if (copy) release_unraisable(c, item);
+    memory_unexport(inner); spy_release(inner);
+    return copy;
 }
 /* What a next call of kind that convert_call or init_convert made
  * returned in result, which it takes: the item's conversion, owned

@@ -18,7 +18,8 @@
 (* An export program defines class B whose __buffer__ logs "buffer" and    *)
 (* its flags, 284, and returns memoryview(b"abc") or b"abc", or raises     *)
 (* ValueError, with no __release_buffer__ or one that logs "release" and   *)
-(* returns or then raises KeyError;                                        *)
+(* returns or then raises KeyError, or one taking no view, which raises    *)
+(* TypeError before it runs;                                                *)
 (* then takes bytes(B()), bytes(bytearray(B())), map(bytes, [B()])'s     *)
 (* item or b"%b" % (B(),), or makes m =                                    *)
 (* memoryview(B()) and reads bytes(m) inside `with m:`, before m.release() *)
@@ -63,7 +64,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"none", "logs", "fails"}, how : {"bytes", "bytearray", "map", "percent", "with", "release", "unbound", "del", "collect"}]
+Programs == [part : {"export"}, ret : {"view", "bytes", "raise"}, release : {"none", "logs", "fails", "unbindable"}, how : {"bytes", "bytearray", "map", "percent", "with", "release", "unbound", "del", "collect"}]
             \cup [part : {"resize"}, released : BOOLEAN]
             \cup [part : {"plain"}]
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
@@ -83,7 +84,7 @@ Pending == "pending"
 Export(p) ==
     CASE p.ret = "bytes" -> "buffer 284 TypeError"             \* __buffer__ must return a memoryview
       [] p.ret = "raise" -> "buffer 284 ValueError"            \* its exception propagates, nothing exported
-      [] OTHER -> "buffer 284 " \o (IF p.release # "none" THEN "release " ELSE "") \o "b'abc'"
+      [] OTHER -> "buffer 284 " \o (IF p.release \in {"logs", "fails"} THEN "release " ELSE "") \o "b'abc'"
 
 \* Whether an item of view v, or a store into it, converts its index.
 Indexes(v, store) == v \in IF store THEN {"plain"} ELSE {"plain", "readonly", "grid"}
@@ -155,9 +156,12 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* A buffer obtained is released exactly once, however it is let go and
-\* whether or not its __release_buffer__ raises.
-ReleasedOnce == Done /\ program.part = "export" /\ program.ret = "view" /\ program.release # "none" =>
+\* whether or not its __release_buffer__ raises; one that cannot bind
+\* never runs, and the copy or release goes on as if it had raised.
+ReleasedOnce == Done /\ program.part = "export" /\ program.ret = "view" /\ program.release \in {"logs", "fails"} =>
     outcome = "buffer 284 release b'abc'"
+UnboundReleased == Done /\ program.part = "export" /\ program.ret = "view" /\ program.release = "unbindable" =>
+    outcome = "buffer 284 b'abc'"
 
 \* A buffer never obtained is never released.
 UnexportedUnreleased == Done /\ program.part = "export" /\ program.ret # "view" =>

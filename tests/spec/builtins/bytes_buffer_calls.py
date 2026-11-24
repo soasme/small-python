@@ -70,3 +70,11 @@ class NativeText:
 assert_eq(b"%b|%s" % (NativeBytes(), NativeBytes()), b"ok|ok")
 with assert_raises(TypeError, message="NativeText.__bytes__() must return a bytes, not str"):
     b"%b" % NativeText()
+# A __release_buffer__ that cannot take the view raises in it, which is
+# unraisable: the copy is still made, through map() as directly.
+class Unbindable:
+    def __buffer__(self, flags): return memoryview(b"ab")
+    def __release_buffer__(self): pass
+def unbindable():
+    return [list(map(bytes, [Unbindable()])), list(map(bytearray, [Unbindable()])), bytes(Unbindable())]
+assert_eq(unbindable(), [[b"ab"], [bytearray(b"ab")], b"ab"])

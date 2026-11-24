@@ -763,6 +763,7 @@ Unreleased (0.10.0):
 - `min()` and `max()` without a key, when an item's builtin comparison and the best's reflected Python one both decline, name the comparison as written
 - `super.__get__` exists as a slot wrapper; a `super` subclass defining `__set__` is a data descriptor, so a metaclass's instance of it answers before `type`'s attribute
 - `type.__or__` and `__ror__` decide a union member by its type, without reading a `__class__` property
+- `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
 
 2026-11-10 0.9.0:
 

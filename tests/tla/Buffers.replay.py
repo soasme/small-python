@@ -17,7 +17,9 @@ def export(p, log):
         log.append("release")
         if p["release"] == "fails":
             raise KeyError("release")
-    if p["release"] != "none":
+    if p["release"] == "unbindable":
+        body["__release_buffer__"] = lambda self: log.append("release")
+    elif p["release"] != "none":
         body["__release_buffer__"] = __release_buffer__
     B = type("B", (), body)
     how = p["how"]
