@@ -46,3 +46,20 @@ def gen():
 assert_eq(next(gen()), expected)
 def main(): return cases()
 assert_eq(main(), expected)
+# A list or bytearray has no number methods: the right operand's Python
+# __radd__ or __rmul__ comes before its in-place concatenation or
+# repetition, which runs on NotImplemented.
+seq_log = []
+class Reflecting:
+    def __init__(self, give): self.give = give
+    def __radd__(self, other): seq_log.append(("radd", type(other).__name__)); return self.give
+    def __rmul__(self, other): seq_log.append(("rmul", type(other).__name__)); return self.give
+    def __iter__(self): return iter([9])
+    def __index__(self): return 2
+def sequences():
+    l = [1]; l += Reflecting("taken")
+    b = bytearray(b"a"); b *= Reflecting(NotImplemented)
+    m = [1]; m += Reflecting(NotImplemented)
+    n = [1]; n *= Reflecting(NotImplemented)
+    return l, b, m, n, seq_log
+assert_eq(sequences(), ("taken", bytearray(b"aa"), [1, 9], [1, 1], [("radd", "list"), ("rmul", "bytearray"), ("radd", "list"), ("rmul", "list")]))
