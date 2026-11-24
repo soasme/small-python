@@ -33277,6 +33277,8 @@ static ALWAYS_INLINE SPYValue *searched(SPYValue *callee, int method, size_t arg
         if (callee->type != SPY_BOUND_METHOD || callee->as.bound.module) return NULL;
         method = callee->as.bound.method; seq = callee->as.bound.self;
     }
+    /* A list's or tuple's subclass searches its items. */
+    if (seq->type == SPY_INSTANCE && seq->as.map.base) seq = seq->as.map.base;
     *id = method;
     return (method == M_INDEX || method == M_COUNT || method == M_REMOVE) &&
            (argc == 1 || (method == M_INDEX && argc >= 2 && argc <= 3 && is_int(argv[1]) && (argc == 2 || is_int(argv[2])))) &&
@@ -34292,7 +34294,9 @@ static int python_eq(SPYValue *v) {
 /* Whether ordering op of a and b, two lists or two tuples, calls a
  * Python method on the machine: an item's __eq__ (python_pair), or the
  * ordering method of the first unequal pair, whose == calls no Python
- * (plain_equal), the pairs before it found equal so. */
+ * when either item's == does not (plain_equal): the other's builtin ==
+ * declines it, python_pair having found no Python __eq__; the pairs
+ * before it found equal so. */
 static int order_python(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if ((a->type != SPY_LIST && a->type != SPY_TUPLE) || b->type != a->type || (op != '<' && op != T_LE && op != '>' && op != T_GE))
         return 0;
@@ -34301,7 +34305,7 @@ static int order_python(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (end >= a->as.seq.len || end >= b->as.seq.len) return 0;
     SPYValue *x = a->as.seq.items[end], *y = b->as.seq.items[end];
     int rich = op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : R_GE;
-    return plain_equal(x) && plain_equal(y) && (rich_function(c, x, y, rich) || rich_reflection(c, y, x, rich_reflected[rich]));
+    return (plain_equal(x) || plain_equal(y)) && (rich_function(c, x, y, rich) || rich_reflection(c, y, x, rich_reflected[rich]));
 }
 /* Whether a and b, lists or tuples, are equal from item at on, as
  * list_richcompare decides, an unequal pair left past an end comparing the

@@ -801,6 +801,8 @@ Unreleased (0.10.0):
 - A duplicate keyword from `**` of a mappingproxy names its callee by Python attributes without nesting on the C stack
 - A module-level import under `__lazy_modules__` calls a Python `__import__` hook without nesting on the C stack
 - Reading a module attribute bound by a lazy import, or a `str.format` field's attribute of a module or a class with a Python `__getattribute__`, runs Python without nesting on the C stack
+- `index`, `count` and `remove` of a list or tuple subclass's instance call items' Python `__eq__` without nesting on the C stack
+- Ordering lists or tuples whose first unequal items are an instance and a container calls its Python ordering method without nesting on the C stack
 - iter(f, sentinel) of a builtin callable runs the sentinel's `__eq__` and its result's `__bool__` without nesting on the C stack, and is 2x faster
 - `bool` has its own `__and__`, `__or__`, `__xor__`, their reflections and `__invert__`; `int.__and__(True, True)` is `1`
 - error messages name a builtin class method such as `dict.__dict__['fromkeys']` a `classmethod_descriptor`
