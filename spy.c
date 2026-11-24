@@ -4727,6 +4727,7 @@ static Node *chain_end(Parser *, Node *);
 static int emit_default(Parser *, Node *);
 static Node *lambda_parsed(Parser *, Node *);
 static Node *template_parsed(Parser *, Node *);
+static int augmented_target(Parser *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -8371,7 +8372,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     Node *statement = rest(p, n), *first = NULL, *last = NULL;
     int kind = statement ? statement->kind : N_PASS;
     if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
-    else if (kind == N_ASSIGN && (statement->op == '=' || statement->a->kind == N_NAME))
+    else if (kind == N_ASSIGN)
         first = statement->op == '=' ? statement->b : statement->a, last = statement->b;
     else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
     int kept = first && (first->flags & F_EMITTED) && (last->flags & F_EMITTED) && first->steps_at == p->emitting_from.steps.mark.at &&
@@ -8452,6 +8453,7 @@ static Node *expression_statement(Parser *p, Node *n) {
         if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
         p->pos++; n->kind = N_ASSIGN; n->op = op;
         if (op == '=') emitted_drop(p);
+        else if (n->a->kind != N_NAME && p->emitting && augmented_target(p, n->a)) return NULL;
         n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
         if (!n->b) return NULL;
         Node **tail = &n->args;
@@ -17716,6 +17718,22 @@ static Node *template_parsed(Parser *p, Node *n) {
     if (emit_before(c, program, start, BC_NEW, n, SPY_LIST) == SIZE_MAX || emit(c, program, BC_TEMPLATE, n, 0) == SIZE_MAX) return NULL;
     return parsed_steps(p, n, start);
 }
+/* Item or attribute t, emitted to the end, as augmented assignment's
+ * target, as compile_statement lays it: its read becomes the target's
+ * load, a step of its own before the read while calls can pause. -1 on
+ * an error. */
+static int augmented_target(Parser *p, Node *t) {
+    Program *program = p->emitting;
+    if (!(t->flags & F_EMITTED) || t->steps_end != program->len || program->items[program->len - 1].op != (t->kind == N_INDEX ? BC_INDEX : BC_ATTR)) return 0;
+    /* A target is its plain steps alone, without the fused step an item
+     * or attribute at hand begins with. */
+    Instruction *first = &program->items[t->steps_at];
+    if (first->op == BC_OPERATE && first->target == t->steps_end) { emit_drop(program, t->steps_at); t->steps_end--; }
+    if (program->calls == PAUSING) return emit_before(p->ctx, program, program->len - 1, BC_LOAD_TARGET, t, 1) == SIZE_MAX ? -1 : (t->steps_end = program->len, 0);
+    Instruction *x = &program->items[program->len - 1];
+    x->op = BC_LOAD_TARGET; x->step = p->ctx->steps ? p->ctx->steps[BC_LOAD_TARGET] : NULL;
+    return 0;
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -18041,7 +18059,7 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
     if (first->flags & F_EMITTED) target.at = first->steps_at;
     if (augmented) {
         compile_expr(c, p, item ? t->a : t);
-        if (item) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
+        if (item && !(t->flags & F_EMITTED)) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
         compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
         emit(c, p, item ? BC_SAVE_TARGET : BC_STORE, t, !item);
     } else if (item) {
@@ -18519,8 +18537,9 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     case N_ASSIGN:
         if (n->op != '=') {
             Node *target = n->a;
+            /* An item or attribute emitted as parsed is loaded (augmented_target). */
             if (target->kind == N_NAME) compile_expr(c, p, target);
-            else {
+            else if (!(target->flags & F_EMITTED)) {
                 compile_expr(c, p, target->a);
                 if (target->kind == N_INDEX) compile_expr(c, p, target->b);
                 /* While calls can pause, the target's read is a step of its own. */
