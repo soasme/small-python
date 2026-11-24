@@ -28948,13 +28948,14 @@ static NO_INLINE SPYValue *ior_merges(SPYContext *c, SPYValue *callee, size_t ar
     return own && (plain_instance(y) || keyed_dict(c, y)) ? own : NULL;
 }
 static int percent_reaches(SPYContext *, SPYValue *);
-/* For a call of callee on argc arguments argv that is str.__mod__ or
- * bytes.__mod__ of arguments whose conversion may call Python
- * (slot_object, percent_reaches): the format's str or bytes, borrowed,
+/* For a call of callee on argc arguments argv that is str.__mod__,
+ * bytes.__mod__ or bytearray.__mod__ of arguments whose conversion may call
+ * Python (slot_object, percent_reaches): the format's text, borrowed,
  * which formats them as its % does (percent_begin); else NULL. */
 static NO_INLINE SPYValue *percent_slot(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
     SPYValue *x = slot_object(c, callee, argc, argv, SPY_STRING, "__mod__"), *text = x ? builtin_value(c, x, SPY_STRING) : NULL;
     if (!x && (x = slot_object(c, callee, argc, argv, SPY_BYTES, "__mod__"))) text = builtin_value(c, x, SPY_BYTES);
+    if (!x && (x = slot_object(c, callee, argc, argv, SPY_BYTEARRAY, "__mod__"))) text = builtin_value(c, x, SPY_BYTEARRAY);
     return text && percent_reaches(c, argv[argc - 1]) ? text : NULL;
 }
 /* Dict x's merge of y into own, its storage, as dict.update() does, on m
@@ -32538,8 +32539,11 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Attri
                                         (argc == 4 && callee->as.native.kwcall == type_method) ||
                                         /* a set method given its set and others (set_chain_call) */
                                         (argc > 2 && set_like(argv[argc - 1]) && callee->as.native.kwcall == set_method) ||
-                                        (argc > 1 && argv[0]->type == SPY_STRING &&
-                                         (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
+                                        /* str.format_map, and a text's slot such as __mod__ (percent_slot) */
+                                        (argc > 1 && ((argv[0]->type == SPY_STRING && callee->as.native.kwcall == str_format_map) ||
+                                                      ((UINT64_C(1) << argv[0]->type & (UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_BYTES |
+                                                                                         UINT64_C(1) << SPY_BYTEARRAY)) &&
+                                                       callee->as.native.kwcall == slot_call))))))
         return operand_call_rest(c, m, at, callee, method, argc, argv, env);
     /* A dict's update of a dict (update_call). */
     if (UNLIKELY(method == M_UPDATE) && argc == 1 && merges(callee, argv[0])) return update_call(c, m, callee, argv[0], env);
@@ -45819,6 +45823,7 @@ static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SP
 static SPYValue *bytearray_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     return exported(c, bytes_hex, argc, argv, keywords, data);
 }
+static SPYValue *subclass_called(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *bytes_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     if (positional_only(c, class_tname(argv[0]), "fromhex", 1, 1, argc - 1, keywords)) return NULL;
     SPYValue *copy = NULL, *text = builtin_value(c, argv[1], SPY_STRING);
@@ -45842,15 +45847,17 @@ static SPYValue *bytes_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
     }
     SPYValue *result = NULL;
     if (!c->error_type[0]) {
-        result = (int)(intptr_t)data == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
+        result = argv[0] == c->types[SPY_BYTEARRAY] ? bytearray_new(c, out.data ? out.data : "", out.len) :
             spy_bytes(c, out.data ? out.data : "", out.len);
-        SPYValue *cls = argv[0];
-        if (result && cls != c->types[(int)(intptr_t)data]) {
-            SPYValue *converted = call(c, cls, 1, &result);
-            spy_release(result); result = converted;
-        }
     }
     mem_free(out.data); spy_release(copy);
+    Machine *m = result && argv[0] != c->types[(int)(intptr_t)data] ? step_machine(c) : NULL;
+    /* A subclass is called with the bytes, on the machine when it is the step's. */
+    if (m) return subclass_called(c, m, spy_retain(argv[0]), result);
+    if (result && argv[0] != c->types[(int)(intptr_t)data]) {
+        SPYValue *converted = call(c, argv[0], 1, &result);
+        spy_release(result); result = converted;
+    }
     return result;
 }
 static SPYValue *str_maketrans(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -46284,7 +46291,6 @@ static SPYValue *float_getformat(SPYContext *c, size_t argc, SPYValue *const *ar
     const char *format = *(unsigned char *)&probe ? "IEEE, little-endian" : "IEEE, big-endian";
     return spy_string(c, format, strlen(format));
 }
-static SPYValue *subclass_called(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     if (positional_only(c, class_tname(argv[0]), "fromhex", 1, 1, argc - 1, keywords)) return NULL;
@@ -52983,8 +52989,10 @@ static int register_type_methods(SPYContext *c) {
         register_method(c, SPY_FROZENDICT, "fromkeys", dict_fromkeys, 0, METHOD_CLASS) ||
         register_method(c, SPY_FROZENDICT, "copy", frozendict_method, 0, METHOD_INSTANCE) ||
         register_method(c, SPY_FROZENDICT, "__getnewargs__", frozendict_method, 1, METHOD_INSTANCE) ? -1 :
-        /* float.fromhex calls a subclass on its step's machine. */
+        /* float.fromhex, bytes.fromhex and bytearray.fromhex call a subclass on their step's machine. */
         (name_local(c->types[SPY_FLOAT], "fromhex")->as.wrapper.function->as.native.host = 2,
+         name_local(c->types[SPY_BYTES], "fromhex")->as.wrapper.function->as.native.host = 2,
+         name_local(c->types[SPY_BYTEARRAY], "fromhex")->as.wrapper.function->as.native.host = 2,
          /* A lazy import's resolve() calls __import__ on its step's machine (lazy_resolvek). */
          name_local(c->types[SPY_LAZY_IMPORT], "resolve")->as.native.host = 2, 0);
 }

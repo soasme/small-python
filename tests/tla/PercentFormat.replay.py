@@ -54,6 +54,11 @@ class NotStr:
     def __str__(self): spin(); return 1
 
 SOURCES = {
+    "mod_explicit_bytearray": ("log = []\nfmt = bytearray(b'%a end')\nclass R:\n    def __repr__(self):\n        for _ in (): pass\n"
+                               "        log.append('r')\n        return 'R'\nclass Clears:\n    def __repr__(self):\n"
+                               "        for _ in (): pass\n        fmt.clear()\n        return 'E'\ndef call(f, *args): return f(*args)\n"
+                               "try: call(fmt.__mod__, Clears())\nexcept BufferError: log.append('busy')\n"
+                               "result = (call(bytearray.__mod__, bytearray(b'<%a>'), R()), fmt, log)"),
     "mod_explicit": "log = []\nclass Str(str):\n    def __str__(self):\n        for _ in (): pass\n        log.append('str')\n        return 'custom'\nclass Rm(str):\n    def __rmod__(self, o): log.append('rmod'); return 'rm'\n    def __str__(self):\n        for _ in (): pass\n        log.append('s'); return 'S'\nresult = (str.__mod__('%s', Str('x')), '%s|%s'.__mod__((Str('a'), Rm('b'))), str.__mod__('%s', Rm('c')), log)",
     "str_subclass_operands": "log = []\nclass Str(str):\n    def __str__(self):\n        for _ in (): pass\n        log.append('str')\n        return 'custom'\n"
                              "class Rm(str):\n    def __rmod__(self, o):\n        log.append('rmod')\n        return 'rm'\n    def __str__(self):\n        log.append('s')\n        return 'S'\n"

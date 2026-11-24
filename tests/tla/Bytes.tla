@@ -133,7 +133,7 @@ Padded(p) ==
 
 
 Cases == {"literal_forms", "hex_group_first", "hex_sep_length", "search_needle_last", "bytearray_index_calls", "bytearray_take_calls", "bytearray_store_calls", "bytes_item_index", "bytearray_arity", "literal_non_ascii", "ctor_forms", "ctor_str_encoding", "ctor_index_calls", "ctor_subclass_index", "ctor_iter_calls", "ctor_size_fallback", "extend_iter_calls", "join_iter_calls", "ctor_index_big",
-          "ctor_negative", "ctor_range_error", "ctor_float", "bytearray_ctor", "fromhex", "fromhex_bad",
+          "ctor_negative", "ctor_range_error", "ctor_float", "bytearray_ctor", "fromhex", "fromhex_subclass", "fromhex_bad",
           "fromhex_space_middle", "fromhex_non_hex", "hex", "hex_bad_sep", "index_is_int", "iterate_ints",
           "repr_escapes", "immutable", "concat_repeat", "concat_str", "contains", "contains_str", "compare",
           "hash", "hash_bytearray", "contains_index", "contains_index_fails", "count_int", "count_range", "search_str", "case_ascii_only",
@@ -192,6 +192,7 @@ Case(c) ==
       [] c = "ctor_float" -> "TypeError: cannot convert 'float' object to bytes"
       [] c = "bytearray_ctor" -> "(bytearray(b''), bytearray(b'\\x00\\x00'), bytearray(b'ab'), bytearray(b'\\xc3\\xa9'), bytearray(b'\\x00\\x01'))"
       [] c = "fromhex" -> "(b'.\\xf0\\xf1\\xf2', bytearray(b'.\\xf0'), b'', b'\\x00')"
+      [] c = "fromhex_subclass" -> "(['bytes'], 'A', b'.')"
       [] c = "fromhex_bad" -> "ValueError: fromhex() arg must contain an even number of hexadecimal digits"
       [] c = "fromhex_space_middle" -> "ValueError: non-hexadecimal number found in fromhex() arg at position 1"
       [] c = "fromhex_non_hex" -> "ValueError: non-hexadecimal number found in fromhex() arg at position 0"

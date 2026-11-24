@@ -104,6 +104,9 @@ SOURCES = {
     "ctor_float": 'result = bytes(1.5)',
     "bytearray_ctor": "result = (bytearray(), bytearray(2), bytearray(b'ab'), bytearray('\xe9', 'utf-8'), bytearray(range(2)))",
     "fromhex": "result = (bytes.fromhex('2Ef0 F1f2  '), bytearray.fromhex('2ef0'), bytes.fromhex(''), bytes.fromhex(b'00'))",
+    "fromhex_subclass": ("class A(bytearray):\n    def __init__(self, v):\n        for _ in (): pass\n"
+                         "        log.append(type(v).__name__)\n        bytearray.__init__(self, v)\n"
+                         "log = []\na = A.fromhex('2e')\nresult = (log, type(a).__name__, bytes(a))"),
     "fromhex_bad": "result = bytes.fromhex('2e f')",
     "fromhex_space_middle": "result = bytes.fromhex('2 e')",
     "fromhex_non_hex": "result = bytes.fromhex('zz')",
