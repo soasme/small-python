@@ -98,6 +98,8 @@ typedef struct { size_t at; Operand *last; } Mark;
 typedef struct { Mark mark; size_t values, tested, split; } Emitted;
 static Emitted emitted(Program *);
 static void emit_undo(Program *, Emitted);
+/* And how many nodes its parser had emitted (emit_mark). */
+typedef struct { Emitted steps; size_t nodes; } EmitMark;
 /* A function's parameter: its name, its kind (P_POSITIONAL and the rest),
  * whether its definition gives it a default and, for replace()d code, the
  * body's name for its slot. A signature is an array of them that one with
@@ -4680,7 +4682,7 @@ typedef struct {
      * its leaves emit into emitting as they are read, and are listed in
      * emitted; emits says the statement line_statements begins may. */
     Program *emitting; Node **emitted; size_t emitted_len, emitted_cap; int emits;
-    Emitted emitting_from; /* Where the statement's steps begin. */
+    EmitMark emitting_from; /* Where the statement's steps begin. */
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
@@ -4706,6 +4708,8 @@ typedef struct {
 static Node *emit_parsed(Parser *, Node *, size_t);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
+static EmitMark emit_mark(Parser *);
+static void emit_back(Parser *, EmitMark);
 static Scope *scope_new(SPYContext *, Scope *, int);
 static void scope_adopt(Scope *, Scope *);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -5424,7 +5428,7 @@ static Node *yield_expression(Parser *);
 static void star_expression_error(Parser *, size_t);
 static int named_equals_error(Parser *, size_t);
 static const char *expression_name(Node *);
-static Node *comprehension(Parser *, Node *, int);
+static Node *comprehension(Parser *, Node *, int, EmitMark);
 static Node *statements(Parser *);
 static Node *suite_after(Parser *, const char *, size_t);
 static Body body_begin(Parser *, Node *, size_t);
@@ -6245,6 +6249,7 @@ static Node *atom_node(Parser *p) {
         do {
             Node *item;
             size_t item_at = p->pos;
+            EmitMark element = emit_mark(p);
             if (take(p, T_POW)) {
                 item = node(p, N_MAPPING);
                 if (!item || !(item->a = expression(p, 4))) return NULL;
@@ -6309,7 +6314,7 @@ static Node *atom_node(Parser *p) {
             }
             *tail = item; tail = &item->next;
             if (keyword(p, "for") || keyword(p, "async")) {
-                if (!comprehension(p, n, awaits)) return NULL;
+                if (!comprehension(p, n, awaits, element)) return NULL;
                 if (at(p, ':') && item->kind == N_MAPPING) return syntax_span(p, item_at, item_at + 1, "cannot use dict unpacking here");
                 break;
             }
@@ -6384,6 +6389,7 @@ static int call_arguments(Parser *p, Node *n) {
         Node *arg;
         size_t first = p->pos;
         int awaits = p->awaits;
+        EmitMark before = emit_mark(p);
         if (at(p, '*') || at(p, T_POW)) {
             size_t star = p->pos;
             int unpack_mapping = take(p, T_POW);
@@ -6429,12 +6435,11 @@ static int call_arguments(Parser *p, Node *n) {
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
             size_t start = p->pos;
-            Emitted before = p->emitting ? emitted(p->emitting) : (Emitted){{0, NULL}, 0, 0, 0};
             arg = expression_mode(p, 0, 2);
             if (arg && at(p, '=')) {
                 Token *name = &p->tokens[start];
                 /* A keyword's name, parsed as a name, emits nothing. */
-                if (arg->flags & F_EMITTED) { arg->flags &= ~F_EMITTED; p->emitted_len--; emit_undo(p->emitting, before); }
+                emit_back(p, before);
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {
                     char message[64];
                     snprintf(message, sizeof(message), "cannot assign to %s", expression_name(arg));
@@ -6483,14 +6488,14 @@ static int call_arguments(Parser *p, Node *n) {
                 Node *probe = node(p, N_TUPLE);
                 if (!probe) return -1;
                 probe->args = arg;
-                if (comprehension(p, probe, awaits)) genexp = p->pos;
+                if (comprehension(p, probe, awaits, before)) genexp = p->pos;
                 spy_clear_error(p->ctx);
                 syntax_span(p, first, genexp, "Generator expression must be parenthesized"); return -1;
             }
             Node *generator = node(p, N_TUPLE);
             if (!generator) return -1;
             generator->args = arg;
-            if (!comprehension(p, generator, awaits)) return -1;
+            if (!comprehension(p, generator, awaits, before)) return -1;
             if (at(p, ',')) {
                 /* CPython's invalid_arguments reads the arguments after the comma. */
                 p->pos++; peek(p); p->pos--;
@@ -6928,7 +6933,9 @@ static Node *assignment_error(Parser *p, size_t start) {
  * all but its first iterable. A generator expression's own stay its own;
  * a list, set or dict comprehension's are its enclosing scope's too, as
  * it runs inlined there. */
-static Node *comprehension(Parser *p, Node *n, int awaits) {
+/* Comprehension n, its element parsed since element: only its first
+ * iterable is evaluated where it is, the rest in its own program. */
+static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element) {
     if (n->args->next) {
         /* invalid_comprehension: the range of the unparenthesized targets. */
         Node *last = n->args;
@@ -6938,34 +6945,40 @@ static Node *comprehension(Parser *p, Node *n, int awaits) {
         return NULL;
     }
     n->op = n->kind; n->kind = N_COMPREHENSION;
+    emit_back(p, element);
+    Program *emitting = p->emitting; p->emitting = NULL;
     Node **tail = &n->a;
     size_t clauses = 0;
     int outer = 0; /* The first iterable's awaits. */
     while (keyword(p, "for") || keyword(p, "async")) {
         int asynchronous = take_word(p, "async");
-        if (!take_word(p, "for")) return syntax(p, "invalid syntax");
-        if (++clauses > 128) return syntax(p, "too many comprehension clauses");
+        if (!take_word(p, "for")) return p->emitting = emitting, syntax(p, "invalid syntax");
+        if (++clauses > 128) return p->emitting = emitting, syntax(p, "too many comprehension clauses");
         Node *loop = node(p, N_FOR);
-        if (!loop || !(loop->args = expression_list(p, 4))) return NULL;
+        if (!loop || !(loop->args = expression_list(p, 4))) return p->emitting = emitting, NULL;
         loop->op = asynchronous; p->awaits += asynchronous;
         /* invalid_for_if_clause precedes invalid_for_target. */
-        if (!keyword(p, "in")) return syntax(p, "'in' expected after for-loop variables");
-        if (!target(p, loop->args)) return p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
+        if (!keyword(p, "in")) return p->emitting = emitting, syntax(p, "'in' expected after for-loop variables");
+        if (!target(p, loop->args)) return p->emitting = emitting, p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
         p->pos++;
         int before = p->awaits;
-        if (!(loop->a = expression(p, 1))) return NULL;
+        if (tail == &n->a) p->emitting = emitting;
+        loop->a = expression(p, 1);
+        p->emitting = NULL;
+        if (!loop->a) { p->emitting = emitting; return NULL; }
         if (tail == &n->a) outer = p->awaits - before;
         *tail = loop; tail = &loop->b;
         while (take_word(p, "if")) {
-            if (++clauses > 128) return syntax(p, "too many comprehension clauses");
+            if (++clauses > 128) return p->emitting = emitting, syntax(p, "too many comprehension clauses");
             Node *test = node(p, N_IF);
-            if (!test || !(test->a = expression(p, 1))) return NULL;
+            if (!test || !(test->a = expression(p, 1))) return p->emitting = emitting, NULL;
             *tail = test; tail = &test->b;
         }
     }
+    p->emitting = emitting;
     if (p->awaits - awaits > outer) n->asynchronous = 1;
     if (n->op == N_TUPLE) p->awaits = awaits + outer;
-    return n;
+    return finished(p, n);
 }
 /* Whether token i is the keyword s. */
 static int word_at(Parser *p, size_t i, const char *s) {
@@ -8280,7 +8293,7 @@ static Node *statement_body(Parser *p, int emits) {
 static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
     Program *program = p->body.program;
-    p->emitting_from = emitted(program);
+    p->emitting_from = (EmitMark){emitted(program), 0};
     p->emitting = program;
     Node *statement = rest(p, n);
     Node *value = !statement ? NULL : statement->kind == N_EXPR || statement->kind == N_RETURN ? statement->a :
@@ -8288,7 +8301,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     /* Its steps are its value's, after an augmented name's, from the
      * statement's start to the end. */
     Node *first = value && statement->kind == N_ASSIGN && statement->op != '=' ? statement->a : value;
-    if (value && (!(first->flags & F_EMITTED) || !(value->flags & F_EMITTED) || first->steps_at != p->emitting_from.mark.at ||
+    if (value && (!(first->flags & F_EMITTED) || !(value->flags & F_EMITTED) || first->steps_at != p->emitting_from.steps.mark.at ||
                   (first != value && first->steps_end != value->steps_at) || value->steps_end != program_len(program))) value = NULL;
     if (!value || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING))
         emitted_drop(p);
@@ -8296,11 +8309,14 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     return statement;
 }
 /* Undo what the statement emitting emitted so far: its targets', as its '=' is read. */
-static void emitted_drop(Parser *p) {
+static void emitted_drop(Parser *p) { emit_back(p, p->emitting_from); }
+/* What the parser has emitted, to return to (emit_back). */
+static EmitMark emit_mark(Parser *p) { return p->emitting ? (EmitMark){emitted(p->emitting), p->emitted_len} : (EmitMark){0}; }
+static void emit_back(Parser *p, EmitMark m) {
     if (!p->emitting) return;
-    for (size_t i = 0; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
-    p->emitted_len = 0;
-    emit_undo(p->emitting, p->emitting_from);
+    for (size_t i = m.nodes; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
+    p->emitted_len = m.nodes;
+    emit_undo(p->emitting, m.steps);
 }
 /* The value of return statement n. */
 static Node *return_statement(Parser *p, Node *n) {
@@ -17465,6 +17481,7 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_COMPARE && !n->args->next) fixed[1] = n->args->a;
     else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n))) list = n->args;
     else if (n->kind == N_JOINED) { fixed[0] = NULL; list = n->args; }
+    else if (n->kind == N_COMPREHENSION) fixed[0] = n->a->a;
     else if (n->kind == N_LAMBDA) {
         /* Each default is followed by a step of its own. */
         for (Node *a = n->args; a; a = a->next) if (a->a) return n;
