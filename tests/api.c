@@ -3085,6 +3085,28 @@ int main(int argc, char **argv) {
         assert(integer(fresh, run_paused(fresh, spy_eval(fresh, "f()", "firsts.py"), SPY_STOP_STEPS, &pauses)) == 9 + (i == 1) && pauses > 2);
         spy_context_free(fresh);
     }
+    /* Programs whose f() returns 7 while calls can pause: a chained
+     * comparison's result whose truth is a Python __bool__, or __len__. */
+    static const char *const pausing[] = {
+        "class T:\n    def __init__(s, t): s.t = t\n    def __bool__(s):\n        for _ in (): pass\n        return s.t\n"
+        "class L:\n    def __init__(s, n): s.n = n\n    def __len__(s):\n        for _ in (): pass\n        return s.n\n"
+        "class C:\n    def __init__(s, r): s.r = r\n    def __lt__(s, o): return s.r\n"
+        "def f():\n    t, n, l, z = C(T(True)), C(T(False)), C(L(1)), C(L(0))\n"
+        "    r = [(t < n < 1).t, (n < t < 1).t, (l < z < 1).n, (z < l < 1).n]\n"
+        "    return 7 if r == [False, False, 0, 0] else 0\n",
+        /* Or whose descriptor __bool__ is absent, its truth __len__'s. */
+        "class P:\n    def __init__(s, n): s.n = n\n    @property\n    def __bool__(s):\n        for _ in (): pass\n        raise AttributeError\n"
+        "    def __len__(s):\n        for _ in (): pass\n        return s.n\n"
+        "class C:\n    def __init__(s, r): s.r = r\n    def __lt__(s, o): return s.r\n"
+        "class Q(P):\n    __len__ = [].__len__\n"
+        "def f():\n    r = [(C(P(0)) < C(P(1)) < 1).n, (C(P(1)) < C(P(0)) < 1).n, (C(Q(1)) < C(P(1)) < 1).n]\n    return 7 if r == [0, 0, 1] else 0\n",
+    };
+    for (size_t i = 0; i < sizeof(pausing) / sizeof(*pausing); i++) {
+        SPYContext *paused = spy_context_new();
+        assert(paused && !spy_set_limit(paused, SPY_LIMIT_PAUSE, 1) && spy_exec(paused, pausing[i], "pausing.py") == 0);
+        assert(integer(paused, spy_eval(paused, "f()", "pausing.py")) == 7);
+        spy_context_free(paused);
+    }
     /* While calls can pause, a deletion looks a frame proxy's key up on
      * the machine, its Python __hash__ and __eq__ called there. */
     SPYContext *deleting = spy_context_new();
