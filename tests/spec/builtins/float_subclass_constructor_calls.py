@@ -61,3 +61,9 @@ EXPECTED = [
 assert_eq(len(OUT), len(EXPECTED))
 for got, want in zip(OUT, EXPECTED):
     assert_eq(got, want)
+# A subclass's fromhex as a key function makes its instances too.
+class HexF(float): pass
+def hex_keys():
+    return [sorted(["0x1p2", "0x1p1"], key=HexF.fromhex), min(["0x1p2", "0x1p1"], key=HexF.fromhex),
+            [type(v).__name__ for v in map(HexF.fromhex, ["0x1p0"])]]
+assert_eq(hex_keys(), [["0x1p1", "0x1p2"], "0x1p1", ["HexF"]])
