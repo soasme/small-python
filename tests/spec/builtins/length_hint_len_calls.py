@@ -66,3 +66,26 @@ native_hints = [native_it.__length_hint__(), native_back.__length_hint__()]
 next(native_it); next(native_back)
 native_hints += [native_it.__length_hint__(), native_back.__length_hint__()]
 assert_eq(native_hints, [3, 3, 2, 2])
+# A native __len__ bound elsewhere is called for the hint; a hint that is
+# not an int is ignored.
+class HintNative:
+    __len__ = [1, 2, 3].__len__
+    def __iter__(self): return iter([4, 5])
+class Seq:
+    __len__ = [1, 2, 3].__len__
+    def __getitem__(self, i):
+        if i > 1: raise IndexError
+        return i
+class HintBad:
+    __len__ = "x".upper
+    def __getitem__(self, i):
+        if i > 1: raise IndexError
+        return i
+def native_hints():
+    out = [list(HintNative()), list(iter(Seq())), bytes(HintNative()), bytearray(iter(Seq())), [9] + list(iter(Seq()))]
+    l = []; l.extend(HintNative()); out.append(l)
+    for f in (lambda: list(iter(HintBad())), lambda: list(HintBad())):
+        try: out.append(f())
+        except TypeError as e: out.append(str(e))
+    return out
+assert_eq(native_hints(), [[4, 5], [0, 1], b"\x04\x05", bytearray(b"\x00\x01"), [9, 0, 1], [4, 5], [0, 1], [0, 1]])
