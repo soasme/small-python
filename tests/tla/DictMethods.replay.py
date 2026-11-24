@@ -76,6 +76,9 @@ SOURCES = {
                        "def g():\n    yield 1\n    log.append('y'); yield 2\n    log.append('y'); yield 3\n"
                        "class F(frozendict): pass\nd = S.fromkeys(g(), 0)\nf = F.fromkeys(iter([1, 2]))\n"
                        "result = (log, dict(d), type(f).__name__, dict(f))"),
+    "fromkeys_iter_source": ("log = []\nclass I:\n    def __iter__(s):\n        for _ in (): pass\n        log.append('i'); return iter([4])\n"
+                             "class S(dict): pass\nclass F(frozendict): pass\n"
+                             "result = (S.fromkeys(I()), F.fromkeys(I(), 1), dict.fromkeys(I()), log)"),
     "fromkeys": "result = (dict.fromkeys('ab'), dict.fromkeys([1, 2], 0), type(Missing.fromkeys('a')).__name__)",
     "fromkeys_shared": "d = dict.fromkeys('ab', [])\nd['a'].append(1)\nresult = d",
     "fromkeys_hashed": "H.log.clear()\nd = dict.fromkeys([H(1), 2, H(3), H(1)], 0)\nresult = ([getattr(k, 'v', k) for k in d], list(d.values()), H.log)",

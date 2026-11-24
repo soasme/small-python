@@ -1,7 +1,8 @@
 # spec: PLS-315 26.1.1, 7.8.2, 26.1.3
 # description: dict.fromkeys of a subclass calls the class with no
 # arguments, its Python __new__ and __init__ included, then sets each
-# element of the iterable, a list, a generator or a map, by the instance's
+# element of the iterable, a list, a generator, a map or one of a Python
+# __iter__, which must return an iterator, by the instance's
 # Python __setitem__, each before the next element is taken; a frozendict
 # subclass is called with a frozendict of the keys. Keys of a dict or set
 # keep their hashes, and one with a Python __eq__ compares an earlier one.
@@ -36,6 +37,11 @@ class X(int):
         log.append(("hash", int(self))); return 13
     def __eq__(self, other):
         spin(); log.append((int(self), int(other))); return False
+class Iterable(int):
+    def __iter__(self):
+        spin(); log.append("iter"); return iter([int(self)])
+class NotIterator:
+    def __iter__(self): spin(); return 5
 def gen(*items):
     for item in items:
         spin(); log.append(("yield", item))
@@ -56,6 +62,8 @@ def main():
     check(lambda: D.fromkeys(map(str, [1, 2]), 0), [("1", 0), ("2", 0)], [("init", ()), ("set", "1", 0), ("set", "2", 0)], D)
     check(lambda: Fresh.fromkeys([1]), [("x", 1), (1, None)], ["new"], dict)
     check(lambda: F.fromkeys(gen(1, 2)), [(1, None), (2, None)], [("new", 0), ("yield", 1), ("yield", 2), ("new", 1)], F)
+    check(lambda: D.fromkeys(Iterable(9)), [(9, None)], [("init", ()), "iter", ("set", 9, None)], D)
+    check(lambda: F.fromkeys(Iterable(3)), [(3, None)], [("new", 0), "iter", ("new", 1)], F)
     check(lambda: frozendict.fromkeys(gen(4), 0), [(4, 0)], [("yield", 4)], frozendict)
     check(lambda: dict.fromkeys(gen(6)), [(6, None)], [("yield", 6)], dict)
     # A dict's keys keep their hashes; the second compares the first.
@@ -74,3 +82,4 @@ def broken():
     raise ValueError("gen")
 assert_raises(ValueError, lambda: D.fromkeys(broken()), message="gen")
 assert_raises(TypeError, lambda: D.fromkeys(5), message="'int' object is not iterable")
+assert_raises(TypeError, lambda: D.fromkeys(NotIterator()), message="NotIterator.__iter__() must return an iterator, not int")

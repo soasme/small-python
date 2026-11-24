@@ -46187,6 +46187,17 @@ static SPYValue *fromkeys_set(SPYContext *c, Machine *m, SPYValue *state, SPYVal
     spy_release(result);
     return fromkeys_items(c, m, state);
 }
+/* What the source's Python __iter__ returned fromkeys_fill, its keys'
+ * iterator in state then (fromkeys_items). */
+static SPYValue *fromkeys_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items;
+    if (result && (result = iterator_returned(c, items[1], result, "__iter__"))) {
+        spy_release(items[1]); items[1] = result;
+        return fromkeys_items(c, m, state);
+    }
+    spy_release(state);
+    return NULL;
+}
 /* dict.fromkeys of class cls filling dict, which it takes, the new
  * instance, with iterable's keys of value: a subclass's Python
  * __setitem__ called on m (fromkeys_items), an eq_keyed dict's or set's
@@ -46217,14 +46228,16 @@ static SPYValue *fromkeys_fill(SPYContext *c, Machine *m, SPYValue *cls, SPYValu
             spy_release(entry.key);
         }
     } else {
-        SPYValue *iterator = get_iterator(c, iterable), *key;
-        setter = m && iterator && dict->type == SPY_INSTANCE ? class_lookup(dict->as.map.parent, "__setitem__") : NULL;
+        SPYValue *python = NULL, *iterator = iterator_of(c, iterable, m ? &python : NULL), *key;
+        setter = m && (iterator || python) && dict->type == SPY_INSTANCE ? class_lookup(dict->as.map.parent, "__setitem__") : NULL;
         if (setter && !machine_function(c, setter)) setter = NULL;
-        if (m && iterator && (setter || iterator->type != SPY_ITERATOR || called_iterator(iterator))) {
-            /* A Python iterator's next key, or a subclass's Python
-             * __setitem__, is m's call for each key (fromkeys_items). */
-            SPYValue *state = tuple_of(c, 5, (SPYValue *[]){dict, iterator, value, setter ? setter : c->none, copy ? cls : c->none});
+        if (m && (python || (iterator && (setter || iterator->type != SPY_ITERATOR || called_iterator(iterator))))) {
+            /* A Python __iter__, a Python iterator's next key, or a
+             * subclass's Python __setitem__, is m's call (fromkeys_items). */
+            SPYValue *state = tuple_of(c, 5, (SPYValue *[]){dict, python ? iterable : iterator, value, setter ? setter : c->none, copy ? cls : c->none});
             spy_release(dict); spy_release(iterator);
+            if (python && state) return callk(c, m, python, 0, NULL, fromkeys_iterated, state);
+            spy_release(python);
             return state ? fromkeys_items(c, m, state) : NULL;
         }
         while (iterator && !c->error_type[0] && (key = native_next(c, iterator))) {
@@ -51410,6 +51423,8 @@ static NO_INLINE SPYValue *native_entered_rest(SPYContext *c, Machine *m, SPYVal
      * given its self first (step_native). */
     if (native->type == SPY_NATIVE && native->as.native.host == 2) {
         SPYValue *args[9];
+        /* dict.fromkeys of a source the consumer takes is its call (consumer_id). */
+        if (native->as.native.kwcall == dict_fromkeys && native != callee && consumer_of(c, callee, -1, argc, argv) >= 0) return NULL;
         if (native == callee || argc > 8) return step_native(c, m, callee, -1, NULL, argc, argv, NULL);
         args[0] = callee->as.method.self;
         if (argc) memcpy(args + 1, argv, argc * sizeof(*argv));
