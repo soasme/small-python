@@ -18625,8 +18625,19 @@ enum { TICK_DEFER = 2, TICK_DEFINITION };
 static NO_INLINE int tick_full(SPYContext *c, Frame *f, size_t line, int machine) {
     if (c->error_type[0]) return -1;
     /* A collection waits for the finalizers that wait (a boundary inside
-     * __del__), so that it can run its own and free what they leave. */
-    if (c->collect_due && !finalizers_wait(c) && !stress_waits(c)) collect(c);
+     * __del__), so that it can run its own and free what they leave. On
+     * a machine it waits for every queued finalizer and passes once: the
+     * finalizers of what it kept run below, as the machine's, and it
+     * passes again after them. */
+    if (c->collect_due && !finalizers_wait(c) && !stress_waits(c) && !(machine && c->finalize_calls_len)) {
+        if (machine) {
+            int kept = 0;
+            c->collect_memory = SIZE_MAX;
+            collect_once(c, &kept);
+            schedule_collection(c);
+            if (kept && c->finalize_calls_len) c->collect_due = 1;
+        } else collect(c);
+    }
     /* Dead generators that close running nothing close here, in line,
      * so that one after them the machine closes is first. */
     while (machine && c->finalize_calls_len && !weak_next(c) && !finalizer(c) && closes_quietly(c, c->finalize_first)) {

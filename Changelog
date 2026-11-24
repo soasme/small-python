@@ -808,6 +808,7 @@ Unreleased (0.10.0):
 - A FrameLocalsProxy compares equal to a dict subclass's instance holding its locals
 - A dict subclass's instance whose own `__eq__` declines compares by the other dict's values first; dict subclasses compare without nesting on the C stack
 - A bound method of an `anext()` awaitable, such as its `throw` taken as a value, calls its source's Python `__await__` without nesting on the C stack
+- a collection the engine starts while a program runs calls the `__del__` methods and closes the generators and coroutines it reclaims without nesting on the C stack
 - a bytearray's slice store refuses any number, an object with `__index__`, `__int__` or `__float__` included, as CPython does; one whose slice has a Python `__index__` copies its value without nesting on the C stack
 - `bytearray.__mod__` called by name or passed as a callable calls its arguments' Python methods without nesting on the C stack
 - `bytes.fromhex()` and `bytearray.fromhex()` call a subclass with the bytes made, as CPython does, without nesting on the C stack
