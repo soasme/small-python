@@ -8272,8 +8272,8 @@ static Node *statement_body(Parser *p, int emits) {
 }
 /* Statement n, the rest parsed by rest, emitted as it is parsed into
  * its body's program, once a held-back statement compiles. An
- * expression statement, an assignment to a name, or a return of a
- * value keeps its steps when its value's are all emitted; other
+ * expression statement, an assignment, augmented to a name, or a
+ * return of a value keeps its steps when its value's are all emitted; other
  * statements compile when they end, their emitted steps undone. */
 static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
@@ -8282,7 +8282,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     p->emitting = program;
     Node *statement = rest(p, n);
     Node *value = !statement ? NULL : statement->kind == N_EXPR || statement->kind == N_RETURN ? statement->a :
-                  statement->kind == N_ASSIGN && !statement->args && statement->a->kind == N_NAME ? statement->b : NULL;
+                  statement->kind == N_ASSIGN && (statement->op == '=' || statement->a->kind == N_NAME) ? statement->b : NULL;
     /* An augmented assignment's name is read first. */
     if (value && statement->kind == N_ASSIGN && statement->op != '=' &&
         (!(statement->a->flags & F_EMITTED) || statement->a->steps_end != value->steps_at)) value = NULL;
