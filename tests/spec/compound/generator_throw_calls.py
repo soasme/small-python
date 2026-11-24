@@ -158,3 +158,17 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(throws(), expected)
+# A class whose native __new__ makes another class's instance: that
+# instance is the argument of the class's call again.
+class NativeNew(Exception):
+    __new__ = staticmethod(ValueError)
+def native_gen():
+    yield 1
+def native_throws():
+    out = []
+    for args in ((NativeNew,), (NativeNew, None), (NativeNew, 5), (NativeNew, (1, 2))):
+        g = native_gen(); next(g)
+        try: g.throw(*args)
+        except ValueError as e: out.append((e.args[0] is NativeNew, e.args[1].args[1:]))
+    return out
+assert_eq(native_throws(), [(True, ()), (True, ()), (True, (5,)), (True, (1, 2))])
