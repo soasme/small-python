@@ -3435,6 +3435,12 @@ static SPYValue *name_getitem(SPYContext *c, SPYValue *e) {
  * __getitem__), borrowed; else NULL. */
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
 static SPYValue *dictionary_value(SPYContext *, SPYValue *);
+/* The dict storage of env e's namespace, a dict subclass's instance with
+ * a __missing__, borrowed; else NULL. */
+static SPYValue *missing_storage(SPYContext *c, SPYValue *e) {
+    SPYValue *namespace = e->as.map.namespace;
+    return namespace && namespace->type == SPY_INSTANCE && item_function(c, namespace, "__missing__") ? dictionary_value(c, namespace) : NULL;
+}
 static NO_INLINE SPYValue *name_missing(SPYContext *c, SPYValue *e, Name name) {
     SPYValue *namespace = e->as.map.namespace, *dict = namespace && namespace->type == SPY_INSTANCE ? dictionary_value(c, namespace) : NULL;
     return dict && !dict_name(c, dict, name) && !c->error_type[0] ? item_function(c, namespace, "__missing__") : NULL;
@@ -3465,6 +3471,7 @@ static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **,
 static SPYValue *map_findk(SPYContext *, Machine *, SPYValue *, SPYValue *, int64_t, MapCursor, Continuation, SPYValue *);
 static SPYValue *name_resumed(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *name_searched(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *name_missed(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* The dict whose keys dict_name searches for a lookup in env e
  * (name_lookup), borrowed; else NULL. */
 static SPYValue *name_dict(SPYValue *e) {
@@ -3502,7 +3509,10 @@ static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e
             e = binding_env(c, e, name);
             int storage = locals && at != env && e == at && e->type == V_ENV && e->as.map.flags == 3 &&
                           (namespace = e->as.map.namespace) && namespace->type != SPY_DICT;
-            if (!storage && ((function = name_getitem(c, e)) || (function = name_missing(c, e, name)))) {
+            /* A dict subclass's storage that compares a key searches on m, its __missing__ then called (name_missed). */
+            SPYValue *missing = !storage && m ? missing_storage(c, e) : NULL;
+            int compares = missing && name_compares(c, missing, name);
+            if (!storage && ((function = name_getitem(c, e)) || (!compares && (function = name_missing(c, e, name))))) {
                 SPYValue *key = spy_string(c, name.text, name.len), *state = NULL;
                 if (key) state = k_state(c, 4, (SPYValue *[6]){spy_retain(env), spy_retain(e), spy_retain(key), int_value(c, annotation)}, k, ctx);
                 else spy_release(ctx);
@@ -3510,15 +3520,15 @@ static SPYValue *name_walk(SPYContext *c, Machine *m, SPYValue *env, SPYValue *e
                 return callk(c, m, function, 2, (SPYValue *[]){spy_retain(e->as.map.namespace), key}, name_resumed, state);
             }
             /* A dict's key that is not a str compares on m (map_findk, name_searched). */
-            SPYValue *dict = storage ? dictionary_value(c, namespace) : name_dict(e);
-            if (dict && name_compares(c, dict, name)) {
+            SPYValue *dict = compares ? missing : storage ? dictionary_value(c, namespace) : name_dict(e);
+            if (dict && (compares || name_compares(c, dict, name))) {
                 SPYValue *key = spy_string(c, name.text, name.len), *state = NULL;
                 int64_t hash;
                 if (key && !hash_value(c, key, &hash))
                     state = k_state(c, 5, (SPYValue *[7]){spy_retain(env), spy_retain(e), spy_retain(key), int_value(c, annotation), spy_retain(dict)}, k, ctx);
                 else spy_release(ctx);
                 if (!state) { spy_release(key); return NULL; }
-                SPYValue *result = map_findk(c, m, dict, key, hash, map_cursor(namespace_map(dict), hash), name_searched, state);
+                SPYValue *result = map_findk(c, m, dict, key, hash, map_cursor(namespace_map(dict), hash), compares ? name_missed : name_searched, state);
                 spy_release(key);
                 return result;
             }
@@ -3572,6 +3582,16 @@ static SPYValue *name_searched(SPYContext *c, Machine *m, SPYValue *state, SPYVa
     value = result ? name_walk(c, m, env, e, name_of(key->as.string.data), annotation, 1, v, k, ctx) : k(c, m, ctx, NULL);
     spy_release(result); spy_release(env); spy_release(e); spy_release(key);
     return value;
+}
+/* What name_walk's search of a namespace's dict storage found, as
+ * name_searched's: a miss is its __missing__ call (callk, name_resumed). */
+static SPYValue *name_missed(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *namespace = items[1]->as.map.namespace, *function;
+    if (result && result->as.integer_data.small < 0 && (function = item_function(c, namespace, "__missing__"))) {
+        spy_release(result);
+        return callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(items[2])}, name_resumed, state);
+    }
+    return name_searched(c, m, state, result);
 }
 /* The continuation that gives the result as it is (name_from, a mappingproxy's call). */
 static SPYValue *unchanged(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue *result) { (void)c; (void)m; (void)ctx; return result; }

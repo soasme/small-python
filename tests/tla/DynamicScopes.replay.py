@@ -229,6 +229,18 @@ def shared_name_operands():
     return result + (left(), right())
 
 
+def missing_key_eq():
+    Missing.log = []
+    log = []
+    class Unequal(Key):
+        __hash__ = Key.__hash__
+        def __eq__(self, other):
+            super().__eq__(other)
+            return False
+    # How often a probe compares the same key is not specified: the set.
+    return eval("v", {}, Missing({Unequal(log): 5})), eval("v", {}, Missing({Key(log): 6})), sorted(set(log)), Missing.log
+
+
 def mutating_name_key():
     namespace = {"zero": lambda: 0}
     class Key:
