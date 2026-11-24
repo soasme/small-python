@@ -4722,6 +4722,11 @@ static Node *cond_end(Parser *, Node *, size_t, EmitMark);
 typedef struct { size_t start, at; int done; } SliceSteps;
 static int slice_lay(Parser *, Node *, int, SliceSteps *);
 static Node *slice_end(Parser *, Node *, size_t);
+static int chain_parsed(Parser *, Node *, Node *, size_t, int);
+static Node *chain_end(Parser *, Node *);
+static int emit_default(Parser *, Node *);
+static Node *lambda_parsed(Parser *, Node *);
+static Node *template_parsed(Parser *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -5556,6 +5561,7 @@ static int parameter_list(Parser *p, Node *n, int close) {
             if (take(p, '=')) {
                 if (kind == P_VARARGS || kind == P_KWARGS) { syntax(p, "variadic parameter cannot have a default"); return -1; }
                 if (!(arg->a = plain_expression(p, 0))) return -1;
+                if (n->kind == N_LAMBDA && p->emitting && emit_default(p, arg)) return -1;
                 if (kind == P_POSITIONAL) defaults = 1;
             } else if (kind == P_POSITIONAL && defaults) { syntax(p, "parameter without a default follows parameter with a default"); return -1; }
             *tail = arg; tail = &arg->next;
@@ -6651,6 +6657,8 @@ static Node *expression_inner(Parser *p, int min, int named) {
         n->a = left; n->line = left->line; /* the expression begins with its left operand */
         if (prec == 3) {
             Node **tail = &n->args;
+            /* A chain's steps are emitted as it is parsed (chain_parsed). */
+            int chain = p->emitting && (left->flags & F_EMITTED) && left->steps_end == program_len(p->emitting);
             do {
                 Node *cmp = node(p, N_BINARY);
                 if (!cmp) return NULL;
@@ -6659,11 +6667,14 @@ static Node *expression_inner(Parser *p, int min, int named) {
                     return syntax(p, p->barry ? "with Barry as BDFL, use '<>' instead of '!='" :
                                   "invalid syntax.  Maybe you meant '!=' instead of '<>'?");
                 cmp->op = op; p->pos += (size_t)width;
+                size_t at = chain ? program_len(p->emitting) : 0;
                 cmp->a = expression(p, 4);
                 if (!cmp->a) return NULL;
                 *tail = cmp; tail = &cmp->next;
                 op = operator_info(p, &width, &prec);
+                if (chain && (prec == 3 || cmp != n->args) && !(chain = chain_parsed(p, n, cmp, at, prec == 3)) && p->ctx->error_type[0]) return NULL;
             } while (prec == 3);
+            if (chain && n->args->next && !chain_end(p, n)) return NULL;
         } else {
             n->op = op; p->pos += (size_t)width;
             size_t branch = op == O_AND || op == O_OR ? short_begin(p, n) : SIZE_MAX;
@@ -17649,6 +17660,62 @@ static int slice_lay(Parser *p, Node *n, int upto, SliceSteps *steps) {
 static Node *slice_end(Parser *p, Node *n, size_t start) {
     return emit(p->ctx, p->emitting, BC_SLICE, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, start);
 }
+/* Comparison chain n as it is parsed, as compile_operation compiles it:
+ * once its comparison cmp's operand was emitted from at on, after the
+ * operands and comparisons before it, cmp's comparison, more saying
+ * whether one follows. Whether its steps still are its own; at its end,
+ * the comparisons' exits. */
+static int chain_parsed(Parser *p, Node *n, Node *cmp, size_t at, int more) {
+    Program *program = p->emitting;
+    if (n->args == cmp ? n->a->steps_end != at : 0) return 0;
+    if (!(cmp->a->flags & F_EMITTED) || cmp->a->steps_at != at || cmp->a->steps_end != program->len) return 0;
+    size_t pc = emit(p->ctx, program, BC_COMPARE, cmp, more);
+    if (pc == SIZE_MAX) return 0;
+    program->items[pc].other = (uint32_t)cmp->op;
+    return 1;
+}
+static Node *chain_end(Parser *p, Node *n) {
+    Program *program = p->emitting;
+    for (size_t i = n->a->steps_end; i < program->len; i++)
+        if (program->items[i].op == BC_COMPARE && !program->items[i].target) program->items[i].target = (uint32_t)program->len;
+    program->split = n->args->a->steps_at;
+    return parsed_steps(p, n, n->a->steps_at);
+}
+/* A lambda's parameter arg, its default parsed: the default's step, once
+ * its value was emitted up to the end (lambda_parsed). -1 on an error. */
+static int emit_default(Parser *p, Node *arg) {
+    if (!(arg->a->flags & F_EMITTED) || arg->a->steps_end != p->emitting->len) return 0;
+    return emit(p->ctx, p->emitting, BC_DEFAULT, arg, arg->op == P_KWONLY) == SIZE_MAX ? -1 : 0;
+}
+/* Lambda n, parsed: when each default's value and step follow the one
+ * before from its start to the end, its making step goes before them. */
+static Node *lambda_parsed(Parser *p, Node *n) {
+    Program *program = p->emitting;
+    size_t start = program->len, at = SIZE_MAX;
+    for (Node *a = n->args; a; a = a->next) {
+        if (!a->a) continue;
+        if (at == SIZE_MAX) at = start = a->a->steps_at;
+        if (!(a->a->flags & F_EMITTED) || a->a->steps_at != at || a->a->steps_end >= program->len ||
+            program->items[a->a->steps_end].op != BC_DEFAULT) return n;
+        at = a->a->steps_end + 1;
+    }
+    if (at != SIZE_MAX && at != program->len) return n;
+    return emit_before(p->ctx, program, start, BC_FUNCTION, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, start);
+}
+/* Template string n, parsed: when its parts were emitted one after
+ * another up to the end, each is added to the list its new value begins,
+ * and the template made of it, as compile_expr compiles them. */
+static Node *template_parsed(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    if (!emitted_operands(program, (Node *[3]){NULL}, n->args)) return n;
+    size_t added = 0, start = n->args ? n->args->steps_at : program->len;
+    /* A part's steps end later by the steps added before them. */
+    for (Node *a = n->args; a; a = a->next, added++)
+        if (emit_before(c, program, a->steps_end + added, BC_ADD, a, 0) == SIZE_MAX) return NULL;
+    if (emit_before(c, program, start, BC_NEW, n, SPY_LIST) == SIZE_MAX || emit(c, program, BC_TEMPLATE, n, 0) == SIZE_MAX) return NULL;
+    return parsed_steps(p, n, start);
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -17670,11 +17737,9 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n))) list = n->args;
     else if (n->kind == N_JOINED) { fixed[0] = NULL; list = n->args; }
     else if (n->kind == N_COMPREHENSION) fixed[0] = n->a->a;
-    else if (n->kind == N_LAMBDA) {
-        /* Each default is followed by a step of its own. */
-        for (Node *a = n->args; a; a = a->next) if (a->a) return n;
-        fixed[0] = NULL;
-    }
+    else if (n->kind == N_LAMBDA) return lambda_parsed(p, n);
+    else if (n->kind == N_INTERPOLATION) fixed[1] = n->b;
+    else if (n->kind == N_TEMPLATE) return template_parsed(p, n);
     /* A field's conversion and format() call are steps between its value and spec. */
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
     else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
