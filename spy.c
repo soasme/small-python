@@ -18328,7 +18328,9 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
             if (!method) {
                 if (error_is(c, "AttributeError")) {
                     spy_clear_error(c);
-                    errorf(c, "TypeError", callable ? "Value after ** must be a mapping, not %s" : "'%s' object is not a mapping", type_name(source));
+                    char fq[256];
+                    errorf(c, "TypeError", callable ? "Value after ** must be a mapping, not %s" : "'%s' object is not a mapping",
+                           type_fqname(source, fq, sizeof(fq)));
                 }
                 return -1;
             }
