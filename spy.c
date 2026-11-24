@@ -8261,8 +8261,8 @@ static Node *statement_body(Parser *p, int emits) {
 }
 /* Statement n, the rest parsed by rest, emitted as it is parsed into
  * its body's program, once a held-back statement compiles. An
- * expression statement, an assignment of a value to a name, or a return
- * of a value keeps its steps when its value's are all emitted; other
+ * expression statement, an assignment to a name, or a return of a
+ * value keeps its steps when its value's are all emitted; other
  * statements compile when they end, their emitted steps undone. */
 static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
@@ -8271,7 +8271,10 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     p->emitting = program;
     Node *statement = rest(p, n);
     Node *value = !statement ? NULL : statement->kind == N_EXPR || statement->kind == N_RETURN ? statement->a :
-                  statement->kind == N_ASSIGN && statement->op == '=' && !statement->args && statement->a->kind == N_NAME ? statement->b : NULL;
+                  statement->kind == N_ASSIGN && !statement->args && statement->a->kind == N_NAME ? statement->b : NULL;
+    /* An augmented assignment's name is read first. */
+    if (value && statement->kind == N_ASSIGN && statement->op != '=' &&
+        (!(statement->a->flags & F_EMITTED) || statement->a->steps_end != value->steps_at)) value = NULL;
     if (!value || !(value->flags & F_EMITTED) || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING))
         emitted_drop(p);
     p->emitting = NULL; p->emitted_len = 0;
@@ -17741,8 +17744,10 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
     if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
     int shape = operator_right(n->b) ? SHAPE_FUSED : operand_shape(c, n->b);
     Mark target = mark(p);
-    /* A name's value emitted as it was parsed begins the steps. */
-    if (n->b->flags & F_EMITTED) target.at = n->b->steps_at;
+    /* Steps emitted as they were parsed begin with a name's value, or the
+     * name augmented. */
+    Node *first = augmented ? t : n->b;
+    if (first->flags & F_EMITTED) target.at = first->steps_at;
     if (augmented) {
         compile_expr(c, p, item ? t->a : t);
         if (item) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
@@ -18196,7 +18201,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         !(assigns_steps(p, n))) {
         if (increment(n) && !p->namespace) {
             /* The sum, past the plain steps that run when it declines (increment_step). */
-            size_t start = p->len;
+            size_t start = n->a->flags & F_EMITTED ? n->a->steps_at : p->len;
             compile_expr(c, p, n->a); compile_expr(c, p, n->b);
             emit(c, p, BC_INPLACE, n, n->op); emit(c, p, BC_STORE, n->a, 1);
             patch(p, c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_INCREMENT, n, 0), p->len); return;
