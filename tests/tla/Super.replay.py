@@ -13,7 +13,44 @@ FRAMES = {
 }
 
 
+BINDS = """log = []
+class A: pass
+class S(super):
+    def __init__(self, *args):
+        for _ in (): pass
+        log.append("init"); super().__init__(*args)
+"""
+
+
+def bind(p):
+    namespace = {}
+    exec(BINDS, namespace)
+    A, S, log = namespace["A"], namespace["S"], namespace["log"]
+    a = A()
+    cls = super if p["cls"] == "super" else S
+    sup = cls(A, a) if p["bound"] else cls(A)
+    log.clear()
+    result = super.__get__(sup, None if p["obj"] == "None" else a, A)
+    if result is sup:
+        return (tuple(log), "itself")
+    return (tuple(log), "%s bound" % type(result).__name__ if result.__self__ is a else "wrong")
+
+
+def meta(p):
+    namespace = {}
+    exec("class S(super):\n" + ("    def __set__(self, o, v): pass\n" if p["set"] else "    pass\n") +
+         "class MM(type):\n    __prepare__ = S(type)\nM = MM('M', (type,), {})\n", namespace)
+    got = namespace["M"].__prepare__
+    if isinstance(got, super):
+        return ((), "S bound" if got.__self__ is namespace["M"] else "wrong")
+    return ((), "type's" if got.__self__ is namespace["M"] and got.__name__ == "__prepare__" else repr(got))
+
+
 def outcome(p):
+    if p.get("op") == "bind":
+        return bind(p)
+    if p.get("op") == "meta":
+        return meta(p)
     if p.get("op") == "frame":
         try:
             exec(FRAMES[p["frame"]], {})

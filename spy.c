@@ -12071,7 +12071,7 @@ enum { M_APPEND, M_POP, M_GET, M_KEYS, M_VALUES, M_ITEMS, M_JOIN, M_FORMAT,
        M_SEND, M_THROW, M_CLOSE, M_NEXT, M_ITER, M_INDICES, M_UPDATE, M_CONJUGATE, M_SPLITLINES, M_ISPRINTABLE, M_BIT_LENGTH, M_BIT_COUNT, M_AWAIT,
        M_AITER, M_ANEXT, M_ASEND, M_ATHROW, M_ACLOSE, M_COUNT, M_INDEX,
        M_EXTEND, M_INSERT, M_REMOVE, M_CLEAR, M_COPY, M_REVERSE, M_SORT,
-       M_DICT_POP, M_POPITEM, M_SETDEFAULT, M_ISIDENTIFIER, M_SUPER_GET,
+       M_DICT_POP, M_POPITEM, M_SETDEFAULT, M_ISIDENTIFIER,
        M_STARTSWITH, M_ENDSWITH, M_FIND, M_RFIND, M_STRING_INDEX, M_RINDEX, M_STRING_COUNT, M_ISDISJOINT,
        M_CODE_REPLACE, M_CODE_LINES, M_FRAME_CLEAR };
 static SPYValue *frame_clear(SPYContext *, SPYValue *);
@@ -12797,12 +12797,30 @@ static int data_descriptor(SPYValue *value) {
 static int data_descriptor_get(SPYValue *value) {
     return data_descriptor(value) && (value->type != SPY_INSTANCE || class_lookup(value->as.map.parent, "__get__"));
 }
+/* Whether super subclass instance v's class takes super's own __get__. */
+static int super_get_inherited(SPYContext *c, SPYValue *v) {
+    return class_lookup(v->as.map.parent, "__get__") == name_local(c->types[SPY_SUPER], "__get__");
+}
+/* super.__get__ of self, storage its super, for object, NULL for None:
+ * an unbound super binds to object, a subclass's by calling its class, a
+ * call step on the step's machine (property_copy). */
+static SPYValue *unchanged(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *super_get(SPYContext *c, SPYValue *self, SPYValue *storage, SPYValue *object) {
+    if (storage->as.super.self || !object) return spy_retain(self);
+    if (self == storage) return super_new(c, storage->as.super.type, object);
+    SPYValue *args[] = {storage->as.super.type, object}, *cls = self->as.map.parent;
+    Machine *m = step_machine(c);
+    SPYValue *tuple = m ? tuple_of(c, 2, args) : NULL;
+    if (tuple) return step_callk(c, m, spy_retain(cls), tuple, unchanged, NULL);
+    if (m) return NULL;
+    return call(c, cls, 2, args);
+}
 static SPYValue *descriptor_value(SPYContext *c, SPYValue *value, SPYValue *self, SPYValue *owner) {
     if (value->type == SPY_SUPER && !value->as.super.self && self)
         return super_new(c, value->as.super.type, self);
     /* super_descr_get: an unbound super subclass instance calls its class. */
     SPYValue *unbound = value->type == SPY_INSTANCE ? builtin_value(c, value, SPY_SUPER) : NULL;
-    if (unbound && !unbound->as.super.self && self && !class_lookup(value->as.map.parent, "__get__")) {
+    if (unbound && !unbound->as.super.self && self && super_get_inherited(c, value)) {
         SPYValue *args[] = {unbound->as.super.type, self};
         return call(c, value->as.map.parent, 2, args);
     }
@@ -13490,7 +13508,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         if (definition) return descriptor_get(c, definition,
             v->as.super.self == v->as.super.owner ? NULL : v->as.super.self, v->as.super.owner);
-        if (!strcmp(name, "__get__")) return bound_method(c, v, M_SUPER_GET, name);
+        if (!strcmp(name, "__get__")) return descriptor_get(c, name_local(c->types[SPY_SUPER], name), v, c->types[SPY_SUPER]);
         if (!strcmp(name, "__thisclass__")) return spy_retain(v->as.super.type);
         if (!strcmp(name, "__self__")) return spy_retain(v->as.super.self ? v->as.super.self : c->none);
         if (!strcmp(name, "__self_class__")) return spy_retain(v->as.super.owner ? v->as.super.owner : c->none);
@@ -14083,7 +14101,7 @@ static int machine_function(SPYContext *, SPYValue *);
  * super object's type and the instance (super_descr_get). */
 static int super_binds(SPYContext *c, SPYValue *descriptor) {
     SPYValue *unbound = descriptor->type == SPY_INSTANCE && descriptor->ctx == c ? builtin_value(c, descriptor, SPY_SUPER) : NULL;
-    return unbound && !unbound->as.super.self && unbound->as.super.type && !class_lookup(descriptor->as.map.parent, "__get__");
+    return unbound && !unbound->as.super.self && unbound->as.super.type && super_get_inherited(c, descriptor);
 }
 /* What a descriptor of class kind calls on the machine as its __get__,
  * unbound as the descriptor slot calls it: a Python function, the one a
@@ -14182,7 +14200,7 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
         descriptor = builtin_value(c, descriptor, SPY_PROPERTY);
         return property_enters(c, descriptor) ? spy_retain(descriptor) : NULL;
     }
-    if (!(get ? get_function(c, kind) != NULL : kind && super_binds(c, descriptor)) ||
+    if (!((get && get_function(c, kind)) || (kind && super_binds(c, descriptor))) ||
         !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
         return NULL;
     /* The search may delete the descriptor. */
@@ -15484,7 +15502,6 @@ static SPYValue *method_arity_error(SPYContext *c, SPYValue *self, int method, S
     case M_UPDATE: max = 1; break;
     case M_THROW: case M_ATHROW: case M_STARTSWITH: case M_ENDSWITH: case M_FIND: case M_RFIND:
     case M_STRING_INDEX: case M_RINDEX: case M_STRING_COUNT: min = 1; max = 3; break;
-    case M_SUPER_GET: min = 1; max = 2; break;
     default: break;
     }
     return method_arity(c, owner, name, min, max, argc);
@@ -15633,9 +15650,6 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
     case M_STARTSWITH: case M_ENDSWITH: case M_FIND: case M_RFIND:
     case M_STRING_INDEX: case M_RINDEX: case M_STRING_COUNT:
         return string_search(c, self, method, argc, argv);
-    case M_SUPER_GET:
-        if (argc < 1 || argc > 2) break;
-        return self->as.super.self || argv[0]->type == SPY_NONE ? spy_retain(self) : super_new(c, self->as.super.type, argv[0]);
     case M_COUNT: case M_INDEX: case M_REMOVE: {
         if (self->type != SPY_RANGE) {
             if (!argc || argc > (method == M_INDEX ? 3u : 1u)) break;
@@ -50686,6 +50700,7 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
         if (!object && !owner) return spy_error(c, "TypeError", "__get__(None, None) is invalid");
         if (type == SPY_PROPERTY) return property_get(c, self, storage, object);
         if (type == SPY_STATICMETHOD) return spy_retain(storage->as.wrapper.function);
+        if (type == SPY_SUPER) return super_get(c, self, storage, object);
         if (builtin_classmethod(storage)) return classmethod_descriptor_get(c, storage, owner ? owner : value_class(c, object));
         return (storage->as.wrapper.user ? plain_method : bind_method)(c, owner ? owner : value_class(c, object), storage->as.wrapper.function);
     }
@@ -51599,6 +51614,9 @@ static SPYValue *callable_get(SPYContext *c, size_t argc, SPYValue *const *argv,
 }
 static int register_descriptor_methods(SPYContext *c) {
     static const int types[] = {SPY_PROPERTY, SPY_CLASSMETHOD, SPY_STATICMETHOD};
+    if (register_method(c, SPY_SUPER, "__get__", descriptor_method, (intptr_t)SPY_SUPER << 8 | DESCR_GET, METHOD_INSTANCE)) return -1;
+    /* A subclass's binding is a call on the step's machine (super_get). */
+    name_local(c->types[SPY_SUPER], "__get__")->as.native.host = 2;
     static const int classmethod_descriptor_ops[] = {DESCR_GET, DESCR_REPR, DESCR_CALL};
     for (size_t i = 0; i < 3; i++) {
         int op = classmethod_descriptor_ops[i];

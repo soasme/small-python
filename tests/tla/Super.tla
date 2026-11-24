@@ -32,6 +32,14 @@
 (*  (lambda: super())() , or a generic class's bases, which run in its    *)
 (* type parameters' scope,  class G[T](super()): pass . Both raise        *)
 (* RuntimeError "super(): no arguments"; a method's own super() does not. *)
+(*                                                                         *)
+(* Or it binds a super object by the slot super.__get__ (op "bind"): one  *)
+(* of super or of a subclass S whose __init__ logs, unbound or bound, to  *)
+(* an instance or None. An unbound one binds to the instance, S's by      *)
+(* calling S; otherwise the object itself is the result. Or it reads      *)
+(* __prepare__ of a class whose metaclass's metaclass holds an S          *)
+(* instance (op "meta"): with S defining __set__ the instance is a data   *)
+(* descriptor and binds to the class, else type's __prepare__ answers.    *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -41,7 +49,9 @@ MRO(x) == CASE x = "A" -> <<"A">> [] x = "B" -> <<"B", "A">> [] x = "C" -> <<"C"
              [] x = "D" -> <<"D", "B", "C", "A">>
 Diamonds == [kind : [Classes -> Kinds], call : Classes, name : {"m", "__get__", "p"}, receiver : {"instance", "proxy"}]
 Frames == [op : {"frame"}, frame : {"method", "lambda", "generic"}]
-Programs == Diamonds \cup Frames
+Binds == [op : {"bind"}, cls : {"super", "S"}, bound : BOOLEAN, obj : {"instance", "None"}]
+Metas == [op : {"meta"}, set : BOOLEAN]
+Programs == Diamonds \cup Frames \cup Binds \cup Metas
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -59,7 +69,11 @@ Call(p) ==
                    ELSE LET rest == From(i + 1, TRUE) IN <<<<mro[i]>> \o rest[1], rest[2]>>
     IN  From(1, FALSE)
 
-Run(p) == IF p \in Frames THEN <<<<>>, IF p.frame = "method" THEN "ok" ELSE "RuntimeError: super(): no arguments">> ELSE Call(p)
+Bind(p) == IF p.bound \/ p.obj = "None" THEN <<<<>>, "itself">>
+           ELSE IF p.cls = "super" THEN <<<<>>, "super bound">> ELSE <<<<"init">>, "S bound">>
+
+Run(p) == IF p \in Binds THEN Bind(p) ELSE IF p \in Metas THEN <<<<>>, IF p.set THEN "S bound" ELSE "type's">>
+          ELSE IF p \in Frames THEN <<<<>>, IF p.frame = "method" THEN "ok" ELSE "RuntimeError: super(): no arguments">> ELSE Call(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -68,6 +82,10 @@ Spec == Init /\ [][Execute]_vars
 -----------------------------------------------------------------------------
 Done == outcome # Pending
 Diamond == Done /\ program \in Diamonds
+
+\* Only an unbound super object bound to an instance changes; only a
+\* subclass's binding calls it.
+BindsOnce == Done /\ program \in Binds => (outcome[1] # <<>> <=> program.cls = "S" /\ outcome[2] = "S bound")
 Log == outcome[1]
 Index(s, x) == CHOOSE i \in DOMAIN s : s[i] = x
 
