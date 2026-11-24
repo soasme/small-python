@@ -91,6 +91,13 @@ enum { ENV_FORWARD = 6 };
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
+typedef struct Operand Operand;
+/* A place in a program's steps and operands, where an expression's begin. */
+typedef struct { size_t at; Operand *last; } Mark;
+/* What a program has emitted, to return to (emit_undo). */
+typedef struct { Mark mark; size_t values, tested, split; } Emitted;
+static Emitted emitted(Program *);
+static void emit_undo(Program *, Emitted);
 /* A function's parameter: its name, its kind (P_POSITIONAL and the rest),
  * whether its definition gives it a default and, for replace()d code, the
  * body's name for its slot. A signature is an array of them that one with
@@ -4668,6 +4675,10 @@ typedef struct {
      * of too many digits: as a parser action's error ends CPython's parse,
      * its error is the parse's. */
     char *literal_error; size_t literal_line;
+    /* An expression statement emits as it is parsed (expression_statement):
+     * its leaves emit into emitting as they are read, and are listed in
+     * emitted; emits says the statement line_statements begins may. */
+    Program *emitting; Node **emitted; size_t emitted_len, emitted_cap; int emits;
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
@@ -6156,16 +6167,23 @@ static Node *yield_expression(Parser *p) {
 }
 static SPYValue *literal_value(SPYContext *, Node *);
 static Node *atom_node(Parser *);
-/* An atom; a literal's value is made as it is parsed. */
+static void compile_expr(SPYContext *, Program *, Node *);
+/* An atom; a literal's value is made as it is parsed, and while its
+ * statement emits (expression_statement), a leaf is compiled now. */
 static Node *atom(Parser *p) {
     Node *n = atom_node(p);
+    SPYContext *c = p->ctx;
     if (n && !n->constant && (n->kind == N_STRING || n->kind == N_BYTES || n->kind == N_NONE || n->kind == N_BOOL || n->kind == N_ELLIPSIS)) {
-        SPYContext *c = p->ctx;
         size_t line = c->line;
         if (!literal_value(c, n)) return NULL;
         c->line = line;
     }
-    return n;
+    if (!n || !p->emitting || (n->kind > N_BOOL && n->kind != N_ELLIPSIS) || (n->flags & F_EMITTED)) return n;
+    if (grow(c, (void **)&p->emitted, &p->emitted_cap, p->emitted_len + 1, sizeof(*p->emitted))) return NULL;
+    compile_expr(c, p->emitting, n);
+    n->flags |= F_EMITTED;
+    p->emitted[p->emitted_len++] = n;
+    return c->error_type[0] ? NULL : n;
 }
 static Node *atom_node(Parser *p) {
     Node *n;
@@ -7749,7 +7767,8 @@ static Node *type_alias(Parser *p) {
     if (!value || !(n->b = lazy_function(p, source_name(n->a), value))) return NULL;
     return n;
 }
-static Node *statement_body(Parser *);
+static Node *statement_body(Parser *, int);
+static Node *expression_statement(Parser *, Node *);
 /* invalid_match_stmt: a soft-keyword line that failed to parse as anything
  * else may still be a misplaced match header or case clause. */
 static void soft_keyword_error(Parser *p, size_t start) {
@@ -7782,8 +7801,10 @@ static Node *statement(Parser *p) {
     int future = token_is(first, "from") && p->pos + 2 < p->len && token_is(first + 1, "__future__") && token_is(first + 2, "import");
     int misplaced = future && (p->statement_level || p->future_closed) && !p->deferred;
     if (misplaced) defer(p, "from __future__ imports must occur at the beginning of the file");
+    int emits = p->emits;
+    p->emits = 0;
     p->statement_level++;
-    Node *n = statement_body(p);
+    Node *n = statement_body(p, emits);
     p->statement_level--;
     /* Namespace stores are known when the statement's body finishes. A
      * nested definition has restored the enclosing parser context here. */
@@ -7802,7 +7823,7 @@ static Node *statement(Parser *p) {
     }
     return n;
 }
-static Node *statement_body(Parser *p) {
+static Node *statement_body(Parser *p, int emits) {
     if (at(p, '@')) {
         Node *decorators = NULL, **tail = &decorators;
         while (take(p, '@')) {
@@ -8223,6 +8244,26 @@ static Node *statement_body(Parser *p) {
         if (n->a && at(p, '=')) return syntax_at(p, n->a, "assignment to yield expression not possible");
         return n->a ? n : NULL;
     }
+    if (!emits) return expression_statement(p, n);
+    /* A held-back statement compiles first. */
+    if (body_statements(p, p->body.head, NULL)) return NULL;
+    Program *program = p->body.program;
+    Emitted before = emitted(program);
+    p->emitting = program;
+    Node *statement = expression_statement(p, n);
+    p->emitting = NULL;
+    /* An assignment, annotation or expression whose steps are not all
+     * emitted compiles when it ends, its emitted steps undone. */
+    if (!statement || statement->kind != N_EXPR || !(statement->a->flags & F_EMITTED) ||
+        (p->ctx->optimize > 1 && statement->a->kind == N_STRING)) {
+        for (size_t i = 0; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
+        emit_undo(program, before);
+    }
+    p->emitted_len = 0;
+    return statement;
+}
+/* The rest of an expression, assignment or annotation statement n. */
+static Node *expression_statement(Parser *p, Node *n) {
     int parenthesized = at(p, '(');
     size_t start = p->pos;
     if (!(n->a = expression_list(p, 0))) return NULL;
@@ -8292,6 +8333,7 @@ static Node *line_statements(Parser *p, int one) {
                                 keyword(p, "with") || keyword(p, "def") || keyword(p, "class") || keyword(p, "async"))) {
             syntax(p, "invalid syntax"); goto failed;
         }
+        p->emits = one && at_body(p);
         Node *n = statement(p);
         if (!n) goto failed;
         if ((head || after) && n->kind == N_MATCH) { p->pos = start + 1; syntax(p, "invalid syntax"); goto failed; }
@@ -16604,7 +16646,7 @@ typedef struct {
  * (USE_ALWAYS: an attribute or a name an import reads), or is an
  * inlined comprehension's, whose program's uses follow (USE_INLINE). */
 enum { USE_NONE, USE_NAME, USE_ALWAYS, USE_INLINE };
-typedef struct Operand { struct Operand *next; int use; Scope *inlined; AttributeOperand attribute; NameOperand name; char text[]; } Operand;
+struct Operand { struct Operand *next; int use; Scope *inlined; AttributeOperand attribute; NameOperand name; char text[]; };
 struct Program { Instruction *items; size_t len, cap, tested, entry; int calls, display, namespace, unbinds, loads; size_t split; /* where an operator's own steps began after its left operand's */ ImportRecord *imports; Operand *operands, *last; SPYValue **values; size_t values_len, values_cap; };
 /* The values a program owns (emit_value). */
 static void program_edges(Program *code, Visit visit, void *data) {
@@ -17003,8 +17045,6 @@ static size_t emit_before(SPYContext *c, Program *p, size_t at, int op, Node *n,
     if (p->tested > at) p->tested++;
     return at;
 }
-/* A place in p's steps and operands, where an expression's begin. */
-typedef struct { size_t at; Operand *last; } Mark;
 static Mark mark(Program *p) { return (Mark){p->len, p->last}; }
 /* Move the steps and operands of the expressions from a on after those
  * from b on, which follow them to the end, each jumping only among its
@@ -17034,6 +17074,15 @@ static Mark emit_after(Program *p, Mark a, Mark b, size_t *pc) {
     Operand **head = a.last ? &a.last->next : &p->operands, *start = *head;
     *head = b.last->next; p->last->next = start; b.last->next = NULL; p->last = b.last;
     return moved;
+}
+static Emitted emitted(Program *p) { return (Emitted){mark(p), p->values_len, p->tested, p->split}; }
+/* Undo what p emitted since e. */
+static void emit_undo(Program *p, Emitted e) {
+    Operand **at = e.mark.last ? &e.mark.last->next : &p->operands;
+    for (Operand *o = *at, *next; o; o = next) { next = o->next; mem_free(o); }
+    *at = NULL; p->last = e.mark.last;
+    while (p->values_len > e.values) spy_release(p->values[--p->values_len]);
+    p->len = e.mark.at; p->tested = e.tested; p->split = e.split;
 }
 static void patch(Program *p, size_t pc, size_t target) {
     if (pc == SIZE_MAX) return;
@@ -17190,6 +17239,8 @@ static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
+    /* Its steps were emitted as it was parsed (expression_statement). */
+    if (n->flags & F_EMITTED) return;
     if (n->constant || (at_hand(n) && n->kind != N_NAME)) { SPYValue *value = literal_value(c, n); if (value) emit_value(c, p, n, spy_retain(value)); return; }
     if (n->kind == N_NAME) { emit(c, p, BC_NAME, n, 0); return; }
     /* What cannot suspend is evaluated whole, a leaf or an operator on
