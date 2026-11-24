@@ -4703,6 +4703,8 @@ typedef struct {
     Node *last_statement;
     int module_begun;
 } Parser;
+static Node *emit_parsed(Parser *, Node *, size_t);
+static Node *finished(Parser *, Node *);
 static Scope *scope_new(SPYContext *, Scope *, int);
 static void scope_adopt(Scope *, Scope *);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -5476,7 +5478,7 @@ static Node *subscript(Parser *p) {
     if (take(p, ':') && !at(p, ',') && !at(p, ']')) {
         if (!(n->c = plain_expression(p, 0))) return NULL;
     }
-    return n;
+    return finished(p, n);
 }
 static int parameter_list(Parser *p, Node *n, int close) {
     Node **tail = &n->args;
@@ -6169,8 +6171,6 @@ static Node *yield_expression(Parser *p) {
 }
 static SPYValue *literal_value(SPYContext *, Node *);
 static Node *atom_node(Parser *);
-static Node *emit_parsed(Parser *, Node *, size_t);
-static Node *finished(Parser *, Node *);
 static void compile_expr(SPYContext *, Program *, Node *);
 /* An atom; a literal's value is made as it is parsed, and while its
  * statement emits (expression_statement), a leaf is compiled now. */
@@ -17435,22 +17435,24 @@ static Node *emit_parsed(Parser *p, Node *n, size_t at) {
  * it. While its statement emits, n compiles now when its operands did,
  * one after another up to the program's end; a chained comparison, a
  * boolean operator and other expressions compile with their statement. */
-static int emitted_operands(Program *, Node *, Node *, Node *);
+static int emitted_operands(Program *, Node *[3], Node *);
 static Node *finished(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     if (n && n->kind == N_UNARY && n->op == '-' && !n->constant && n->a->constant && (n->a->kind <= N_IMAG || n->a->kind == N_UNARY) &&
         !(n->constant = unary(c, '-', n->a->constant))) return NULL;
     if (!n || !p->emitting || c->error_type[0] || (n->flags & F_EMITTED)) return n;
     Program *program = p->emitting;
-    Node *one = n->a, *two = NULL, *list = NULL;
-    if (n->kind == N_INDEX || (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR)) two = n->b;
-    else if (n->kind == N_COMPARE && !n->args->next) two = n->args->a;
+    Node *fixed[3] = {n->a}, *list = NULL;
+    if (n->kind == N_INDEX || (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR)) fixed[1] = n->b;
+    else if (n->kind == N_COMPARE && !n->args->next) fixed[1] = n->args->a;
     else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n))) list = n->args;
-    else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { one = NULL; list = n->args; }
-    else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) one = NULL;
+    else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
+    else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) fixed[0] = NULL;
+    /* An absent bound is a step of its own, after those present (compile_expr). */
+    else if (n->kind == N_SLICE && (n->a || !n->b) && (n->b || !n->c)) { fixed[1] = n->b; fixed[2] = n->c; }
     else if (n->kind != N_UNARY && n->kind != N_ATTR) return n;
-    Node *first = one ? one : list ? (list->kind == N_KEYWORD ? list->a : list) : NULL;
-    if (!emitted_operands(program, one, two, list)) return n;
+    Node *first = fixed[0] ? fixed[0] : list ? (list->kind == N_KEYWORD ? list->a : list) : NULL;
+    if (!emitted_operands(program, fixed, list)) return n;
     if (n->constant) {
         /* Its operand's value, a step, becomes its own. */
         Instruction *load = &program->items[n->a->steps_at];
@@ -17459,11 +17461,11 @@ static Node *finished(Parser *p, Node *n) {
     }
     return emit_parsed(p, n, first ? first->steps_at : program->len);
 }
-/* Whether operands one and two, then those of list (a keyword's value
- * for a keyword), were emitted one after another up to p's end. */
-static int emitted_operands(Program *p, Node *one, Node *two, Node *list) {
-    Node *last = NULL, *fixed[2] = {one, two};
-    for (int i = 0; i < 2; i++) {
+/* Whether the operands fixed, then those of list (a keyword's value for
+ * a keyword), were emitted one after another up to p's end. */
+static int emitted_operands(Program *p, Node *fixed[3], Node *list) {
+    Node *last = NULL;
+    for (int i = 0; i < 3; i++) {
         if (!fixed[i]) continue;
         if (!(fixed[i]->flags & F_EMITTED) || (last && last->steps_end != fixed[i]->steps_at)) return 0;
         last = fixed[i];
