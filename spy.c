@@ -3005,7 +3005,8 @@ static void hash_failed(SPYContext *c, SPYValue *map, SPYValue *key) {
         error_settle(c);
         put_text(message, sizeof(message), c->error_message);
         spy_clear_error(c);
-        errorf(c, "TypeError", "cannot use '%s' as %s (%s)", type_name(key), role, message);
+        char fq[256];
+        errorf(c, "TypeError", "cannot use '%s' as %s (%s)", type_fqname(key, fq, sizeof(fq)), role, message);
     }
 }
 static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) {
@@ -25440,8 +25441,9 @@ static SPYValue *manager_error(SPYContext *c, SPYValue *manager, int async, int 
     int other = enter && exit;
     spy_release(enter); spy_release(exit);
     if (c->error_type[0]) spy_clear_error(c);
+    char fq[256];
     return errorf(c, "TypeError", "'%s' object does not support the %scontext manager protocol (missed %s method)%s",
-                  type_name(manager), async ? "asynchronous " : "",
+                  type_fqname(manager, fq, sizeof(fq)), async ? "asynchronous " : "",
                   has_exit ? (async ? "__aenter__" : "__enter__") : (async ? "__aexit__" : "__exit__"),
                   !other ? "" : async ? " but it supports the context manager protocol. Did you mean to use 'with'?" :
                   " but it supports the asynchronous context manager protocol. Did you mean to use 'async with'?");

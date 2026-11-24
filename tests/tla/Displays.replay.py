@@ -18,6 +18,7 @@ SOURCES = {
     "trailing_comma": "result = ([1, 2,], {1,}, {1: 2,})",
     "nested": "result = [t(1), [t(2), (t(3), {t(4)})], {t(5): [t(6)]}]",
     "dict_unhashable": "{[]: 1}",
+    "dict_unhashable_local": "def make():\n    class Keyed:\n        __hash__ = None\n    return Keyed()\n{make(): 1}",
     "set_unhashable": "{[1]}",
     "dict_late_unhashable": "{t(1): t(2), t([]): t(3)}",
     "dstar_keys_protocol": "class M:\n    def keys(self): return ['k']\n    def __getitem__(self, k): return k.upper()\n"

@@ -23,7 +23,7 @@ EXTENDS Naturals, Sequences, TLC
 
 SeqItems == {"plain", "true", "star", "empty", "bad"}
 DictItems == {"pair", "true_pair", "merge", "bad"}
-Cases == {"paren_same", "paren_yield", "empty", "tuple_needs_comma", "trailing_comma", "nested", "dict_unhashable",
+Cases == {"paren_same", "paren_yield", "empty", "tuple_needs_comma", "trailing_comma", "nested", "dict_unhashable", "dict_unhashable_local",
           "set_unhashable", "dict_late_unhashable", "dstar_keys_protocol", "dstar_keys_listed", "dstar_keys_iterable", "dstar_nested", "dstar_bad_keys", "dstar_subclass_entries", "call_dstar_twice", "call_dstar_nonstr", "dstar_local", "call_dstar_local", "star_generator_error",
           "star_bare", "dstar_in_list", "dstar_in_set", "list_identity"}
 Programs == [kind : {"list", "tuple", "set"}, items : UNION {[1..n -> SeqItems] : n \in 0..3}]
@@ -91,6 +91,7 @@ Case(c) ==
       [] c = "trailing_comma" -> <<"ok", "([1, 2], {1}, {1: 2})", <<>>>>
       [] c = "nested" -> <<"ok", "[1, [2, (3, {4})], {5: [6]}]", <<"1", "2", "3", "4", "5", "6">>>>
       [] c = "dict_unhashable" -> <<"TypeError: cannot use 'list' as a dict key", <<>>, <<>>>>
+      [] c = "dict_unhashable_local" -> <<"TypeError: cannot use 'make.<locals>.Keyed' as a dict key", <<>>, <<>>>>
       [] c = "set_unhashable" -> <<"TypeError: cannot use 'list' as a set element", <<>>, <<>>>>
       [] c = "dict_late_unhashable" -> <<"TypeError: cannot use 'list' as a dict key", <<>>, <<"1", "2", "[]", "3">>>>
       [] c = "dstar_keys_protocol" -> <<"ok", "{'k': 'K'}", <<>>>>         \* keys() and __getitem__
