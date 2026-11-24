@@ -77,7 +77,7 @@ SortedItems(S) == LET s == SelectSeq(AllItems, LAMBDA e : e \in S) IN List([i \i
 Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
-Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_function_keys", "ctor_own_keys_calls", "ctor_asked_keys", "ior_keyed_mapping", "ior_explicit", "keys_not_iterable", "union_keyed", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_listed_pairs", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys", "get_keyed_eq",
+Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_function_keys", "ctor_own_keys_calls", "ctor_asked_keys", "ior_keyed_mapping", "ior_explicit", "keys_not_iterable", "union_keyed", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_listed_pairs", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys", "get_keyed_eq", "fromkeys_class", "update_unbound",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_slot", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "subclass_equal_key_methods", "subclass_missing_equal_keys", "getitem_key_calls", "subclass_hashed", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "ior_mapping", "merge_dict_iter", "copy_shallow", "merge_empty", "merge_equal_keys", "merge_mutated", "clear",
@@ -122,6 +122,8 @@ Case(c) ==
       [] c = "ctor_two_positional" -> "TypeError: dict expected at most 1 argument, got 2"
       \* get/setdefault/pop of a str key compare a stored str subclass by its __eq__
       [] c = "get_keyed_eq" -> "(2, 2, [2, 1], 2, ['k', 'k', 'k', 'k'])"
+      [] c = "update_unbound" -> "({1: 2, 'z': 0}, {1: 2, 3: 4}, [5], ['k', 1, 'k', 1])"
+      [] c = "fromkeys_class" -> "(['n', 1, 'y', 2, 'y', 3], {1: 0, 2: 0, 3: 0}, 'F', {1: None, 2: None})"
       [] c = "fromkeys" -> "({'a': None, 'b': None}, {1: 0, 2: 0}, 'Missing')"
       [] c = "fromkeys_shared" -> "{'a': [1], 'b': [1]}"
       [] c = "fromkeys_hashed" -> "([1, 2, 3], [0, 0, 0], [1, 3, 1])"

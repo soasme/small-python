@@ -66,6 +66,16 @@ SOURCES = {
     "get_keyed_eq": ("log = []\nclass K(str):\n    def __eq__(s, o):\n        log.append(o); return str.__eq__(s, o)\n"
                      "    __hash__ = str.__hash__\nd = {'a': 1, K('k'): 2}\n"
                      "result = (d.get('k'), d.setdefault('k', 0), list(map(d.get, ['k', 'a'])), d.pop('k'), log)"),
+    "update_unbound": ("log = []\nclass M:\n    def keys(s):\n        for _ in (): pass\n        log.append('k'); return [1]\n"
+                       "    def __getitem__(s, k): log.append(k); return 2\n"
+                       "class S(dict):\n    def __setitem__(s, k, v): log.append('set'); dict.__setitem__(s, k, v)\n"
+                       "s = S(); d = {}; l = []\ndict.update(d, M(), z=0); s.update(M()); dict.update(s, iter([(3, 4)]))\n"
+                       "list(map(l.extend, [iter([5])]))\nresult = (d, dict(s), l, log)"),
+    "fromkeys_class": ("log = []\nclass S(dict):\n    def __init__(s):\n        for _ in (): pass\n        log.append('n')\n"
+                       "    def __setitem__(s, k, v):\n        log.append(k); dict.__setitem__(s, k, v)\n"
+                       "def g():\n    yield 1\n    log.append('y'); yield 2\n    log.append('y'); yield 3\n"
+                       "class F(frozendict): pass\nd = S.fromkeys(g(), 0)\nf = F.fromkeys(iter([1, 2]))\n"
+                       "result = (log, dict(d), type(f).__name__, dict(f))"),
     "fromkeys": "result = (dict.fromkeys('ab'), dict.fromkeys([1, 2], 0), type(Missing.fromkeys('a')).__name__)",
     "fromkeys_shared": "d = dict.fromkeys('ab', [])\nd['a'].append(1)\nresult = d",
     "fromkeys_hashed": "H.log.clear()\nd = dict.fromkeys([H(1), 2, H(3), H(1)], 0)\nresult = ([getattr(k, 'v', k) for k in d], list(d.values()), H.log)",

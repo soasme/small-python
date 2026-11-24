@@ -29,7 +29,7 @@ Cases == {"unused", "used", "from_unused", "from_used", "placeholder", "from_pla
           "missing_used", "broken", "as", "not_cached", "in_function_use", "registry", "submodule",
           "in_function", "in_try", "in_class", "star", "future",
           "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function",
-          "compat_getitem", "hook_used", "hook_dotted"}
+          "compat_getitem", "hook_used", "hook_dotted", "method_read"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -68,6 +68,8 @@ Run(p) ==
       [] p.case = "hook_used" -> "(1, 'sub', ['pkg', 'pkg']) ['pkg', 'sub']"
       \* such a hook is given a dotted lazy import's whole name, so the submodule runs too
       [] p.case = "hook_dotted" -> "([('pkg.sub', None)], ['pkg', 'sub']) ['pkg', 'sub']"
+      \* a lazily named submodule read for a call is imported first, then called
+      [] p.case = "method_read" -> "(\"'module' object is not callable\", 'sub') ['pkg', 'sub']"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

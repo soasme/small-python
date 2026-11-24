@@ -599,6 +599,7 @@ struct SPYContext {
     int interactive_input; /* eval_source parses interactive input, whose expression statements display their values. */
     SPYValue *pattern_calls[2]; /* The builtin len and isinstance, as a pattern's steps call them (pattern_step). */
     Node *node_open; /* The node of the last compile-time SyntaxError, while analysis runs (analysis_defer). */
+    SPYValue *next_call; /* The builtin next, as dict.fromkeys calls it on a machine (fromkeys_items). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -13142,12 +13143,12 @@ static SPYValue *definition_code(SPYContext *c, SPYValue *unit, Scope *s) {
     }
     return spy_retain(s->code_value);
 }
-/* A missing module attribute that a lazy import named as a submodule
- * (sys.lazy_modules holds "module.name" or a name below it) imports it. */
-static SPYValue *import_module(SPYContext *, const char *);
-static SPYValue *lazy_submodule(SPYContext *c, SPYValue *module, const char *name) {
+/* The submodule's full name, a str, that a lazy import named a missing
+ * module attribute name of module (sys.lazy_modules holds "module.name"
+ * or a name below it); else NULL. */
+static SPYValue *lazy_submodule_name(SPYContext *c, SPYValue *module, const char *name) {
     SPYValue *module_name = name_local(module, "__name__");
-    if (!c->lazy_modules || !module_name || module_name->type != SPY_STRING) return NULL;
+    if (!c->lazy_modules || !module_name || module_name->type != SPY_STRING || name_local(module, name)) return NULL;
     size_t prefix = module_name->as.string.len, length = strlen(name);
     for (size_t i = 0; i < c->lazy_modules->as.map.len; i++) {
         SPYValue *key = map_items(c->lazy_modules)[i].key;
@@ -13155,15 +13156,46 @@ static SPYValue *lazy_submodule(SPYContext *c, SPYValue *module, const char *nam
         if (key->as.string.len < prefix + 1 + length || strncmp(text, module_name->as.string.data, prefix) ||
             text[prefix] != '.' || strncmp(text + prefix + 1, name, length) ||
             (text[prefix + 1 + length] && text[prefix + 1 + length] != '.')) continue;
-        char *full = copy_text(c, text, prefix + 1 + length);
-        SPYValue *imported = full ? import_module(c, full) : NULL;
-        mem_free(full);
-        spy_release(imported);
-        if (c->error_type[0]) return NULL;
-        SPYValue *value = name_local(module, name);
-        return value ? spy_retain(value) : NULL;
+        return spy_string(c, text, prefix + 1 + length);
     }
     return NULL;
+}
+/* Whether reading attribute name of module imports a submodule (lazy_submodule_name). */
+static int lazy_pending(SPYContext *c, SPYValue *module, const char *name) {
+    SPYValue *full = lazy_submodule_name(c, module, name);
+    spy_release(full);
+    return full != NULL;
+}
+/* A missing module attribute that a lazy import named as a submodule
+ * (lazy_submodule_name) imports it. */
+static SPYValue *import_module(SPYContext *, const char *);
+static SPYValue *lazy_submodule(SPYContext *c, SPYValue *module, const char *name) {
+    SPYValue *full = lazy_submodule_name(c, module, name), *imported = full ? import_module(c, full->as.string.data) : NULL;
+    spy_release(full); spy_release(imported);
+    SPYValue *value = full && !c->error_type[0] ? name_local(module, name) : NULL;
+    return value ? spy_retain(value) : NULL;
+}
+/* What the import of a lazily named submodule (lazy_attribute) returned:
+ * the attribute of state's module then, read as attribute() reads it
+ * when the import left it unset, for state's continuation (k_resume). */
+static SPYValue *submodule_imported(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *module = state->as.seq.items[0], *name = state->as.seq.items[1], *value = NULL;
+    spy_release(result);
+    if (result) value = name_local(module, name->as.string.data) ? spy_retain(name_local(module, name->as.string.data)) : attribute(c, module, name->as.string.data);
+    return k_resume(c, m, state, value);
+}
+/* The read of attribute name of module v, which it takes, that a lazy
+ * import names as a submodule (lazy_submodule_name), on m: the submodule
+ * imported, its modules' bodies m's calls (importk), continuation k's
+ * with ctx, which it takes, of the attribute then. */
+static SPYValue *importk(SPYContext *, Machine *, size_t, SPYValue **, Continuation, SPYValue *);
+static SPYValue *lazy_attribute(SPYContext *c, Machine *m, SPYValue *v, const char *name, Continuation k, SPYValue *ctx) {
+    SPYValue *full = lazy_submodule_name(c, v, name), *items[4] = {v, full ? spy_string(c, name, strlen(name)) : NULL};
+    SPYValue *state = items[1] ? k_state(c, 2, items, k, spy_retain(ctx)) : NULL;
+    if (!items[1]) spy_release(v);
+    if (!state) { spy_release(full); return k(c, m, ctx, NULL); }
+    spy_release(ctx);
+    return importk(c, m, 1, &full, submodule_imported, state);
 }
 /* Call an __annotate__ function with the VALUE format, or return {} when it
  * is not callable. */
@@ -14374,6 +14406,11 @@ static HOT SPYValue *operand_attribute(SPYContext *c, SPYValue *v, AttributeOper
     /* A __dict__ whose search calls a Python __eq__ is searched on the machine (getter_call, method_getter). */
     if (calls && v->type == SPY_INSTANCE && UNLIKELY(v->as.map.namespace) && dict_searches(c, v, at->name->text)) {
         c->annotating = 2;
+        return NULL;
+    }
+    /* A module's submodule a lazy import names is imported on the machine (getter_call, method_getter). */
+    if (calls && v->type == SPY_MODULE && UNLIKELY(c->lazy_modules != NULL) && lazy_pending(c, v, at->name->text)) {
+        c->annotating = 4;
         return NULL;
     }
     return calls ? attribute_step(c, v, at->name->text) : attribute(c, v, at->name->text);
@@ -28324,15 +28361,35 @@ static int class_converts(SPYContext *c, SPYValue *cls) {
 /* Whether filter's function is a call step of its own (filter_call): a
  * Python class, a callable instance, a bound Python method, a builtin that
  * may go on on the machine (map_steps), a slot wrapper bound to an
- * instance (slot_steps) or a dict lookup that may compare by Python
- * (keyed_lookup); not while tracing (map_convert). */
+ * instance (slot_steps) or a builtin's bound method whose call may
+ * (bound_steps); not while tracing (map_convert). */
 static int slot_steps(SPYValue *, size_t, SPYValue *const *);
-static int keyed_lookup(SPYValue *, int);
+static int bound_steps(SPYValue *);
 static int filter_steps(SPYContext *c, SPYValue *function) {
     return ((function->type == SPY_CLASS && !builtin_class(c, function)) || function->type == SPY_INSTANCE || metaclassed(function) ||
             bound_function(c, function) || map_steps(function) || (function->type == SPY_METHOD && slot_steps(function, 0, NULL)) ||
-            keyed_lookup(function, -1)) &&
+            bound_steps(function)) &&
            !c->settings[SET_TRACE] && !c->settings[SET_PROFILE];
+}
+/* Whether map or filter iterator v's next call of function, a consuming
+ * builtin's bound method (bound_steps), may go on on the machine: its
+ * next item, when v takes one list or tuple, a source the machine takes
+ * (consumer_of); always for another iterable. */
+static ALWAYS_INLINE int consumer_of(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+static int keyed_lookup(SPYValue *, int);
+static NO_INLINE int bound_next(SPYContext *c, SPYValue *v, SPYValue *function) {
+    if (keyed_lookup(function, -1)) return 1;
+    SPYValue *source = v->as.iterator.source, *items = source->as.seq.len == 2 ? source->as.seq.items[1] : NULL;
+    if (!items || items->type != SPY_ITERATOR || items->as.iterator.kind != I_SEQUENCE || items->as.iterator.done) return 1;
+    size_t at = items->as.iterator.index;
+    items = items->as.iterator.source;
+    if (items->type != SPY_LIST && items->type != SPY_TUPLE) return 1;
+    if (at >= items->as.seq.len) return 0;
+    /* A join or extend of a list, tuple or str calls no Python. */
+    SPYValue *item = items->as.seq.items[at];
+    int method = function->as.bound.method;
+    if ((method == M_JOIN || method == M_EXTEND) && (item->type == SPY_LIST || item->type == SPY_TUPLE || item->type == SPY_STRING)) return 0;
+    return consumer_of(c, function, -1, 1, &item) >= 0;
 }
 static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
@@ -28348,7 +28405,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
          (function->type == SPY_CLASS && builtin_class(c, function))))
         return v->as.iterator.source->as.seq.items[1]->type != SPY_ITERATOR || v->as.iterator.source->as.seq.items[1]->as.iterator.kind != I_RANGE;
     return function && (machine_function(c, function) || (kind == I_FILTER && filter_steps(c, function)) ||
-                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD || keyed_lookup(function, -1) ||
+                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD || (bound_steps(function) && bound_next(c, v, function)) ||
                                            (function->type == SPY_CLASS && class_converts(c, function)))));
 }
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
@@ -28584,10 +28641,19 @@ static NO_INLINE int set_sources(SPYContext *c, SPYValue *set, int which, size_t
 static int next_steps(SPYContext *c, SPYValue *v) {
     return resumable(v) || next_calls(c, v) || zip_of_generator(v) || adapted_generator(v);
 }
+/* The storage of the dict subclass's instance that callee, an update,
+ * is bound to (dict.update writes it, not the instance's __setitem__),
+ * borrowed; else NULL. */
+static SPYValue *updated_storage(SPYContext *c, SPYValue *callee) {
+    return callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_UPDATE &&
+           callee->as.bound.self->type == SPY_INSTANCE ? builtin_value(c, callee->as.bound.self, SPY_DICT) : NULL;
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
     if (built) callee = built;
-    if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    SPYValue *storage = updated_storage(c, callee);
+    if (storage) { method = M_UPDATE; callee = storage; }
+    else if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     SPYValue *relaying = callee;
     callee = anext_relayed(callee, &method, NULL);
     /* A coroutine wrapper's methods are its coroutine's, its __next__ and
@@ -28746,20 +28812,24 @@ static int ior_consume(SPYContext *c, Machine *m, SPYValue *own, SPYValue *x, SP
 }
 /* Whether callee is a generator's, coroutine's or asend, athrow or
  * anext() awaitable's method from its type, send, throw, close or
- * __next__, given v, one of them, first: the machine resumes it as v's
- * bound method (slot_call binds it in C). */
-static NO_INLINE int generator_method_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
-    if (callee->type != SPY_NATIVE || callee->as.native.kwcall != slot_call || callee->as.native.owner != c->types[v->type]) return 0;
+ * __next__, or a dict's update, given v, one of them or a dict
+ * subclass's instance, first: the machine
+ * runs it as v's bound method (slot_call binds it in C). */
+static NO_INLINE int self_slot_method(SPYContext *c, SPYValue *callee, SPYValue *v) {
+    int type = v->type == SPY_INSTANCE ? SPY_DICT : v->type;
+    if (callee->type != SPY_NATIVE || callee->as.native.kwcall != slot_call || callee->as.native.owner != c->types[type]) return 0;
     const char *name = callee->as.native.name->as.string.data;
+    if (type == SPY_DICT) return !strcmp(name, "update") && builtin_value(c, v, SPY_DICT);
     return !strcmp(name, "send") || !strcmp(name, "throw") || !strcmp(name, "close") || !strcmp(name, "__next__");
 }
-static ALWAYS_INLINE int generator_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
+static ALWAYS_INLINE int self_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
     return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR_ASEND ||
-            v->type == SPY_ASYNC_GENERATOR_ATHROW || v->type == SPY_ANEXT_AWAITABLE) && generator_method_slot(c, callee, v);
+            v->type == SPY_ASYNC_GENERATOR_ATHROW || v->type == SPY_ANEXT_AWAITABLE || v->type == SPY_DICT ||
+            (v->type == SPY_INSTANCE && callee->type == SPY_NATIVE && v->as.map.base)) && self_slot_method(c, callee, v);
 }
-/* Generator method callee, which it takes, from its type, bound to g,
+/* Method callee (self_slot), which it takes, from its type, bound to g,
  * which it takes too: the bound method; else NULL. */
-static NO_INLINE SPYValue *generator_bound(SPYContext *c, SPYValue *callee, SPYValue *g) {
+static NO_INLINE SPYValue *self_bound(SPYContext *c, SPYValue *callee, SPYValue *g) {
     SPYValue *bound = attribute_value(c, g, callee->as.native.name->as.string.data);
     spy_release(callee); spy_release(g);
     return bound;
@@ -28771,8 +28841,8 @@ static ALWAYS_INLINE int consumer_of(SPYContext *, SPYValue *, int, size_t, SPYV
  * the source's items (consumer_end), 1; else 0, or -1 on an error. */
 static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *);
 static int dict_consumer(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *source, SPYValue *keywords) {
-    int updating = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_UPDATE &&
-                   callee->as.bound.self->type == SPY_DICT;
+    int updating = (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_UPDATE &&
+                    callee->as.bound.self->type == SPY_DICT) || updated_storage(c, callee);
     int dict = updating || callee == c->types[SPY_DICT] || callee == c->types[SPY_FROZENDICT] ||
                (callee->type == SPY_CLASS && built_type(c, callee) == c->types[SPY_DICT]);
     int id = dict ? consumer_of(c, callee, -1, 1, &source) : -1;
@@ -28987,8 +29057,12 @@ static void consume_traced(SPYContext *c, Machine *m, int id, SPYValue *callee, 
     }
     spy_retain(defaulted);
     /* A native method given its object first is bound to it (self_consumer). */
-    SPYValue *bound = NULL;
-    if (callee->type == SPY_NATIVE && (init_extends(callee) || bytes_joining(callee) || bytes_extend(callee))) {
+    SPYValue *bound = NULL, *storage = updated_storage(c, callee);
+    /* A dict subclass's instance's update is its storage's (updated_storage). */
+    if (storage) {
+        if (!(bound = bound_method(c, storage, M_UPDATE, "update"))) { spy_release(generator); spy_release(start); spy_release(defaulted); return; }
+        callee = bound;
+    } else if (callee->type == SPY_NATIVE && (init_extends(callee) || bytes_joining(callee) || bytes_extend(callee))) {
         bound = bind_method(c, generator, callee);
         spy_release(generator);
         if (!bound) { spy_release(start); spy_release(defaulted); return; }
@@ -30785,6 +30859,16 @@ static ALWAYS_INLINE int keyed_lookup(SPYValue *callee, int method) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     return callee->type == SPY_DICT && eq_keyed(callee) && (method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP);
 }
+/* Whether callee is a str's join, a list's extend or a dict's update,
+ * bound, which consume their source (consumer_of). */
+static ALWAYS_INLINE int consuming_bound(SPYValue *callee) {
+    return callee->type == SPY_BOUND_METHOD && !callee->as.bound.module &&
+           (callee->as.bound.method == M_JOIN || callee->as.bound.method == M_EXTEND || callee->as.bound.method == M_UPDATE);
+}
+/* Whether a call of callee, a builtin's bound method, may go on on the
+ * machine: a dict lookup that may compare by Python (keyed_lookup), or a
+ * consuming_bound one. */
+static ALWAYS_INLINE int bound_steps(SPYValue *callee) { return keyed_lookup(callee, -1) || consuming_bound(callee); }
 static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     int keyed = keyed_lookup(callee, method);
     if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) method = callee->as.bound.method;
@@ -31193,10 +31277,10 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Attribut
         return result ? NULL : c->error_type[0] ? NULL : looked(c);
     }
     int id = consumer_of(c, callee, method, argc, argv);
-    /* So does a generator's method from its type given the generator
-     * first (generator_slot). */
-    if (id < 0 && method < 0 && argc && generator_slot(c, callee, argv[0])) {
-        if (!(callee = generator_bound(c, callee, argv[0]))) { release_all(argc, argv); return NULL; }
+    /* So does a generator's or dict's method from its type given its
+     * object first (self_slot). */
+    if (id < 0 && method < 0 && argc && self_slot(c, callee, argv[0])) {
+        if (!(callee = self_bound(c, callee, argv[0]))) { release_all(argc, argv); return NULL; }
         argv++; argc--;
         id = consumer_of(c, callee, method, argc, argv);
     }
@@ -32486,14 +32570,16 @@ static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, AttributeOpe
         if (!result && !c->k_fn) method_drop(m, stacked);
         return result;
     }
-    if (UNLIKELY(c->annotating == 3)) {
-        /* A computed attribute (wrapper_computes) read on m, then called (method_got). */
+    if (UNLIKELY(c->annotating >= 3)) {
+        /* A computed attribute (wrapper_computes) or a lazily named
+         * submodule (lazy_attribute) read on m, then called (method_got). */
+        int lazy = c->annotating == 4;
         c->annotating = 0;
         SPYValue *count = int_value(c, stacked), *key = spy_string(c, at->name->text, strlen(at->name->text));
         SPYValue *state = count && key ? spy_tuple(c, 4, (SPYValue *[]){object, c->none, key, count}) : NULL;
         spy_release(count); spy_release(key);
         if (!state) { spy_release(object); method_drop(m, stacked); return NULL; }
-        return wrapper_computed(c, m, object, at->name->text, method_got, state);
+        return lazy ? lazy_attribute(c, m, object, at->name->text, method_got, state) : wrapper_computed(c, m, object, at->name->text, method_got, state);
     }
     return method_getter_of(c, m, at->name->text, c->fallback ? c->fallback : spy_retain(at->method), object, stacked);
 }
@@ -32724,6 +32810,7 @@ static int called_class(SPYContext *c, SPYValue *callee, SPYValue **slot, size_t
     spy_release(callee);
     return 1;
 }
+static int empty_format(SPYContext *, SPYValue *, SPYValue *);
 /* The search id of callee, of seq (searched), with argc arguments argv,
  * popped atop m's stack: a range's index or count of an instance
  * (range_search), or a list's or tuple's index, count or remove, which a
@@ -32840,11 +32927,11 @@ again:
         callee = argv[-1];
         goto again;
     }
-    if (argc && generator_slot(c, callee, argv[0])) {
-        /* A generator's method from its type given the generator is its
-         * bound method (generator_slot), in the callee's place; the stack
+    if (argc && self_slot(c, callee, argv[0])) {
+        /* A generator's or dict's method from its type given its object
+         * is its bound method (self_slot), in the callee's place; the stack
          * keeps its references until the binding succeeds. */
-        SPYValue *bound = generator_bound(c, spy_retain(callee), spy_retain(argv[0]));
+        SPYValue *bound = self_bound(c, spy_retain(callee), spy_retain(argv[0]));
         if (!bound) return NULL;
         spy_release(callee); spy_release(argv[0]);
         argv[-1] = callee = bound;
@@ -32873,6 +32960,8 @@ again:
      * Python __repr__ (repr_call), and str.format of an instance with a
      * Python __format__ (format_job). */
     if (argc == 1 && repr_job(c, callee, argv[0])) return repr_call(c, m, env);
+    /* format() with an empty spec is format() of the object alone. */
+    if (argc == 2 && empty_format(c, callee, argv[1]) && repr_job(c, callee, argv[0])) { spy_release(machine_pop(m)); return repr_call(c, m, env); }
     if (argc == 1 && is_builtin(callee, B_ASCII) && repr_job(c, c->field_calls[0], argv[0])) return ascii_call(c, m, env);
     if (format_reached(c, callee, -1, argc, argv)) {
         SPYValue *args[8];
@@ -33340,6 +33429,15 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Instruc
         spy_release(callee);
         callee = argv[-1];
     }
+    if (positional && self_slot(c, callee, argv[0])) {
+        /* A dict's method from its type given the dict is its bound method (self_slot), as in stack_call. */
+        SPYValue *bound = self_bound(c, spy_retain(callee), spy_retain(argv[0]));
+        if (!bound) goto done;
+        spy_release(callee); spy_release(argv[0]);
+        argv[-1] = callee = bound;
+        memmove(argv, argv + 1, --argc * sizeof(*argv));
+        m->len--; positional--;
+    }
     SPYValue *wrapped = machine_function(c, callee) ? callee : NULL;
     if (wrapped) {
         SPYValue *callee_env = keyword_env(c, wrapped, positional, argv, kw, kwc, NULL, 0);
@@ -33629,6 +33727,15 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, SPYValue **en
             int status = print_call_step(c, m, argc, argc, keywords->as.map.len ? keywords : NULL, &printing, env);
             result = status == 1 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
         }
+    } else if (!keywords->as.map.len && (args->as.seq.len == 1 || (args->as.seq.len == 2 && empty_format(c, callee, args->as.seq.items[1]))) &&
+               !c->error_type[0] && (repr_job(c, callee, args->as.seq.items[0]) ||
+                (is_builtin(callee, B_ASCII) && repr_job(c, c->field_calls[0], args->as.seq.items[0])))) {
+        /* str(), repr() and ascii() of a container take it atop m's
+         * stack under the callee, as a plain call's (repr_call). */
+        size_t len = m->len;
+        if (machine_push_all(c, m, 2, (SPYValue *[]){spy_retain(callee), spy_retain(args->as.seq.items[0])}))
+            while (m->len > len) spy_release(machine_pop(m));
+        else result = is_builtin(callee, B_ASCII) ? ascii_call(c, m, env) : repr_call(c, m, env);
     } else if (!keywords->as.map.len && args->as.seq.len <= 3 && !c->error_type[0] &&
                (seq = searched(callee, -1, args->as.seq.len, args->as.seq.items, &id)))
         /* A search compares on m as a plain call's does. */
@@ -38187,9 +38294,11 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, AttributeOpera
         if (result) machine_push(c, m, result);
         return NULL;
     }
-    if (UNLIKELY(c->annotating == 3)) {
+    if (UNLIKELY(c->annotating >= 3)) {
+        /* A computed attribute (wrapper_computes) or a lazily named submodule (lazy_attribute) read on m. */
+        SPYValue *result = c->annotating == 3 ? wrapper_computed(c, m, v, at->name->text, wrapper_value, NULL) :
+                           lazy_attribute(c, m, v, at->name->text, wrapper_value, NULL);
         c->annotating = 0;
-        SPYValue *result = wrapper_computed(c, m, v, at->name->text, wrapper_value, NULL);
         if (result) machine_push(c, m, result);
         return NULL;
     }
@@ -40043,8 +40152,8 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
          (callee->type == SPY_CLASS && (described_new(c, callee, 0) || built_call(c, callee, 0, items->as.seq.len, items->as.seq.items))) ||
          index_arguments(c, callee, -1, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 2 && is_builtin(callee, B_ROUND) && is_number(items->as.seq.items[0]) && index_function(c, items->as.seq.items[1])) ||
-         (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) || slot_steps(callee, items->as.seq.len, items->as.seq.items) ||
-         keyed_lookup(callee, -1) ||
+         (items->as.seq.len && self_slot(c, callee, items->as.seq.items[0])) || slot_steps(callee, items->as.seq.len, items->as.seq.items) ||
+         keyed_lookup(callee, -1) || (consuming_bound(callee) && consumer_of(c, callee, -1, items->as.seq.len, items->as.seq.items) >= 0) ||
          (items->as.seq.len == 1 && repr_job(c, is_builtin(callee, B_ASCII) ? c->field_calls[0] : callee, items->as.seq.items[0])))) {
         /* A builtin whose call may go on on the machine, an argument's
          * __index__ among them (index_arguments), or a staticmethod, is a call step of
@@ -40216,7 +40325,7 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         if (!callee) return 0;
         if (!(function = machine_function(c, callee) ? callee : bound_function(c, callee)))
             return callee->type == SPY_NATIVE || callee->type == SPY_CLASS || callee->type == SPY_STATICMETHOD ||
-                   (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) || keyed_lookup(callee, -1) ?
+                   (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) || (bound_steps(callee) && bound_next(c, v, callee)) ?
                    map_convert(c, m, v, fn, env) : 0;
         if (!(args = zip_items(c, v))) return -1;
         /* A bound method or callable instance's self goes first. */
@@ -45979,15 +46088,113 @@ static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
     }
     return result;
 }
-static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
-    (void)data;
-    if (!argc) return spy_error(c, "TypeError", "fromkeys requires a class argument");
-    if (positional_only(c, class_tname(argv[0]), "fromkeys", 1, 2, argc - 1, keywords)) return NULL;
-    SPYValue *args[2] = {argv[1], argc > 2 ? argv[2] : NULL};
-    int frozen = argv[0] == c->types[SPY_FROZENDICT], copy = 0;
-    SPYValue *dict = frozen ? value_new(c, SPY_FROZENDICT) : call(c, argv[0], 0, NULL);
-    if (!dict) return NULL;
-    SPYValue *base = builtin_value(c, dict, SPY_FROZENDICT), *value = args[1] ? args[1] : c->none;
+/* dict.fromkeys's state on m for a dict or set source whose stored keys
+ * keep their hashes: (dict, source, value, next entry's index), each key
+ * of the source from that index stored in dict, a lookup reaching a
+ * Python __eq__ suspended (map_findk) and resumed (fromkeys_found): dict,
+ * or NULL with the comparison m's next call or an error. */
+static SPYValue *fromkeys_found(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *fromkeys_state(SPYContext *c, SPYValue *dict, SPYValue *source, SPYValue *value, size_t next, SPYValue *key, int64_t hash) {
+    SPYValue *index = int_value(c, (int64_t)next), *hashed = key ? int_value(c, hash) : NULL;
+    SPYValue *state = index && (!key || hashed) ? tuple_of(c, key ? 6 : 4, (SPYValue *[]){dict, source, value, index, key, hashed}) : NULL;
+    spy_release(index); spy_release(hashed);
+    return state;
+}
+static SPYValue *fromkeys_entries(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items, *dict = items[0], *source = items[1];
+    for (size_t i = (size_t)items[3]->as.integer_data.small; i < source->as.map.len && !c->error_type[0]; i++) {
+        Entry entry = map_items(source)[i];
+        if ((i & 63) == 63 && spend(c, 1)) break;
+        if (!entry.key) continue;
+        MapCursor cursor = map_cursor(dict, entry.hash);
+        ptrdiff_t found;
+        if (map_scan(c, dict, entry.key, entry.hash, &cursor, &found)) {
+            /* The key and its hash wait in the state for the comparison. */
+            SPYValue *next = fromkeys_state(c, dict, source, items[2], i + 1, entry.key, entry.hash);
+            spy_release(state);
+            return next ? map_findk(c, m, dict, entry.key, entry.hash, cursor, fromkeys_found, next) : NULL;
+        }
+        if (c->error_type[0]) break;
+        if (found >= 0) { spy_retain(items[2]); spy_release(dict->as.map.items[found].value); dict->as.map.items[found].value = items[2]; }
+        else if (map_append(c, dict, entry.key, items[2], entry.hash)) break;
+    }
+    SPYValue *result = c->error_type[0] ? NULL : spy_retain(dict);
+    spy_release(state);
+    return result;
+}
+/* The entry map_findk found for state's waiting key, or -1: the key
+ * stored, the source's next keys after it (fromkeys_entries). */
+static SPYValue *fromkeys_found(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *dict = items[0];
+    ptrdiff_t found = result ? (ptrdiff_t)result->as.integer_data.small : -1;
+    spy_release(result);
+    if (!result || (found >= 0 ? (spy_retain(items[2]), spy_release(dict->as.map.items[found].value), dict->as.map.items[found].value = items[2], 0) :
+                    map_append(c, dict, items[4], items[2], items[5]->as.integer_data.small))) {
+        spy_release(state);
+        return NULL;
+    }
+    return fromkeys_entries(c, m, state);
+}
+/* dict.fromkeys's state on m: (dict, iterator, value, __setitem__ or
+ * None, frozendict subclass or None), each next key of the iterator
+ * stored in dict: a builtin iterator's taken in C, any other's by next()
+ * as m's next call (fromkeys_next); a Python __setitem__ m's call for it
+ * (callk, fromkeys_set). At the end dict, or the subclass called with it
+ * (fromkeys_done); NULL with a call or an error. */
+static SPYValue *fromkeys_next(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *fromkeys_set(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *fromkeys_done(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items, *args = items[4]->type == SPY_NONE ? NULL : tuple_of(c, 1, items);
+    SPYValue *result = items[4]->type == SPY_NONE ? spy_retain(items[0]) : args ? comparek(c, m, spy_retain(items[4]), args, COMPARE_CALL + 1, unchanged, NULL) : NULL;
+    spy_release(state);
+    return result;
+}
+static int fromkeys_store(SPYContext *c, SPYValue *dict, SPYValue *key, SPYValue *value) {
+    int failed = dict->type == SPY_FROZENDICT ? map_set(c, dict, key, value) : set_index(c, dict, key, value);
+    spy_release(key);
+    return failed || c->error_type[0];
+}
+static SPYValue *fromkeys_items(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue **items = state->as.seq.items, *iterator = items[1], *key = NULL;
+    while (!c->error_type[0] && iterator->type == SPY_ITERATOR && !called_iterator(iterator) && (key = native_next(c, iterator))) {
+        if (items[3]->type != SPY_NONE)
+            return callk(c, m, spy_retain(items[3]), 3, (SPYValue *[]){spy_retain(items[0]), key, spy_retain(items[2])}, fromkeys_set, state);
+        if (fromkeys_store(c, items[0], key, items[2])) break;
+    }
+    if (!c->error_type[0] && !(iterator->type == SPY_ITERATOR && !called_iterator(iterator))) {
+        SPYValue *args = tuple_of(c, 2, (SPYValue *[]){iterator, c->unbound});
+        if (args) return comparek(c, m, spy_retain(c->next_call), args, COMPARE_CALL + 2, fromkeys_next, state);
+    }
+    if (c->error_type[0]) { spy_release(state); return NULL; }
+    return fromkeys_done(c, m, state);
+}
+/* The key next() gave fromkeys_items, result, or c->unbound at the end. */
+static SPYValue *fromkeys_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items;
+    if (result == c->unbound) {
+        spy_release(result);
+        return fromkeys_done(c, m, state);
+    } else if (result && items[3]->type != SPY_NONE) {
+        return callk(c, m, spy_retain(items[3]), 3, (SPYValue *[]){spy_retain(items[0]), result, spy_retain(items[2])}, fromkeys_set, state);
+    } else if (result) {
+        return fromkeys_store(c, items[0], result, items[2]) ? (spy_release(state), NULL) : fromkeys_items(c, m, state);
+    }
+    spy_release(state);
+    return result;
+}
+static SPYValue *fromkeys_set(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (!result) { spy_release(state); return NULL; }
+    spy_release(result);
+    return fromkeys_items(c, m, state);
+}
+/* dict.fromkeys of class cls filling dict, which it takes, the new
+ * instance, with iterable's keys of value: a subclass's Python
+ * __setitem__ called on m (fromkeys_items), an eq_keyed dict's or set's
+ * keys compared on it (fromkeys_entries), when m is the step's; a
+ * frozendict subclass's built from a frozendict of them. */
+static SPYValue *fromkeys_fill(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *dict, SPYValue *iterable, SPYValue *value) {
+    int frozen = cls == c->types[SPY_FROZENDICT], copy = 0;
+    SPYValue *base = builtin_value(c, dict, SPY_FROZENDICT), *setter;
     if (base && !frozen) {
         SPYValue *fresh = value_new(c, SPY_FROZENDICT);
         if (fresh && extend_display(c, fresh, base)) { spy_release(fresh); fresh = NULL; }
@@ -45995,17 +46202,31 @@ static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv
         if (!dict) return NULL;
         frozen = copy = 1;
     }
-    if (is_dict(dict) && (is_dict(args[0]) || is_set(args[0]))) {
-        SPYValue *source = args[0];
-        for (size_t i = 0; i < source->as.map.len && !c->error_type[0]; i++) {
-            Entry entry = map_items(source)[i];
+    if (m && !copy && is_dict(dict) && (is_dict(iterable) || is_set(iterable)) && eq_keyed(iterable)) {
+        /* A stored key's Python __eq__ is m's call (fromkeys_entries). */
+        SPYValue *state = fromkeys_state(c, dict, iterable, value, 0, NULL, 0);
+        spy_release(dict);
+        return state ? fromkeys_entries(c, m, state) : NULL;
+    }
+    if (is_dict(dict) && (is_dict(iterable) || is_set(iterable))) {
+        for (size_t i = 0; i < iterable->as.map.len && !c->error_type[0]; i++) {
+            Entry entry = map_items(iterable)[i];
             if ((i & 63) == 63 && spend(c, 1)) break;
             spy_retain(entry.key);
             map_set_hash(c, dict, entry.key, value, entry.hash);
             spy_release(entry.key);
         }
     } else {
-        SPYValue *iterator = get_iterator(c, args[0]), *key;
+        SPYValue *iterator = get_iterator(c, iterable), *key;
+        setter = m && iterator && dict->type == SPY_INSTANCE ? class_lookup(dict->as.map.parent, "__setitem__") : NULL;
+        if (setter && !machine_function(c, setter)) setter = NULL;
+        if (m && iterator && (setter || iterator->type != SPY_ITERATOR || called_iterator(iterator))) {
+            /* A Python iterator's next key, or a subclass's Python
+             * __setitem__, is m's call for each key (fromkeys_items). */
+            SPYValue *state = tuple_of(c, 5, (SPYValue *[]){dict, iterator, value, setter ? setter : c->none, copy ? cls : c->none});
+            spy_release(dict); spy_release(iterator);
+            return state ? fromkeys_items(c, m, state) : NULL;
+        }
         while (iterator && !c->error_type[0] && (key = native_next(c, iterator))) {
             if (frozen) map_set(c, dict, key, value);
             else set_index(c, dict, key, value);
@@ -46015,10 +46236,40 @@ static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv
     }
     if (c->error_type[0]) { spy_release(dict); return NULL; }
     if (copy) {
-        SPYValue *result = call(c, argv[0], 1, &dict);
+        /* The subclass is called with the frozendict, on m when it is the step's. */
+        SPYValue *args = m ? tuple_of(c, 1, &dict) : NULL;
+        if (m) { spy_release(dict); return args ? comparek(c, m, spy_retain(cls), args, COMPARE_CALL + 1, unchanged, NULL) : NULL; }
+        SPYValue *result = call(c, cls, 1, &dict);
         spy_release(dict); return result;
     }
     return dict;
+}
+/* The instance a dict subclass's call made for dict.fromkeys, result:
+ * filled from state's (cls, iterable, value) (fromkeys_fill). */
+static SPYValue *fromkeys_made(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items;
+    result = result ? fromkeys_fill(c, m, items[0], result, items[1], items[2]) : NULL;
+    spy_release(state);
+    return result;
+}
+static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    if (!argc) return spy_error(c, "TypeError", "fromkeys requires a class argument");
+    if (positional_only(c, class_tname(argv[0]), "fromkeys", 1, 2, argc - 1, keywords)) return NULL;
+    SPYValue *cls = argv[0], *iterable = argv[1], *value = argc > 2 ? argv[2] : c->none;
+    Machine *m = step_machine(c);
+    if (cls == c->types[SPY_FROZENDICT]) {
+        SPYValue *dict = value_new(c, SPY_FROZENDICT);
+        return dict ? fromkeys_fill(c, m, cls, dict, iterable, value) : NULL;
+    }
+    if (m && cls != c->types[SPY_DICT]) {
+        /* A subclass is called on m, its Python __new__ or __init__ m's call (fromkeys_made). */
+        SPYValue *state = tuple_of(c, 3, (SPYValue *[]){cls, iterable, value}), *none = state ? value_new(c, SPY_TUPLE) : NULL;
+        if (!none) { spy_release(state); return NULL; }
+        return comparek(c, m, spy_retain(cls), none, COMPARE_CALL, fromkeys_made, state);
+    }
+    SPYValue *dict = call(c, cls, 0, NULL);
+    return dict ? fromkeys_fill(c, m, cls, dict, iterable, value) : NULL;
 }
 static SPYValue *frozendict_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     const char *name = data ? "__getnewargs__" : "copy";
@@ -49793,6 +50044,11 @@ static NO_INLINE SPYValue *format_job(SPYContext *c, Machine *m, SPYValue *calle
     spy_release(state);
     return result;
 }
+/* Whether a call of callee with spec second is format() with an empty spec. */
+static int empty_format(SPYContext *c, SPYValue *callee, SPYValue *spec) {
+    SPYValue *text = is_builtin(callee, B_FORMAT) ? builtin_value(c, spec, SPY_STRING) : NULL;
+    return text && !text->as.string.len;
+}
 /* str() or repr() of the container atop m's stack, under its callee,
  * that repr_job takes: the call to enter, str's class with *env set, its
  * state and c->replacing in place of callee and argument (repr_from); else
@@ -52285,6 +52541,9 @@ static int register_core_methods(SPYContext *c) {
         (name_local(c->types[SPY_COMPLEX], "from_number")->as.wrapper.function->as.native.host = 2,
          name_local(c->types[SPY_FLOAT], "from_number")->as.wrapper.function->as.native.host = 2,
          name_local(c->types[SPY_INT], "from_bytes")->as.wrapper.function->as.native.host = 2,
+         /* So does dict.fromkeys of an eq_keyed dict or set (fromkeys_entries). */
+         name_local(c->types[SPY_DICT], "fromkeys")->as.wrapper.function->as.native.host = 2,
+         name_local(c->types[SPY_FROZENDICT], "fromkeys")->as.wrapper.function->as.native.host = 2,
          /* So do type's and a sentinel's __or__ and __ror__ (union_slot). */
          name_local(type, "__or__")->as.native.host = name_local(type, "__ror__")->as.native.host = 2,
          name_local(c->types[SPY_SENTINEL], "__or__")->as.native.host = name_local(c->types[SPY_SENTINEL], "__ror__")->as.native.host = 2, 0);
@@ -52447,6 +52706,7 @@ SPYContext *spy_context_new(void) {
         if (i == B_COMPILE || i == B_IMPORT) v->as.native.host = 2;
         if (i == B_REPR || i == B_FORMAT) c->field_calls[i == B_FORMAT] = spy_retain(v);
         if (i == B_SORTED) c->sorter = spy_retain(v);
+        if (i == B_NEXT) c->next_call = spy_retain(v);
         if (i == B_LEN || i == B_ISINSTANCE) c->pattern_calls[i == B_ISINSTANCE] = spy_retain(v);
         int status = name_set(c, c->builtins, names[i], v);
         spy_release(v);

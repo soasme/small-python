@@ -13,14 +13,15 @@
 (* in [C(), 1], (C(), 1), {1: C()} or {C()}, or when sub in an instance   *)
 (* of class Sub(list) (tuple, dict, set) holding the same, whose repr a    *)
 (* set's subclass's names Sub, nested in a list when nested, shown by      *)
-(* repr(), str(), an f-string, str.format, % or ascii(); each __repr__     *)
+(* repr(), str(), an f-string, str.format, %, ascii(), repr() through a    *)
+(* starred call, or format() with an empty spec; each __repr__             *)
 (* loops and logs its call. The outcome is the text, the default repr      *)
 (* written <C>, or ZeroDivisionError, and the number of calls.             *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [repr : {"function", "static", "raises", "none"}, container : {"list", "tuple", "dict", "set"},
-             sub : BOOLEAN, nested : BOOLEAN, via : {"repr", "str", "fstring", "format", "percent", "ascii"}]
+             sub : BOOLEAN, nested : BOOLEAN, via : {"repr", "str", "fstring", "format", "percent", "ascii", "starred", "format_empty"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

@@ -5,7 +5,7 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 VIA = {"repr": repr, "str": str, "fstring": lambda x: f"{x}", "format": lambda x: "{}".format(x),
-       "percent": lambda x: "%s" % (x,), "ascii": ascii}
+       "percent": lambda x: "%s" % (x,), "ascii": ascii, "starred": lambda x: repr(*(x,)), "format_empty": lambda x: format(x, "")}
 
 
 def outcome(p):
