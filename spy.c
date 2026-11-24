@@ -15179,10 +15179,10 @@ static SPYValue *format_build(SPYContext *c, const char *text, size_t start, siz
     int status = format_markup(c, &out, text, start, end, args, depth);
     return format_finish(c, &out, status);
 }
-/* The Python __format__ of plain instance v's class, a function on the
+/* The Python __format__ of instance v's class, a function on the
  * machine, borrowed, or NULL. */
 static SPYValue *format_function(SPYContext *c, SPYValue *v) {
-    SPYValue *function = v->type == SPY_INSTANCE && !v->as.map.base ? class_lookup(v->as.map.parent, "__format__") : NULL;
+    SPYValue *function = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__format__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Append object formatted by spec to out: 0, or -1 on an error. */
@@ -15231,8 +15231,10 @@ static int format_replacement(SPYContext *c, Buffer *out, const char *text, size
     SPYValue *object = format_field_object(c, text, name, name_end, args), *format = NULL, *found[2];
     /* The field's lookup suspends the job, which takes it up again at its brace. */
     if (object == c->unbound) { args->resume = name - 1; return 4; }
-    /* A container formats by an empty spec as by !s. */
-    unsigned converting = conversion ? conversion : object && (repr_container(object) || repr_base(c, object)) && !expanding && spec == spec_end ? 's' : 0;
+    /* A container formats by an empty spec as by !s, as does a builtin's
+     * subclass keeping its __format__ (format_spec). */
+    unsigned converting = conversion ? conversion : object && !expanding && spec == spec_end &&
+        (repr_container(object) || repr_base(c, object) || (object->type == SPY_INSTANCE && builtin_base(c, object, "__format__", NULL))) ? 's' : 0;
     SPYValue *converter = converting == 's' ? c->types[SPY_STRING] : c->field_calls[0];
     if (object && args->suspend && (!expanding || depth == 2) && (converting == 's' || converting == 'r' || converting == 'a') &&
         (object->type == SPY_INSTANCE ? conversion_method(c, converter, 1, &object, found) ? (spy_release(found[0]), 1) :

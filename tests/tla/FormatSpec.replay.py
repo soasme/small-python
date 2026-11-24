@@ -111,6 +111,9 @@ SOURCES = {
     "str_format_container_raises": "result = '{}'.format([Spin(), BadRepr()])",
     "str_format_container_nested": "result = '{!r:>{}}|{:{}}|{!a:{}}'.format([Spin()], 6, (Spin(),), '', [U()], '<9')",
     "str_format_container_nested_spec": "result = '{:{}}'.format([Spin()], 'x')",
+    "format_builtin_subclass": "class J(int):\n    def __format__(self, spec):\n        for _ in (): pass\n        return 'j' + spec\n"
+                               "class S(str):\n    def __str__(self):\n        for _ in (): pass\n        return 'str'\n"
+                               "result = '{0}|{0:x}|{1}|{1:>3}'.format(J(1), S('ab'))",
     "format_field_reads": "import builtins\nm = type(builtins)('m')\nm.__getattr__ = lambda name: name * 2\n"
                           "class G:\n    def __getattribute__(self, name):\n        for _ in (): pass\n        return name.upper()\n"
                           "result = '{0.ab}|{1.cd!r}|{0.e.__class__.__name__}'.format(m, G())"
