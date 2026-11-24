@@ -43,7 +43,7 @@ Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name"
           "class_dict_proxy", "function_ctor", "function_module_code", "function_call_wrapper", "proxy_hash", "function_genexp_code",
           "code_replace", "notimplemented_ctor", "none_ctor",
           "classmethod_descr_repr", "classmethod_descr_call", "classmethod_descr_get",
-          "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg",
+          "classmethod_descr_instance", "classmethod_descr_objclass", "classmethod_descr_no_arg", "classmethod_descr_named",
           "classmethod_descr_not_type", "classmethod_descr_not_subtype", "getset_get", "getset_readonly",
           "member_unset", "member_set", "method_descr_wrong_type", "method_descr_objclass", "method_descr_no_arg",
           "wrapper_descr_no_arg", "nonslot_dunder_kinds",
@@ -99,6 +99,7 @@ Case(c) ==
       [] c = "classmethod_descr_instance" -> "{'x': None}"
       [] c = "classmethod_descr_objclass" -> "(True, 'fromkeys', 'dict.fromkeys', True)"
       [] c = "classmethod_descr_no_arg" -> "TypeError: descriptor 'fromkeys' of 'dict' object needs an argument"
+      [] c = "classmethod_descr_named" -> "AttributeError: 'classmethod_descriptor' object has no attribute '__self__'"
       [] c = "classmethod_descr_not_type" -> "TypeError: descriptor 'fromkeys' for type 'dict' needs a type, not a 'int' as arg 2"
       [] c = "classmethod_descr_not_subtype" -> "TypeError: descriptor 'fromkeys' requires a subtype of 'dict' but received 'int'"
       [] c = "getset_get" -> "3"

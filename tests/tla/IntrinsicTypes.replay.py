@@ -148,6 +148,7 @@ SOURCES = {
     "classmethod_descr_instance": "result = dict.__dict__['fromkeys'].__get__({})('x')",
     "classmethod_descr_objclass": "d = dict.__dict__['fromkeys']\nresult = (d.__objclass__ is dict, d.__name__, d.__qualname__, callable(d))",
     "classmethod_descr_no_arg": "dict.__dict__['fromkeys']()",
+    "classmethod_descr_named": "dict.__dict__['fromkeys'].__self__",
     "classmethod_descr_not_type": "dict.__dict__['fromkeys'](1, 'a')",
     "classmethod_descr_not_subtype": "dict.__dict__['fromkeys'](int, 'a')",
     "getset_get": "result = int.__dict__['real'].__get__(3)",

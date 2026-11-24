@@ -776,6 +776,7 @@ Unreleased (0.10.0):
 - a subclass of `reversed` has `reversed`'s `__length_hint__`, which `list()` asks
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
 - a complex number's operators decline a non-number: `'b' * 1j` and `1j + 'b'` raise the sequence's or the operator's TypeError
+- error messages name a builtin class method such as `dict.__dict__['fromkeys']` a `classmethod_descriptor`
 - a bytearray subclass's `+=` and `__iadd__` name the subclass in "can't concat" errors
 - `x * seq` repeats seq by x once x's class drops its own repetition; `x *= seq` raises for an instance of any Python class and for dict, set, range, views and memoryview
 - `x *= n` of a list or bytearray subclass calls its own `__mul__` first and repeats in place once that declines; `[1] *= 'a'` reports a sequence's non-int count

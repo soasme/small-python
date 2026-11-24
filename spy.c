@@ -3313,6 +3313,7 @@ static const char *type_name(SPYValue *value) {
         if (name) return name;
     }
     if (value->type == SPY_ITERATOR) return iterator_names[iterator_class_id(value)];
+    if (builtin_classmethod(value)) return "classmethod_descriptor";
     int kind = native_kind(value);
     if (kind) return kind == NATIVE_METHOD_DESCRIPTOR ? "method_descriptor" : kind == NATIVE_WRAPPER_DESCRIPTOR ? "wrapper_descriptor" :
         kind == NATIVE_METHOD_WRAPPER ? "method-wrapper" : "builtin_function_or_method";
