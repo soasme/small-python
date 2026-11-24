@@ -59,3 +59,28 @@ expected = [
     (('documented in', 'got'), [('doc', 'in')]),
 ]
 assert_eq(results(), expected)
+# A getter whose __getattribute__ raises AttributeError for __doc__ has
+# its __getattr__ supply the doc, natively or on the machine.
+falls_log = []
+class DocFalls:
+    def __call__(self, obj): return 1
+    def __getattribute__(self, name):
+        falls_log.append(("ga", name))
+        if name == "__doc__": raise AttributeError(name)
+        return object.__getattribute__(self, name)
+    def __getattr__(self, name):
+        falls_log.append(("gattr", name))
+        if name == "__doc__": return "fallback doc"
+        raise AttributeError(name)
+class MachineDocFalls(DocFalls):
+    def __getattribute__(self, name):
+        for _ in (): pass
+        return DocFalls.__getattribute__(self, name)
+    def __getattr__(self, name):
+        for _ in (): pass
+        return DocFalls.__getattr__(self, name)
+def falls_docs():
+    return [property(DocFalls()).__doc__, property(MachineDocFalls()).__doc__,
+            list(map(property, [DocFalls(), MachineDocFalls()]))[1].__doc__]
+assert_eq(falls_docs(), ["fallback doc"] * 3)
+assert_eq(falls_log, [("ga", "__doc__"), ("gattr", "__doc__")] * 4)
