@@ -4705,6 +4705,7 @@ typedef struct {
 } Parser;
 static Node *emit_parsed(Parser *, Node *, size_t);
 static Node *finished(Parser *, Node *);
+static Node *leaf(Parser *, Node *);
 static Scope *scope_new(SPYContext *, Scope *, int);
 static void scope_adopt(Scope *, Scope *);
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -5966,7 +5967,7 @@ static int flush_literal(Parser *p, Node ***tail, Buffer *out) {
     n->name.text = out->data; n->op = (int)out->len;
     out->data = NULL; out->len = out->cap = 0;
     **tail = n; *tail = &n->next;
-    return 0;
+    return leaf(p, n) ? 0 : -1;
 }
 static void invalid_expression_error(Parser *);
 static size_t probe_expression(Parser *, size_t, int);
@@ -5978,6 +5979,8 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
     }
     Parser inner = {.ctx = p->ctx, .unit = p->unit, .definition = p->definition, .private_name = p->private_name,
                     .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
+    /* A field parsed for its value emits into its statement's program. */
+    if (!failed) { inner.emitting = p->emitting; inner.emitted = p->emitted; inner.emitted_len = p->emitted_len; inner.emitted_cap = p->emitted_cap; }
     Node *result = NULL;
     const char *copy = text.data + 1, *copy_end = copy + (end - start);
     if (lex(&inner, text.data)) p->ctx->line += line - 1;
@@ -6025,6 +6028,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         p->error_start = inner.error_start; p->error_end = inner.error_end;
         p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
     }
+    if (!failed) { p->emitted = inner.emitted; p->emitted_len = inner.emitted_len; p->emitted_cap = inner.emitted_cap; }
     mem_free(inner.tokens); mem_free(inner.literal_error); mem_free(text.data);
     return result;
 }
@@ -6059,6 +6063,8 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
             const char *nonspace = begin;
             while (nonspace < expr_end && isspace((unsigned char)*nonspace)) nonspace++;
             if (nonspace == expr_end) { syntax(p, "f-string: empty expression not allowed"); return -1; }
+            /* The text before the field is its own part, but for a debug field's. */
+            if (*expr_end != '=' && flush_literal(p, tail, literal)) return -1;
             Node *field = node(p, !spec && (flags & L_TEMPLATE) ? N_INTERPOLATION : N_FORMAT);
             if (!field || !(field->a = field_expression(p, begin, expr_end, flags, line, NULL))) return -1;
             if (field->kind == N_INTERPOLATION) {
@@ -6097,9 +6103,10 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
                 int status = string_parts(p, &s, end, flags, 1, &parts, &format, depth + 1);
                 if (!status) status = flush_literal(p, &parts, &format);
                 mem_free(format.data);
-                if (status) return -1;
+                if (status || !finished(p, field->b)) return -1;
             } else if (debug && !field->op) field->op = 'r';
             if (s >= end || *s != '}') { syntax(p, "f-string: expecting '}'"); return -1; }
+            if (!finished(p, field)) return -1;
             **tail = field; *tail = &field->next;
             /* Escape errors count from the literal text after the field. */
             p->literal_start = ++s;
@@ -6146,7 +6153,7 @@ static Node *string_node(Parser *p) {
     }
     int status = flush_literal(p, &tail, &literal);
     mem_free(literal.data);
-    return status ? NULL : n;
+    return status ? NULL : finished(p, n);
 }
 static Node *yield_expression(Parser *p) {
     size_t start = p->pos++;
@@ -6183,6 +6190,10 @@ static Node *atom(Parser *p) {
         c->line = line;
     }
     if (n && (n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET)) return finished(p, n);
+    return leaf(p, n);
+}
+/* Literal or name n, emitted while its statement emits. */
+static Node *leaf(Parser *p, Node *n) {
     if (!n || !p->emitting || (n->kind > N_BOOL && n->kind != N_ELLIPSIS) || (n->flags & F_EMITTED)) return n;
     return emit_parsed(p, n, program_len(p->emitting));
 }
@@ -9567,7 +9578,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
-    mem_free(p.tokens); mem_free(p.literal_error);
+    mem_free(p.tokens); mem_free(p.literal_error); mem_free(p.emitted);
     if (c->error_type[0]) {
         put_text(c->filename, sizeof(c->filename), filename); c->filename_from = c->quiet_unit = NULL;
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
@@ -17449,6 +17460,9 @@ static Node *finished(Parser *p, Node *n) {
     if (n->kind == N_INDEX || (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR)) fixed[1] = n->b;
     else if (n->kind == N_COMPARE && !n->args->next) fixed[1] = n->args->a;
     else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n))) list = n->args;
+    else if (n->kind == N_JOINED) { fixed[0] = NULL; list = n->args; }
+    /* A field's conversion and format() call are steps between its value and spec. */
+    else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
     else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
     else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) fixed[0] = NULL;
     /* An absent bound is a step of its own, after those present (compile_expr). */
