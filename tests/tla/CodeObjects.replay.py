@@ -21,6 +21,21 @@ def source(p):
 
 
 def outcome(p):
+    if p["op"] == "first":
+        kind = p["kind"]
+        head = ("async def" if kind in ("async", "asyncgen") else "def") + " f():"
+        body = "    yield 1" if kind in ("gen", "asyncgen") else "    return 1"
+        namespace = {"d": lambda f: f}
+        exec("v = 1\n" + "@d\n" * p["decorators"] + head + "\n" + body + "\n", namespace)
+        f = namespace["f"]
+        if kind == "def":
+            return "%d -" % f.__code__.co_firstlineno
+        instance = f()
+        frame = instance.gi_frame if kind == "gen" else instance.cr_frame if kind == "async" else instance.ag_frame
+        line = frame.f_lineno
+        if kind == "async":
+            instance.close()
+        return "%d %d" % (f.__code__.co_firstlineno, line)
     if p["op"] == "class":
         import builtins
         bodies = []

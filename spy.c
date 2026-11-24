@@ -13549,7 +13549,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_qualname")) return qualified_name(c, def);
         if (!strcmp(name, "co_freevars") || !strcmp(name, "co_cellvars"))
             return closure_names(c, def, name[3] == 'c');
-        if (!strcmp(name, "co_firstlineno")) return spy_int(c, def ? (int64_t)def->line : 1);
+        if (!strcmp(name, "co_firstlineno")) return spy_int(c, def ? (int64_t)def->first_line : 1);
         if (!strcmp(name, "co_flags")) {
             /* CO_OPTIMIZED | CO_NEWLOCALS, CO_VARARGS, CO_VARKEYWORDS, CO_NESTED,
              * CO_GENERATOR, CO_COROUTINE, CO_ASYNC_GENERATOR, CO_HAS_DOCSTRING,
@@ -22428,7 +22428,7 @@ static void generator_close(SPYValue *v) {
         v->as.generator.frame = NULL;
         if (frame->refs > 1) {
             frame->as.frame.owner = spy_retain(v->as.generator.code); frame->as.frame.generator = NULL;
-            frame->as.frame.line = v->as.generator.line ? v->as.generator.line : v->as.generator.def ? v->as.generator.def->line : 0;
+            frame->as.frame.line = v->as.generator.line ? v->as.generator.line : v->as.generator.def ? v->as.generator.def->first_line : 0;
         }
         spy_release(frame);
     }
@@ -24293,7 +24293,8 @@ static int trace_class_line(SPYContext *c, Scope *n) {
     top->line = top->traced = n->first_line;
     return c->settings[SET_TRACE] ? trace_event(c, TRACE_LINE, NULL) : 0;
 }
-/* The 'call' event of a frame just entered, at its definition line; a
+/* The 'call' event of a frame just entered, at its first decorator's line or
+ * its definition's; a
  * class body's 'line' event follows. */
 static NO_INLINE int trace_call(SPYContext *c) {
     struct ActiveFrame *top = &c->frames[c->py_depth - 1];
@@ -24304,11 +24305,11 @@ static NO_INLINE int trace_call(SPYContext *c) {
         top->line = cls->first_line;
         return trace_event(c, TRACE_CALL, NULL) || trace_class_line(c, cls);
     }
-    if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->line;
+    if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->first_line;
     else if (owner->type == V_UNIT) top->line = 0;
     else if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) {
         /* A resumed generator continues the line where it was suspended. */
-        top->line = owner->as.generator.line ? owner->as.generator.line : owner->as.generator.def ? owner->as.generator.def->line : top->line;
+        top->line = owner->as.generator.line ? owner->as.generator.line : owner->as.generator.def ? owner->as.generator.def->first_line : top->line;
         if (owner->as.generator.line) top->traced = top->line;
     }
     return trace_event(c, TRACE_CALL, NULL);
@@ -41523,7 +41524,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     if (!g->as.generator.started && thrown) {
         size_t line = c->line;
         if (enter_frame(c, g->as.generator.env, g)) return NULL;
-        c->frames[c->py_depth - 1].line = g->as.generator.def ? g->as.generator.def->line : line;
+        c->frames[c->py_depth - 1].line = g->as.generator.def ? g->as.generator.def->first_line : line;
         raise_thrown(c, thrown, NULL); leave_frame(c, NULL); c->line = line;
         generator_close(g); return NULL;
     }
@@ -42786,7 +42787,7 @@ static size_t frame_line(SPYContext *c, SPYValue *frame) {
     SPYValue *owner = frame_owner(frame);
     /* A suspended generator's frame is where it resumes; a finished one's, where it ended. */
     if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR)
-        return owner->as.generator.line ? owner->as.generator.line : owner->as.generator.def ? owner->as.generator.def->line : 0;
+        return owner->as.generator.line ? owner->as.generator.line : owner->as.generator.def ? owner->as.generator.def->first_line : 0;
     return frame->as.frame.line;
 }
 /* Whether frame runs a function or a generator expression, whose locals

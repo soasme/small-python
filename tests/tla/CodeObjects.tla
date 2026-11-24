@@ -24,6 +24,10 @@
 (* annotation function being within its body, the                         *)
 (* __conditional_annotations__ cell when the annotation is conditional,   *)
 (* and .type_params free when generic.                                    *)
+(* A decorated f (op "first", decorators 0 to 2, each @d on its own line   *)
+(* from line 2) starts its code at the first decorator's line, 2, as       *)
+(* does its unstarted generator's, coroutine's, or asynchronous            *)
+(* generator's frame.                                                      *)
 (*                                                                         *)
 (* A program, after  v = 1  on line 1, defines f on line 2, or inside      *)
 (*  def outer(): v = 1  on line 4 (then returns it), as                    *)
@@ -56,6 +60,7 @@ Programs == [sig : Sigs, kind : Kinds, doc : BOOLEAN, closure : Closures, nested
             \cup [sig : Sigs, kind : Kinds, doc : BOOLEAN, closure : Closures, nested : BOOLEAN, op : Ops]
             \cup [doc : BOOLEAN, op : {"module", "methods"}]
             \cup [annotated : BOOLEAN, conditional : BOOLEAN, generic : BOOLEAN, op : {"class"}]
+            \cup [kind : Kinds, decorators : 0..2, op : {"first"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -94,6 +99,8 @@ Run(p) ==
     ELSE CASE p.op = "doc" -> IF p.doc THEN "'doc'" ELSE "no docstring"
            [] p.op = "module" -> (IF p.doc THEN "'doc'" ELSE "no docstring") \o " 0"
            [] p.op = "methods" -> "True True"
+           \* co_firstlineno, then the unstarted frame's line ("-" for a plain function).
+           [] p.op = "first" -> "2 " \o (IF p.kind = "def" THEN "-" ELSE "2")
            [] p.op = "class" -> (IF ~p.annotated THEN "() "
                                  ELSE Repr(<<"__classdict__">> \o (IF p.conditional THEN <<"__conditional_annotations__">> ELSE <<>>)) \o " ")
                                 \o Repr((IF p.generic THEN <<".type_params">> ELSE <<>>) \o (IF p.annotated THEN <<"v">> ELSE <<>>))
