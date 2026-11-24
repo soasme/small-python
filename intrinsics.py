@@ -546,6 +546,8 @@ class NoDefaultType:
 
 
 NoDefault = object.__new__(NoDefaultType)
+# The keyword-only parameters of TypeVar, TypeVarTuple and ParamSpec.
+_VARIANCE = {'bound': None, 'covariant': False, 'contravariant': False, 'infer_variance': False, 'default': NoDefault}
 
 
 class _ConstEvaluator:
@@ -564,6 +566,33 @@ class _ConstEvaluator:
 
 
 _UNSET = object()
+
+
+def _clinic(function, arguments, keywords, positional, keyword_only, variadic=False):
+    # Argument Clinic's binding (PLS-315 7.4.4), naming function: the
+    # required positional parameters, a variadic tuple after them when
+    # variadic, then the keyword-only parameters' values or defaults.
+    count, names = len(positional), positional + tuple(keyword_only)
+    given = len(arguments) + len(keywords)
+    if not variadic and given > len(names):
+        kind = 'keyword ' if not arguments else ''
+        raise TypeError(f'{function}() takes at most {len(names)} {kind}arguments ({given} given)')
+    if not variadic and len(arguments) > count:
+        plural = 's' if count != 1 else ''
+        raise TypeError(f'{function}() takes exactly {count} positional argument{plural} ({len(arguments)} given)')
+    for position, key in enumerate(positional[len(arguments):], len(arguments)):
+        if key not in keywords:
+            raise TypeError(f"{function}() missing required argument '{key}' (pos {position + 1})")
+    for key in keywords:
+        if key in positional[:len(arguments)]:
+            position = positional.index(key) + 1
+            raise TypeError(f"argument for {function}() given by name ('{key}') and position ({position})")
+        if key not in names:
+            _unexpected_keyword(function, key, names)
+    values = arguments[:count] + tuple(keywords[key] for key in positional[len(arguments):])
+    if variadic:
+        values += (arguments[count:],)
+    return values + tuple(keywords.get(key, default) for key, default in keyword_only.items())
 
 
 def _param_init(self, name, bound, covariant, contravariant, infer_variance, default, module):
@@ -687,8 +716,9 @@ class TypeVar:
     __module__ = 'typing'
     __init_subclass__ = _final('typing.TypeVar')
 
-    def __init__(self, name, *constraints, bound=None, covariant=False, contravariant=False,
-                 infer_variance=False, default=NoDefault):
+    def __init__(self, *arguments, **keywords):
+        name, constraints, bound, covariant, contravariant, infer_variance, default = _clinic(
+            'typevar', arguments, keywords, ('name',), _VARIANCE, True)
         _param_init(self, name, None, covariant, contravariant, infer_variance, default, _caller_module())
         if constraints and bound is not None:
             raise TypeError('Constraints cannot be combined with bound=...')
@@ -755,8 +785,9 @@ class TypeVarTuple:
     __module__ = 'typing'
     __init_subclass__ = _final('typing.TypeVarTuple')
 
-    def __init__(self, name, *, bound=None, covariant=False, contravariant=False,
-                 infer_variance=False, default=NoDefault):
+    def __init__(self, *arguments, **keywords):
+        name, bound, covariant, contravariant, infer_variance, default = _clinic(
+            'typevartuple', arguments, keywords, ('name',), _VARIANCE)
         _param_init(self, name, bound, covariant, contravariant, infer_variance, default, _caller_module())
 
     __setattr__ = _param_setattr
@@ -874,8 +905,9 @@ class ParamSpec:
     __module__ = 'typing'
     __init_subclass__ = _final('typing.ParamSpec')
 
-    def __init__(self, name, *, bound=None, covariant=False, contravariant=False,
-                 infer_variance=False, default=NoDefault):
+    def __init__(self, *arguments, **keywords):
+        name, bound, covariant, contravariant, infer_variance, default = _clinic(
+            'paramspec', arguments, keywords, ('name',), _VARIANCE)
         _param_init(self, name, None, covariant, contravariant, infer_variance, default, _caller_module())
         if bound is not None:
             object.__setattr__(self, '_bound', _type_check(bound, 'Bound must be a type.'))
@@ -1205,21 +1237,8 @@ class TypeAliasType:
     __init_subclass__ = _final('typing.TypeAliasType')
 
     def __init__(self, *arguments, **keywords):
-        # Argument Clinic: typealias(name, value, *, type_params=(), qualname=None).
-        if len(arguments) > 2:
-            raise TypeError(f'typealias() takes exactly 2 positional arguments ({len(arguments)} given)')
-        for key in keywords:
-            if key not in ('name', 'value', 'type_params', 'qualname'):
-                raise TypeError(f"typealias() got an unexpected keyword argument '{key}'")
-        for position, key in enumerate(('name', 'value')):
-            if key in keywords and position < len(arguments):
-                raise TypeError(f"argument for typealias() given by name ('{key}') and position ({position + 1})")
-        for position, key in enumerate(('name', 'value')):
-            if position >= len(arguments) and key not in keywords:
-                raise TypeError(f"typealias() missing required argument '{key}' (pos {position + 1})")
-        name, value = arguments + tuple(keywords[key] for key in ('name', 'value')[len(arguments):])
-        type_params = keywords.get('type_params', ())
-        qualname = keywords.get('qualname')
+        name, value, type_params, qualname = _clinic(
+            'typealias', arguments, keywords, ('name', 'value'), {'type_params': (), 'qualname': None})
         if not _is(name, str):
             raise TypeError(f"typealias() argument 'name' must be str, not {_type_name(name)}")
         if not _is(type_params, tuple):

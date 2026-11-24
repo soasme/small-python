@@ -21490,6 +21490,17 @@ static SPYValue *frame_module_name(SPYContext *c, size_t depth) {
 /* The intrinsics' _caller_module(): the module of the innermost frame
  * outside them, which CPython's caller() names as a typing constructor's
  * __module__. */
+/* _unexpected_keyword(function, key, names): raises the TypeError of a
+ * keyword naming none of the names, with its suggestion. */
+static SPYValue *intrinsic_unexpected_keyword(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)argc; (void)data;
+    const char *items[8];
+    size_t n = argv[2]->as.seq.len;
+    for (size_t i = 0; i < n; i++) items[i] = argv[2]->as.seq.items[i]->as.string.data;
+    const char *key = argv[1]->as.string.data;
+    unexpected_keyword(c, argv[0]->as.string.data, key, suggestion(key, items, n));
+    return NULL;
+}
 static SPYValue *caller_module(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     (void)argc; (void)argv; (void)data;
     size_t depth = 0;
@@ -21733,7 +21744,8 @@ static SPYValue *intrinsics_begin(SPYContext *c, SPYValue **unit) {
     if (module) module->as.map.namespace = value_new(c, SPY_DICT);
     int failed = !module || !module_name || !module->as.map.namespace ||
         name_set(c, module, "__builtins__", c->builtins) || name_set(c, module, "__name__", module_name) || file_natives(c, module) ||
-        define_native(c, module, "_caller_module", caller_module, NULL);
+        define_native(c, module, "_caller_module", caller_module, NULL) ||
+        define_native(c, module, "_unexpected_keyword", intrinsic_unexpected_keyword, NULL);
     spy_release(module_name);
     Buffer source = {.ctx = c};
     for (size_t i = 0; !failed && i < sizeof(intrinsics_source) / sizeof(*intrinsics_source); i++)

@@ -58,7 +58,7 @@ Cases == {"getattr_nonstr", "property_get_calls", "property_copy_calls", "proper
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_locals_keys", "dir_hook_calls", "dir_hook_generator", "dir_hook_iterable", "dir_hook_raises",
           "dir_hook_bad", "dir_module_property", "callable_forms", "callable_unread", "id_identity", "hash_big", "hash_bad", "hash_eq_only", "hash_method_object",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
-          "type_bad_dict", "type_bad_dict_local", "type_bad_name", "type_qualname_kw", "isinstance_hook", "isinstance_bad",
+          "type_bad_dict", "type_bad_dict_local", "builtin_missing_before_clash", "typevartuple_total", "typevartuple_suggest", "type_bad_name", "type_qualname_kw", "isinstance_hook", "isinstance_bad",
           "issubclass_bad_first", "issubclass_bad_second", "object_no_attrs", "object_args",
           "object_dir_has", "delattr_class", "setattr_builtin_type", "getattr_type_default",
           "super_zero_arg", "globals_identity", "memoryview_builtin", "repr_builtin"}
@@ -135,6 +135,9 @@ Case(c) ==
       [] c = "type_two_args" -> "TypeError: type() takes 1 or 3 arguments"
       [] c = "type_bad_bases" -> "TypeError: type.__new__() argument 2 must be tuple, not int"
       [] c = "type_bad_dict" -> "TypeError: type.__new__() argument 3 must be dict or frozendict, not list"
+      [] c = "builtin_missing_before_clash" -> "TypeError: pow() missing required argument 'exp' (pos 2)"
+      [] c = "typevartuple_total" -> "TypeError: typevartuple() takes at most 6 arguments (7 given)"
+      [] c = "typevartuple_suggest" -> "TypeError: typevartuple() got an unexpected keyword argument 'dfault'. Did you mean 'default'?"
       [] c = "type_bad_dict_local" -> "TypeError: type.__new__() argument 3 must be dict or frozendict, not make.<locals>.Local"
       [] c = "type_bad_name" -> "TypeError: type.__new__() argument 1 must be str, not int"
       [] c = "type_qualname_kw" -> "'Q.T'"
