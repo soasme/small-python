@@ -48,6 +48,10 @@ SOURCES = {
     "bytes_item_index": "log = []\nclass V:\n    def __init__(self, v): self.v = v\n    def __index__(self):\n        for _ in (): pass\n        log.append(self.v)\n        return self.v\n"
                         "def gen(*x): yield from x\nb = bytearray(b'q')\nb.extend(gen(V(67)))\n"
                         "result = (bytes(gen(V(65), V(66))), b, bytes([V(65), V(68)]), log)",
+    "bytearray_slice_index_twice": ("log = []\nclass I:\n    def __index__(self):\n        for _ in (): pass\n        log.append('i')\n        return 0\n"
+                                    "class N:\n    def __index__(self): return 1\n    def __iter__(self): return iter([5])\n"
+                                    "b = bytearray(2)\nb[I():1] = [9]\nc = bytearray(2)\nc[I():1] = bytearray(b'x')\n"
+                                    "try: b[I():1] = N()\nexcept TypeError: log.append('number')\nresult = (b, c, log)"),
     "bytearray_store_calls": "ba = bytearray(b'abc')\nclass V:\n    def __init__(self, v, rep): self.v, self.rep = v, rep\n    def __index__(self):\n        for _ in (): pass\n        ba[:] = self.rep\n        return self.v\n"
                              "ba[0] = V(65, b'xb')\nr = bytes(ba)\ntry: ba[1] = V(66, b'')\nexcept IndexError as e: i = type(e).__name__\n"
                              "try: ba[0] = V(256, b'')\nexcept ValueError as e: v = str(e)\nresult = (r, i, bytes(ba), v)",

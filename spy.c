@@ -26535,11 +26535,15 @@ static int percent_has(SPYContext *c, SPYValue *v, const char *name) {
     spy_release(method);
     return method != NULL;
 }
-/* PyNumber_Check: an int, float, or complex, or an object with a numeric hook. */
+/* PyNumber_Check: an int, float or complex, or an object whose type has
+ * __index__, __int__ or __float__. */
+static int number_check(SPYContext *c, SPYValue *v) {
+    return is_number(v) || v->type == SPY_COMPLEX ||
+           percent_has(c, v, "__index__") || percent_has(c, v, "__int__") || percent_has(c, v, "__float__");
+}
+/* A % integer's operand: a number_check, or an object with __complex__. */
 static int percent_number(SPYContext *c, SPYValue *v) {
-    if (is_number(v) || v->type == SPY_COMPLEX) return 1;
-    return percent_has(c, v, "__index__") || percent_has(c, v, "__int__") || percent_has(c, v, "__float__") ||
-        percent_has(c, v, "__complex__");
+    return number_check(c, v) || percent_has(c, v, "__complex__");
 }
 static SPYValue *percent_spec(SPYContext *c, SPYValue *value, const char *spec) {
     SPYValue *text = spy_string(c, spec, strlen(spec));
@@ -32050,7 +32054,7 @@ static SPYValue *hex_measured(SPYContext *c, Machine *m, SPYValue *state, SPYVal
 }
 static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *index_from(SPYContext *, Machine *, SPYValue *, int, SPYValue *, SPYValue *, size_t, unsigned);
-static int percent_number(SPYContext *, SPYValue *);
+static int number_check(SPYContext *, SPYValue *);
 static SPYValue *slice_copied(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static int slice_source(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static int slice_plain(SPYValue *);
@@ -32090,7 +32094,7 @@ static NO_INLINE SPYValue *slice_key_from(SPYContext *c, Machine *m, SPYValue *c
     int listed = list && slice_source(c, list, items[at], items[at + 1]);
     if (!(mask & INDEX_TWICE) && !listed) return call(c, callee, n, items);
     /* A number or str is no value to copy (bytearray_ass_subscript). */
-    if (!listed && (percent_number(c, items[at + 1]) || builtin_value(c, items[at + 1], SPY_STRING)))
+    if (!listed && (number_check(c, items[at + 1]) || builtin_value(c, items[at + 1], SPY_STRING)))
         return spy_error(c, "TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)");
     /* list() or bytearray() of the value, a call step on m (comparek),
      * then the store (slice_copied). */
@@ -35776,13 +35780,12 @@ static SPYValue *memory_key_returned(SPYContext *c, Machine *m, SPYValue *state,
 static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, size_t count, SPYValue *const *operands, SPYValue **env) {
     SPYValue *function = list_index(c, operands[0], key, count == 2 ? "__delitem__" : "__setitem__"), *value = count == 3 ? operands[2] : NULL;
     size_t len = m->len, d = 0;
-    /* A slice store into a bytearray or a view takes its value's buffer,
-     * which only bytes, a bytearray or a view gives without Python
-     * (index_returned copies it for a bytearray), or a bytearray's copy
-     * of a value the machine iterates (array_copy). */
+    /* A slice store into a view takes its value's buffer, which only
+     * bytes, a bytearray or a view gives without Python; a bytearray
+     * copies its value (index_returned). */
     if (function && value && key->type == SPY_SLICE && value->type != SPY_BYTES && value->type != SPY_BYTEARRAY && value->type != SPY_MEMORYVIEW) {
         SPYValue *base = operands[0]->type == SPY_INSTANCE ? builtin_base(c, operands[0], "__setitem__", NULL) : operands[0];
-        if (base && base->type != SPY_LIST && (base->type != SPY_BYTEARRAY || !machine_source(c, value))) function = NULL;
+        if (base && base->type == SPY_MEMORYVIEW) function = NULL;
     }
     /* A view's tuple key, from its first instance (memory_key_next). */
     if (!function && count == 3 && memory_key_calls(c, operands[0], key, 1)) {
@@ -35851,13 +35854,17 @@ static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins
             return;
         }
         /* A bytearray stores a copy of a value that is no other bytearray,
-         * converting the slice as written again (bytearray_ass_subscript). */
+         * converting the slice as written again (bytearray_ass_subscript):
+         * after a zero step, a number or a str is refused, and a value
+         * other than bytes or a view is copied by bytearray() on m
+         * (array_copy). */
         SPYValue *base = !function && index && value ? builtin_value(c, object, SPY_BYTEARRAY) : NULL;
-        if (base && machine_source(c, value)) {
-            /* A value the machine iterates is copied there (array_copy),
-             * the slice's zero step refused first. */
-            if (slice_plain(index)) array_copy(c, m, object, item, value);
-            else spy_error(c, "ValueError", "slice step cannot be zero");
+        if (base && (value->type != SPY_BYTEARRAY || value == base) && (!slice_plain(index) || (value->type != SPY_BYTES &&
+                                                                       value->type != SPY_BYTEARRAY && value->type != SPY_MEMORYVIEW))) {
+            if (!slice_plain(index)) spy_error(c, "ValueError", "slice step cannot be zero");
+            else if (number_check(c, value) || builtin_value(c, value, SPY_STRING))
+                spy_error(c, "TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)");
+            else array_copy(c, m, object, item, value);
             release_all(5, (SPYValue *[]){index, object, item, value, key});
             return;
         }
@@ -37702,9 +37709,10 @@ static int slice_plain(SPYValue *key) {
 }
 /* Whether a store of value at key into object copies the value on the
  * machine (array_copy): object a bytearray or its subclass's instance,
- * key a plain slice (slice_plain), value one the machine iterates. */
+ * key a plain slice (slice_plain), value one the machine iterates and
+ * no number (number_check), which the store refuses. */
 static int array_copies(SPYContext *c, SPYValue *object, SPYValue *key, SPYValue *value) {
-    return slice_plain(key) && builtin_value(c, object, SPY_BYTEARRAY) && machine_source(c, value);
+    return slice_plain(key) && builtin_value(c, object, SPY_BYTEARRAY) && machine_source(c, value) && !number_check(c, value);
 }
 /* The Python __index__ of value, a byte to store at int key of object, a
  * bytearray or its subclass's instance, which the store calls on the
@@ -48473,7 +48481,7 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
     if (slice_bounds(c, key, &bounds) || slice_adjust(c, &bounds, array->as.string.len, &slice)) return -1;
     SPYValue *actual = item ? builtin_value(c, item, SPY_BYTEARRAY) : NULL;
     if (item && (!actual || actual == array)) {
-        if (is_number(item) || builtin_value(c, item, SPY_STRING)) {
+        if (number_check(c, item) || builtin_value(c, item, SPY_STRING)) {
             spy_error(c, "TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)"); return -1;
         }
         Buffer bytes = {.ctx = c};
