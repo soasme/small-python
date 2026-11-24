@@ -4459,9 +4459,10 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
         return puts_buffer(b, num);
     case SPY_SUPER: {
         /* super_repr: the type's and the object type's tp_name. */
-        SPYValue *type = name_text(v->as.super.type, "__name__");
+        SPYValue *type = v->as.super.type ? name_text(v->as.super.type, "__name__") : NULL;
         SPYValue *owner = v->as.super.owner ? name_text(v->as.super.owner, "__name__") : NULL;
-        return puts_buffer(b, "<super: <class '") || puts_buffer(b, type && type->type == SPY_STRING ? type->as.string.data : "?") ||
+        return puts_buffer(b, "<super: <class '") ||
+            puts_buffer(b, !v->as.super.type ? "NULL" : type && type->type == SPY_STRING ? type->as.string.data : "?") ||
             puts_buffer(b, "'>, ") || (owner ? puts_buffer(b, "<") || puts_buffer(b, owner->type == SPY_STRING ? owner->as.string.data : "?") ||
             puts_buffer(b, " object>>") : puts_buffer(b, "NULL>"));
     }
@@ -12808,10 +12809,12 @@ static int super_get_inherited(SPYContext *c, SPYValue *v) {
  * an unbound super binds to object, a subclass's by calling its class, a
  * call step on the step's machine (property_copy). */
 static SPYValue *unchanged(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* A super's __thisclass__: None for one super.__new__ made, unbound. */
+static SPYValue *super_this(SPYContext *c, SPYValue *v) { return v->as.super.type ? v->as.super.type : c->none; }
 static SPYValue *super_get(SPYContext *c, SPYValue *self, SPYValue *storage, SPYValue *object) {
     if (storage->as.super.self || !object) return spy_retain(self);
-    if (self == storage) return super_new(c, storage->as.super.type, object);
-    SPYValue *args[] = {storage->as.super.type, object}, *cls = self->as.map.parent;
+    if (self == storage) return super_new(c, super_this(c, storage), object);
+    SPYValue *args[] = {super_this(c, storage), object}, *cls = self->as.map.parent;
     Machine *m = step_machine(c);
     SPYValue *tuple = m ? tuple_of(c, 2, args) : NULL;
     if (tuple) return step_callk(c, m, spy_retain(cls), tuple, unchanged, NULL);
@@ -12820,11 +12823,11 @@ static SPYValue *super_get(SPYContext *c, SPYValue *self, SPYValue *storage, SPY
 }
 static SPYValue *descriptor_value(SPYContext *c, SPYValue *value, SPYValue *self, SPYValue *owner) {
     if (value->type == SPY_SUPER && !value->as.super.self && self)
-        return super_new(c, value->as.super.type, self);
+        return super_new(c, super_this(c, value), self);
     /* super_descr_get: an unbound super subclass instance calls its class. */
     SPYValue *unbound = value->type == SPY_INSTANCE ? builtin_value(c, value, SPY_SUPER) : NULL;
     if (unbound && !unbound->as.super.self && self && super_get_inherited(c, value)) {
-        SPYValue *args[] = {unbound->as.super.type, self};
+        SPYValue *args[] = {super_this(c, unbound), self};
         return call(c, value->as.map.parent, 2, args);
     }
     if (value->type == SPY_PROPERTY) return property_get(c, value, value, self);
@@ -13511,10 +13514,11 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         if (definition) return descriptor_get(c, definition,
             v->as.super.self == v->as.super.owner ? NULL : v->as.super.self, v->as.super.owner);
-        if (!strcmp(name, "__get__")) return descriptor_get(c, name_local(c->types[SPY_SUPER], name), v, c->types[SPY_SUPER]);
-        if (!strcmp(name, "__thisclass__")) return spy_retain(v->as.super.type);
+        if (!strcmp(name, "__thisclass__")) return spy_retain(super_this(c, v));
         if (!strcmp(name, "__self__")) return spy_retain(v->as.super.self ? v->as.super.self : c->none);
         if (!strcmp(name, "__self_class__")) return spy_retain(v->as.super.owner ? v->as.super.owner : c->none);
+        /* Then super's own attributes, bound to the super object. */
+        if ((definition = class_lookup(c->types[SPY_SUPER], name))) return descriptor_get(c, definition, v, c->types[SPY_SUPER]);
         return errorf(c, "AttributeError", "'super' object has no attribute '%s'", name);
     }
     if (v->type != SPY_INSTANCE && v->type != SPY_CLASS && (!strcmp(name, "__hash__") || !strcmp(name, "__round__"))) {
@@ -37983,7 +37987,7 @@ static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, S
     }
     if (function->type == SPY_PROPERTY) get = spy_retain(function->as.property.get);
     else if (super_binds(c, function)) {
-        argv[0] = spy_retain(builtin_value(c, function, SPY_SUPER)->as.super.type); argv[1] = spy_retain(v); *argc = 2;
+        argv[0] = spy_retain(super_this(c, builtin_value(c, function, SPY_SUPER))); argv[1] = spy_retain(v); *argc = 2;
         get = spy_retain(function->as.map.parent);
         spy_release(function);
         return get;
@@ -50780,6 +50784,8 @@ static SPYValue *native_new(SPYContext *c, size_t argc, SPYValue *const *argv, S
             builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
     else if (owner == c->types[SPY_MODULE]) base = module_allocate(c);
     else if (owner == c->types[SPY_SENTINEL]) base = sentinel_construct(c, argc - 1, argv + 1, keywords);
+    /* super.__new__ makes an unbound super of no class; __init__ binds it. */
+    else if (owner == c->types[SPY_SUPER]) base = value_new(c, SPY_SUPER);
     else base = builtin_keywords(c, argc - 1, argv + 1, id, keywords, owner);
     /* reversed() of an object with __reversed__ returns that method's result. */
     if (!base || cls == owner || value_class(c, base) != owner) return base;

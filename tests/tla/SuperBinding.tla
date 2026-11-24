@@ -17,12 +17,13 @@
 (* "dflt"), hasattr(a, "x"), object.__getattribute__(a, "x") or A.x. The  *)
 (* outcome is the value, S(B, a) for the bound S, D for the unbound one,  *)
 (* or the AttributeError, which names x unless object.__getattribute__   *)
-(* was called.                                                             *)
+(* was called. D is made by S(B), or by S.__new__(S), a super of no class, *)
+(* and then d.__init__(B) (made "new"): both give the same outcomes.       *)
 (***************************************************************************)
 EXTENDS Naturals
 
 Ops == {"get", "getattr", "getattrd", "hasattr", "objget", "classget"}
-Programs == [op : Ops, dict : BOOLEAN, raises : BOOLEAN, fallback : BOOLEAN]
+Programs == [op : Ops, dict : BOOLEAN, raises : BOOLEAN, fallback : BOOLEAN, made : {"call", "new"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

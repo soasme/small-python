@@ -509,6 +509,7 @@ chooses as follows, on a 64-bit build:
 | Extra names in a class namespace | 16.4.2 | none |
 | Sorting algorithm | 25.1.4 | a stable merge sort: descending runs are reversed, short runs extended to 32 items by insertion, and neighbouring runs merged |
 | Assertions by default | 14.5, B.6 | run (optimization level 0) |
+| Binding a `super` of no class | 20.3.2 | the `TypeError` of `super(None, obj)` |
 | A single-field f-string, `str.format` or `%` result | 13.2.4.2, 23.4, 23.6 | always a new `str` |
 | Code object internals | 28.2, 28.3, 28.9 | `co_code`, `co_linetable` and `co_exceptiontable` are empty, `co_stacksize` is 1, `co_consts` holds only a docstring, `f_lasti` and `tb_lasti` are 0; code objects are made only by compiling and `replace` |
 | Effect of other `code.replace` changes | 28.2.1 | none: the code runs its original source |

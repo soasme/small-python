@@ -22,7 +22,11 @@ def outcome(p):
             return "fallback"
         body["__getattr__"] = __getattr__
     B = type("B", (), body)
-    d = S(B)
+    if p["made"] == "call":
+        d = S(B)
+    else:
+        d = S.__new__(S)
+        d.__init__(B)
     B.x = d
     A = type("A", (B,), {})
     a = A()
