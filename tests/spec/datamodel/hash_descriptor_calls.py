@@ -1,4 +1,4 @@
-# spec: PLS-315 3.3.1, 7.5.7, 26, 28
+# spec: PLS-315 10.3, 7.5.7, 26, 28
 # description: A __hash__ that is a descriptor is read by its Python
 # __get__, which may loop, with the key and its class, and what it gives is
 # called with no arguments, wherever a key is hashed: hash(), a set or

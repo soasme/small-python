@@ -11,8 +11,8 @@
 (* f_trace_lines and f_trace_opcodes not deleted; f_locals hashes its keys *)
 (* first, takes a key equal to a variable's name for that variable, keeps  *)
 (* another as an extra local, hashing it again, gives get() and            *)
-(* setdefault() the item, a KeyError their default, and reverses to a      *)
-(* list; clear() drops the locals                                          *)
+(* setdefault() the item, a KeyError their default, reverses to a list,   *)
+(* shows and compares with a dict as its snapshot; clear() drops the locals*)
 (* (of a generator's frame, once the generator finishes), finalizes a      *)
 (* generator that has not started, and raises RuntimeError for an          *)
 (* executing or suspended frame.                                           *)
@@ -41,7 +41,7 @@ Sources == {"running", "finished", "gennew", "gensusp", "gendone", "gendropped",
 Ops == {"f_code", "repr", "f_back", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator", "f_lineno", "f_trace",
         "settrace", "setlines", "setbadlines", "setlineno", "setcode", "clear",
         "dellineno", "dellines", "delopcodes", "impostor", "unhashable", "reversed",
-        "get_keyerror", "setdefault_keyerror", "extra_calls", "native_hash"}
+        "get_keyerror", "setdefault_keyerror", "extra_calls", "native_hash", "repr_calls", "compare_calls"}
 Programs == [source : Sources, op : Ops]
 
 VARIABLES program, outcome
@@ -87,6 +87,11 @@ Run(p) ==
       \* A key of a native __hash__ and a Python __eq__ that no variable's
       \* name or extra local equals is absent at once; one stored is found.
       [] p.op = "native_hash" -> "False True 7 True False "
+      \* Its repr is its snapshot's, each local's __repr__ called once, itself
+      \* as a local {...}; == and != of a dict, or one's subclass, compare
+      \* the snapshot, each value's __eq__ called once.
+      [] p.op = "repr_calls" -> "True 1 1 ss"
+      [] p.op = "compare_calls" -> "True False True eee"
       [] p.op = "clear" -> CASE s \in {"running", "gensusp"} -> "RuntimeError"
                              \* A generator that has not started is finalized; its frame stays its own.
                              [] s = "gennew" -> "{'a': 1} None"

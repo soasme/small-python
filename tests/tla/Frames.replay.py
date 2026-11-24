@@ -21,6 +21,36 @@ def gen(a):
 """
 
 
+class Shown:
+    def __init__(self, log):
+        self.log = log
+
+    def __repr__(self):
+        for _ in ():
+            pass
+        self.log.append("s")
+        return "shown"
+
+
+class Equal:
+    def __init__(self, log):
+        self.log = log
+
+    def __eq__(self, other):
+        for _ in ():
+            pass
+        self.log.append("e")
+        return True
+
+
+class Sub(dict):
+    pass
+
+
+def call(f, *args, **kwargs):
+    return f(*args, **kwargs)
+
+
 class Impostor:
     def __hash__(self):
         return hash("b")
@@ -132,6 +162,18 @@ def act(p, namespace, fr, g):
             proxy[stored] = 7
             found += [proxy[stored], stored in proxy, absent in proxy]
             return " ".join(map(str, found)) + " " + "".join(log)
+        if op == "repr_calls":
+            proxy = fr.f_locals
+            proxy["z"], proxy["p"] = Shown(log), proxy
+            text = repr(proxy)
+            shown, cycle = "'z': shown", "{...}"
+            return f"{text == call(repr, proxy)} {text.count(shown)} {text.count(cycle)} {''.join(log)}"
+        if op == "compare_calls":
+            proxy = fr.f_locals
+            proxy["z"] = Equal(log)
+            other = dict(proxy)
+            other["z"] = 0
+            return f"{proxy == other} {other != proxy} {proxy == Sub(other)} {''.join(log)}"
         fr.clear()
         return repr(dict(fr.f_locals)) + ("" if g is None else " " + repr(g.gi_frame))
     except (TypeError, AttributeError, ValueError, RuntimeError) as error:

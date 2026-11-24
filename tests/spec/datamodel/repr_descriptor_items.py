@@ -1,4 +1,4 @@
-# spec: PLS-315 3.3.1, 26, 27.1.5
+# spec: PLS-315 10.3, 26, 7.5.6
 # description: The repr of a list, tuple, dict or set shows an item whose
 # class's __repr__ is a descriptor by reading it with its Python __get__,
 # which may loop, and calling what it gives, item by item in order, by

@@ -1,4 +1,4 @@
-# spec: PLS-315 7.5.8, 27.1.5
+# spec: PLS-315 7.5.8, 23.4
 # description: str.format of an instance of a builtin type's subclass calls
 # its class's Python __format__, which may loop, given the spec; one keeping
 # the builtin __format__ formats by an empty spec as str() does, calling a

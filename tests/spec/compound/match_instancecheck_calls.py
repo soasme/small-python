@@ -1,4 +1,4 @@
-# spec: PLS-315 15.6.5, 7.10.2
+# spec: PLS-315 15.6.5, 19.3.21
 # description: A class pattern tests its subject by isinstance(), calling
 # the class's metaclass's Python __instancecheck__, which may loop, unless
 # the subject's class is the class itself; the result's truth, by a

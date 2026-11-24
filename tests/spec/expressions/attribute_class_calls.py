@@ -1,4 +1,4 @@
-# spec: PLS-315 6.3.4, 3.3.1, 3.3.3
+# spec: PLS-315 13.3.1, 13.3.4, 10.2.1
 # description: A class read as an attribute of a class, an instance or a
 # namespace, each computed, and called there runs its Python __new__ and
 # __init__, which

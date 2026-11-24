@@ -11531,7 +11531,16 @@ static NO_INLINE int slice_python(SPYContext *c, int op, SPYValue *a, SPYValue *
 }
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue **left, SPYValue *b) {
     if (UNLIKELY((*left)->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && !(*left = proxy_compared(c, *left, b))) return NULL;
+    /* A FrameLocalsProxy's == and != of a dict compare its snapshot (FL_EQ);
+     * a dict's of one, declined, are its reflected ones (operator_call). */
+    if (UNLIKELY((*left)->type == SPY_FRAME_LOCALS) && (op == T_EQ || op == T_NE) && builtin_value(c, b, SPY_DICT)) {
+        SPYValue *proxy = *left;
+        *left = frame_contents(c, proxy->as.bound.self, FRAME_DICT);
+        spy_release(proxy);
+        if (!*left) return NULL;
+    }
     SPYValue *a = *left;
+    if (UNLIKELY(b->type == SPY_FRAME_LOCALS) && (op == T_EQ || op == T_NE) && a->type == SPY_DICT) return NULL;
     /* Of one on the right, the machine compares the mapping (operator_call). */
     if (UNLIKELY(b->type == SPY_MAPPINGPROXY) && (op == T_EQ || op == T_NE) && proxy_reflects(a)) return NULL;
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
@@ -11920,7 +11929,11 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
          * reflected method, unless its class has a Python one. */
         int reflected = rich_reflected[rich_kind(op)];
         SPYValue *left = value_class(c, a), *right = value_class(c, b);
-        int swapped = y != b && right != left && subclass(right, left) && !class_lookup(right, rich_names[reflected]);
+        /* One whose class has its own method, declined, keeps its builtin's
+         * out; the other's reflected one goes then. */
+        int own = x != a && !builtin_base(c, a, rich_names[rich_kind(op)], NULL), theirs = y != b && !builtin_base(c, b, rich_names[reflected], NULL);
+        if (own && theirs) return op == T_EQ || op == T_NE ? spy_bool(c, op == T_EQ ? a == b : a != b) : unordered(c, op, a, b);
+        int swapped = own || (!theirs && y != b && right != left && subclass(right, left));
         /* Numbers compare by a method their classes left (number_kept). */
         if (number_rank(x) < 3 && number_rank(y) < 3 && !number_kept(c, NULL, rich_kind(op), a, b))
             return op == T_EQ || op == T_NE ? spy_bool(c, op == T_EQ ? a == b : a != b) : unordered(c, op, a, b);
@@ -26183,7 +26196,7 @@ static int print_instances(SPYContext *, SPYValue *, size_t, SPYValue *const *, 
 static SPYValue *entries_file(const Entry *, size_t);
 static int print_call_step(SPYContext *, Machine *, size_t, size_t, SPYValue *, SPYValue **, SPYValue **);
 static ALWAYS_INLINE int repr_job(SPYContext *c, SPYValue *callee, SPYValue *v) {
-    return (repr_container(v) || repr_base(c, v)) && repr_items(c, callee, v);
+    return (repr_container(v) || repr_base(c, v) || UNLIKELY(v->type == SPY_FRAME_LOCALS)) && repr_items(c, callee, v);
 }
 static SPYValue *repr_call(SPYContext *, Machine *, SPYValue **);
 static SPYValue *ascii_call(SPYContext *, Machine *, SPYValue **);
@@ -36083,6 +36096,12 @@ static NO_INLINE SPYValue *native_lookup(SPYContext *c, Machine *m, Instruction 
 static int repeats(SPYValue *v) {
     return v->type == SPY_LIST || v->type == SPY_TUPLE || v->type == SPY_STRING || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY;
 }
+/* What instance v of a subclass of list or tuple, or for == and != of
+ * dict or frozendict, compares as, its base, or v. */
+static SPYValue *compared_base(SPYValue *v, int op) {
+    SPYValue *base = v->type == SPY_INSTANCE ? v->as.map.base : NULL;
+    return base && (base->type == SPY_LIST || base->type == SPY_TUPLE || ((op == T_EQ || op == T_NE) && is_dict(base))) ? base : v;
+}
 /* The list or tuple an instance v of a subclass of list or tuple holds, or v. */
 static SPYValue *sequence_base(SPYValue *v) {
     return v->type == SPY_INSTANCE && v->as.map.base && (v->as.map.base->type == SPY_LIST || v->as.map.base->type == SPY_TUPLE) ? v->as.map.base : v;
@@ -36311,6 +36330,14 @@ enum { FL_GETITEM, FL_SETITEM, FL_DELITEM, FL_CONTAINS, FL_ITER, FL_LEN, FL_REVE
 static int keyed_dict(SPYContext *c, SPYValue *v) {
     return v->type == SPY_INSTANCE && v->as.map.base && is_dict(v->as.map.base) && !builtin_base(c, v, "__iter__", NULL);
 }
+/* The dict or frozendict v is, or one's subclass instance holds whose
+ * class keeps the builtin comparison rich, borrowed; else NULL. */
+static SPYValue *dict_kept(SPYContext *c, SPYValue *v, int rich) {
+    if (!v) return NULL;
+    if (is_dict(v)) return v;
+    SPYValue *base = builtin_base(c, v, rich_names[rich], NULL);
+    return base && is_dict(base) ? base : NULL;
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -36319,6 +36346,17 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
      * mapping compared with x (proxy_compared), y kept for a chain. */
     if (UNLIKELY(y && y->type == SPY_MAPPINGPROXY) && (rich == R_EQ || rich == R_NE) && proxy_reflects(x)) {
         SPYValue *compared = proxy_compared(c, spy_retain(y), x);
+        if (!compared) return NULL;
+        operator_keep(c, m, ins, y);
+        function = operator_call(c, m, ins, compared, x, env);
+        spy_release(compared);
+        return function;
+    }
+    /* So is x == or != FrameLocalsProxy y for a dict x, or one's subclass
+     * keeping that method: y's snapshot compared with x (FL_EQ). */
+    if (UNLIKELY(y && y->type == SPY_FRAME_LOCALS) && (rich == R_EQ || rich == R_NE) && builtin_value(c, x, SPY_DICT) &&
+        (x->type == SPY_DICT || builtin_base(c, x, rich == R_EQ ? "__eq__" : "__ne__", NULL))) {
+        SPYValue *compared = frame_contents(c, y->as.bound.self, FRAME_DICT);
         if (!compared) return NULL;
         operator_keep(c, m, ins, y);
         function = operator_call(c, m, ins, compared, x, env);
@@ -36461,6 +36499,17 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     if (kind == OPERATE_BINARY && class_union(op, x, y)) return union_call(c, m, x, y, env);
     if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' && percent_converts(c, x, y))
         return percent_call(c, m, x, y);
+    /* == and != of dicts, a subclass's instance among them keeping its
+     * builtin method, compare their dicts (dict_richcompare), y's values
+     * first when its class is a subclass of x's (reflected), y kept for a
+     * chain. */
+    SPYValue *dx, *dy;
+    if ((rich == R_EQ || rich == R_NE) && UNLIKELY(x->type == SPY_INSTANCE || (y && y->type == SPY_INSTANCE)) &&
+        (dx = dict_kept(c, x, rich)) && (dy = dict_kept(c, y, rich)) && (dx != x || dy != y)) {
+        SPYValue *left = value_class(c, x), *right = value_class(c, y);
+        operator_keep(c, m, ins, y);
+        return dy != y && right != left && subclass(right, left) ? operator_call(c, m, ins, dy, dx, env) : operator_call(c, m, ins, dx, dy, env);
+    }
     /* A list's or tuple's subclass instance whose class has no Python
      * comparison compares as its list or tuple, its own items first
      * when it is the right operand of its base's object (reflected,
@@ -36719,16 +36768,17 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
  * in *self; else NULL, the rest of the operation done in C into *result. */
 /* Whether what comparison op of x and y does once their Python methods
  * declined is another comparison: a mappingproxy self's method name
- * compares its mapping (proxy_compared); with a list's or tuple's
- * subclass instance among them, the other one of the same builtin, self's
+ * compares its mapping (proxy_compared); with a list's or tuple's, or
+ * for == and != a dict's or frozendict's, subclass instance among them,
+ * the other one of the same builtin (compared_base), self's
  * builtin method name, or, when name is NULL, comparison_declined's,
  * compares their items, *self then the one whose items go first
  * (declined_entered). */
 static int declined_bases(SPYContext *c, int op, SPYValue *x, SPYValue *y, const char *name, SPYValue **self) {
     if (name && (*self)->type == SPY_MAPPINGPROXY) return op == T_EQ || op == T_NE;
-    SPYValue *a = sequence_base(x), *b = sequence_base(y);
-    if ((a == x && b == y) || a->type != b->type || (a->type != SPY_LIST && a->type != SPY_TUPLE)) return 0;
-    if (name) return class_lookup(value_class(c, *self), name) == class_lookup(value_class(c, sequence_base(*self)), name);
+    SPYValue *a = compared_base(x, op), *b = compared_base(y, op);
+    if ((a == x && b == y) || !(is_dict(a) ? is_dict(b) : a->type == b->type && (a->type == SPY_LIST || a->type == SPY_TUPLE))) return 0;
+    if (name) return class_lookup(value_class(c, *self), name) == class_lookup(value_class(c, compared_base(*self, op)), name);
     SPYValue *left = value_class(c, x), *right = value_class(c, y);
     *self = b != y && right != left && subclass(right, left) && !class_lookup(right, rich_names[rich_reflected[rich_kind(op)]]) ? y : x;
     return 1;
@@ -36740,7 +36790,7 @@ static int declined_bases(SPYContext *c, int op, SPYValue *x, SPYValue *y, const
 static int declined_k(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, int op, SPYValue *self) {
     int rich = rich_kind(op), mine = self == x;
     if (operator_push(c, m, x, y, ins->line ? OPERATOR_LAST : OPERATOR_LAST | op << 2)) return 0;
-    c->k_fn = spy_retain(sequence_base(self)); c->k_env = spy_retain(sequence_base(mine ? y : x));
+    c->k_fn = spy_retain(compared_base(self, op)); c->k_env = spy_retain(compared_base(mine ? y : x, op));
     c->k_unit = 2 + (mine ? rich : rich_reflected[rich]); c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_OPERATOR;
     return 1;
 }
@@ -37439,9 +37489,9 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
                  * its mapping's, or its items', first. */
                 int rich = rich_kind(op), mine = self == x;
                 SPYValue *other = mine ? y : x;
-                SPYValue *a = self->type == SPY_MAPPINGPROXY ? proxy_compared(c, spy_retain(self), other) : spy_retain(sequence_base(self));
+                SPYValue *a = self->type == SPY_MAPPINGPROXY ? proxy_compared(c, spy_retain(self), other) : spy_retain(compared_base(self, op));
                 int pushed = a && !operator_push(c, m, x, y, OPERATOR_LAST | called);
-                Call *call = pushed ? compare_enter(c, m, a, spy_retain(self->type == SPY_MAPPINGPROXY ? other : sequence_base(other)), mine ? rich : rich_reflected[rich], CALL_OPERATOR) : (spy_release(a), NULL);
+                Call *call = pushed ? compare_enter(c, m, a, spy_retain(self->type == SPY_MAPPINGPROXY ? other : compared_base(other, op)), mine ? rich : rich_reflected[rich], CALL_OPERATOR) : (spy_release(a), NULL);
                 if (call) {
                     spy_release(x); spy_release(y);
                     return &call->m;
@@ -43755,7 +43805,7 @@ static SPYValue *frame_locals_apply(SPYContext *c, int op, SPYValue *proxy, SPYV
     case FL_REPR: return spy_repr(c, proxy);
     case FL_EQ: case FL_NE: {
         if (args[0]->type == SPY_FRAME_LOCALS) return spy_bool(c, (args[0]->as.bound.self == frame) == (op == FL_EQ));
-        if (args[0]->type != SPY_DICT) return spy_retain(c->not_implemented);
+        if (!builtin_value(c, args[0], SPY_DICT)) return spy_retain(c->not_implemented);
         SPYValue *copy = frame_contents(c, frame, FRAME_DICT);
         SPYValue *result = copy ? comparison(c, op == FL_EQ ? T_EQ : T_NE, copy, args[0]) : NULL;
         spy_release(copy); return result;
@@ -50004,15 +50054,23 @@ static int repr_reaches(SPYContext *, SPYValue *, int *);
 /* Whether item has such a method or is a container that reaches one. */
 static int repr_item_reaches(SPYContext *c, SPYValue *item, int *budget) {
     int bound;
-    return repr_method(c, item, &bound) || repr_descriptor(c, item) || ((repr_container(item) || repr_base(c, item)) && repr_reaches(c, item, budget));
+    return repr_method(c, item, &bound) || repr_descriptor(c, item) ||
+           ((repr_container(item) || repr_base(c, item) || item->type == SPY_FRAME_LOCALS) && repr_reaches(c, item, budget));
 }
 /* Whether container v, not in the repr stack, holds an item, a dict's
  * key or value, with such a method or such a container, among the
- * containers left in *budget. */
+ * containers left in *budget; a FrameLocalsProxy, its snapshot's, so too
+ * when it cannot be taken, which the job then reports. */
 static int repr_reaches(SPYContext *c, SPYValue *v, int *budget) {
     if (*budget <= 0) return 0;
     --*budget;
     for (size_t i = 0; i < c->repr_len; i++) if (c->repr_stack[i] == repr_key(v)) return 0;
+    if (UNLIKELY(v->type == SPY_FRAME_LOCALS)) {
+        SPYValue *copy = frame_contents(c, v->as.bound.self, FRAME_DICT);
+        int reaches = !copy || repr_reaches(c, copy, budget);
+        spy_release(copy);
+        return reaches;
+    }
     if (v->type == SPY_INSTANCE) v = v->as.map.base;
     if (v->type == SPY_LIST || v->type == SPY_TUPLE) {
         for (size_t i = 0; i < v->as.seq.len; i++) if (repr_item_reaches(c, v->as.seq.items[i], budget)) return 1;
@@ -50054,20 +50112,22 @@ static void repr_drop(SPYContext *c, SPYValue *v) {
  * the method's name and the item on m's stack, or at a list or tuple
  * item's own job (repr_call), the state and c->replacing under it; else
  * the job's text, or NULL on an error, its container left the repr stack.
- * The container's length is read again after each item. */
+ * The container's length is read again after each item; a dict's value
+ * held at its third, read there again as its parts grow. */
 static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue **function, SPYValue **env) {
-    SPYValue *shown = state->as.seq.items[0], *v = shown->type == SPY_INSTANCE ? shown->as.map.base : shown, *text = NULL, *index;
-    SPYValue **held = &state->as.seq.items[2];
+    SPYValue *shown = state->as.seq.items[0], *text = NULL, *index;
+    SPYValue *v = shown->type == SPY_INSTANCE ? shown->as.map.base : shown->type == SPY_FRAME_LOCALS ? state->as.seq.items[3] : shown;
+    size_t first = 3 + (shown->type == SPY_FRAME_LOCALS);
     int seq = v->type == SPY_LIST || v->type == SPY_TUPLE, dict = is_dict(v);
     for (size_t i = (size_t)state->as.seq.items[1]->as.integer_data.small;; i++) {
         SPYValue *item;
-        if (dict && i % 2) item = *held;
+        if (dict && i % 2) item = state->as.seq.items[2];
         else if (i >> dict >= (seq ? v->as.seq.len : v->as.map.len)) break;
         else if (seq) item = v->as.seq.items[i];
         else {
             Entry *entry = &map_items(v)[i >> dict];
             item = entry->key;
-            if (dict) { spy_release(*held); *held = spy_retain(entry->value); }
+            if (dict) { spy_release(state->as.seq.items[2]); state->as.seq.items[2] = spy_retain(entry->value); }
         }
         int bound;
         SPYValue *described = (*function = repr_method(c, item, &bound)) ? NULL : repr_descriptor(c, item);
@@ -50115,9 +50175,9 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
     int named = shown != v && (frozen || v->type == SPY_SET);
     int status = named ? puts_buffer(&b, type_name(shown)) || puts_buffer(&b, "({") :
                  puts_buffer(&b, v->type == SPY_FROZENDICT ? "frozendict({" : v->type == SPY_FROZENSET ? "frozenset({" : !seq ? "{" : tuple ? "(" : "[");
-    for (size_t k = 3; !status && k < state->as.seq.len; k++) {
+    for (size_t k = first; !status && k < state->as.seq.len; k++) {
         SPYValue *part = builtin_value(c, state->as.seq.items[k], SPY_STRING);
-        status = (k > 3 && puts_buffer(&b, dict && k % 2 == 0 ? ": " : ", ")) || append(&b, part->as.string.data, part->as.string.len);
+        status = (k > first && puts_buffer(&b, dict && (k - first) % 2 ? ": " : ", ")) || append(&b, part->as.string.data, part->as.string.len);
     }
     if (!status && tuple && v->as.seq.len == 1) status = puts_buffer(&b, ",");
     status = status || puts_buffer(&b, frozen || named ? "})" : !seq ? "}" : tuple ? ")" : "]");
@@ -50338,21 +50398,23 @@ static int empty_format(SPYContext *c, SPYValue *callee, SPYValue *spec) {
  * state and c->replacing in place of callee and argument (repr_from); else
  * the text, or NULL on an error, both popped. */
 static NO_INLINE SPYValue *repr_call(SPYContext *c, Machine *m, SPYValue **env) {
-    SPYValue *v = m->stack[m->len - 1], *state = spy_list(c), *zero = int_value(c, 0), *function, *result = NULL;
+    SPYValue *v = m->stack[m->len - 1], *state = spy_list(c), *zero = int_value(c, 0), *function, *result = NULL, *copy = NULL;
     size_t len = m->len;
-    /* repr_job found v outside the repr stack. */
+    /* repr_job found v outside the repr stack. A FrameLocalsProxy shows
+     * its snapshot's items, which its job holds after its third. */
     int entered = repr_enter(c, repr_key(v));
     if (!entered && (!state || !zero || sequence_append(c, state, v) || sequence_append(c, state, zero) ||
-                     sequence_append(c, state, c->none))) repr_drop(c, repr_key(v));
+                     sequence_append(c, state, c->none) || (UNLIKELY(v->type == SPY_FRAME_LOCALS) &&
+                     (!(copy = frame_contents(c, v->as.bound.self, FRAME_DICT)) || sequence_append(c, state, copy))))) repr_drop(c, repr_key(v));
     else if (!entered && (result = repr_from(c, m, state, &function, env)) && function) {
         /* What the job pushed takes the callee's and argument's places. */
         spy_release(m->stack[len - 2]); spy_release(m->stack[len - 1]);
         memmove(&m->stack[len - 2], &m->stack[len], (m->len - len) * sizeof(*m->stack));
         m->len -= 2;
-        spy_release(state); spy_release(zero);
+        spy_release(state); spy_release(zero); spy_release(copy);
         return result;
     }
-    spy_release(state); spy_release(zero);
+    spy_release(state); spy_release(zero); spy_release(copy);
     while (m->len > len - 2) spy_release(machine_pop(m));
     return result;
 }

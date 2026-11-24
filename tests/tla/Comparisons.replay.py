@@ -42,6 +42,9 @@ SOURCES = {
     "contains_int_sub_iter": "class C(int):\n    def __iter__(s):\n        yield t(1)\n        yield t(2)\n        yield t(3)\nresult = 2 in C()",
     "search_list_sub": "class X:\n    def __eq__(s, o):\n        for _ in (): pass\n        t(o)\n        return o == 2\nclass L(list): pass\nl = L([X(), X()])\nresult = (l.count(2), l.index(2), (l.remove(2), len(l)))",
     "order_mixed_items": "class E:\n    def __lt__(s, o):\n        for _ in (): pass\n        t('lt')\n        o.clear()\n        return NotImplemented\na = [[E()]]\ntry:\n    a[0] < a\nexcept TypeError as e:\n    result = (str(e), a)",
+    "dict_sub_order": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return True\n"
+                      "class Own(dict):\n    def __eq__(s, o): return NotImplemented\nclass S(dict): pass\n"
+                      "result = (Own(k=E('o')) == {'k': E('d')}, {'k': E('d')} == S(k=E('s')), S(k=E('x')) != {'k': 1})",
     "contains_list_sub_iter": "class C(list):\n    def __iter__(s):\n        yield t(9)\nresult = (2 in C([2]), 9 in C([2]))",
     "contains_getitem": "class C:\n    def __getitem__(s, i):\n        if i > 3: raise IndexError\n        return t(i * 10)\nresult = (20 in C(), 50 in C())",
     "contains_none": "class C: pass\n1 in C()",

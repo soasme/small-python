@@ -1,4 +1,4 @@
-# spec: PLS-315 7.4.1, 19.3.2, 3.3.6
+# spec: PLS-315 7.4.1, 19.3.2, 13.4, 15.3.2
 # description: Awaiting a class, or iterating one by async for or an
 # asynchronous comprehension, calls its metaclass's __await__ or
 # __aiter__, a Python method or a descriptor whose Python __get__ is read

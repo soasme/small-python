@@ -1,4 +1,4 @@
-# spec: PLS-315 27.1.5, 26.10.1
+# spec: PLS-315 27.1.6, 20.5.1
 # description: map(property, getters) makes each property as a call of
 # property does, reading each getter's __doc__ when it is made: by a
 # Python __getattribute__, or a __getattr__ after its AttributeError, or

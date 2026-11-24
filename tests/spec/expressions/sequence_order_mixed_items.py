@@ -1,4 +1,4 @@
-# spec: PLS-315 7.8.2, 7.8.4
+# spec: PLS-315 25.5.3, 7.2.4
 # description: Ordering two lists or tuples whose first unequal items are an
 # instance and a container calls the instance's Python ordering method,
 # which may loop, mutate either sequence or return NotImplemented, or the

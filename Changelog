@@ -804,6 +804,9 @@ Unreleased (0.10.0):
 - `index`, `count` and `remove` of a list or tuple subclass's instance call items' Python `__eq__` without nesting on the C stack
 - Ordering lists or tuples whose first unequal items are an instance and a container calls its Python ordering method without nesting on the C stack
 - `str.format` of a builtin type's subclass calls its Python `__format__`, or by an empty spec its Python `__str__`, without nesting on the C stack
+- `repr()`, `str()` and `format()` of a FrameLocalsProxy, and its `==` with a dict, call Python methods without nesting on the C stack
+- A FrameLocalsProxy compares equal to a dict subclass's instance holding its locals
+- A dict subclass's instance whose own `__eq__` declines compares by the other dict's values first; dict subclasses compare without nesting on the C stack
 - iter(f, sentinel) of a builtin callable runs the sentinel's `__eq__` and its result's `__bool__` without nesting on the C stack, and is 2x faster
 - `bool` has its own `__and__`, `__or__`, `__xor__`, their reflections and `__invert__`; `int.__and__(True, True)` is `1`
 - error messages name a builtin class method such as `dict.__dict__['fromkeys']` a `classmethod_descriptor`

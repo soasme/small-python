@@ -1,4 +1,4 @@
-# spec: PLS-315 26.4.1, 26.4.2, 7.7.7
+# spec: PLS-315 24.1.1, 24.2, 7.7.7
 # description: bytes(), bytearray() and bytearray.extend of an instance of
 # a builtin iterator's subclass that overrides neither __iter__ nor
 # __next__ iterate it as its iterator does: a reversed one over a sequence

@@ -1,4 +1,4 @@
-# spec: PLS-315 26.2.3, 7.8.2
+# spec: PLS-315 25.1.3, 25.5.2, 7.2.5
 # description: index, count and remove of a list or tuple subclass's
 # instance, bound or called on the class, compare each item with the value
 # by the item's Python __eq__, which may loop, mutate the sequence or
