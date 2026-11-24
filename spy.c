@@ -22620,20 +22620,20 @@ static SPYValue *default_mro(SPYContext *c, SPYValue *cls, SPYValue *bases) {
 fail:
     spy_release(order); mem_free(positions); return NULL;
 }
+/* The class keeps the tuple of its bases itself, as __bases__. */
 static int set_class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {
-    SPYValue *copy = value_new(c, SPY_TUPLE);
-    if (!copy) return -1;
-    for (size_t i = 0; i < bases->as.seq.len && !c->error_type[0]; i++) {
+    for (size_t i = 0; i < bases->as.seq.len; i++) {
         SPYValue *base = bases->as.seq.items[i];
-        if (base->type != SPY_CLASS) { spy_error(c, "TypeError", "bases must be types"); break; }
-        for (size_t j = 0; j < i; j++) if (bases->as.seq.items[j] == base)
+        if (base->type != SPY_CLASS) { spy_error(c, "TypeError", "bases must be types"); return -1; }
+        for (size_t j = 0; j < i; j++) if (bases->as.seq.items[j] == base) {
             errorf(c, "TypeError", "duplicate base class %s", name_text(base, "__name__")->as.string.data);
-        if (!c->error_type[0]) sequence_append(c, copy, base);
+            return -1;
+        }
     }
-    if (c->error_type[0]) { spy_release(copy); return -1; }
-    spy_release(cls->as.map.bases); cls->as.map.bases = copy;
+    spy_retain(bases);
+    spy_release(cls->as.map.bases); cls->as.map.bases = bases;
     spy_release(cls->as.map.parent);
-    cls->as.map.parent = copy->as.seq.len ? spy_retain(copy->as.seq.items[0]) : NULL;
+    cls->as.map.parent = bases->as.seq.len ? spy_retain(bases->as.seq.items[0]) : NULL;
     return 0;
 }
 static int class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {

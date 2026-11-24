@@ -14,7 +14,8 @@
 (* each subclass's are recomputed, oldest first, each mro() called once;   *)
 (* when one raises, every MRO and C's bases are restored and the           *)
 (* LookupError propagates. The outcome is the exception or "ok", C's       *)
-(* bases, D's and E's MROs, and the classes mro() was called for.          *)
+(* bases, D's and E's MROs, the classes mro() was called for, and whether  *)
+(* C.__bases__ is the very tuple stored, or the old one once restored.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -24,7 +25,7 @@ Programs == [store : {"assign", "for", "setattr"}, fail : {"none", "C", "D", "E"
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
-Pending == <<"pending", <<>>, <<>>, <<>>, <<>>>>
+Pending == <<"pending", <<>>, <<>>, <<>>, <<>>, FALSE>>
 
 \* The classes whose mro() runs: all, or those up to the failing one.
 Called(p) == IF p.fail = "none" THEN Order
@@ -33,7 +34,7 @@ MroOf(cls, base) == IF cls = "D" THEN <<"D", "C", base, "object">> ELSE <<"E", "
 
 Run(p) ==
     LET base == IF p.fail = "none" THEN p.target ELSE "A"
-    IN  <<IF p.fail = "none" THEN "ok" ELSE "LookupError", <<base>>, MroOf("D", base), MroOf("E", base), Called(p)>>
+    IN  <<IF p.fail = "none" THEN "ok" ELSE "LookupError", <<base>>, MroOf("D", base), MroOf("E", base), Called(p), TRUE>>
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

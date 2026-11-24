@@ -25,7 +25,7 @@ def outcome(p):
     for cls in (C, D, E):
         cls.armed = True
     del log[:]
-    bases = ({"A": A, "B": B}[p["target"]],)
+    bases, old = ({"A": A, "B": B}[p["target"]],), C.__bases__
     kind = "ok"
     try:
         if p["store"] == "assign":
@@ -38,7 +38,8 @@ def outcome(p):
     except LookupError:
         kind = "LookupError"
     names = lambda t: tuple(k.__name__ for k in t)
-    return (kind, names(C.__bases__), names(D.__mro__), names(E.__mro__), tuple(log))
+    same = C.__bases__ is (bases if kind == "ok" else old)
+    return (kind, names(C.__bases__), names(D.__mro__), names(E.__mro__), tuple(log), same)
 
 
 failures = 0

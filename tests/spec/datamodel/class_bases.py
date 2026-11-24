@@ -1,4 +1,4 @@
-# spec: PLS-315 20.2.3
+# spec: PLS-315 20.2.3, 10.4.2
 # description: Assigning __bases__ changes attribute lookup and its compatibility checks.
 from harness import *
 
@@ -298,3 +298,19 @@ with assert_raises(TypeError):
 class Rebased: pass
 assert_eq(str(assert_raises(TypeError, setattr, Rebased, "__bases__", (1,))), "Rebased.__bases__ must be tuple of classes, not 'int'")
 assert_eq(str(assert_raises(ValueError, type, "a\0b", (), {})), "type name must not contain null characters")
+
+# The class keeps the tuple it is given, by type() or by assignment, and a
+# failed assignment leaves the old tuple in place.
+class KA: pass
+class KB: pass
+kept = (KA,)
+KC = type("KC", kept, {})
+assert_eq(KC.__bases__ is kept, True)
+kept = (KB,)
+KC.__bases__ = kept
+assert_eq(KC.__bases__ is kept, True)
+try:
+    KC.__bases__ = (KC,)
+except TypeError:
+    pass
+assert_eq(KC.__bases__ is kept, True)
