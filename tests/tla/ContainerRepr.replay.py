@@ -15,8 +15,12 @@ def outcome(p):
         for _ in range(2): pass
         log.append(text)
         return text
+    def absent(self):
+        for _ in range(2): pass
+        raise AttributeError("absent")
     body = {"function": {"__repr__": lambda self: spin("c")}, "static": {"__repr__": staticmethod(lambda: spin("s"))},
-            "raises": {"__repr__": staticmethod(lambda: spin(1) // 0)}, "none": {}}[p["repr"]]
+            "raises": {"__repr__": staticmethod(lambda: spin(1) // 0)},
+            "property": {"__repr__": property(lambda self: lambda: spin("p"))}, "absent": {"__repr__": property(absent)}, "none": {}}[p["repr"]]
     C = type("C", (), body)
     c = C()
     shown = {"list": lambda: [c, 1], "tuple": lambda: (c, 1), "dict": lambda: {1: c}, "set": lambda: {c}}[p["container"]]()
@@ -28,7 +32,7 @@ def outcome(p):
         text = VIA[p["via"]](shown)
     except ZeroDivisionError:
         text = "ZeroDivisionError"
-    if p["repr"] == "none":
+    if p["repr"] in ("none", "absent"):
         start = text.index("<")
         text = text[:start] + "<C>" + text[text.index(">", start) + 1:]
     return (text, len(log))

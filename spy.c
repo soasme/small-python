@@ -49853,6 +49853,14 @@ static SPYValue *repr_method(SPYContext *c, SPYValue *item, int *bound) {
     if ((*bound = function != NULL) || (item->type != SPY_INSTANCE && !metaclassed(item)) || builtin_base(c, item, "__repr__", NULL)) return function;
     return (found = class_lookup(value_class(c, item), "__repr__")) ? static_function(c, found) : NULL;
 }
+/* The __repr__ of item's class that is a descriptor with a Python __get__
+ * (descriptor_getter), whose read a repr job makes first, borrowed; else
+ * NULL. */
+static SPYValue *descriptor_getter(SPYContext *, SPYValue *);
+static SPYValue *repr_descriptor(SPYContext *c, SPYValue *item) {
+    SPYValue *d = !instance_like(item) || builtin_base(c, item, "__repr__", NULL) ? NULL : class_lookup(value_class(c, item), "__repr__");
+    return d && (d->type == SPY_INSTANCE || d->type == SPY_PROPERTY) && descriptor_getter(c, d) ? d : NULL;
+}
 /* The container whose items show in the repr of instance v of a list's,
  * tuple's, dict's, set's, frozenset's or frozendict's subclass not
  * defining __repr__, borrowed; else NULL. */
@@ -49870,7 +49878,7 @@ static int repr_reaches(SPYContext *, SPYValue *, int *);
 /* Whether item has such a method or is a container that reaches one. */
 static int repr_item_reaches(SPYContext *c, SPYValue *item, int *budget) {
     int bound;
-    return repr_method(c, item, &bound) || ((repr_container(item) || repr_base(c, item)) && repr_reaches(c, item, budget));
+    return repr_method(c, item, &bound) || repr_descriptor(c, item) || ((repr_container(item) || repr_base(c, item)) && repr_reaches(c, item, budget));
 }
 /* Whether container v, not in the repr stack, holds an item, a dict's
  * key or value, with such a method or such a container, among the
@@ -49935,8 +49943,10 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
             item = entry->key;
             if (dict) { spy_release(*held); *held = spy_retain(entry->value); }
         }
-        int bound, nested = !(*function = repr_method(c, item, &bound)) && repr_job(c, c->field_calls[0], item);
-        if (*function || nested) {
+        int bound;
+        SPYValue *described = (*function = repr_method(c, item, &bound)) ? NULL : repr_descriptor(c, item);
+        int nested = !*function && !described && repr_job(c, c->field_calls[0], item);
+        if (*function || nested || described) {
             if (!(index = int_value(c, (int64_t)i + 1))) break;
             spy_release(state->as.seq.items[1]); state->as.seq.items[1] = index;
             if (machine_push(c, m, spy_retain(state)) || machine_push(c, m, spy_retain(c->replacing))) break;
@@ -49948,8 +49958,18 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
                 *function = c->entering_init;
                 return text;
             }
-            if (machine_push(c, m, spy_string(c, "__repr__", 8)) || machine_push(c, m, spy_retain(item)) ||
-                !(*env = function_env(c, *function, (size_t)bound, (SPYValue *[]){bound ? spy_retain(item) : item}, NULL, bound))) break;
+            if (machine_push(c, m, spy_string(c, "__repr__", 8)) || machine_push(c, m, spy_retain(item))) break;
+            if (described) {
+                /* Its read comes first, then the call of what it gives
+                 * (descripted); its AttributeError gives the bare repr. */
+                Buffer b = { .ctx = c };
+                SPYValue *bare = buffer_text(&b, SPY_STRING, bare_repr(&b, item));
+                *function = bare ? special_env(c, m, described, item, NULL, bare, env) : NULL;
+                spy_release(bare);
+                if (!*function) break;
+                /* The descriptor's class holds its getter. */
+                spy_release(*function);
+            } else if (!(*env = function_env(c, *function, (size_t)bound, (SPYValue *[]){bound ? spy_retain(item) : item}, NULL, bound))) break;
             c->entering_init = *function; c->entering_kind = CALL_CHECKED;
             return spy_retain(c->types[SPY_STRING]);
         }
