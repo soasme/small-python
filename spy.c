@@ -4663,6 +4663,7 @@ typedef struct {
     Node *annotations, **annotations_tail;
     int awaits; /* The awaits and async for clauses parsed (comprehension). */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
+    int line_open; /* A body's line continues after a statement and its ';' (line_statements). */
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
@@ -8247,23 +8248,28 @@ static Node *statement_body(Parser *p) {
     if (n->kind == N_EXPR && n->a->kind == N_NAMED && !n->a->op) return syntax(p, "invalid syntax");
     return n;
 }
-static Node *line_statements(Parser *p) {
+/* The statements of a line; in a body's statements (one), its next
+ * statement, the line left open after a ';'. */
+static Node *line_statements(Parser *p, int one) {
     Node *head = NULL, **tail = &head;
     size_t start;
+    int after = p->line_open;
+    p->line_open = 0;
     do {
         start = p->pos;
         /* A suite on its header's line, and a statement after ';', is simple. */
-        if ((p->inline_suite || head) && (at(p, '@') || keyword(p, "if") || keyword(p, "while") || keyword(p, "for") || keyword(p, "try") ||
+        if ((p->inline_suite || head || after) && (at(p, '@') || keyword(p, "if") || keyword(p, "while") || keyword(p, "for") || keyword(p, "try") ||
                                 keyword(p, "with") || keyword(p, "def") || keyword(p, "class") || keyword(p, "async"))) {
             syntax(p, "invalid syntax"); goto failed;
         }
         Node *n = statement(p);
         if (!n) goto failed;
-        if (head && n->kind == N_MATCH) { p->pos = start + 1; syntax(p, "invalid syntax"); goto failed; }
+        if ((head || after) && n->kind == N_MATCH) { p->pos = start + 1; syntax(p, "invalid syntax"); goto failed; }
         *tail = n; tail = &n->next;
         if (n->kind == N_IF || n->kind == N_WHILE || n->kind == N_FOR || n->kind == N_DEF ||
             n->kind == N_CLASS || n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH) return head;
         if (!take(p, ';')) break;
+        if (one && !at(p, T_NL)) { p->line_open = 1; return head; }
     } while (!at(p, T_NL));
     if (expect(p, T_NL, "invalid syntax")) return head;
 failed:
@@ -8297,7 +8303,7 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
     p->conditional += compound;
     if (!take(p, T_NL)) {
         p->inline_suite = 1;
-        body = line_statements(p);
+        body = line_statements(p, 0);
         p->inline_suite = 0;
         if (body && analyse_statements(p, body)) return NULL;
     }
@@ -8512,9 +8518,10 @@ static Node *statements(Parser *p) {
     int body = p->body.program && p->depth == p->body.depth;
     while (!at(p, T_END) && !at(p, T_DEDENT)) {
         if (take(p, T_NL)) continue;
-        Node *start = p->unit->as.unit.nodes, *n = line_statements(p);
+        int line = !p->line_open;
+        Node *start = p->unit->as.unit.nodes, *n = line_statements(p, 1);
         if (!n || nodes_finish(p, start)) return NULL;
-        if (!p->depth) p->unit->as.unit.statements++;
+        if (!p->depth && line) p->unit->as.unit.statements++;
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
         if (analyse_statements(p, n) || (!p->depth && resolve_statements(p))) return NULL;
