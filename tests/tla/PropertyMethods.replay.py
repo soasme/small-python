@@ -24,8 +24,9 @@ def documented(p):
             return "documented"
 
     maker = property if p["maker"] == "property" else Sub
+    made = {"method": lambda: list(map(maker, [Getter()]))[0], "bound": lambda: next(map(maker, [Getter()]))}.get(p["how"], lambda: maker(Getter()))
     try:
-        result = repr(maker(Getter()).__doc__)
+        result = repr(made().__doc__)
     except LookupError:
         result = "LookupError"
     return " ".join([result] + calls)

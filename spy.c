@@ -28476,7 +28476,8 @@ static int next_calls(SPYContext *c, SPYValue *v) {
          (function->type == SPY_CLASS && builtin_class(c, function))))
         return v->as.iterator.source->as.seq.items[1]->type != SPY_ITERATOR || v->as.iterator.source->as.seq.items[1]->as.iterator.kind != I_RANGE;
     return function && (machine_function(c, function) || (kind == I_FILTER && filter_steps(c, function)) ||
-                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD || (bound_steps(function) && bound_next(c, v, function)) ||
+                        (kind == I_MAP && (bound_function(c, function) || map_steps(function) || function->type == SPY_STATICMETHOD ||
+                                           function == c->types[SPY_PROPERTY] || (bound_steps(function) && bound_next(c, v, function)) ||
                                            (function->type == SPY_CLASS && class_converts(c, function)))));
 }
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
@@ -40267,7 +40268,7 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
         return status;
     }
     if (!c->error_type[0] && items->as.seq.len <= COMPARE_ARGS && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] &&
-        (map_steps(callee) || is_builtin(callee, B_NEXT) || callee->type == SPY_STATICMETHOD ||
+        (map_steps(callee) || is_builtin(callee, B_NEXT) || callee->type == SPY_STATICMETHOD || callee == c->types[SPY_PROPERTY] ||
          (callee->type == SPY_CLASS && (described_new(c, callee, 0) || built_call(c, callee, 0, items->as.seq.len, items->as.seq.items))) ||
          index_arguments(c, callee, -1, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 2 && is_builtin(callee, B_ROUND) && is_number(items->as.seq.items[0]) && index_function(c, items->as.seq.items[1])) ||
