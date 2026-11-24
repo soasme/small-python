@@ -323,8 +323,8 @@ class generic_alias_iterator:
     __slots__ = ('_obj',)
     __init_subclass__ = _final('generic_alias_iterator')
 
-    def __init__(self, obj):
-        object.__setattr__(self, '_obj', obj)
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("cannot create 'generic_alias_iterator' instances")
 
     def __iter__(self):
         return self
@@ -421,7 +421,9 @@ class GenericAlias:
         return result
 
     def __iter__(self):
-        return generic_alias_iterator(self)
+        it = object.__new__(generic_alias_iterator)
+        object.__setattr__(it, '_obj', self)
+        return it
 
     def __mro_entries__(self, bases):
         return (self.__origin__,)
@@ -568,31 +570,33 @@ class _ConstEvaluator:
 _UNSET = object()
 
 
-def _clinic(function, arguments, keywords, positional, keyword_only, variadic=False):
-    # Argument Clinic's binding (PLS-315 7.4.4), naming function: the
-    # required positional parameters, a variadic tuple after them when
-    # variadic, then the keyword-only parameters' values or defaults.
-    count, names = len(positional), positional + tuple(keyword_only)
+def _clinic(function, arguments, keywords, params, positional, variadic=False):
+    # Argument Clinic's binding (PLS-315 7.4.4), naming function: params
+    # maps each parameter, in order, to its default, or to _UNSET when it is
+    # required; the first positional ones may be given by position, and
+    # when variadic the further positional arguments are a tuple after them.
+    names = tuple(params)
     given = len(arguments) + len(keywords)
     if not variadic and given > len(names):
         kind = 'keyword ' if not arguments else ''
-        raise TypeError(f'{function}() takes at most {len(names)} {kind}arguments ({given} given)')
-    if not variadic and len(arguments) > count:
-        plural = 's' if count != 1 else ''
-        raise TypeError(f'{function}() takes exactly {count} positional argument{plural} ({len(arguments)} given)')
-    for position, key in enumerate(positional[len(arguments):], len(arguments)):
-        if key not in keywords:
+        plural = 's' if len(names) != 1 else ''
+        raise TypeError(f'{function}() takes at most {len(names)} {kind}argument{plural} ({given} given)')
+    if not variadic and len(arguments) > positional:
+        plural = 's' if positional != 1 else ''
+        raise TypeError(f'{function}() takes exactly {positional} positional argument{plural} ({len(arguments)} given)')
+    bound = min(len(arguments), positional)
+    for position, key in enumerate(names[bound:], bound):
+        if params[key] is _UNSET and key not in keywords:
             raise TypeError(f"{function}() missing required argument '{key}' (pos {position + 1})")
     for key in keywords:
-        if key in positional[:len(arguments)]:
-            position = positional.index(key) + 1
-            raise TypeError(f"argument for {function}() given by name ('{key}') and position ({position})")
+        if key in names[:bound]:
+            raise TypeError(f"argument for {function}() given by name ('{key}') and position ({names.index(key) + 1})")
         if key not in names:
             _unexpected_keyword(function, key, names)
-    values = arguments[:count] + tuple(keywords[key] for key in positional[len(arguments):])
+    values = arguments[:bound] + tuple(keywords.get(key, params[key]) for key in names[bound:])
     if variadic:
-        values += (arguments[count:],)
-    return values + tuple(keywords.get(key, default) for key, default in keyword_only.items())
+        values = values[:positional] + (arguments[positional:],) + values[positional:]
+    return values
 
 
 def _param_init(self, name, bound, covariant, contravariant, infer_variance, default, module):
@@ -718,7 +722,7 @@ class TypeVar:
 
     def __init__(self, *arguments, **keywords):
         name, constraints, bound, covariant, contravariant, infer_variance, default = _clinic(
-            'typevar', arguments, keywords, ('name',), _VARIANCE, True)
+            'typevar', arguments, keywords, {'name': _UNSET, **_VARIANCE}, 1, True)
         _param_init(self, name, None, covariant, contravariant, infer_variance, default, _caller_module())
         if constraints and bound is not None:
             raise TypeError('Constraints cannot be combined with bound=...')
@@ -787,7 +791,7 @@ class TypeVarTuple:
 
     def __init__(self, *arguments, **keywords):
         name, bound, covariant, contravariant, infer_variance, default = _clinic(
-            'typevartuple', arguments, keywords, ('name',), _VARIANCE)
+            'typevartuple', arguments, keywords, {'name': _UNSET, **_VARIANCE}, 1)
         _param_init(self, name, bound, covariant, contravariant, infer_variance, default, _caller_module())
 
     __setattr__ = _param_setattr
@@ -849,7 +853,8 @@ class ParamSpecArgs:
     __module__ = 'typing'
     __init_subclass__ = _final('typing.ParamSpecArgs')
 
-    def __init__(self, origin):
+    def __init__(self, *arguments, **keywords):
+        origin, = _clinic('paramspecargs', arguments, keywords, {'origin': _UNSET}, 1)
         object.__setattr__(self, '__origin__', origin)
 
     def __setattr__(self, name, value):
@@ -877,7 +882,8 @@ class ParamSpecKwargs:
     __module__ = 'typing'
     __init_subclass__ = _final('typing.ParamSpecKwargs')
 
-    def __init__(self, origin):
+    def __init__(self, *arguments, **keywords):
+        origin, = _clinic('paramspeckwargs', arguments, keywords, {'origin': _UNSET}, 1)
         object.__setattr__(self, '__origin__', origin)
 
     def __setattr__(self, name, value):
@@ -907,7 +913,7 @@ class ParamSpec:
 
     def __init__(self, *arguments, **keywords):
         name, bound, covariant, contravariant, infer_variance, default = _clinic(
-            'paramspec', arguments, keywords, ('name',), _VARIANCE)
+            'paramspec', arguments, keywords, {'name': _UNSET, **_VARIANCE}, 1)
         _param_init(self, name, None, covariant, contravariant, infer_variance, default, _caller_module())
         if bound is not None:
             object.__setattr__(self, '_bound', _type_check(bound, 'Bound must be a type.'))
@@ -1238,7 +1244,7 @@ class TypeAliasType:
 
     def __init__(self, *arguments, **keywords):
         name, value, type_params, qualname = _clinic(
-            'typealias', arguments, keywords, ('name', 'value'), {'type_params': (), 'qualname': None})
+            'typealias', arguments, keywords, {'name': _UNSET, 'value': _UNSET, 'type_params': (), 'qualname': None}, 2)
         if not _is(name, str):
             raise TypeError(f"typealias() argument 'name' must be str, not {_type_name(name)}")
         if not _is(type_params, tuple):
@@ -1642,7 +1648,9 @@ class _IOBase:
 class FileIO(_IOBase):
     __module__ = '_io'
 
-    def __init__(self, file, mode='r', closefd=True, opener=None):
+    def __init__(self, *arguments, **keywords):
+        file, mode, closefd, opener = _clinic(
+            'FileIO', arguments, keywords, {'file': _UNSET, 'mode': 'r', 'closefd': True, 'opener': None}, 4)
         if opener is not None:
             raise NotImplementedError("open() does not support opener")
         self._fd = -1
@@ -1738,8 +1746,9 @@ class FileIO(_IOBase):
 class _Buffered(_IOBase):
     __module__ = '_io'
 
-    def __init__(self, raw, buffer_size=8192):
-        self.raw = raw
+    def __init__(self, *arguments, **keywords):
+        name = next(cls.__name__ for cls in type(self).__mro__ if cls in (BufferedReader, BufferedWriter, BufferedRandom))
+        self.raw, buffer_size = _clinic(name, arguments, keywords, {'raw': _UNSET, 'buffer_size': 8192}, 2)
 
     name = property(lambda self: self.raw.name)
     mode = property(lambda self: self.raw.mode)
@@ -1850,7 +1859,10 @@ def _utf8_cut(data):
 class TextIOWrapper(_IOBase):
     __module__ = '_io'
 
-    def __init__(self, buffer, encoding=None, errors=None, newline=None, line_buffering=False, write_through=False):
+    def __init__(self, *arguments, **keywords):
+        buffer, encoding, errors, newline, line_buffering, write_through = _clinic(
+            'TextIOWrapper', arguments, keywords, {'buffer': _UNSET, 'encoding': None, 'errors': None, 'newline': None,
+                                                   'line_buffering': False, 'write_through': False}, 6)
         if newline not in (None, '', '\n', '\r', '\r\n'):
             raise ValueError(f"illegal newline value: {newline}")
         if encoding is None:

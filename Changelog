@@ -767,7 +767,7 @@ Unreleased (0.10.0):
 - `type.__new__()`'s namespace, `str()`'s encoding and errors, a `**` unpacking of a non-mapping, an unhashable key or element, and a `with` of a non-manager name the class by its fully qualified name
 - a generic alias has `__reduce__` and CPython's store and deletion errors; a union is not iterable; a type alias iterates to its `Unpack`
 - a built-in function reports a missing required argument before a keyword repeating a positional one
-- `TypeVar`, `TypeVarTuple`, `ParamSpec` and `TypeAliasType` report argument errors as CPython's `typevar()` and the others do
+- `TypeVar`, `TypeVarTuple`, `ParamSpec`, `TypeAliasType`, `ParamSpecArgs`, `ParamSpecKwargs` and the file classes report argument errors as CPython's constructors do; a generic alias iterator cannot be created
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
 
 2026-11-10 0.9.0:

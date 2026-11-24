@@ -51,3 +51,16 @@ def arity():
         except TypeError as e: out.append(str(e))
     return out
 assert_eq(arity(), ["open() missing required argument 'file' (pos 1)", "open() takes at most 8 arguments (9 given)"])
+
+# The classes of an opened file bind their arguments as built-ins with
+# keyword parameters too.
+f = open("spec_open_calls.txt")
+TextIO, Reader, Raw = type(f), type(f.buffer), type(f.buffer.raw)
+f.close()
+assert_eq([message(lambda: Raw()), message(lambda: Raw("f", "r", True, None, 5)), message(lambda: Raw("f", x=1)),
+           message(lambda: Reader(1, 2, 3)), message(lambda: Reader(raw=1, x=1)), message(lambda: TextIO()),
+           message(lambda: TextIO(buffer=1, encoding=2, foo=3))],
+          ["FileIO() missing required argument 'file' (pos 1)", "FileIO() takes at most 4 arguments (5 given)",
+           "FileIO() got an unexpected keyword argument 'x'", "BufferedReader() takes at most 2 arguments (3 given)",
+           "BufferedReader() got an unexpected keyword argument 'x'", "TextIOWrapper() missing required argument 'buffer' (pos 1)",
+           "TextIOWrapper() got an unexpected keyword argument 'foo'"])

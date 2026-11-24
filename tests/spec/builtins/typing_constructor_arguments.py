@@ -1,10 +1,11 @@
-# spec: PLS-315 29.2.1, 29.3, 29.4, 29.6
+# spec: PLS-315 29.2.1, 29.3, 29.4, 29.6, 29.9.1
 # description: TypeVar, TypeVarTuple, ParamSpec and TypeAliasType bind
 # their arguments as Argument Clinic does, naming typevar(),
 # typevartuple(), paramspec() and typealias(): too many positional
 # arguments, then one given by name and position, then a missing one,
 # then an unexpected keyword, with its suggestion; the at-most count first
-# when there is no variadic parameter.
+# when there is no variadic parameter. ParamSpecArgs and ParamSpecKwargs
+# bind origin the same way; a generic alias iterator cannot be created.
 from harness import *
 def f[T, *Ts, **P](): pass
 T, Ts, P = f.__type_params__
@@ -44,3 +45,13 @@ def values():
             TVT(name="Ts", default=int).__default__, repr(TVT("a", contravariant=1)), PS(name="P", bound=int).__bound__,
             TAT(name="Y", value=int, qualname="Q").__qualname__]
 assert_eq(values(), [int, (int, str), False, int, "-a", int, "Q"])
+PSA, PSK, GAI = type(P.args), type(P.kwargs), type(iter(list[int]))
+def others():
+    out = []
+    for c in (lambda: PSA(), lambda: PSA(1, 2), lambda: PSK(x=1), lambda: GAI(), lambda: GAI(list[int])):
+        try: c()
+        except TypeError as e: out.append(str(e))
+    return out
+assert_eq(others(), ["paramspecargs() missing required argument 'origin' (pos 1)", "paramspecargs() takes at most 1 argument (2 given)",
+                     "paramspeckwargs() missing required argument 'origin' (pos 1)"] + ["cannot create 'generic_alias_iterator' instances"] * 2)
+assert_eq((PSA(origin=P) == P.args, PSK(P).__origin__ is P), (True, True))

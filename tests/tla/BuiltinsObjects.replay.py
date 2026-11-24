@@ -113,6 +113,8 @@ SOURCES = {
     "builtin_missing_before_clash": "result = pow(2, base=2)",
     "typevartuple_total": "def f[*Ts](): pass\nresult = type(f.__type_params__[0])('a', 'b', x=1, y=2, z=3, u=4, v=5)",
     "typevartuple_suggest": "def f[*Ts](): pass\nresult = type(f.__type_params__[0])('a', dfault=1)",
+    "paramspecargs_missing": "def f[**P](): pass\nresult = type(f.__type_params__[0].args)()",
+    "ga_iterator_create": "result = type(iter(list[int]))(list[int])",
     "type_bad_dict_local": "def make():\n    class Local: pass\n    return Local()\nresult = type('T', (), make())",
     "type_bad_name": 'result = type(1, (), {})',
     "type_qualname_kw": "T = type('T', (), {'__qualname__': 'Q.T'})\nresult = T.__qualname__",
