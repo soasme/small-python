@@ -214,6 +214,10 @@ struct Node {
      * innermost rule that matched it has set the range. */
     const char *start, *end;
     int spanned;
+    /* An expression's summaries, once asked (expands, loads_name): for
+     * each mode, whether expands is known and its answer; and loads_name,
+     * plus one. Expressions are whole when they compile. */
+    unsigned char expands_known, expands_value, loads;
     NameOperand name;
     char *original;
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
@@ -16817,8 +16821,24 @@ static int arithmetic(Node *n) {
     if (n->kind == N_COMPARE) { for (Node *c = n->args; c; c = c->next) if (!arithmetic(c->a)) return 0; return arithmetic(n->a); }
     return 0;
 }
+static int expanding(Node *, int);
+/* Whether n's kind is an expression's, whose node is whole once it compiles. */
+static int expression_kind(int kind) {
+    return kind <= N_COND || kind == N_STAR || kind == N_COMPREHENSION || kind == N_MAPPING || kind == N_SET ||
+           kind == N_KEYWORD || kind == N_LAMBDA || kind == N_NAMED || kind == N_YIELD || kind == N_SLICE ||
+           kind == N_JOINED || kind == N_FORMAT || kind == N_ELLIPSIS || kind == N_AWAIT || kind == N_TEMPLATE ||
+           kind == N_INTERPOLATION;
+}
 static int expands(Node *n, int calls) {
     if (!n) return 0;
+    if (!expression_kind(n->kind)) return expanding(n, calls);
+    if (!(n->expands_known >> calls & 1)) {
+        n->expands_value |= (unsigned char)(expanding(n, calls) << calls);
+        n->expands_known |= (unsigned char)(1 << calls);
+    }
+    return n->expands_value >> calls & 1;
+}
+static int expanding(Node *n, int calls) {
     int loads = calls & LOADS;
     calls &= ~LOADS;
     /* A class body binds and loads names through its namespace, and exec()
@@ -17487,8 +17507,11 @@ static int unpacks_annotation(Node *n) {
 static int loads_name(Node *n) {
     if (!n || n->kind == N_LAMBDA || n->kind == N_COMPREHENSION) return 0;
     if (n->kind == N_NAME) return 1;
-    for (Node *a = n->args; a; a = a->next) if (loads_name(a)) return 1;
-    return loads_name(n->a) || loads_name(n->b) || loads_name(n->c);
+    if (n->loads) return n->loads - 1;
+    int loads = loads_name(n->a) || loads_name(n->b) || loads_name(n->c);
+    for (Node *a = n->args; a && !loads; a = a->next) loads = loads_name(a);
+    if (expression_kind(n->kind)) n->loads = (unsigned char)(loads + 1);
+    return loads;
 }
 /* Whether statement n, while calls can pause, loads a name through its
  * dictionary on the machine (name_load): an assignment's value or a
