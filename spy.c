@@ -23060,7 +23060,8 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     SPYValue *bases = builtin_value(c, given, SPY_TUPLE);
     if (!text) return errorf(c, "TypeError", "type.__new__() argument 1 must be str, not %s", type_name(name));
     if (!bases) return errorf(c, "TypeError", "type.__new__() argument 2 must be tuple, not %s", type_name(given));
-    if (!storage) return errorf(c, "TypeError", "type.__new__() argument 3 must be dict or frozendict, not %s", type_name(namespace));
+    char fq[256];
+    if (!storage) return errorf(c, "TypeError", "type.__new__() argument 3 must be dict or frozendict, not %s", type_fqname(namespace, fq, sizeof(fq)));
     /* Bases are taken as they are: a class statement resolves MRO entries. */
     for (size_t i = 0; !checked && i < bases->as.seq.len; i++) {
         SPYValue *entries = bases->as.seq.items[i]->type == SPY_CLASS ? NULL : optional_attribute(c, bases->as.seq.items[i], "__mro_entries__");
@@ -45185,15 +45186,16 @@ static SPYValue *decode_source(SPYContext *c, const char *source, size_t len, co
     spy_release(encoding);
     return text;
 }
-/* Argument Clinic's check that encoding and errors are str, naming the function. */
+/* Argument Clinic's check that encoding and errors are str, naming the
+ * function; str()'s own parsing names the fully qualified type. */
 static int codec_argument_types(SPYContext *c, const char *function, SPYValue *encoding, SPYValue *errors) {
-    if (encoding && !builtin_value(c, encoding, SPY_STRING)) {
-        errorf(c, "TypeError", "%s() argument 'encoding' must be str, not %s", function, type_name(encoding)); return -1;
-    }
-    if (errors && !builtin_value(c, errors, SPY_STRING)) {
-        errorf(c, "TypeError", "%s() argument 'errors' must be str, not %s", function, type_name(errors)); return -1;
-    }
-    return 0;
+    SPYValue *bad = encoding && !builtin_value(c, encoding, SPY_STRING) ? encoding :
+                    errors && !builtin_value(c, errors, SPY_STRING) ? errors : NULL;
+    if (!bad) return 0;
+    char fq[256];
+    errorf(c, "TypeError", "%s() argument '%s' must be str, not %s", function, bad == encoding ? "encoding" : "errors",
+           strcmp(function, "str") ? type_name(bad) : type_fqname(bad, fq, sizeof(fq)));
+    return -1;
 }
 static SPYValue *str_encode(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;

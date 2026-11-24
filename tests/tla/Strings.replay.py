@@ -111,6 +111,7 @@ SOURCES = {
     "str_decode_replace": "result = str(b'a\\xffb', 'utf-8', 'replace')",
     "str_encoding_nonbytes": "result = str('a', 'utf-8')",
     "str_encoding_int": "result = str(1, 'utf-8')",
+    "str_encoding_local": "def make():\n    class Local: pass\n    return Local()\nresult = str(b'', make())",
     "str_subclass_returns": "result = (type(str(Sub('a'))).__name__, type(Sub('a').upper()).__name__, type(Sub('a').strip()).__name__)",
     "index_char": "s = 'abc'\nresult = (s[0] == s[0:1], type(s[0]).__name__, s[-1], len(s[1]))",
     "immutable": "s = 'abc'\ns[0] = 'x'",

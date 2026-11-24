@@ -144,7 +144,7 @@ Cases == {"capitalize", "index_arguments", "index_keywords", "index_keyword_pair
           "center_bad_fill", "ljust_bad_fill", "center_index_width", "center_float_width",
           "pad_unicode_fill", "partition_bad", "str_no_args", "str_object", "str_bad_dunder",
           "str_bytes_repr", "str_decode", "str_decode_error", "str_decode_replace", "str_encoding_nonbytes",
-          "str_encoding_int", "str_subclass_returns", "index_char", "immutable", "concat_literals",
+          "str_encoding_int", "str_encoding_local", "str_subclass_returns", "index_char", "immutable", "concat_literals",
           "triple_quoted", "u_prefix", "ur_prefix", "code_points", "method_on_type", "method_wrong_self",
           "too_many_args", "keyword_rejected", "format_map"}
 Programs == [method : Search, s : Strs, t : Subs]
@@ -238,6 +238,7 @@ Case(c) ==
       [] c = "str_decode_replace" -> "'a\\ufffdb'"
       [] c = "str_encoding_nonbytes" -> "TypeError: decoding str is not supported"
       [] c = "str_encoding_int" -> "TypeError: decoding to str: need a bytes-like object, int found"
+      [] c = "str_encoding_local" -> "TypeError: str() argument 'encoding' must be str, not make.<locals>.Local"
       [] c = "str_subclass_returns" -> "('str', 'str', 'str')"
       [] c = "index_char" -> "(True, 'str', 'c', 1)"
       [] c = "immutable" -> "TypeError: 'str' object does not support item assignment"

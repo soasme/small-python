@@ -110,6 +110,7 @@ SOURCES = {
     "type_two_args": "result = type('T', ())",
     "type_bad_bases": "result = type('T', 1, {})",
     "type_bad_dict": "result = type('T', (), [])",
+    "type_bad_dict_local": "def make():\n    class Local: pass\n    return Local()\nresult = type('T', (), make())",
     "type_bad_name": 'result = type(1, (), {})',
     "type_qualname_kw": "T = type('T', (), {'__qualname__': 'Q.T'})\nresult = T.__qualname__",
     "isinstance_hook": "result = (isinstance('yes', Q), isinstance('no', Q), issubclass(int, Q), issubclass(str, Q))",

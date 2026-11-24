@@ -764,6 +764,7 @@ Unreleased (0.10.0):
 - `super.__get__` exists as a slot wrapper; a `super` subclass defining `__set__` is a data descriptor, so a metaclass's instance of it answers before `type`'s attribute
 - generic aliases, unions, `object.__reduce_ex__` and `open()` check an argument's type, never a `__class__` property
 - `TypeVar()`, `TypeVarTuple()`, `ParamSpec()` and `TypeAliasType()` take their caller's module as `__module__`, and name a non-str name's class as CPython does
+- `type.__new__()`'s namespace and `str()`'s encoding and errors name a wrong argument's class by its fully qualified name
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy
 
 2026-11-10 0.9.0:
