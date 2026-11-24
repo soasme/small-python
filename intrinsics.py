@@ -290,10 +290,31 @@ def _union(a, b):
 
 # types.GenericAlias: list[int], dict[str, T], tuple[int, ...].
 
-_GA_ATTRIBUTES = frozenset({
-    '__class__', '__bases__', '__origin__', '__args__', '__unpacked__', '__parameters__',
-    '__typing_unpacked_tuple_args__', '__mro_entries__', '__reduce_ex__', '__reduce__',
-    '__copy__', '__deepcopy__'})
+# Its own attributes, which dir() adds to the origin's, then those never
+# read from the origin; any other attribute is the origin's.
+_GA_EXCEPTIONS = frozenset({
+    '__class__', '__origin__', '__args__', '__unpacked__', '__parameters__',
+    '__typing_unpacked_tuple_args__', '__mro_entries__', '__reduce_ex__', '__reduce__'})
+_GA_ATTRIBUTES = _GA_EXCEPTIONS | {'__bases__', '__copy__', '__deepcopy__'}
+# The names a store or deletion finds on CPython's type, by their kind.
+_GA_MEMBERS = frozenset({'__origin__', '__args__', '__unpacked__'})
+_GA_GETSETS = frozenset({'__parameters__', '__typing_unpacked_tuple_args__'})
+# What a class statement adds to GenericAlias that CPython's type lacks.
+_GA_CLASS_STATEMENT = frozenset({'__dict__', '__firstlineno__', '__module__', '__static_attributes__', '__weakref__'})
+
+
+def _ga_store(self, name, value):
+    # PyObject_GenericSetAttr on a GenericAlias, deleting when value is _UNSET.
+    if name in _GA_MEMBERS:
+        raise AttributeError('readonly attribute')
+    if name in _GA_GETSETS:
+        raise AttributeError(f"attribute '{name}' of 'types.GenericAlias' objects is not writable")
+    if name == '__class__':
+        return object.__delattr__(self, name) if value is _UNSET else object.__setattr__(self, name, value)
+    if name not in _GA_CLASS_STATEMENT and any(name in vars(cls) for cls in (GenericAlias, object)):
+        raise AttributeError(f"'types.GenericAlias' object attribute '{name}' is read-only")
+    raise AttributeError(f"'types.GenericAlias' object has no attribute '{name}'"
+                         " and no __dict__ for setting new attributes")
 
 
 class generic_alias_iterator:
@@ -356,13 +377,15 @@ class GenericAlias:
         return getattr(object.__getattribute__(self, '__origin__'), name)
 
     def __setattr__(self, name, value):
-        if name in _GA_ATTRIBUTES:
-            raise AttributeError('readonly attribute')
-        raise AttributeError(f"'types.GenericAlias' object has no attribute '{name}'"
-                             " and no __dict__ for setting new attributes")
+        _ga_store(self, name, value)
 
     def __delattr__(self, name):
-        raise AttributeError('readonly attribute')
+        _ga_store(self, name, _UNSET)
+
+    def __reduce__(self):
+        if self.__unpacked__:
+            return next, (iter(GenericAlias(self.__origin__, self.__args__)),)
+        return type(self), (self.__origin__, self.__args__)
 
     def __repr__(self):
         args = self.__args__
@@ -416,7 +439,7 @@ class GenericAlias:
         return _union(other, self)
 
     def __dir__(self):
-        return sorted(set(dir(self.__origin__)) | _GA_ATTRIBUTES)
+        return sorted(set(dir(self.__origin__)) | _GA_EXCEPTIONS)
 
 
 # typing.Union: int | str, Union[int, str].
@@ -439,12 +462,14 @@ class Union:
     E.g. for int | str"""
     __module__ = 'typing'
     __init_subclass__ = _final('typing.Union')
+    # Its subscription is a mapping's, not a sequence's: it is not iterable.
+    __iter__ = None
 
     def __new__(cls, *args, **kwargs):
         raise TypeError("cannot create 'typing.Union' instances")
 
     def __class_getitem__(cls, args):
-        if not isinstance(args, tuple):
+        if not _is(args, tuple):
             args = (args,)
         if not args:
             raise TypeError("Cannot take a Union of no types.")
@@ -1254,6 +1279,9 @@ class TypeAliasType:
 
     def __repr__(self):
         return self.__qualname__
+
+    def __iter__(self):
+        return iter((Unpack[self],))
 
     def __getitem__(self, parameters):
         if not self._type_params:
