@@ -6520,11 +6520,13 @@ static Node *expression_inner(Parser *p, int min, int named) {
         left->b = node(p, N_RETURN);
         if (!left->b) return NULL;
         int async_function = p->async_function; p->async_function = 0; p->functions++;
+        /* Its body is its own program's. */
         Node *definition = p->definition; p->definition = left;
+        Program *emitting = p->emitting; p->emitting = NULL;
         left->b->a = plain_expression(p, 0);
-        p->definition = definition;
+        p->emitting = emitting; p->definition = definition;
         p->functions--; p->async_function = async_function;
-        if (!left->b->a) return NULL;
+        if (!left->b->a || !(left = finished(p, left))) return NULL;
         goto assignment_expression;
     } else if (at(p, '+') || at(p, '-') || at(p, '~') || keyword(p, "not")) {
         if (keyword(p, "not") && min > 3) return not_operand_error(p);
@@ -8283,10 +8285,12 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     Node *statement = rest(p, n);
     Node *value = !statement ? NULL : statement->kind == N_EXPR || statement->kind == N_RETURN ? statement->a :
                   statement->kind == N_ASSIGN && (statement->op == '=' || statement->a->kind == N_NAME) ? statement->b : NULL;
-    /* An augmented assignment's name is read first. */
-    if (value && statement->kind == N_ASSIGN && statement->op != '=' &&
-        (!(statement->a->flags & F_EMITTED) || statement->a->steps_end != value->steps_at)) value = NULL;
-    if (!value || !(value->flags & F_EMITTED) || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING))
+    /* Its steps are its value's, after an augmented name's, from the
+     * statement's start to the end. */
+    Node *first = value && statement->kind == N_ASSIGN && statement->op != '=' ? statement->a : value;
+    if (value && (!(first->flags & F_EMITTED) || !(value->flags & F_EMITTED) || first->steps_at != p->emitting_from.mark.at ||
+                  (first != value && first->steps_end != value->steps_at) || value->steps_end != program_len(program))) value = NULL;
+    if (!value || (p->ctx->optimize > 1 && statement->kind == N_EXPR && value->kind == N_STRING))
         emitted_drop(p);
     p->emitting = NULL; p->emitted_len = 0;
     return statement;
@@ -17461,6 +17465,11 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_COMPARE && !n->args->next) fixed[1] = n->args->a;
     else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n))) list = n->args;
     else if (n->kind == N_JOINED) { fixed[0] = NULL; list = n->args; }
+    else if (n->kind == N_LAMBDA) {
+        /* Each default is followed by a step of its own. */
+        for (Node *a = n->args; a; a = a->next) if (a->a) return n;
+        fixed[0] = NULL;
+    }
     /* A field's conversion and format() call are steps between its value and spec. */
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
     else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
