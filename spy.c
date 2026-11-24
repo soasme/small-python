@@ -27046,6 +27046,7 @@ static SPYValue *pattern_rest(SPYContext *c, Machine *m, SPYValue *keys, SPYValu
     spy_release(keys);
     return result;
 }
+static SPYValue *check_from(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t);
 /* BC_PATTERN: operation arg & 31 of a compiled pattern, the rest of arg
  * its operand, on the values atop m's stack (compile_pattern): the value
  * to push, c->stepped for none, or NULL for an error or a call left to
@@ -27112,6 +27113,13 @@ static NO_INLINE SPYValue *pattern_step(SPYContext *c, Machine *m, Frame *f, Ins
         /* A class of no metaclass has no hook, and its instance's __class__ needs no read. */
         int plain = v->type == SPY_CLASS && !v->as.map.meta && (subject->type != SPY_INSTANCE || subclass(subject->as.map.parent, v));
         if (!plain && checks_call_rest(c, m, B_ISINSTANCE, 2, top - 1, &result)) return result;
+        /* So is a Python one of the class's own, as of a tuple of it alone (check_from). */
+        if (!plain && value_class(c, subject) != v && item_special(c, v, "__instancecheck__")) {
+            SPYValue *alone = tuple_of(c, 1, &v);
+            result = alone ? check_from(c, m, 0, subject, alone, 0) : NULL;
+            spy_release(alone);
+            return result;
+        }
         int found = instance_check(c, top[-1], v, 0, 0);
         return found < 0 ? NULL : spy_bool(c, found);
     }

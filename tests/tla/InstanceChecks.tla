@@ -18,7 +18,8 @@
 (* __len__ returns 0, or raise ValueError, or with the hooks defined on C *)
 (* itself,                                                                 *)
 (* or with none, and class D(C); then calls isinstance(x, CLS) for x a C,  *)
-(* a D, or 1, or issubclass(X, CLS) for X C, D, or int, where CLS is C,    *)
+(* a D, or 1, or issubclass(X, CLS) for X C, D, or int, or matches x     *)
+(* against the class pattern CLS(), where CLS is C,                       *)
 (* (str, C), (C, int), ((str, (C,)),), 5, or C(). The outcome is the      *)
 (* result or the                                                           *)
 (* exception; a tuple's items are checked in order until one is true.     *)
@@ -29,7 +30,7 @@ EXTENDS Naturals, Sequences
 
 Hooks == {"true", "false", "truthy", "empty", "raise", "onclass", "none"}
 Subjects == {"C", "D", "int"}
-Programs == [check : {"isinstance", "issubclass"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "pair", "nested", "five", "instance"},
+Programs == [check : {"isinstance", "issubclass", "pattern"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "pair", "nested", "five", "instance"},
              via : {"function", "descriptor"}]
 
 VARIABLES program, outcome
@@ -50,7 +51,10 @@ Check(p) ==
 Pair(p) == IF Check(p) = "False" /\ p.subject = "int" THEN "True" ELSE Check(p)
 
 \* An instance's class's hooks check against it; a metaclass's are not its class's.
-Run(p) == CASE p.cls = "five" -> "TypeError"
+\* A class pattern C() checks as isinstance() does; it must name a class.
+Run(p) == CASE p.check = "pattern" /\ p.cls # "C" -> "TypeError"
+            [] p.check = "pattern" -> Check([p EXCEPT !.check = "isinstance"])
+            [] p.cls = "five" -> "TypeError"
             [] p.cls = "instance" -> IF p.hook = "onclass" THEN "True" ELSE "TypeError"
             [] p.cls = "pair" -> Pair(p)
             [] OTHER -> Check(p)
@@ -63,11 +67,14 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* Hooks defined on the class itself change nothing.
-ClassHooksIgnored == Done /\ program.hook = "onclass" /\ program.cls \in {"C", "tuple", "nested"} => outcome = Default(program)
+ClassHooksIgnored == Done /\ program.hook = "onclass" /\ program.cls \in {"C", "tuple", "nested"} /\ program.check # "pattern" => outcome = Default(program)
 
 \* A nested tuple checks as the flat one of its items.
-NestedFlat == Done /\ program.cls = "nested" => outcome = Run([program EXCEPT !.cls = "tuple"])
+NestedFlat == Done /\ program.cls = "nested" /\ program.check # "pattern" => outcome = Run([program EXCEPT !.cls = "tuple"])
 
 \* Every result is a bool or an exception.
+
+\* A class pattern of a class matches as isinstance() checks.
+PatternChecks == Done /\ program.check = "pattern" /\ program.cls = "C" => outcome = Run([program EXCEPT !.check = "isinstance"])
 Bools == Done => outcome \in {"True", "False", "ValueError", "TypeError"}
 =============================================================================

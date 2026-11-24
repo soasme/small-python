@@ -53,7 +53,12 @@ def outcome(p):
     D = type("D", (C,), {})
     cls = {"C": C, "tuple": (str, C), "pair": (C, int), "nested": ((str, (C,)),), "five": 5}[p["cls"]] if p["cls"] != "instance" else C()
     try:
-        if p["check"] == "isinstance":
+        if p["check"] == "pattern":
+            K = cls
+            match {"C": C, "D": D, "int": int}[p["subject"]]() if p["subject"] != "int" else 1:
+                case K(): result = True
+                case _: result = False
+        elif p["check"] == "isinstance":
             result = isinstance({"C": C, "D": D, "int": int}[p["subject"]]() if p["subject"] != "int" else 1, cls)
         else:
             result = issubclass({"C": C, "D": D, "int": int}[p["subject"]], cls)
