@@ -81,3 +81,18 @@ native_it = reversed(NativeFails())
 assert_eq([list(reversed(NativeStops())), next(native_it)], [[], "b"])
 with assert_raises(KeyError):
     next(native_it)
+# A native __getitem__'s IndexError ends the iteration, at once when the
+# length passes the items; any other error propagates.
+class ShortNative:
+    __getitem__ = [1, 2].__getitem__
+    def __len__(self): return 5
+class StopsNative:
+    __getitem__ = {4: "e", 3: "d"}.__getitem__
+    def __len__(self): return 5
+def native_items():
+    out = [list(reversed(ShortNative()))]
+    try: out.append(list(reversed(StopsNative())))
+    except KeyError as e: out.append(("KeyError", e.args))
+    r = reversed(ShortNative())
+    return out + [[next(r, "end"), next(r, "end")]]
+assert_eq(native_items(), [[], ("KeyError", (2,)), ["end", "end"]])
