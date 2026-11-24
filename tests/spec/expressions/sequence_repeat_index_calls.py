@@ -71,3 +71,17 @@ class RepeatHuge:
 assert_eq(["ab" * RepeatCount(), RepeatCount() * [1], (1,) * RepeatCount()], ["abab", [1, 1], (1, 1)])
 with assert_raises(OverflowError, message="cannot fit 'RepeatHuge' into an index-sized integer"):
     "ab" * RepeatHuge()
+# A native __index__, bound elsewhere, gives the count; past an
+# index-sized integer the OverflowError names the object's type.
+class NativeTwo:
+    __index__ = (2).__index__
+class NativeHuge:
+    __index__ = (2**70).__index__
+def native_repeats():
+    t, h = NativeTwo(), NativeHuge()
+    out = [[1] * t, t * "ab", (1,) * t, b"x" * t, bytearray(b"y") * t]
+    for f in (lambda: [1] * h, lambda: "a" * h):
+        try: f()
+        except OverflowError as e: out.append(str(e))
+    return out
+assert_eq(native_repeats(), [[1, 1], "abab", (1, 1), b"xx", bytearray(b"yy")] + ["cannot fit 'NativeHuge' into an index-sized integer"] * 2)
