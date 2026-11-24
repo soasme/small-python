@@ -53,3 +53,13 @@ def module_missing(name): return "got " + name
 python_module.__getattr__ = module_missing
 assert_eq([native_module.x, native_module.y, "{0.z}".format(python_module), "{0.x}".format(native_module), getattr(python_module, "w")],
           [1, None, "got z", "1", "got w"])
+# A native __getattr__, a bound dict method, is called with the name; its
+# KeyError propagates as raised.
+def native_hook():
+    m = type(harness)("native_hooked")
+    m.__getattr__ = {"x": 5}.__getitem__
+    out = [m.x, getattr(m, "x")]
+    try: m.y
+    except KeyError as e: out.append(("KeyError", e.args))
+    return out
+assert_eq(native_hook(), [5, 5, ("KeyError", ("y",))])
