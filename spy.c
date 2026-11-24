@@ -11615,6 +11615,13 @@ static int repeats(SPYValue *);
 static int number_rank(SPYValue *);
 static int number_kept(SPYContext *, const Operator *, int, SPYValue *, SPYValue *);
 /* Binary op on a and b once their special methods declined it. */
+/* A bytes or bytearray concatenation's TypeError, raised for the builtin
+ * value of x, names x's and y's own types. */
+static void concat_named(SPYContext *c, SPYValue *x, SPYValue *y) {
+    if (!error_is(c, "TypeError") || strncmp(c->error_message, "can't concat", 12)) return;
+    spy_clear_error(c);
+    errorf(c, "TypeError", "can't concat %.*s to %.*s", shown(type_name(y), 100), type_name(y), shown(type_name(x), 100), type_name(x));
+}
 static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (op == O_DIVMOD) return divmod_declined(c, a, b);
     if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
@@ -11655,10 +11662,7 @@ static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b
         spy_clear_error(c);
         return errorf(c, "TypeError", "can only concatenate %s (not \"%s\") to %s", type_name(x), type_name(b), type_name(x));
     }
-    if (!strncmp(c->error_message, "can't concat", 12)) {
-        spy_clear_error(c);
-        return errorf(c, "TypeError", "can't concat %.*s to %.*s", shown(type_name(b), 100), type_name(b), shown(type_name(a), 100), type_name(a));
-    }
+    concat_named(c, a, b);
     return result;
 }
 /* Binary op on a and b, values of builtin types for it. */
@@ -22555,7 +22559,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         SPYValue *other = rhs->type == SPY_INSTANCE && rhs->as.map.base && kind != SPY_DICT && !(kind == SPY_BYTEARRAY && own_buffer(rhs)) ?
                           rhs->as.map.base : rhs;
         result = inplace(c, op, base, other);
-        if (!result) return NULL;
+        if (!result) { concat_named(c, old, rhs); return NULL; }
         spy_release(result); return spy_retain(old);
     }
     /* Mutable sets, dicts, and bytearrays update in place, by a buffer a
@@ -51446,6 +51450,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         int extends = type == SPY_DICT || type == SPY_LIST || type == SPY_BYTEARRAY;
         if (!extends && !slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
         SPYValue *result = inplace(c, op, value, type == SPY_DICT || (type == SPY_BYTEARRAY && own_buffer(argv[0])) ? argv[0] : other);
+        if (!result) concat_named(c, self, argv[0]);
         if (!extends) result = slot_result(c, result);
         if (result && result == value && value != self) { spy_release(result); result = spy_retain(self); }
         return result;
