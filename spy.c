@@ -260,8 +260,10 @@ struct SPYValue {
         struct { SPYValue *unit, *env, *attributes, *metadata; Scope *def; Parameter *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
         /* host: 1 made by spy_define or spy_native (host_call); 2 an
-         * engine native whose C code may leave a call to its step (step_native). */
-        struct { SPYNative call; void *data; int method, static_method, host; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+         * engine native whose C code may leave a call to its step (step_native).
+         * slot: a slot wrapper's (slot_call) index in slots, plus one, times
+         * two, plus one when it is a wrapper descriptor (slot_wrapper). */
+        struct { SPYNative call; void *data; int method, static_method, host, slot; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
                  SPYValue *module; /* An assigned __module__, or NULL for the default. */
                  void (*release)(void *); /* Host cleanup for data, run when the value is freed. */ } native;
@@ -28326,10 +28328,14 @@ static int class_converts(SPYContext *c, SPYValue *cls) {
     c->entering_kind = kind;
     return init ? machine_function(c, init) : !c->error_type[0] && new_method(c, cls);
 }
-/* Whether filter's function, a Python class or callable instance, is a
- * call step of its own (filter_call); not while tracing (map_convert). */
+/* Whether filter's function is a call step of its own (filter_call): a
+ * Python class, a callable instance, a bound Python method, a builtin that
+ * may go on on the machine (map_steps), or a slot wrapper bound to an
+ * instance (slot_steps); not while tracing (map_convert). */
+static int slot_steps(SPYValue *, size_t, SPYValue *const *);
 static int filter_steps(SPYContext *c, SPYValue *function) {
-    return ((function->type == SPY_CLASS && !builtin_class(c, function)) || function->type == SPY_INSTANCE || metaclassed(function)) &&
+    return ((function->type == SPY_CLASS && !builtin_class(c, function)) || function->type == SPY_INSTANCE || metaclassed(function) ||
+            bound_function(c, function) || map_steps(function) || (function->type == SPY_METHOD && slot_steps(function, 0, NULL))) &&
            !c->settings[SET_TRACE] && !c->settings[SET_PROFILE];
 }
 static int next_calls(SPYContext *c, SPYValue *v) {
@@ -31234,12 +31240,14 @@ static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
             callee->as.native.kwcall == open_builtin);
 }
 /* Whether a map's builtin callee may go on on the machine, its call a call
- * step's (map_convert): machine_builtin's, sorted(), min(), max() or a
- * native method that may leave a call to its step (step_native). */
+ * step's (map_convert): machine_builtin's, sorted(), min(), max(), a
+ * native method that may leave a call to its step (step_native) or a
+ * descriptor's, whose accessor may be its call (native_entered_rest). */
+static SPYValue *descriptor_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int map_steps(SPYValue *callee) {
     if (callee->type == SPY_METHOD) callee = callee->as.method.function;
     return machine_builtin(callee) || is_builtin(callee, B_SORTED) || is_builtin(callee, B_MIN) || is_builtin(callee, B_MAX) ||
-           (callee->type == SPY_NATIVE && callee->as.native.host == 2);
+           (callee->type == SPY_NATIVE && (callee->as.native.host == 2 || callee->as.native.kwcall == descriptor_method));
 }
 static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
@@ -39966,11 +39974,11 @@ static NO_INLINE int init_convert(SPYContext *c, Machine *m, SPYValue *cls, SPYV
 /* Whether callee is a slot wrapper, unbound or bound, given an instance
  * among its arguments items, whose method a call step may call on the
  * machine (stack_call). */
-static NO_INLINE int slot_steps(SPYValue *callee, SPYValue *items) {
+static NO_INLINE int slot_steps(SPYValue *callee, size_t n, SPYValue *const *items) {
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
     if (function->type != SPY_NATIVE || function->as.native.kwcall != slot_call) return 0;
-    for (size_t i = 0; i < items->as.seq.len; i++)
-        if (items->as.seq.items[i]->type == SPY_INSTANCE || metaclassed(items->as.seq.items[i])) return 1;
+    for (size_t i = 0; i < n; i++)
+        if (items[i]->type == SPY_INSTANCE || metaclassed(items[i])) return 1;
     return callee != function && (callee->as.method.self->type == SPY_INSTANCE || metaclassed(callee->as.method.self));
 }
 static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
@@ -39992,7 +40000,7 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
          (callee->type == SPY_CLASS && (described_new(c, callee, 0) || built_call(c, callee, 0, items->as.seq.len, items->as.seq.items))) ||
          index_arguments(c, callee, -1, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 2 && is_builtin(callee, B_ROUND) && is_number(items->as.seq.items[0]) && index_function(c, items->as.seq.items[1])) ||
-         (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) || slot_steps(callee, items) ||
+         (items->as.seq.len && generator_slot(c, callee, items->as.seq.items[0])) || slot_steps(callee, items->as.seq.len, items->as.seq.items) ||
          (items->as.seq.len == 1 && repr_job(c, is_builtin(callee, B_ASCII) ? c->field_calls[0] : callee, items->as.seq.items[0])))) {
         /* A builtin whose call may go on on the machine, an argument's
          * __index__ among them (index_arguments), or a staticmethod, is a call step of
@@ -51376,13 +51384,13 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     SPYValue *owner = fn->as.native.owner;
     const char *owner_name = name_text(owner, "__name__")->as.string.data;
     int type = builtin_type_id(c, owner);
-    int index = slot_index(name);
+    int index = (fn->as.native.slot >> 1) - 1, wrapper = fn->as.native.slot & 1;
     if (!argc) return misapplied(c, owner_name, name, 0, argv);
     SPYValue *self = argv[0], *value = type == 63 ? self : builtin_value(c, self, type);
     /* A bound builtin method is a builtin_function_or_method too. */
     if (!value && type == SPY_NATIVE && self->type == SPY_BOUND_METHOD) value = self;
     if (value && type == SPY_ITERATOR && value_class(c, value) != owner) value = NULL;
-    if (!value && native_kind(fn) == NATIVE_WRAPPER_DESCRIPTOR)
+    if (!value && wrapper)
         return errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, owner_name, type_name(self));
     if (!value) return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", name, owner_name, type_name(self));
     argc--; argv++;
@@ -51412,7 +51420,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (argc < 1 || argc > 2) return errorf(c, "TypeError", "expected 1 or 2 arguments, got %zu", argc);
     /* A special method that is an ordinary method, such as dict.__contains__,
      * checks its arguments as methods do (7.4). */
-    } else if (native_kind(fn) == NATIVE_WRAPPER_DESCRIPTOR ? wrapper_arguments(c, name, argc, keywords, expected, kind == SLOT_OTHER && op == SLOT_SETITEM) :
+    } else if (wrapper ? wrapper_arguments(c, name, argc, keywords, expected, kind == SLOT_OTHER && op == SLOT_SETITEM) :
                positional_only(c, owner_name, name, expected, expected, argc, keywords)) return NULL;
     SPYValue *other = argc ? operand_value(c, argv[0]) : NULL;
     if ((op == '*' || op == T_MULEQ) && (kind == SLOT_BINARY || kind == SLOT_RBINARY || kind == SLOT_INPLACE) &&
@@ -51634,6 +51642,7 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
         descriptor->as.native.data = descriptor;
         descriptor->as.native.method = 1;
         descriptor->as.native.owner = spy_retain(cls);
+        descriptor->as.native.slot = (index + 1) * 2 + slot_wrapper(name_text(cls, "__name__")->as.string.data, name);
         /* A lookup, comparison or object.__str__'s repr may leave a call to
          * the step (comparek, view_containsk, view_comparek, map_lookupk), as
          * __call__ does. */

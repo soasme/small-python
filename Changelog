@@ -778,7 +778,8 @@ Unreleased (0.10.0):
 - a complex number's operators decline a non-number: `'b' * 1j` and `1j + 'b'` raise the sequence's or the operator's TypeError
 - A generic alias substitutes parameters inside nested list arguments and matches its parameters by identity
 - A generic alias's repr raises IndexError when an item's repr shrinks a list argument
-- filter() of a Python class or callable instance calls it and its result's `__bool__` without nesting on the C stack
+- filter() of a Python class, callable instance or bound method, and map() of a property's `__get__`, `__set__` or `__delete__`, run without nesting on the C stack
+- Calling a builtin slot wrapper such as `s.__contains__` is up to 2.4x faster
 - `bool` has its own `__and__`, `__or__`, `__xor__`, their reflections and `__invert__`; `int.__and__(True, True)` is `1`
 - error messages name a builtin class method such as `dict.__dict__['fromkeys']` a `classmethod_descriptor`
 - a bytearray subclass's `+=` and `__iadd__` name the subclass in "can't concat" errors

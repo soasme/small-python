@@ -254,6 +254,18 @@ SOURCES = {
                      "class C:\n    def __call__(s, n):\n        log.append('c%d' % n); return T(n)\n"
                      "f = filter(C(), [2, 9, 11])\n"
                      "result = (list(filter(T, [1, 2, 3])), [x for x in filter(C(), [3])], (next(f), next(f)), log)"),
+    "filter_method": ("log = []\nclass P:\n    def __init__(s, v): s.v = v\n"
+                      "    @property\n    def x(s):\n        log.append('g%d' % s.v); return s.v\n"
+                      "    def odd(s, n):\n        log.append('o%d' % n); return n % 2\n"
+                      "class D(dict):\n    def __missing__(s, k):\n        log.append('m%d' % k); return k > 1\n"
+                      "result = (list(filter(P(0).odd, [1, 2, 3])), list(filter(D().__getitem__, [1, 2])),"
+                      " [p.v for p in filter(P.x.__get__, [P(1), P(0)])], log)"),
+    "map_property": ("log = []\nclass P:\n    def __init__(s, v): s.v = v\n"
+                     "    @property\n    def x(s):\n        log.append('g%d' % s.v); return s.v\n"
+                     "    @x.setter\n    def x(s, v): log.append('s%d' % v)\n"
+                     "    @x.deleter\n    def x(s): log.append('d%d' % s.v)\n"
+                     "result = (list(map(P.x.__get__, [P(4)])), list(map(P.x.__set__, [P(0)], [5])),"
+                     " list(map(P.x.__delete__, [P(0)])), log)"),
     "filter_result_truth": "log = []\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n"
                            "        log.append(s.v); return s.v\ndef gen(*a):\n    for x in a: yield x\n"
                            "def obj(x):\n    for _ in (): pass\n    return T(x > 1)\n"
