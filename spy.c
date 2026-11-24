@@ -4664,6 +4664,10 @@ typedef struct {
     int awaits; /* The awaits and async for clauses parsed (comprehension). */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     int line_open; /* A body's line continues after a statement and its ';' (line_statements). */
+    /* The first number whose value the parse could not make, such as one
+     * of too many digits: as a parser action's error ends CPython's parse,
+     * its error is the parse's. */
+    char *literal_error; size_t literal_line;
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
@@ -5986,13 +5990,16 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         }
         /* invalid_replacement_field: what follows the expression, if any. */
         if (!result && error_is(p->ctx, "SyntaxError") && !strcmp(p->ctx->error_message, "invalid syntax")) {
-            size_t valid = probe_expression(&inner, 1, 11);
             spy_clear_error(p->ctx);
+            size_t valid = probe_expression(&inner, 1, 11);
             errorf(p->ctx, "SyntaxError", valid ? "%c-string: expecting '=', or '!', or ':', or '}'" : "%c-string: expecting a valid expression after '{'",
                    flags & L_TEMPLATE ? 't' : 'f');
             error_token(&inner, &inner.tokens[valid ? valid : 1]);
         }
         if (!result && failed && inner.far < inner.len && inner.tokens[inner.far].len) *failed = inner.tokens[inner.far].start;
+    }
+    if (inner.literal_error && !p->literal_error) {
+        p->literal_error = inner.literal_error; p->literal_line = inner.literal_line; inner.literal_error = NULL;
     }
     if (!result) {
         /* The error's position, in the outer source. */
@@ -6003,7 +6010,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         p->error_start = inner.error_start; p->error_end = inner.error_end;
         p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
     }
-    mem_free(inner.tokens); mem_free(text.data);
+    mem_free(inner.tokens); mem_free(inner.literal_error); mem_free(text.data);
     return result;
 }
 /* Append the source text [s, end) without its comments. */
@@ -6147,6 +6154,7 @@ static Node *yield_expression(Parser *p) {
     }
     return span(p, n, start);
 }
+static SPYValue *literal_value(SPYContext *, Node *);
 static Node *atom(Parser *p) {
     Node *n;
     if (at(p, T_STRING)) return string_node(p);
@@ -6157,7 +6165,15 @@ static Node *atom(Parser *p) {
         Token *t = peek(p);
         n->name.text = copy_text(p->ctx, t->start, t->len);
         p->pos++;
-        return n->name.text ? n : NULL;
+        /* A number's value is made as it is parsed, at the parse's line. */
+        SPYContext *c = p->ctx;
+        size_t line = c->line;
+        if (n->name.text && literal_value(c, n)) c->line = line;
+        else if (n->name.text && error_is(c, "SyntaxError") && !p->literal_error) {
+            const char *message = c->error_text ? c->error_text : c->error_message;
+            p->literal_error = copy_text(c, message, strlen(message)); p->literal_line = t->line;
+        }
+        return n->constant ? n : NULL;
     }
     if (keyword(p, "None") || keyword(p, "True") || keyword(p, "False")) {
         n = node(p, keyword(p, "None") ? N_NONE : N_BOOL);
@@ -6820,7 +6836,6 @@ static Node *assignment_error(Parser *p, size_t start) {
         int bare = keyword(p, "yield");
         Node *n = bare ? yield_expression(p) : expression_list(p, 0);
         if (!n) return NULL;
-        if (bare && !bad && at(p, '=')) { bad = n; bare_yield = 1; }
         if (!first) {
             first = n;
             /* star_named_expression ',' star_named_expressions: only the element before '=' can match. */
@@ -6841,6 +6856,8 @@ static Node *assignment_error(Parser *p, size_t start) {
             }
         }
         if (!at(p, '=')) break;
+        /* invalid_assignment's yield_expr '=' ends the parse there. */
+        if (bare && !bad) { bad = n; bare_yield = 1; break; }
         if (!bad && !star_target(n)) bad = n;
         p->pos++;
     }
@@ -7645,7 +7662,7 @@ static Node *lazy_function(Parser *p, const char *name, Node *value) {
     format->name.text = copy_text(p->ctx, ".format", 7);
     one->name.text = copy_text(p->ctx, "1", 1);
     entry->name.text = copy_text(p->ctx, name, strlen(name));
-    if (!label->name.text || !format->name.text || !one->name.text || !entry->name.text) return NULL;
+    if (!label->name.text || !format->name.text || !one->name.text || !entry->name.text || !literal_value(p->ctx, one)) return NULL;
     format->op = P_POSONLY; format->a = one;
     fn->a = label; fn->args = format; fn->b = body;
     body->op = 1; body->args = entry; entry->a = value;
@@ -8320,7 +8337,6 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
     return body;
 }
 static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
-static SPYValue *literal_value(SPYContext *, Node *);
 static Node *operator_right(Node *);
 static SPYValue *unary(SPYContext *, int, SPYValue *);
 /* Optimization level 2 keeps no docstrings: each becomes pass, so __doc__ is None. */
@@ -8330,17 +8346,12 @@ static void drop_docstring(Node *body) {
 static int compile_generator(SPYContext *, Node *);
 static int compile_comprehension(SPYContext *, Node *);
 /* The nodes parsed since start, newest first, but those an inner
- * statement's call finished: a number's value, then a negated
- * number as a constant, as CPython folds it, an inner negation before its
+ * statement's call finished: a negated number as a constant, as CPython folds it, an inner negation before its
  * outer; then the instructions of the bodies among them, inner ones
  * first. */
 static int nodes_finish(Parser *p, Node *start) {
     SPYContext *c = p->ctx;
     Node *newest = p->unit->as.unit.nodes;
-    for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
-        if (n->flags & F_FINISHED) continue;
-        if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) literal_value(c, n);
-    }
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated)
         if (!(n->flags & F_FINISHED) && n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
@@ -9209,6 +9220,9 @@ static void invalid_expression_error(Parser *p) {
             p->pos = saved;
         }
     }
+    /* A statement fails after its keyword, at the 'if'. */
+    if (f && token_is(&p->tokens[f], "if") && (token_is(&p->tokens[f - 1], "pass") || token_is(&p->tokens[f - 1], "break") ||
+                                               token_is(&p->tokens[f - 1], "continue"))) f--;
     if (!message && p->tokens[f].kind == T_NAME && p->tokens[f + 1].kind == T_NAME &&
         p->tokens[f + 1].len == 2 && !memcmp(p->tokens[f + 1].start, "if", 2)) {
         Token *t = &p->tokens[f];
@@ -9421,6 +9435,12 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             errorf(c, "SyntaxError", "'%c' was never closed", *p.unclosed);
             p.error_end_zero = 1;
         }
+        /* A literal's error is at its line's start, at offset 0. */
+        if (p.literal_error && c->error_type[0] && strcmp(c->error_type, "MemoryError")) {
+            spy_clear_error(c);
+            errorf(c, "SyntaxError", "%s", p.literal_error);
+            c->line = p.literal_line; p.error_start = p.error_end = p.tokens[0].start; p.error_end_zero = 5;
+        }
         parsing = c->error_type[0] != 0;
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         unit->as.unit.string_source = c->string_source != 0;
@@ -9457,13 +9477,13 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
-    mem_free(p.tokens);
+    mem_free(p.tokens); mem_free(p.literal_error);
     if (c->error_type[0]) {
         put_text(c->filename, sizeof(c->filename), filename); c->filename_from = c->quiet_unit = NULL;
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
             !strcmp(c->error_type, "TabError");
         /* The compiler's errors read the line from the file, which a string has not. */
-        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | (p.error_end_zero ? 2 : 0) | (p.error_end_zero == 2 || p.error_end_zero == 3 ? 8 : 0) | (p.error_end_zero >= 3 ? 16 : 0) | (c->eval_input ? 32 : 0) |
+        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | (p.error_end_zero ? 2 : 0) | (p.error_end_zero == 2 || p.error_end_zero == 3 ? 8 : 0) | (p.error_end_zero >= 3 ? 16 : 0) | (p.error_end_zero == 5 ? 64 : 0) | (c->eval_input ? 32 : 0) |
                                               (!parsing && c->string_source ? 4 : 0));
         if (incomplete) *incomplete = syntax_error && parsing && (p.incomplete || at_end);
         if (syntax_error && parsing && c->exception) {
@@ -19704,7 +19724,8 @@ static SPYValue *exception_create(SPYContext *c, SPYValue *cls, size_t argc, SPY
 static size_t utf8_valid(const unsigned char *, size_t, const char **, size_t *);
 static void attach_syntax_error(SPYContext *c, const char *filename, const char *source,
                                 const char *position, const char *finish, int trim_line) {
-    int end_zero = trim_line & 2, textless = trim_line & 4, end_minus = trim_line & 8, zero_based = trim_line & 16, unterminated = trim_line & 32;
+    int end_zero = trim_line & 2, textless = trim_line & 4, end_minus = trim_line & 8, zero_based = trim_line & 16, unterminated = trim_line & 32,
+        line_begun = trim_line & 64;
     trim_line &= 1;
     char type[sizeof(c->error_type)], message[sizeof(c->error_message)];
     memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
@@ -19717,6 +19738,7 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
     const char *end = strchr(start, '\n');
     end = end ? end + 1 : start + strlen(start);
     if (trim_line && end > start && end[-1] == '\n') end--;
+    if (line_begun) position = finish = start;
     size_t offset = 1, end_offset = 1, end_line = line;
     if (position) {
         /* Columns count characters; without the line's text, the compiler's count UTF-8 bytes. */

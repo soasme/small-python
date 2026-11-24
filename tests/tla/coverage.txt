@@ -208,7 +208,7 @@ Contents | - navigation
 14 Simple Statements > 14.1 Expression statements | CompileModes
 14 Simple Statements > 14.2 Assignment statements | = sections
 14 Simple Statements > 14.2 Assignment statements > 14.2.1 Runtime Semantics: Evaluation | SimpleStatements, Evaluation
-14 Simple Statements > 14.2 Assignment statements > 14.2.2 AssignTarget ( *target*, *v* ) | Unpacking, Subscripts, Attributes
+14 Simple Statements > 14.2 Assignment statements > 14.2.2 AssignTarget ( *target*, *v* ) | Unpacking, Subscripts, Attributes, Grammar
 14 Simple Statements > 14.3 Augmented assignment statements | SimpleStatements, BinaryArith
 14 Simple Statements > 14.4 Annotated assignment statements | Annotations
 14 Simple Statements > 14.5 The `assert` statement | SimpleStatements
@@ -394,7 +394,7 @@ Contents | - navigation
 22 Numbers > 22.1 The `int` type > 22.1.5 Methods | NumberMethods
 22 Numbers > 22.1 The `int` type > 22.1.6 Rounding | BuiltinsNumeric
 22 Numbers > 22.1 The `int` type > 22.1.7 IntToFloat ( *x* ) | BinaryArith
-22 Numbers > 22.1 The `int` type > 22.1.8 The integer string conversion limit | IntStrLimit
+22 Numbers > 22.1 The `int` type > 22.1.8 The integer string conversion limit | IntStrLimit, Grammar
 22 Numbers > 22.1 The `int` type > 22.1.9 Hashing of numbers | NumericHash
 22 Numbers > 22.2 The `bool` type | Truth, NumericTypes
 22 Numbers > 22.3 The `float` type | = sections

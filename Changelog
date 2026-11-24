@@ -807,6 +807,8 @@ Unreleased (0.10.0):
 - `repr()`, `str()` and `format()` of a FrameLocalsProxy, and its `==` with a dict, call Python methods without nesting on the C stack
 - A FrameLocalsProxy compares equal to a dict subclass's instance holding its locals
 - A dict subclass's instance whose own `__eq__` declines compares by the other dict's values first; dict subclasses compare without nesting on the C stack
+- an integer literal over the int string limit is reported as the parser reads it, ahead of later syntax errors, at offset 0, as CPython does
+- an assignment to a yield expression is reported before what follows its `=`; `pass if a else b` and the like report a statement given where an expression is expected
 - A bound method of an `anext()` awaitable, such as its `throw` taken as a value, calls its source's Python `__await__` without nesting on the C stack
 - a collection that finds again an asynchronous generator whose close it ignored, its frame held in the cycle, no longer frees values still in use
 - a collection the engine starts while a program runs calls the `__del__` methods and closes the generators and coroutines it reclaims without nesting on the C stack

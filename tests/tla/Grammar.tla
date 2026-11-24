@@ -42,7 +42,8 @@ Snippets == {"soft_keywords_as_names", "match_soft", "return_star", "assign_star
              "keyword_as_identifier", "dotted_import_as", "relative_import_star", "import_star_function",
              "pass_semicolons", "double_semicolon", "backslash_continuation", "implicit_continuation",
              "decorated_class", "async_lambda", "star_expression_for", "assert_message", "raise_from",
-             "default_after_star", "kwargs_then_param", "indentation_too_deep", "fstrings_too_deep"}
+             "default_after_star", "kwargs_then_param", "indentation_too_deep", "fstrings_too_deep",
+             "literal_limit_then_error", "yield_target_then_error", "statement_before_if"}
 Programs == [kind : Kinds, form : Forms] \cup [snippet : Snippets]
 
 VARIABLES program, outcome
@@ -148,6 +149,13 @@ Snippet(s) ==
       [] s = "raise_from" -> "'compiled'"
       [] s = "default_after_star" -> "'compiled'"
       [] s = "kwargs_then_param" -> "SyntaxError: parameters cannot follow var-keyword parameter"
+      \* 22.1.8: a literal over the int string limit ends the parse as it is read,
+      \* ahead of the unclosed bracket after it.
+      [] s = "literal_limit_then_error" -> "SyntaxError: Exceeds the limit (4300 digits) for integer string conversion: value has 5001 digits; use sys.set_int_max_str_digits() to increase the limit - Consider hexadecimal for huge integer literals to avoid decimal conversion limits."
+      \* 14.2.2: an assignment to a yield ends the parse at its '='.
+      [] s = "yield_target_then_error" -> "SyntaxError: assignment to yield expression not possible"
+      \* 18.2.2: a statement where a conditional expression's value is expected.
+      [] s = "statement_before_if" -> "SyntaxError: expected expression before 'if', but statement is given"
 
 Run(p) == IF "kind" \in DOMAIN p THEN Suite(p.kind, p.form) ELSE Snippet(p.snippet)
 
