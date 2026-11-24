@@ -19,15 +19,19 @@
 (* (builtin), or by async for over c, await c, for over c, if c or the     *)
 (* display {c} (statement). __aiter__ returns c, whose class has an        *)
 (* __anext__ that ends the iteration; __await__ and __iter__ return an     *)
-(* empty iterator, __bool__ False, __hash__ 0. The outcome is "ok", or c's *)
-(* truth, or the exception and its message.                                *)
+(* empty iterator, __bool__ False, __hash__ 0. With on class, C is a       *)
+(* metaclass and the statement reaches __aiter__ or __await__ on a class   *)
+(* of it. The outcome is "ok", or c's truth, or the exception and its      *)
+(* message.                                                                *)
 (***************************************************************************)
 EXTENDS Sequences
 
 Methods == {"__aiter__", "__anext__", "__await__", "__iter__", "__bool__", "__hash__"}
 \* await has no builtin.
-Programs == {p \in [method : Methods, where : {"class", "read", "failing", "raising"}, via : {"builtin", "statement"}] :
-                ~(p.method = "__await__" /\ p.via = "builtin")}
+Programs == {p \in [method : Methods, where : {"class", "read", "failing", "raising"}, via : {"builtin", "statement"},
+                    on : {"instance", "class"}] :
+                ~(p.method = "__await__" /\ p.via = "builtin") /\
+                (p.on = "class" => p.method \in {"__aiter__", "__await__"} /\ p.via = "statement")}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -52,6 +56,8 @@ Spec == Init /\ [][Execute]_vars
 -----------------------------------------------------------------------------
 Done == outcome # Pending
 
+\* A class reaches its metaclass's method as an instance reaches its class's.
+ClassesAlike == Done /\ program.on = "class" => outcome = Run([program EXCEPT !.on = "instance"])
 \* The read's own AttributeError never escapes; another exception does.
 Replaced == Done /\ program.where \in {"failing", "raising"} =>
     outcome \in {"ValueError: read"} \cup {Absent(m, v) : m \in Methods, v \in {"builtin", "statement"}}

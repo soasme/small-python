@@ -5,7 +5,7 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
-def make(method, where):
+def make(method, where, on="instance"):
     async def anext(self):
         raise StopAsyncIteration
 
@@ -22,6 +22,8 @@ def make(method, where):
         raise (AttributeError if where == "failing" else ValueError)("read")
     if where != "class":
         namespace[method] = property(read)
+    if on == "class":
+        return type("C", (type,), namespace)("K", (), {})
     return type("C", (), namespace)()
 
 
@@ -43,7 +45,7 @@ async def statement(method, c):
 
 
 def outcome(p):
-    c = make(p["method"], p["where"])
+    c = make(p["method"], p["where"], p["on"])
     try:
         if p["via"] == "builtin":
             if p["method"] == "__bool__":

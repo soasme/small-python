@@ -37392,15 +37392,16 @@ static SPYValue *iter_absence(SPYContext *c, SPYValue *v, const char *name) {
     return parts_tuple(c, 1, (SPYValue *[]){spy_string(c, text, strlen(text))});
 }
 /* The Python method name, __iter__, __aiter__ or __await__, of the
- * instance atop m's stack that step ins, a loop, an async for, a yield
- * from or an await, calls on it, owned, with its env, the instance left
+ * instance atop m's stack, or for an async for or an await of a class's
+ * metaclass, that step ins, a loop, an async for, a yield from or an
+ * await, calls on it, owned, with its env, the instance left
  * there, or a descriptor's Python read, its result then called as the
  * step's (special_env); or c->unbound when it is a generator function,
  * called at once, whose generator the step takes (iter_returned); else
  * NULL. */
 static NO_INLINE SPYValue *iter_call(SPYContext *c, Machine *m, Instruction *ins, const char *name, SPYValue **env) {
     SPYValue *v = m->stack[m->len - 1];
-    SPYValue *function = builtin_base(c, v, name, NULL) ? NULL : class_lookup(v->as.map.parent, name);
+    SPYValue *function = builtin_base(c, v, name, NULL) ? NULL : class_lookup(value_class(c, v), name);
     if (!function) return NULL;
     if (!machine_function(c, function) && !generator_function(c, function)) {
         if (!descriptor_getter(c, function)) return NULL;
@@ -41099,8 +41100,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_COMPREHENSION)
             /* A mappingproxy iterates its mapping (mappingproxy_getiter). */
             if (UNLIKELY(proxies_instance(m->stack[m->len - 1])) && !ins->arg) proxy_mapping(&m->stack[m->len - 1]);
-            /* An instance's Python __iter__ or __aiter__ is a call (iter_call). */
-            if (m->stack[m->len - 1]->type == SPY_INSTANCE) {
+            /* An instance's Python __iter__ or __aiter__ is a call (iter_call),
+             * as is a class's metaclass's __aiter__. */
+            if (m->stack[m->len - 1]->type == SPY_INSTANCE || (ins->arg && metaclassed(m->stack[m->len - 1]))) {
                 callee_env = NULL;
                 if ((value = iter_call(c, m, ins, ins->arg ? "__aiter__" : "__iter__", &callee_env))) {
                     if (value == c->unbound) { pc--; break; }
@@ -41187,7 +41189,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             m->awaiting = AWAIT_YIELD; m->drop = ins->arg >> 1;
             m->pc = pc; YIELD(value);
         CASE(BC_DELEGATE)
-            if (ins->arg <= DELEGATE_AWAITABLE && !m->delegate && m->stack[m->len - 1]->type == SPY_INSTANCE) {
+            if (ins->arg <= DELEGATE_AWAITABLE && !m->delegate &&
+                (m->stack[m->len - 1]->type == SPY_INSTANCE || (ins->arg && metaclassed(m->stack[m->len - 1])))) {
                 callee_env = NULL;
                 if ((value = iter_call(c, m, ins, ins->arg ? "__await__" : "__iter__", &callee_env)) && value != c->unbound) {
                     special = CALL_ITER; goto enter_special;
@@ -41245,7 +41248,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_LOOP) {
             /* A mappingproxy iterates its mapping (mappingproxy_getiter). */
             if (ins->arg == 1) proxy_mapping(&m->stack[m->len - 1]);
-            if ((ins->arg == 1 || ins->arg == 2) && m->stack[m->len - 1]->type == SPY_INSTANCE) {
+            if ((ins->arg == 1 || ins->arg == 2) &&
+                (m->stack[m->len - 1]->type == SPY_INSTANCE || (ins->arg == 2 && metaclassed(m->stack[m->len - 1])))) {
                 callee_env = NULL;
                 if ((value = iter_call(c, m, ins, ins->arg == 2 ? "__aiter__" : "__iter__", &callee_env))) {
                     if (value == c->unbound) break;
