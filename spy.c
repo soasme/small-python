@@ -4718,6 +4718,10 @@ static size_t branch_parsed(SPYContext *, Program *, Node *, Node *);
 static size_t loop_open(SPYContext *, Program *, Node *);
 static size_t compile_branch(SPYContext *, Program *, Node *, Node *);
 static Node *cond_end(Parser *, Node *, size_t, EmitMark);
+/* A slice's steps while it is parsed (slice_lay). */
+typedef struct { size_t start, at; int done; } SliceSteps;
+static int slice_lay(Parser *, Node *, int, SliceSteps *);
+static Node *slice_end(Parser *, Node *, size_t);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -5492,14 +5496,21 @@ static Node *subscript(Parser *p) {
     if (first && first->kind == N_NAMED && !first->op) return syntax(p, "invalid syntax");
     Node *n = node(p, N_SLICE);
     if (!n) return NULL;
+    /* Emitted as it is parsed, an absent bound is a step once a bound
+     * after it is read (slice_lay). */
+    size_t start = first && (first->flags & F_EMITTED) ? first->steps_at : p->emitting ? program_len(p->emitting) : 0;
+    SliceSteps steps = {start, start, 0};
+    int stream = p->emitting && (!first || (first->flags & F_EMITTED));
     n->a = first; p->pos++;
     if (!at(p, ':') && !at(p, ',') && !at(p, ']')) {
+        if (stream && !(stream = slice_lay(p, n, 1, &steps)) && p->ctx->error_type[0]) return NULL;
         if (!(n->b = plain_expression(p, 0))) return NULL;
     }
     if (take(p, ':') && !at(p, ',') && !at(p, ']')) {
+        if (stream && !(stream = slice_lay(p, n, 2, &steps)) && p->ctx->error_type[0]) return NULL;
         if (!(n->c = plain_expression(p, 0))) return NULL;
     }
-    return finished(p, n);
+    return stream && slice_lay(p, n, 3, &steps) ? slice_end(p, n, steps.start) : n;
 }
 static int parameter_list(Parser *p, Node *n, int close) {
     Node **tail = &n->args;
@@ -17620,6 +17631,24 @@ static Node *cond_end(Parser *p, Node *n, size_t jump, EmitMark value) {
     patch(program, jump, program->len);
     return parsed_steps(p, n, value.steps.mark.at);
 }
+/* Slice n as it is parsed: its bounds before upto laid out from at on
+ * as compile_expr compiles them, an absent one's step emitted then, a
+ * present one's emitted there before. Whether all were. */
+static int slice_lay(Parser *p, Node *n, int upto, SliceSteps *steps) {
+    Node *bounds[3] = {n->a, n->b, n->c};
+    for (; steps->done < upto; steps->done++) {
+        Node *bound = bounds[steps->done];
+        if (!bound) {
+            if (steps->at != p->emitting->len || emit(p->ctx, p->emitting, BC_NONE, NULL, 0) == SIZE_MAX) return 0;
+            steps->at++;
+        } else if (!(bound->flags & F_EMITTED) || bound->steps_at != steps->at) return 0;
+        else steps->at = bound->steps_end;
+    }
+    return steps->at == p->emitting->len;
+}
+static Node *slice_end(Parser *p, Node *n, size_t start) {
+    return emit(p->ctx, p->emitting, BC_SLICE, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, start);
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -17650,8 +17679,6 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
     else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
     else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) fixed[0] = NULL;
-    /* An absent bound is a step of its own, after those present (compile_expr). */
-    else if (n->kind == N_SLICE && (n->a || !n->b) && (n->b || !n->c)) { fixed[1] = n->b; fixed[2] = n->c; }
     else if (n->kind != N_UNARY && n->kind != N_ATTR) return n;
     Node *first = fixed[0] ? fixed[0] : list ? (list->kind == N_KEYWORD ? list->a : list) : NULL;
     if (!emitted_operands(program, fixed, list)) return n;
