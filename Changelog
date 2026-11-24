@@ -771,7 +771,7 @@ Unreleased (0.10.0):
 - a top-level generic function's `__annotate__` has the qualified name `__annotate__`
 - a decorated function's `co_firstlineno`, its 'call' trace event and an unstarted generator's or coroutine's frame are at its first decorator's line
 - a starred parameter annotation's unpacking error is reported at the `def` line
-- a class's `__bases__` is the very tuple given to `type()` or assigned
+- a class's `__bases__` is the very tuple given to `type()` or assigned, a tuple subclass's instance too; `issubclass()` takes one as an object's `__bases__`
 - `super.__new__()` makes a super of no class that `__init__` binds; a super object finds `super`'s own attributes after its MRO's
 - a subclass of `reversed` has `reversed`'s `__length_hint__`, which `list()` asks
 - `map(bytes, ...)` of an exporter whose `__release_buffer__` cannot take the view reports it as unraisable and gives the copy

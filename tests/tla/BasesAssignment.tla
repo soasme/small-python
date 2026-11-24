@@ -8,9 +8,10 @@
 (*     class C(A, metaclass=M): pass   # M.mro logs the class, raises      *)
 (*     class D(C): pass                # LookupError for the failing one,  *)
 (*     class E(D): pass                # else returns type.mro(cls)        *)
-(*     <store> C.__bases__ = (<target>,)                                   *)
+(*     <store> C.__bases__ = <container>((<target>,))                      *)
 (*                                                                         *)
-(* stored by an assignment, a for target or setattr(): C's MRO and then    *)
+(* stored by an assignment, a for target or setattr(), the container       *)
+(* tuple or a tuple subclass T: C's MRO and then                           *)
 (* each subclass's are recomputed, oldest first, each mro() called once;   *)
 (* when one raises, every MRO and C's bases are restored and the           *)
 (* LookupError propagates. The outcome is the exception or "ok", C's       *)
@@ -20,7 +21,8 @@
 EXTENDS Naturals, Sequences
 
 Order == <<"C", "D", "E">>
-Programs == [store : {"assign", "for", "setattr"}, fail : {"none", "C", "D", "E"}, target : {"A", "B"}]
+Programs == [store : {"assign", "for", "setattr"}, fail : {"none", "C", "D", "E"}, target : {"A", "B"},
+             container : {"tuple", "T"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

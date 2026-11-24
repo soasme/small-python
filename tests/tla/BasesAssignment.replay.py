@@ -25,7 +25,8 @@ def outcome(p):
     for cls in (C, D, E):
         cls.armed = True
     del log[:]
-    bases, old = ({"A": A, "B": B}[p["target"]],), C.__bases__
+    class T(tuple): pass
+    bases, old = {"tuple": tuple, "T": T}[p["container"]](({"A": A, "B": B}[p["target"]],)), C.__bases__
     kind = "ok"
     try:
         if p["store"] == "assign":

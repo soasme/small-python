@@ -1,4 +1,4 @@
-# spec: PLS-315 20.2.3, 10.4.2
+# spec: PLS-315 20.2.3, 10.4.2, 19.3.21
 # description: Assigning __bases__ changes attribute lookup and its compatibility checks.
 from harness import *
 
@@ -314,3 +314,24 @@ try:
 except TypeError:
     pass
 assert_eq(KC.__bases__ is kept, True)
+# A tuple subclass's instance is kept as __bases__ as well, and answers the
+# abstract protocol as a tuple (10.4.2, 19.3.21).
+class KT(tuple): pass
+given = KT((KA,))
+KD = type("KD", given, {})
+assert_eq((KD.__bases__ is given, KD.__mro__, KD.__base__, issubclass(KD, KA)), (True, (KD, KA, object), KA, True))
+assert_eq(type("KE", KT(()), {}).__bases__, (object,))
+given = KT((KB,))
+KD.__bases__ = given
+assert_eq((KD.__bases__ is given, KD.__mro__), (True, (KD, KB, object)))
+for bad, message in ((KT(()), "can only assign non-empty tuple to KD.__bases__, not ()"),
+                     (KT((1,)), "KD.__bases__ must be tuple of classes, not 'int'"),
+                     (KT((KD,)), "a __bases__ item causes an inheritance cycle")):
+    try:
+        KD.__bases__ = bad
+    except TypeError as e:
+        assert_eq(str(e), message)
+    assert_eq(KD.__bases__ is given, True)
+class AbstractBases:
+    __bases__ = KT((KA,))
+assert_eq((issubclass(AbstractBases(), KA), isinstance(KA(), KT)), (True, False))

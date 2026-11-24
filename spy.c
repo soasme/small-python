@@ -633,6 +633,7 @@ static int bases_named(SPYValue *object, SPYValue *name) {
     return object->type == SPY_CLASS && name->type == SPY_STRING && !strcmp(name->as.string.data, "__bases__");
 }
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
+static SPYValue *bases_of(SPYValue *);
 static SPYValue *contained_base(SPYContext *, SPYValue *);
 static int special_dispatch(SPYValue *);
 static int index_defined(SPYContext *, SPYValue *);
@@ -13823,7 +13824,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             if (!strcmp(name, "__base__")) {
                 /* The base that decides the instance layout: one with a builtin
                  * layout, else one with __slots__, else the first. */
-                SPYValue *bases = v->as.map.bases, *best = NULL;
+                SPYValue *bases = v->as.map.bases ? bases_of(v) : NULL, *best = NULL;
                 int rank = -1;
                 for (size_t i = 0; !v->as.map.native && bases && bases->type == SPY_TUPLE && i < bases->as.seq.len; i++) {
                     SPYValue *base = bases->as.seq.items[i];
@@ -22642,8 +22643,12 @@ static SPYValue *default_mro(SPYContext *c, SPYValue *cls, SPYValue *bases) {
 fail:
     spy_release(order); mem_free(positions); return NULL;
 }
-/* The class keeps the tuple of its bases itself, as __bases__. */
-static int set_class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {
+/* The tuple of cls's bases: of the tuple subclass's instance it keeps. */
+static SPYValue *bases_of(SPYValue *cls) { return storage(cls->as.map.bases); }
+/* The class keeps the tuple of its bases itself, as __bases__, a tuple
+ * subclass's instance too. */
+static int set_class_bases(SPYContext *c, SPYValue *cls, SPYValue *given) {
+    SPYValue *bases = storage(given);
     for (size_t i = 0; i < bases->as.seq.len; i++) {
         SPYValue *base = bases->as.seq.items[i];
         if (base->type != SPY_CLASS) { spy_error(c, "TypeError", "bases must be types"); return -1; }
@@ -22652,15 +22657,15 @@ static int set_class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {
             return -1;
         }
     }
-    spy_retain(bases);
-    spy_release(cls->as.map.bases); cls->as.map.bases = bases;
+    spy_retain(given);
+    spy_release(cls->as.map.bases); cls->as.map.bases = given;
     spy_release(cls->as.map.parent);
     cls->as.map.parent = bases->as.seq.len ? spy_retain(bases->as.seq.items[0]) : NULL;
     return 0;
 }
 static int class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {
     if (set_class_bases(c, cls, bases)) return -1;
-    SPYValue *order = default_mro(c, cls, cls->as.map.bases);
+    SPYValue *order = default_mro(c, cls, bases_of(cls));
     if (!order) return -1;
     cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = order;
     return 0;
@@ -22825,8 +22830,8 @@ static void mro_clear(SPYValue *cls) {
  * its error. */
 static int mro_install(SPYContext *c, SPYValue *cls, SPYValue *result) {
     int layout = -1;
-    for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
-        int kind = class_layout(c, cls->as.map.bases->as.seq.items[i]);
+    for (size_t i = 0; i < bases_of(cls)->as.seq.len; i++) {
+        int kind = class_layout(c, bases_of(cls)->as.seq.items[i]);
         if (kind >= 0) layout = kind;
     }
     SPYValue *order = result ? value_new(c, SPY_TUPLE) : NULL;
@@ -22846,7 +22851,7 @@ static int mro_install(SPYContext *c, SPYValue *cls, SPYValue *result) {
     return mro_set(c, cls, order);
 }
 static int initialize_mro(SPYContext *c, SPYValue *cls) {
-    if (!cls->as.map.meta) return mro_set(c, cls, default_mro(c, cls, cls->as.map.bases));
+    if (!cls->as.map.meta) return mro_set(c, cls, default_mro(c, cls, bases_of(cls)));
     mro_clear(cls);
     /* Looked up on the metaclass, as a special method is. */
     SPYValue *method = special_method(c, cls, "mro");
@@ -22866,8 +22871,8 @@ static SPYValue *mro_function(SPYContext *c, SPYValue *cls) {
  * a reentrant mro() has yet to rebuild cannot hide a cycle. */
 static int reaches_through_bases(SPYValue *base, SPYValue *cls) {
     if (base == cls) return 1;
-    for (size_t i = 0; base->as.map.bases && i < base->as.map.bases->as.seq.len; i++)
-        if (reaches_through_bases(base->as.map.bases->as.seq.items[i], cls)) return 1;
+    for (size_t i = 0; base->as.map.bases && i < bases_of(base)->as.seq.len; i++)
+        if (reaches_through_bases(bases_of(base)->as.seq.items[i], cls)) return 1;
     return 0;
 }
 /* Put the generic __dict__ or __weakref__ getset in cls: one of each name
@@ -22905,10 +22910,11 @@ static SPYValue *bases_begin(SPYContext *c, SPYValue *cls, SPYValue *value) {
     const char *name = name_text(cls, "__name__")->as.string.data;
     if (builtin_class(c, cls)) { errorf(c, "TypeError", "cannot set '__bases__' attribute of immutable type '%s'", name); return NULL; }
     if (!value) { errorf(c, "TypeError", "cannot delete '__bases__' attribute of type '%s'", name); return NULL; }
-    if (value->type != SPY_TUPLE) { errorf(c, "TypeError", "can only assign tuple to %s.__bases__, not %s", name, type_name(value)); return NULL; }
-    if (!value->as.seq.len) { errorf(c, "TypeError", "can only assign non-empty tuple to %s.__bases__, not ()", name); return NULL; }
-    for (size_t i = 0; i < value->as.seq.len; i++) {
-        SPYValue *base = value->as.seq.items[i], *mro = base->type == SPY_CLASS ? base->as.map.mro : NULL;
+    SPYValue *bases = builtin_value(c, value, SPY_TUPLE);
+    if (!bases) { errorf(c, "TypeError", "can only assign tuple to %s.__bases__, not %s", name, type_name(value)); return NULL; }
+    if (!bases->as.seq.len) { errorf(c, "TypeError", "can only assign non-empty tuple to %s.__bases__, not ()", name); return NULL; }
+    for (size_t i = 0; i < bases->as.seq.len; i++) {
+        SPYValue *base = bases->as.seq.items[i], *mro = base->type == SPY_CLASS ? base->as.map.mro : NULL;
         if (base->type != SPY_CLASS)
             { errorf(c, "TypeError", "%s.__bases__ must be tuple of classes, not '%s'", name, type_name(base)); return NULL; }
         if (!acceptable_base(c, base)) { errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base)); return NULL; }
@@ -22917,7 +22923,7 @@ static SPYValue *bases_begin(SPYContext *c, SPYValue *cls, SPYValue *value) {
         if (cycle) { spy_error(c, "TypeError", "a __bases__ item causes an inheritance cycle"); return NULL; }
     }
     SPYValue *slotted, *new_slotted;
-    int layout = class_layout(c, cls), slots = bases_slots(c, cls->as.map.bases, &slotted);
+    int layout = class_layout(c, cls), slots = bases_slots(c, bases_of(cls), &slotted);
     int own = (cls->as.map.flags & CLASS_OWN_DICT ? 1 : 0) | (cls->as.map.flags & CLASS_OWN_WEAKREF ? 2 : 0); /* cls's own slots */
     SPYValue *old_bases = spy_retain(cls->as.map.bases), *old_mro = spy_retain(cls->as.map.mro);
     if (set_class_bases(c, cls, value)) { spy_release(old_bases); spy_release(old_mro); return NULL; }
@@ -22929,15 +22935,15 @@ static SPYValue *bases_begin(SPYContext *c, SPYValue *cls, SPYValue *value) {
     }
     spy_release(zero);
     int kind = -1;
-    for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
-        int k = class_layout(c, cls->as.map.bases->as.seq.items[i]);
+    for (size_t i = 0; i < bases_of(cls)->as.seq.len; i++) {
+        int k = class_layout(c, bases_of(cls)->as.seq.items[i]);
         if (k >= 0) kind = k;
     }
-    if (kind != layout || (bases_slots(c, cls->as.map.bases, &new_slotted) | own) != (slots | own) ||
+    if (kind != layout || (bases_slots(c, bases_of(cls), &new_slotted) | own) != (slots | own) ||
         (slotted != new_slotted && (!slotted || !new_slotted || !same_slot_layout(slotted, new_slotted)))) {
         errorf(c, "TypeError", "__bases__ assignment: '%s' object layout differs from '%s'",
-               name_text(cls->as.map.bases->as.seq.items[0], "__name__")->as.string.data,
-               name_text(old_bases->as.seq.items[0], "__name__")->as.string.data);
+               name_text(bases_of(cls)->as.seq.items[0], "__name__")->as.string.data,
+               name_text(storage(old_bases)->as.seq.items[0], "__name__")->as.string.data);
         spy_release(state); state = NULL;
     }
     if (!state) {
@@ -23015,8 +23021,8 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     if (!names || (slots && slots->type == SPY_STRING && sequence_append(c, names, slots))) { spy_release(names); return -1; }
     SPYValue *list = spy_list(c);
     int dict = !slots, weakref = !slots, inherited = 0, weakrefs = 0, status = list ? 0 : -1;
-    for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
-        SPYValue *base = cls->as.map.bases->as.seq.items[i];
+    for (size_t i = 0; i < bases_of(cls)->as.seq.len; i++) {
+        SPYValue *base = bases_of(cls)->as.seq.items[i];
         inherited |= class_has_dict(c, base);
         weakrefs |= class_has_weakref(c, base);
     }
@@ -23132,6 +23138,7 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     SPYValue *module = name_local(namespace, "__module__");
     if (!module) module = name_local(module_env(c, c->eval_env ? c->eval_env : c->globals), "__name__");
     SPYValue *cls = new_user_class(c, text->as.string.data, bases, module ? module : c->none);
+    if (cls && given != bases && bases->as.seq.len && set_class_bases(c, cls, given)) { spy_release(cls); return NULL; }
     if (!cls) return NULL;
     /* A str subclass name is kept as the class's name and default qualified name. */
     if (text != name && (name_set(c, cls, "__name__", name) || name_set(c, cls, "__qualname__", name))) { spy_release(cls); return NULL; }
@@ -31416,7 +31423,7 @@ static SPYValue *abstract_go(SPYContext *c, Machine *m, SPYValue *state, SPYValu
                 if (!error_is(c, "AttributeError")) { result = -1; break; }
                 spy_clear_error(c);
             }
-            SPYValue *bases = read && read->type == SPY_TUPLE ? read : NULL;
+            SPYValue *bases = read ? builtin_value(c, read, SPY_TUPLE) : NULL;
             size_t depth = (size_t)items[AS_DEPTH]->as.integer_data.small;
             if ((stage == ABSTRACT_DERIVED || stage == ABSTRACT_TARGET) && !bases) {
                 spy_error(c, "TypeError", stage == ABSTRACT_DERIVED ? "issubclass() arg 1 must be a class" :
@@ -42220,8 +42227,11 @@ static SPYValue *type_round(SPYContext *c, size_t argc, SPYValue *const *argv, v
 static SPYValue *abstract_bases(SPYContext *c, SPYValue *cls) {
     SPYValue *bases = attribute(c, cls, "__bases__");
     if (!bases && error_is(c, "AttributeError")) spy_clear_error(c);
-    if (bases && bases->type != SPY_TUPLE) { spy_release(bases); return NULL; }
-    return bases;
+    /* A tuple subclass's instance answers by its tuple. */
+    SPYValue *items = bases ? builtin_value(c, bases, SPY_TUPLE) : NULL;
+    if (items) spy_retain(items);
+    spy_release(bases);
+    return items;
 }
 static int abstract_issubclass(SPYContext *c, SPYValue *derived, SPYValue *cls) {
     SPYValue *bases = NULL;
@@ -48486,8 +48496,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *list = value_new(c, SPY_LIST);
         for (SPYValue *v = c->values; list && v; v = v->next) {
             if (v->type != SPY_CLASS || !v->as.map.bases || v == argv[0]) continue;
-            for (size_t i = 0; i < v->as.map.bases->as.seq.len; i++)
-                if (v->as.map.bases->as.seq.items[i] == argv[0]) {
+            for (size_t i = 0; i < bases_of(v)->as.seq.len; i++)
+                if (bases_of(v)->as.seq.items[i] == argv[0]) {
                     if (sequence_append(c, list, v)) { spy_release(list); return NULL; }
                     break;
                 }
@@ -48500,7 +48510,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     case B_TYPE_MRO: {
         if (argc != 1 || argv[0]->type != SPY_CLASS) return spy_error(c, "TypeError", "mro requires a type");
-        SPYValue *list = default_mro(c, argv[0], argv[0]->as.map.bases);
+        SPYValue *list = default_mro(c, argv[0], bases_of(argv[0]));
         if (list) list->type = SPY_LIST;
         return list;
     }
