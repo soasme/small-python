@@ -6170,6 +6170,7 @@ static Node *yield_expression(Parser *p) {
 static SPYValue *literal_value(SPYContext *, Node *);
 static Node *atom_node(Parser *);
 static Node *emit_parsed(Parser *, Node *, size_t);
+static Node *finished(Parser *, Node *);
 static void compile_expr(SPYContext *, Program *, Node *);
 /* An atom; a literal's value is made as it is parsed, and while its
  * statement emits (expression_statement), a leaf is compiled now. */
@@ -6181,6 +6182,7 @@ static Node *atom(Parser *p) {
         if (!literal_value(c, n)) return NULL;
         c->line = line;
     }
+    if (n && (n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET)) return finished(p, n);
     if (!n || !p->emitting || (n->kind > N_BOOL && n->kind != N_ELLIPSIS) || (n->flags & F_EMITTED)) return n;
     return emit_parsed(p, n, program_len(p->emitting));
 }
@@ -6711,7 +6713,7 @@ static Node *expression_items(Parser *p, int min, int named) {
         *tail = item; tail = &item->next;
         if (!take(p, ',')) break;
     }
-    return span(p, tuple, start);
+    return finished(p, span(p, tuple, start));
 }
 static Node *expression_list(Parser *p, int min) { return expression_items(p, min, 0); }
 static int target(Parser *p, Node *n) {
@@ -17433,31 +17435,45 @@ static Node *emit_parsed(Parser *p, Node *n, size_t at) {
  * it. While its statement emits, n compiles now when its operands did,
  * one after another up to the program's end; a chained comparison, a
  * boolean operator and other expressions compile with their statement. */
+static int emitted_operands(Program *, Node *, Node *, Node *);
 static Node *finished(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     if (n && n->kind == N_UNARY && n->op == '-' && !n->constant && n->a->constant && (n->a->kind <= N_IMAG || n->a->kind == N_UNARY) &&
         !(n->constant = unary(c, '-', n->a->constant))) return NULL;
     if (!n || !p->emitting || c->error_type[0] || (n->flags & F_EMITTED)) return n;
     Program *program = p->emitting;
-    /* A call's are its callee and at most 8 arguments' values (plain_call). */
-    Node *operands[9] = {n->a};
-    size_t count = 1;
-    if (n->kind == N_INDEX || (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR)) operands[count++] = n->b;
-    else if (n->kind == N_COMPARE && !n->args->next) operands[count++] = n->args->a;
-    else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n)))
-        for (Node *a = n->args; a; a = a->next) operands[count++] = a->kind == N_KEYWORD ? a->a : a;
+    Node *one = n->a, *two = NULL, *list = NULL;
+    if (n->kind == N_INDEX || (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR)) two = n->b;
+    else if (n->kind == N_COMPARE && !n->args->next) two = n->args->a;
+    else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n))) list = n->args;
+    else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { one = NULL; list = n->args; }
+    else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) one = NULL;
     else if (n->kind != N_UNARY && n->kind != N_ATTR) return n;
-    for (size_t i = 0; i < count; i++) {
-        size_t next = i + 1 < count ? operands[i + 1]->steps_at : program->len;
-        if (!(operands[i]->flags & F_EMITTED) || operands[i]->steps_end != next) return n;
-    }
+    Node *first = one ? one : list ? (list->kind == N_KEYWORD ? list->a : list) : NULL;
+    if (!emitted_operands(program, one, two, list)) return n;
     if (n->constant) {
         /* Its operand's value, a step, becomes its own. */
         Instruction *load = &program->items[n->a->steps_at];
         spy_release(program->values[program->values_len - 1]);
         program->values[program->values_len - 1] = load->constant = spy_retain(n->constant);
     }
-    return emit_parsed(p, n, n->a->steps_at);
+    return emit_parsed(p, n, first ? first->steps_at : program->len);
+}
+/* Whether operands one and two, then those of list (a keyword's value
+ * for a keyword), were emitted one after another up to p's end. */
+static int emitted_operands(Program *p, Node *one, Node *two, Node *list) {
+    Node *last = NULL, *fixed[2] = {one, two};
+    for (int i = 0; i < 2; i++) {
+        if (!fixed[i]) continue;
+        if (!(fixed[i]->flags & F_EMITTED) || (last && last->steps_end != fixed[i]->steps_at)) return 0;
+        last = fixed[i];
+    }
+    for (Node *a = list; a; a = a->next) {
+        Node *value = a->kind == N_KEYWORD ? a->a : a;
+        if (!(value->flags & F_EMITTED) || (last && last->steps_end != value->steps_at)) return 0;
+        last = value;
+    }
+    return !last || last->steps_end == p->len;
 }
 static void compile_target(SPYContext *, Program *, Node *);
 /* Whether attribute or item target n of literals or names is stored at
