@@ -88,6 +88,8 @@ cases = [
  lambda: aw(ListAwait()).send(None),
  lambda: aw(ListAwait()).send(3),
  lambda: (lambda a: [a.send(None) for _ in range(1)])(aw(GenAwait(9))),
+ lambda: (lambda t: t(ValueError))(aw(PlainAwait()).throw),
+ lambda: (lambda f: f())(aw(PlainAwait()).close),
 ]
 EXPECTED = [
     (1, ['await']),
@@ -108,6 +110,8 @@ EXPECTED = [
     (('AttributeError', "'list_iterator' object has no attribute 'send'", None), []),
     (('AttributeError', "'list_iterator' object has no attribute 'send'", None), []),
     ([9], ['await']),
+    (('StopIteration', 'dflt', 'dflt'), ['await', ('throw', 1)]),
+    ('c', ['await', 'close']),
 ]
 assert_eq(len(cases), len(EXPECTED))
 for i, (f, expected) in enumerate(zip(cases, EXPECTED)):

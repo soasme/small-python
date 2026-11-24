@@ -33270,8 +33270,8 @@ again:
         getter = class_described(c, m, callee, 0, argc, argv, NULL, unchanged, NULL);
     result = id >= 0 || getter || c->error_type[0] || c->k_fn ? getter : class_maker(c, callee, argc, argv) ? class_make(c, m, callee, argc, argv, NULL, 0) :
              init ? plain_construct(c, callee, init, argc, argv, NULL) :
-             /* next() of an anext() awaitable runs as the step (anext_steps). */
-             argc == 1 && UNLIKELY(anext_steps(argv[0], M_NEXT)) && is_builtin(callee, B_NEXT) ?
+             /* next() of an anext() awaitable, or its bound method, runs as the step (anext_steps). */
+             (argc == 1 && UNLIKELY(anext_steps(argv[0], M_NEXT)) && is_builtin(callee, B_NEXT)) || UNLIKELY(anext_steps(callee, -1)) ?
              step_native(c, m, callee, -1, NULL, argc, argv, NULL) : step_call(c, m, callee, -1, NULL, argc, argv);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) { consume_traced(c, m, id, consumer, -1, NULL, generator, start, traceback); spy_release(consumer); if (traceback != c->unbound) spy_release(traceback); }
