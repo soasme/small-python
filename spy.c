@@ -6155,7 +6155,19 @@ static Node *yield_expression(Parser *p) {
     return span(p, n, start);
 }
 static SPYValue *literal_value(SPYContext *, Node *);
+static Node *atom_node(Parser *);
+/* An atom; a literal's value is made as it is parsed. */
 static Node *atom(Parser *p) {
+    Node *n = atom_node(p);
+    if (n && !n->constant && (n->kind == N_STRING || n->kind == N_BYTES || n->kind == N_NONE || n->kind == N_BOOL || n->kind == N_ELLIPSIS)) {
+        SPYContext *c = p->ctx;
+        size_t line = c->line;
+        if (!literal_value(c, n)) return NULL;
+        c->line = line;
+    }
+    return n;
+}
+static Node *atom_node(Parser *p) {
     Node *n;
     if (at(p, T_STRING)) return string_node(p);
     if (at(p, T_ELLIPSIS)) { n = node(p, N_ELLIPSIS); p->pos++; return n; }
@@ -6165,7 +6177,8 @@ static Node *atom(Parser *p) {
         Token *t = peek(p);
         n->name.text = copy_text(p->ctx, t->start, t->len);
         p->pos++;
-        /* A number's value is made as it is parsed, at the parse's line. */
+        /* A number's value is made as it is parsed, at the parse's line;
+         * its error ends the parse (Parser.literal_error). */
         SPYContext *c = p->ctx;
         size_t line = c->line;
         if (n->name.text && literal_value(c, n)) c->line = line;
@@ -8353,7 +8366,8 @@ static int nodes_finish(Parser *p, Node *start) {
     SPYContext *c = p->ctx;
     Node *newest = p->unit->as.unit.nodes;
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated)
-        if (!(n->flags & F_FINISHED) && n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
+        if (!(n->flags & F_FINISHED) && n->kind == N_UNARY && n->op == '-' && n->a->constant && (n->a->kind <= N_IMAG || n->a->kind == N_UNARY))
+            n->constant = unary(c, '-', n->a->constant);
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
         if (n->flags & F_FINISHED) continue;
         n->flags |= F_FINISHED;
