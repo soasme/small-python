@@ -1,8 +1,9 @@
 ---------------------------- MODULE Generators ----------------------------
 (***************************************************************************)
 (* The life cycle of a generator or coroutine object driven from outside   *)
-(* through next(), send(), throw(), and close(), and ended by dropping its *)
-(* last reference, which closes it before the next statement, as The       *)
+(* through next(), send(), throw(), close(), and __del__(), and ended by   *)
+(* dropping its last reference, which closes it before the next statement, *)
+(* as The                                                                  *)
 (* Python Language Reference specifies it (reference/expressions.html      *)
 (* #generator-iterator-methods, reference/datamodel.html#coroutine-objects *)
 (* and PEP 342's generator finalization).                                  *)
@@ -52,7 +53,7 @@ Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
 Thrown == {"ValueError", "KeyError", "PyValueError", "NewValueError"}
 Handled == {"None", "IndexError"}               \* what the caller of a throw handles
 Forms == {"one", "three", "traced"}              \* throw(e), throw(e, None, None) or throw(e, None, tb)
-Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h, f>> : e \in Thrown, h \in Handled, f \in Forms} \cup {<<"close">>, <<"drop">>, <<"drop_after">>}
+Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h, f>> : e \in Thrown, h \in Handled, f \in Forms} \cup {<<"close">>, <<"del">>, <<"drop">>, <<"drop_after">>}
 
 \* Where the body is suspended: before its first line, at the loop's yield,
 \* at the yield inside the GeneratorExit handler, or finished; or the object
@@ -114,6 +115,15 @@ Close ==
        THEN pc' = "ignored" /\ result' = <<"raise", "RuntimeError">> /\ UNCHANGED <<i, last>>  \* ignored GeneratorExit
        ELSE Finish(<<"return", "None">>)
 
+(* __del__() closes it as close() does, but what the close raises is       *)
+(* reported, not seen: it returns None.                                    *)
+Del ==
+    /\ op' = <<"del">>
+    /\ result' = <<"return", "None">>
+    /\ IF pc = "loop" /\ variant = "stubborn"
+       THEN pc' = "ignored" /\ UNCHANGED <<i, last>>
+       ELSE pc' = "done" /\ UNCHANGED <<i, last>>
+
 (* The last reference goes: a body suspended in the loop's try runs its    *)
 (* GeneratorExit handler, as close() would; elsewhere no handler runs.      *)
 (* With drop_after a started generator whose close runs no handler dies    *)
@@ -129,6 +139,7 @@ Next ==
     /\ \/ \E v \in Sent : Send(v)
        \/ \E e \in Thrown, h \in Handled, f \in Forms : Throw(e, h, f)
        \/ Close
+       \/ Del
        \/ \E o \in {"drop", "drop_after"} : Drop(o)
 
 Spec == Init /\ [][(Next)]_vars
@@ -152,6 +163,10 @@ ThrowIgnoresCaller == [][(op'[1] = "throw" => last' # "chained")]_vars
 
 \* close() on a finished or just-started object returns None and finishes it.
 CloseFinished == [][(pc \in {"start", "done"} /\ op' = <<"close">> => result' = <<"return", "None">> /\ pc' = "done")]_vars
+
+\* __del__() returns None whatever its close raised, and leaves the object
+\* where close() would.
+DelReturnsNone == [][(op' = <<"del">> => result' = <<"return", "None">>)]_vars
 
 \* close() either finishes the object or raises RuntimeError because the body
 \* yielded again; it never yields a value to the caller.

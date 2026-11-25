@@ -140,6 +140,8 @@ def perform(kind, target, op):
                 value = target.throw(*thrown(op))
         elif op[0] == "throw":
             value = target.throw(*thrown(op))
+        elif op[0] == "del":
+            return ("return", text(target.__del__()))
         else:
             return ("return", text(target.close()))
         return ("yield", value[0], text(value[1]))

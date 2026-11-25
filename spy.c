@@ -12806,8 +12806,10 @@ enum { M_APPEND, M_POP, M_GET, M_KEYS, M_VALUES, M_ITEMS, M_JOIN, M_FORMAT,
        M_EXTEND, M_INSERT, M_REMOVE, M_CLEAR, M_COPY, M_REVERSE, M_SORT,
        M_DICT_POP, M_POPITEM, M_SETDEFAULT, M_ISIDENTIFIER,
        M_STARTSWITH, M_ENDSWITH, M_FIND, M_RFIND, M_STRING_INDEX, M_RINDEX, M_STRING_COUNT, M_ISDISJOINT,
-       M_CODE_REPLACE, M_CODE_LINES, M_FRAME_CLEAR };
+       M_CODE_REPLACE, M_CODE_LINES, M_FRAME_CLEAR, M_DEL };
 static SPYValue *frame_clear(SPYContext *, SPYValue *);
+static void generator_finalize(SPYContext *, SPYValue *);
+static int close_quietly(SPYContext *, SPYValue *);
 /* Method number method of self, bound under name. */
 static SPYValue *bound_method(SPYContext *c, SPYValue *self, int method, const char *name) {
     SPYValue *bound = value_new(c, SPY_BOUND_METHOD);
@@ -14716,6 +14718,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "send")) method = M_SEND;
         if (!strcmp(name, "throw")) method = M_THROW;
         if (!strcmp(name, "close")) method = M_CLOSE;
+        if ((v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) && !strcmp(name, "__del__")) method = M_DEL;
         if (v->type != SPY_COROUTINE) {
             if (!strcmp(name, "__next__")) method = M_NEXT;
             if (!strcmp(name, "__iter__")) method = M_ITER;
@@ -14728,6 +14731,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "asend")) method = M_ASEND;
         if (!strcmp(name, "athrow")) method = M_ATHROW;
         if (!strcmp(name, "aclose")) method = M_ACLOSE;
+        if (!strcmp(name, "__del__")) method = M_DEL;
     }
     if (v->type == SPY_STRING) {
         if (!strcmp(name, "join")) method = M_JOIN;
@@ -16275,7 +16279,7 @@ static SPYValue *method_arity_error(SPYContext *c, SPYValue *self, int method, S
     const char *name = method_name ? method_name->as.string.data : "method", *owner = type_name(self);
     size_t min = 0, max = 0;
     switch (method) {
-    case M_NEXT: case M_ITER: case M_AWAIT: case M_AITER: case M_ANEXT:
+    case M_NEXT: case M_ITER: case M_AWAIT: case M_AITER: case M_ANEXT: case M_DEL:
         return errorf(c, "TypeError", "expected 0 arguments, got %zu", argc);
     case M_SPLITLINES: return errorf(c, "TypeError", "splitlines() takes at most 1 argument (%zu given)", argc);
     case M_APPEND: case M_EXTEND: case M_REMOVE: case M_JOIN: case M_SEND: case M_ASEND: case M_ISDISJOINT: case M_INDICES: case M_COUNT:
@@ -16426,6 +16430,10 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
     case M_FRAME_CLEAR:
         if (argc) break;
         return frame_clear(c, self);
+    case M_DEL:
+        if (argc) break;
+        generator_finalize(c, self);
+        return spy_none(c);
     case M_CODE_LINES: {
         /* No bytecode, so no instructions to map to lines or positions. */
         if (argc) break;
@@ -22719,6 +22727,18 @@ static void finalize_ahead(SPYContext *c, size_t waiting) {
  * callbacks of references whose targets died, at a statement boundary. Their
  * exceptions are unraisable, reported without disturbing the interrupted code.
  * While stopped they wait for the next outermost call. */
+/* Finalize generator, coroutine or asynchronous generator g (27.2.4):
+ * its close(), or for an asynchronous generator its host finalizer; an
+ * exception is unraisable. Its __del__ calls this. */
+static void generator_finalize(SPYContext *c, SPYValue *g) {
+    const char *failure = "Exception ignored while closing generator ";
+    if (g->type == SPY_ASYNC_GENERATOR && g->as.generator.origin) {
+        spy_release(call(c, g->as.generator.origin, 1, &g));
+        failure = "Exception ignored while finalizing generator ";
+    } else spy_release(generator_method(c, g, M_CLOSE, 0, NULL));
+    if (c->error_type[0]) report_unraisable(c, failure, g, NULL);
+    if (c->error_type[0]) spy_clear_error(c);
+}
 /* The first finalizer in line, run (weak_callbacks). */
 static void finalize_one(SPYContext *c) {
     SPYValue *self = finalize_pop(c);
@@ -22727,7 +22747,6 @@ static void finalize_one(SPYContext *c) {
     SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, "__del__") : NULL, *method;
     if (function && function->type == SPY_FUNCTION) method = spy_retain(function);
     else method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
-    const char *failure = "Exception ignored while closing generator ";
     /* A read of __del__ that fails is dropped (slot_tp_finalize); a call's
      * error names what the read gave. */
     if (self->type == SPY_INSTANCE && !method) spy_clear_error(c);
@@ -22735,11 +22754,7 @@ static void finalize_one(SPYContext *c) {
         spy_release(method == function ? call(c, method, 1, &self) : call(c, method, 0, NULL));
         if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling deallocator ", method, NULL);
     } else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
-    else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
-        spy_release(call(c, self->as.generator.origin, 1, &self));
-        failure = "Exception ignored while finalizing generator ";
-    } else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
-    if (c->error_type[0]) report_unraisable(c, failure, self, NULL);
+    else if (self->type != SPY_INSTANCE) generator_finalize(c, self);
     if (c->error_type[0]) spy_clear_error(c);
     spy_release(method); spy_release(self);
     finalize_ahead(c, waiting);
@@ -30272,6 +30287,12 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
         argv = athrow_args(c, callee, &argc);
         callee = callee->as.async_operation.generator; method = M_THROW;
     }
+    /* Its __del__ closes it there as its finalization does (finalizer). */
+    if (method == M_DEL)
+        return argc ? -1 : callee->type == SPY_ASYNC_GENERATOR ?
+               !callee->as.generator.origin && suspended(callee) && callee->as.generator.started && raises_at(innermost(callee->as.generator.machine)) ? B_CLOSE : -1 :
+               resumable(callee) && callee->type != SPY_COROUTINE_ITERATOR && callee->as.generator.started && throws_in(c, callee, NULL) &&
+               !close_quietly(c, callee) ? B_CLOSE : -1;
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
@@ -30402,10 +30423,10 @@ static NO_INLINE int self_slot_method(SPYContext *c, SPYValue *callee, SPYValue 
     if (callee->type != SPY_NATIVE || callee->as.native.kwcall != slot_call || callee->as.native.owner != c->types[type]) return 0;
     const char *name = callee->as.native.name->as.string.data;
     if (type == SPY_DICT) return !strcmp(name, "update") && builtin_value(c, v, SPY_DICT);
-    return !strcmp(name, "send") || !strcmp(name, "throw") || !strcmp(name, "close") || !strcmp(name, "__next__");
+    return !strcmp(name, "send") || !strcmp(name, "throw") || !strcmp(name, "close") || !strcmp(name, "__next__") || !strcmp(name, "__del__");
 }
 static ALWAYS_INLINE int self_slot(SPYContext *c, SPYValue *callee, SPYValue *v) {
-    return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR_ASEND ||
+    return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR || v->type == SPY_ASYNC_GENERATOR_ASEND ||
             v->type == SPY_ASYNC_GENERATOR_ATHROW || v->type == SPY_ANEXT_AWAITABLE || v->type == SPY_DICT ||
             (v->type == SPY_INSTANCE && callee->type == SPY_NATIVE && v->as.map.base)) && self_slot_method(c, callee, v);
 }
@@ -30446,7 +30467,7 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
                        callee->type == SPY_METHOD || callee->type == SPY_CLASS || (callee->type == SPY_NATIVE && argc == 2))) ||
                      ((argv[0]->type == SPY_BYTES || argv[0]->type == SPY_BYTEARRAY || argv[0]->type == SPY_SET) && callee->type == SPY_NATIVE && argc == 2))) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR || callee->type == SPY_BOUND_METHOD ||
-           callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW ||
+           callee->type == SPY_ASYNC_GENERATOR_ASEND || callee->type == SPY_ASYNC_GENERATOR_ATHROW || (callee->type == SPY_ASYNC_GENERATOR && method == M_DEL) ||
            (!argc && callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE) ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* A consumer's source *v, owned (iter_function): an instance whose
@@ -30930,7 +30951,6 @@ static SPYValue *key_best(SPYContext *c, Consumer *s) {
  * else NULL, finalizing in C (weak_callbacks), as also inside it, past the
  * recursion limit or under a trace function, whose errors are unraisable
  * there. */
-static int close_quietly(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *finalizer(SPYContext *c) {
     SPYValue *self = c->finalize_first;
     if (finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->py_depth >= c->recursion_limit)
@@ -30965,6 +30985,20 @@ static void finalize_close(SPYContext *c, Machine *m) {
     consume(c, m, B_CLOSE, g, M_CLOSE, NULL, NULL, NULL);
     if (m->block_len > depth) { m->blocks[depth].consumer->finalizing = c->finalize_calls_len + 1; c->weak_running = 1; }
     spy_release(g);
+}
+/* The close a generator's __del__ began on the machine (consumer_id)
+ * ended at the consumer top, given what its generator yielded (item),
+ * which it takes, or its error: either is unraisable, as
+ * finalize_closed's, and the call returns None (consumer_end). */
+static NO_INLINE void deleted_closed(SPYContext *c, Block *top, SPYValue *item) {
+    SPYValue *g = top->value;
+    if (item) {
+        spy_release(item);
+        spy_error(c, "RuntimeError", g->type == SPY_ASYNC_GENERATOR ? "async generator ignored GeneratorExit" :
+                                     g->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
+    }
+    if (c->error_type[0]) report_unraisable(c, "Exception ignored while closing generator ", g, NULL);
+    if (c->error_type[0]) spy_clear_error(c);
 }
 /* The close finalize_close began ended, given what its generator yielded
  * (item) or its error: either is unraisable; the generator is done with. */
@@ -31075,6 +31109,7 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     if (UNLIKELY(top->consumer->id == B_CLOSE)) {
         if (!item && error_is(c, "GeneratorExit")) spy_clear_error(c);
         if (top->consumer->finalizing) return finalize_closed(c, m, f, item);
+        if (top->consumer->method == M_DEL) { deleted_closed(c, top, item); item = NULL; }
         if (top->consumer->closed) return exit_closing(c, m, f, item);
         /* A coroutine that yields has its own error. */
         if (item && top->value->type == SPY_COROUTINE) {
@@ -50295,9 +50330,10 @@ static SPYValue *operation_close_end(SPYContext *c, Consumer *s) {
 static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
     if (s->closes) return operation_close_end(c, s);
     if (s->id == B_CLOSE) {
-        /* What the generator returned. */
+        /* What the generator returned; None for its __del__. */
         SPYValue *returned = s->sent;
         s->sent = NULL;
+        if (s->method == M_DEL) { spy_release(returned); returned = NULL; }
         return returned ? returned : spy_none(c);
     }
     if ((s->id == B_NEXT || s->id == B_THROW) && !c->error_type[0]) {
@@ -53358,7 +53394,7 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
  * sees only Python-level overrides. */
 enum { SLOT_BINARY, SLOT_RBINARY, SLOT_INPLACE, SLOT_COMPARE, SLOT_UNARY, SLOT_BUILTIN, SLOT_CALL, SLOT_OTHER };
 enum { SLOT_REPR, SLOT_STR, SLOT_FORMAT, SLOT_ITER, SLOT_CONTAINS, SLOT_GETITEM, SLOT_SETITEM, SLOT_DELITEM,
-       SLOT_BOOL, SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL, SLOT_COMPLEX, SLOT_NEXT };
+       SLOT_BOOL, SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL, SLOT_COMPLEX, SLOT_NEXT, SLOT_DEL };
 #define T(x) (UINT64_C(1) << (x))
 #define T_OBJECT (UINT64_C(1) << 63)
 #define T_NUMBERS (T(SPY_INT) | T(SPY_FLOAT) | T(SPY_COMPLEX))
@@ -53399,6 +53435,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR)
         | T_AWAITABLES},
     {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR) | T_AWAITABLES},
+    {"__del__", SLOT_OTHER, SLOT_DEL, T(SPY_GENERATOR) | T(SPY_COROUTINE) | T(SPY_ASYNC_GENERATOR)},
     {"__contains__", SLOT_OTHER, SLOT_CONTAINS, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
     {"__getitem__", SLOT_OTHER, SLOT_GETITEM, T_SEQUENCES | T_DICTS | T(SPY_RANGE)},
     {"__setitem__", SLOT_OTHER, SLOT_SETITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
@@ -53696,6 +53733,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     case SLOT_DELITEM: return delete_index(c, value, argv[0]) ? NULL : spy_none(c);
     case SLOT_BOOL: return spy_bool(c, truthy(value));
     case SLOT_COMPLEX: return spy_retain(value);
+    case SLOT_DEL: return method_call(c, value, M_DEL, NULL, 0, NULL);
     default: /* SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL */
         if (value->type != SPY_FLOAT) return builtin(c, 1, &value, (void *)(intptr_t)B_INT);
         if (!isfinite(value->as.real)) return spy_error(c, isnan(value->as.real) ? "ValueError" : "OverflowError",
