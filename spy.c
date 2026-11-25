@@ -4728,6 +4728,7 @@ static int emit_default(Parser *, Node *);
 static Node *lambda_parsed(Parser *, Node *);
 static Node *template_parsed(Parser *, Node *);
 static int augmented_target(Parser *, Node *);
+static Node *format_parsed(Parser *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -6634,6 +6635,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
                         *tail = item; tail = &item->next;
                         if (!take(p, ',')) break;
                     }
+                    if (!finished(p, tuple)) return NULL;
                 }
                 if (!n->b || !expect(p, ']', "invalid syntax")) return NULL;
             } else {
@@ -17734,6 +17736,21 @@ static int augmented_target(Parser *p, Node *t) {
     x->op = BC_LOAD_TARGET; x->step = p->ctx->steps ? p->ctx->steps[BC_LOAD_TARGET] : NULL;
     return 0;
 }
+/* Field n of an f-string, its value's steps followed by its spec's up to
+ * the end: its conversion, and while calls can pause the format() call's
+ * callee, go between them, as compile_expr lays them out. */
+static Node *format_parsed(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    if (!emitted_operands(program, (Node *[3]){n->a, n->b}, NULL)) return n;
+    size_t at = n->b->steps_at;
+    int pausing = program->calls == PAUSING, convert = pausing ? CONVERT_CALL : 0;
+    if (n->op && (emit_before(c, program, at++, BC_CONVERT, n, n->op | convert) == SIZE_MAX ||
+                  (pausing && emit_before(c, program, at++, BC_CALLN, n, 1) == SIZE_MAX))) return NULL;
+    if (pausing && emit_before(c, program, at, BC_CONVERT, n, 'f' | CONVERT_CALL) == SIZE_MAX) return NULL;
+    if (emit(c, program, pausing ? BC_CALLN : BC_FORMAT, n, pausing ? 2 : 1) == SIZE_MAX) return NULL;
+    return parsed_steps(p, n, n->a->steps_at);
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -17760,6 +17777,7 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_TEMPLATE) return template_parsed(p, n);
     /* A field's conversion and format() call are steps between its value and spec. */
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
+    else if (n->kind == N_FORMAT) return format_parsed(p, n);
     else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
     else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) fixed[0] = NULL;
     else if (n->kind != N_UNARY && n->kind != N_ATTR) return n;
