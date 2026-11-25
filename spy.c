@@ -4731,6 +4731,7 @@ static int augmented_target(Parser *, Node *);
 static Node *format_parsed(Parser *, Node *);
 static Node *starred_parsed(Parser *, Node *);
 static Node *yield_unmade(Parser *, Node *);
+static void debug_text(Parser *, Node *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -6134,7 +6135,10 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
                 field->op = *s++;
                 while (s < end && (isspace((unsigned char)*s) || (*s == '\\' && s + 1 < end && s[1] == '\n'))) s += *s == '\\' ? 2 : 1;
             }
+            Node **text = *tail;
             if (flush_literal(p, tail, literal)) return -1;
+            /* A debug field's text, flushed after its value, goes before it. */
+            if (debug && *text && p->emitting) debug_text(p, *text, field->a);
             if (*s == ':') {
                 s++;
                 field->b = node(p, N_JOINED);
@@ -17596,8 +17600,8 @@ static int call_stream(Parser *p, Node *n, Node *arg, Mark start, int state, Mar
     int keyword = arg->kind == N_KEYWORD || arg->kind == N_MAPPING;
     Node *value = keyword || arg->kind == N_STAR ? arg->a : arg, *args[8];
     size_t count = 0, positional = 0;
-    for (Node *a = n->args; a != arg; a = a->next) {
-        if (count == 8) return 0;
+    /* A plain call has at most 8 arguments before arg. */
+    for (Node *a = n->args; a != arg && state == CALL_PLAIN; a = a->next) {
         positional += a->kind != N_KEYWORD;
         args[count++] = a;
     }
@@ -17806,6 +17810,16 @@ static Node *yield_unmade(Parser *p, Node *n) {
     if (first->op == BC_YIELD && first->arg == 1) emit_drop(program, n->steps_at);
     n->flags &= ~F_EMITTED;
     return value;
+}
+/* The steps of text, a literal emitted after those of value up to the
+ * end, put before them; a literal's own no operands to move. */
+static void debug_text(Parser *p, Node *text, Node *value) {
+    Program *program = p->emitting;
+    if (!(value->flags & F_EMITTED) || value->steps_end != text->steps_at || text->steps_end != program->len) return;
+    size_t at = value->steps_at, length = text->steps_end - text->steps_at;
+    emit_after(program, (Mark){at, program->last}, (Mark){text->steps_at, program->last}, NULL);
+    value->steps_at += length; value->steps_end += length;
+    text->steps_at = at; text->steps_end = at + length;
 }
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
