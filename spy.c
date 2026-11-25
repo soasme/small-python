@@ -20217,6 +20217,16 @@ static SPYValue *number_literal(SPYContext *c, Node *n) {
     }
     mem_free(s); return v;
 }
+/* The name of the definition or alias generic's parameters are for: its
+ * child that is neither a parameter's bound nor its default. */
+static const char *generic_name(Scope *generic) {
+    for (Scope *child = generic->children; child; child = child->sibling) {
+        int lazy = 0;
+        for (TypeParameter *t = generic->type_params; t && t->name; t++) lazy |= child == t->bound || child == t->fallback;
+        if (!lazy) return scope_name(child);
+    }
+    return "";
+}
 static int append_qualname(Buffer *out, Scope *scope) {
     if (!scope || !scope->form) return 0;
     if (scope->form == N_GENERIC) return append_qualname(out, scope->parent);
@@ -20238,11 +20248,17 @@ static int append_qualname(Buffer *out, Scope *scope) {
         return puts_buffer(out, "__annotate__");
     }
     if (scope->kind == S_COMPREHENSION && scope->op != N_TUPLE) return append_qualname(out, scope->parent);
+    /* An annotation scope adds nothing to the names within it; a generic
+     * definition's parameter scope above one is named for it. */
     Scope *parent = scope->parent;
-    if (parent && parent->form == N_GENERIC) parent = parent->parent;
+    int generic = 0;
+    if (parent && (parent->flags & F_ANNOTATE)) { parent = parent->parent; generic = parent && parent->form == N_GENERIC; }
+    else if (parent && parent->form == N_GENERIC) parent = parent->parent;
     Symbol *binding = scope->form == N_DEF || scope->form == N_CLASS ? scope_symbol(parent, scope->name) : NULL;
     if ((!binding || !(binding->flags & S_GLOBAL)) && append_qualname(out, parent)) return -1;
-    if (out->len && puts_buffer(out, parent && parent->kind == S_FUNCTION ? ".<locals>." : ".")) return -1;
+    if (generic && ((out->len && puts_buffer(out, parent->parent && parent->parent->kind == S_FUNCTION ? ".<locals>." : ".")) ||
+        puts_buffer(out, "<generic parameters of ") || puts_buffer(out, generic_name(parent)) || puts_buffer(out, ">"))) return -1;
+    if (out->len && puts_buffer(out, !generic && parent && parent->kind == S_FUNCTION ? ".<locals>." : ".")) return -1;
     const char *name = scope->form == N_LAMBDA ? "<lambda>" : scope->form == N_COMPREHENSION ? "<genexpr>" : scope_name(scope);
     return puts_buffer(out, name);
 }

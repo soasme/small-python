@@ -27,6 +27,8 @@ Unreleased (0.10.0):
   in a handler) reports its own line and file to the host, not line 0
 - a function's name only annotated (`x: int`) is not in co_varnames until the body uses it
 - a long function or class body is compiled in less memory: 20,000 lines peak at 46 MB, not 124 MB
+- a lambda or generator expression in an annotation, type alias value or type
+  parameter bound is named where its owner is (`C.<lambda>`, not `C.__annotate__.<locals>.<lambda>`)
 - a generator that dies while its frame lives on is gone to weak references
 - the asend, athrow and anext awaitable types define their methods, so
   they are awaitable to type-based checks
