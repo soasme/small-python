@@ -5469,11 +5469,15 @@ static Node *yield_expression(Parser *);
 static void star_expression_error(Parser *, size_t);
 static int named_equals_error(Parser *, size_t);
 static const char *expression_name(Node *);
-static Node *comprehension(Parser *, Node *, int, EmitMark);
+static Node *comprehension(Parser *, Node *, int, EmitMark, Program *);
+static Program *comprehension_apart(Parser *, Node *);
+static Mark mark(Program *);
+static void comprehension_apart_undo(Parser *, Node *, EmitMark, Program *);
 static Program *comprehension_begin(Parser *, Node *, EmitMark);
 static int comprehension_for(Parser *, Node *, EmitMark, EmitMark, int);
 static int comprehension_if(Parser *, Node *, EmitMark);
-static int comprehension_close(Parser *, Node *, Program *, EmitMark, EmitMark);
+static int comprehension_close(Parser *, Node *, Program *, EmitMark, EmitMark, Mark);
+static Program *comprehension_opened(Parser *, Node *, EmitMark);
 static void compile_comprehension_item(SPYContext *, Program *, Node *);
 static int emit_take(SPYContext *, Program *, Mark, size_t, size_t, Program *);
 static Node *statements(Parser *);
@@ -6318,6 +6322,12 @@ static Node *atom_node(Parser *p) {
             Node *item;
             size_t item_at = p->pos;
             EmitMark element = emit_mark(p);
+            /* A comprehension's element whose program loads names unlike
+             * the comprehension's emits into the comprehension's own
+             * (comprehension_apart). */
+            Program *apart = !n->args ? comprehension_apart(p, n) : NULL;
+            if (p->ctx->error_type[0]) return NULL;
+            if (apart) element = emit_mark(p);
             if (open == '{' && !n->args && p->emitting && (display = emit_display(p, n)) == SIZE_MAX) return NULL;
             size_t item_start = display != SIZE_MAX ? program_len(p->emitting) : 0;
             if (take(p, T_POW)) {
@@ -6383,9 +6393,10 @@ static Node *atom_node(Parser *p) {
                 n->kind = N_SET;
             }
             *tail = item; tail = &item->next;
+            if (apart && !keyword(p, "for") && !keyword(p, "async")) { comprehension_apart_undo(p, n, element, apart); apart = NULL; display = SIZE_MAX; }
             if (keyword(p, "for") || keyword(p, "async")) {
                 display = SIZE_MAX;
-                if (!comprehension(p, n, awaits, element)) return NULL;
+                if (!comprehension(p, n, awaits, element, apart)) return NULL;
                 if (at(p, ':') && item->kind == N_MAPPING) return syntax_span(p, item_at, item_at + 1, "cannot use dict unpacking here");
                 break;
             }
@@ -6566,14 +6577,14 @@ static int call_arguments(Parser *p, Node *n) {
                 Node *probe = node(p, N_TUPLE);
                 if (!probe) return -1;
                 probe->args = arg;
-                if (comprehension(p, probe, awaits, before)) genexp = p->pos;
+                if (comprehension(p, probe, awaits, before, NULL)) genexp = p->pos;
                 spy_clear_error(p->ctx);
                 syntax_span(p, first, genexp, "Generator expression must be parenthesized"); return -1;
             }
             Node *generator = node(p, N_TUPLE);
             if (!generator) return -1;
             generator->args = arg;
-            if (!comprehension(p, generator, awaits, before)) return -1;
+            if (!comprehension(p, generator, awaits, before, NULL)) return -1;
             if (at(p, ',')) {
                 /* CPython's invalid_arguments reads the arguments after the comma. */
                 p->pos++; peek(p); p->pos--;
@@ -7033,7 +7044,7 @@ static Node *assignment_error(Parser *p, size_t start) {
  * it runs inlined there. */
 /* Comprehension n, its element parsed since element: only its first
  * iterable is evaluated where it is, the rest in its own program. */
-static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element) {
+static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Program *enclosing) {
     if (n->args->next) {
         /* invalid_comprehension: the range of the unparenthesized targets. */
         Node *last = n->args;
@@ -7043,13 +7054,17 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element) {
         return NULL;
     }
     n->op = n->kind; n->kind = N_COMPREHENSION;
-    Program *emitting = p->emitting;
     /* Its element and its clauses but its first iterable emit into its
-     * own program as they are parsed (comprehension_begin); else its
-     * element's steps are undone. */
-    Program *body = comprehension_begin(p, n, element);
+     * own program as they are parsed (comprehension_begin), its element
+     * there already when enclosing's emits apart; else its element's
+     * steps are undone. */
+    Program *emitting = enclosing ? enclosing : p->emitting;
+    Program *body = enclosing ? comprehension_opened(p, n, element) : comprehension_begin(p, n, element);
     if (!body) emit_back(p, element);
+    if (!body && enclosing) { free_program(n->scope->code); n->scope->code = NULL; }
     if (p->ctx->error_type[0]) return NULL;
+    /* Where the clauses' steps begin after the element's and item's there. */
+    Mark opening = body && enclosing ? mark(body) : (Mark){0, NULL};
     EmitMark iterable = {0};
     Node **tail = &n->a;
     size_t clauses = 0;
@@ -7092,7 +7107,7 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element) {
     p->emitting = emitting;
     if (p->awaits - awaits > outer) n->asynchronous = 1;
     if (n->op == N_TUPLE) p->awaits = awaits + outer;
-    if (n->scope && n->scope->code && comprehension_close(p, n, body, element, iterable)) return NULL;
+    if (n->scope && n->scope->code && comprehension_close(p, n, body, element, iterable, opening)) return NULL;
     return finished(p, n);
 }
 /* Whether token i is the keyword s. */
@@ -17877,12 +17892,62 @@ static Program *comprehension_begin(Parser *p, Node *n, EmitMark element) {
     Node *item = n->args, *fixed[3] = {item->kind == N_STAR || item->kind == N_MAPPING || n->op == N_DICT ? item->a : item};
     if (n->op == N_DICT && item->kind != N_MAPPING) fixed[1] = item->b;
     int calls = c->pausing ? PAUSING : BODY, loads = c->string_source != 0;
+    /* A dictionary's or set's new value, emitted at its first item (emit_display), goes. */
+    size_t at = element.steps.mark.at, display = n->op == N_DICT || n->op == N_SET;
     if (!outer || outer->calls != calls || outer->loads != loads || !emitted_operands(outer, fixed, NULL) ||
-        fixed[0]->steps_at != element.steps.mark.at || !body_scope(c, n)) return NULL;
+        fixed[0]->steps_at != at + display || (display && outer->items[at].op != BC_NEW) || !body_scope(c, n)) return NULL;
+    if (display) emit_drop(outer, at);
     Program *program = allocate(c, sizeof(*program));
     if (!program) return NULL;
     program->calls = calls; program->loads = loads;
     return n->scope->code = program;
+}
+/* Whether the display whose first item the parser is at has a
+ * comprehension's for at its own depth. */
+static int comprehension_ahead(Parser *p) {
+    size_t depth = 0;
+    for (size_t i = p->pos; i < p->len; i++) {
+        int kind = p->tokens[i].kind;
+        if (kind == '(' || kind == '[' || kind == '{') depth++;
+        else if ((kind == ')' || kind == ']' || kind == '}') && !depth--) return 0;
+        else if (!depth && (word_at(p, i, "for") || kind == T_NL || kind == T_END)) return kind == T_NAME;
+    }
+    return 0;
+}
+/* At display n's first item, a comprehension's for ahead, in a program that loads names unlike a comprehension's: its
+ * scope and its own program begun, which its element then emits into;
+ * the enclosing program. Else NULL. */
+static Program *comprehension_apart(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    Program *outer = p->emitting;
+    int calls = c->pausing ? PAUSING : BODY, loads = c->string_source != 0;
+    if (!outer || (outer->calls == calls && outer->loads == loads) || n->scope || !comprehension_ahead(p)) return NULL;
+    Program *program = allocate(c, sizeof(*program));
+    if (!program || !(n->scope = scope_new(c, NULL, S_COMPREHENSION))) { mem_free(program); return NULL; }
+    program->calls = calls; program->loads = loads;
+    n->scope->code = program;
+    p->emitting = program;
+    return outer;
+}
+/* Display n's first item, emitted apart from element on, is no
+ * comprehension's: its steps are undone, and so is its scope. */
+static void comprehension_apart_undo(Parser *p, Node *n, EmitMark element, Program *enclosing) {
+    emit_back(p, element);
+    p->emitting = enclosing;
+    free_scope(n->scope); n->scope = NULL;
+}
+/* Comprehension n, its element emitted from element on into its own
+ * program (comprehension_apart): that program, its item's steps added,
+ * when they are all the element's; else NULL. */
+static Program *comprehension_opened(Parser *p, Node *n, EmitMark element) {
+    Program *program = p->emitting;
+    Node *item = n->args, *fixed[3] = {item->kind == N_STAR || item->kind == N_MAPPING || n->op == N_DICT ? item->a : item};
+    if (n->op == N_DICT && item->kind != N_MAPPING) fixed[1] = item->b;
+    size_t at = element.steps.mark.at, display = n->op == N_DICT || n->op == N_SET;
+    if (!emitted_operands(program, fixed, NULL) || fixed[0]->steps_at != at + display || (display && program->items[at].op != BC_NEW)) return NULL;
+    if (display) emit_drop(program, at);
+    compile_comprehension_item(p->ctx, program, n);
+    return p->ctx->error_type[0] ? NULL : program;
 }
 /* For clause loop, its target emitted into the comprehension's program
  * from target on, then its iterable from iterable on there unless it is
@@ -17929,21 +17994,34 @@ static int comprehension_if(Parser *p, Node *test, EmitMark at) {
  * clauses closed, innermost first, as compile_comprehension lays them
  * out. Without, its own program is undone, and so are the element's
  * steps, and it compiles from its nodes. -1 on an error. */
-static int comprehension_close(Parser *p, Node *n, Program *body, EmitMark element, EmitMark iterable) {
+static int comprehension_close(Parser *p, Node *n, Program *body, EmitMark element, EmitMark iterable, Mark opening) {
     SPYContext *c = p->ctx;
     Program *outer = p->emitting;
     Node *source = n->a->a;
     if (!body || !(source->flags & F_EMITTED) || source->steps_at != iterable.steps.mark.at || source->steps_end != outer->len) {
+        /* An element emitted apart is undone in its program. */
+        if (opening.at) p->emitting = n->scope->code;
         emit_back(p, element);
+        p->emitting = outer;
         free_program(n->scope->code); n->scope->code = NULL;
         return 0;
     }
-    Mark moved = emit_after(outer, element.steps.mark, iterable.steps.mark, NULL);
-    source->steps_at = element.steps.mark.at; source->steps_end = moved.at;
-    if (emit_take(c, outer, moved, element.steps.values, iterable.steps.values, body)) return -1;
-    compile_comprehension_item(c, body, n);
     size_t count = 0;
     for (Node *clause = n->a; clause; clause = clause->b) count++;
+    if (opening.at) {
+        /* Its element and item, which begin its program, go after its
+         * clauses' openings, which move back by them. */
+        emit_after(body, (Mark){0, NULL}, opening, NULL);
+        for (Node *clause = n->a; clause; clause = clause->b) {
+            clause->steps_at -= opening.at;
+            if (clause->kind != N_IF) clause->steps_end -= opening.at;
+        }
+    } else {
+        Mark moved = emit_after(outer, element.steps.mark, iterable.steps.mark, NULL);
+        source->steps_at = element.steps.mark.at; source->steps_end = moved.at;
+        if (emit_take(c, outer, moved, element.steps.values, iterable.steps.values, body)) return -1;
+        compile_comprehension_item(c, body, n);
+    }
     while (count-- && !c->error_type[0]) {
         Node *clause = n->a;
         for (size_t i = 0; i < count; i++) clause = clause->b;
