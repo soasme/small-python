@@ -5504,7 +5504,6 @@ static Node *suite_after(Parser *, const char *, size_t);
 static Body body_begin(Parser *, Node *, size_t);
 static int body_end(Parser *, Node *, Node *, Body);
 static int body_statements(Parser *, Node *, Node *);
-static size_t if_begin(SPYContext *, Program *, Node *);
 static size_t if_else(SPYContext *, Program *, Node *, size_t);
 static int nodes_finish(Parser *, Node *);
 static Scope *body_scope(SPYContext *, Node *);
@@ -5516,7 +5515,6 @@ static size_t loop_begin(Parser *, Program *, Node *, size_t *);
 static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
 static void patch(Program *, size_t, size_t);
 static size_t program_len(Program *);
-static uint32_t with_begin(SPYContext *, Program *, Node *, int);
 static void case_begin(Parser *, Program *, Node *, Case *, Program *);
 static void case_end(SPYContext *, Program *, Node *, Case *, uint32_t *);
 static void match_end(SPYContext *, Program *, Node *, uint32_t);
@@ -7223,7 +7221,7 @@ static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
     return failed ? NULL : body;
 }
 /* if_stmt or elif_stmt after its keyword; with emits, compiled in place:
- * the test before its suite, the jump past the rest after it (if_begin). */
+ * the test before its suite, the jump past the rest after it (if_else). */
 static Node *if_statement(Parser *p, int emits) {
     Node *start = p->unit->as.unit.nodes, *n = node(p, N_IF);
     if (!n) return NULL;
@@ -7233,10 +7231,10 @@ static Node *if_statement(Parser *p, int emits) {
     EmitMark from = {0};
     if (emits && header_emit(p, &from)) return NULL;
     n->a = expression(p, 0);
-    int kept = emits && header_kept(p, n->a, from);
+    if (emits) header_kept(p, n->a, from);
     if (n->a && at(p, '=')) return condition_equals_error(p, condition);
     if (!n->a || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
-    if (emits) branch = kept ? branch_parsed(p->ctx, p->body.program, n->a, n) : if_begin(p->ctx, p->body.program, n);
+    if (emits) branch = branch_parsed(p->ctx, p->body.program, n->a, n);
     if (!(n->b = suite_of(p, what, line, emits))) return NULL;
     if (emits) end = if_else(p->ctx, p->body.program, n, branch);
     if (take_word(p, "elif")) {
@@ -8202,16 +8200,15 @@ static Node *statement_body(Parser *p, int emits) {
             }
             if (grouped) p->pos++;
         }
-        /* Its items emit as they are parsed (with_item), unless one cannot. */
+        /* Its items emit as they are parsed (with_item). */
         EmitMark from = {0};
         uint32_t last = NO_STEP;
-        int streams = emits;
         if (emits && header_emit(p, &from)) return NULL;
         do {
             Node *item = node(p, N_ASSIGN);
             EmitMark before = emit_mark(p);
             if (!item || !(item->a = expression(p, 0))) return NULL;
-            if (streams && !(streams = with_item(p, item, before, asynchronous, &last)) && p->ctx->error_type[0]) return NULL;
+            if (emits && with_item(p, item, before, asynchronous, &last)) return NULL;
             if (take_word(p, "as")) {
                 /* invalid_with_item: an expression that ends the item is its target. */
                 size_t as = p->pos, expr_start = p->expr_start, expr_end = p->expr_end;
@@ -8227,19 +8224,16 @@ static Node *statement_body(Parser *p, int emits) {
                     span(p, item->b, as);
                 } else if (!(item->b = expression(p, 4))) return NULL;
                 if (!target(p, item->b)) return p->ctx->error_type[0] ? NULL : target_error(p, item->b, TARGETS_STAR);
-                if (streams && !(streams = with_target(p, item, before)) && p->ctx->error_type[0]) return NULL;
+                if (emits && with_target(p, item, before)) return NULL;
             }
-            if (streams && emit_pop(p, item)) return NULL;
+            if (emits && emit_pop(p, item)) return NULL;
             *tail = item; tail = &item->next;
             if (!take(p, ',')) break;
             if (!grouped && at(p, ':')) { p->pos--; return syntax(p, "the last 'with' item has a trailing comma"); }
         } while (!grouped || !at(p, ')'));
         if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
-        /* With emits compiled in place, as compile_statement does (with_begin). */
-        if (emits && !streams) { emit_back(p, from); last = NO_STEP; }
         if (emits) { p->emitting = NULL; p->emitted_len = 0; }
         if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
-        if (emits && !streams) last = with_begin(p->ctx, p->body.program, n->args, n->op);
         if (!(n->b = suite_of(p, "'with' statement", n->line, emits))) return NULL;
         if (emits) { with_end(p->ctx, p->body.program, last, n->op); n->flags |= F_EMITTED; }
         return n;
@@ -8439,12 +8433,12 @@ static Node *statement_body(Parser *p, int emits) {
         if (emits && header_emit(p, &from)) return NULL;
         if (emits && !is_for) { loop = loop_open(p->ctx, p->body.program, n); from = emit_mark(p); }
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
-        int kept = emits && header_kept(p, n->a, from);
+        if (emits) header_kept(p, n->a, from);
         if (!n->a) return NULL;
         if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
         /* With emits compiled in place, as compile_statement does (loop_begin). */
         if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
-        if (emits && !is_for) branch = kept ? branch_parsed(p->ctx, p->body.program, n->a, n) : compile_branch(p->ctx, p->body.program, n->a, n);
+        if (emits && !is_for) branch = branch_parsed(p->ctx, p->body.program, n->a, n);
         else if (emits) branch = loop_begin(p, p->body.program, n, &loop);
         p->loops++; n->b = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
         if (!n->b) return NULL;
@@ -17663,19 +17657,6 @@ static void retest(SPYContext *c, Program *p, Node *n, size_t start) {
     p->items[at].arg |= 1;
     p->tested = at + 1;
 }
-/* A call's or class header's arguments, each added by BC_ARG: the
- * positional and starred ones first, then the keywords. */
-static void compile_arguments(SPYContext *c, Program *p, Node *args) {
-    Mark keywords = mark(p);
-    for (Node *a = args; a && !c->error_type[0]; a = a->next) {
-        int keyword = a->kind == N_KEYWORD || a->kind == N_MAPPING;
-        Mark start = mark(p);
-        compile_expr(c, p, keyword || a->kind == N_STAR ? a->a : a);
-        emit(c, p, BC_ARG, a, a->kind);
-        /* A positional argument goes before the keywords before it. */
-        if (!keyword) keywords = emit_after(p, keywords, start, NULL);
-    }
-}
 /* The applications of decorators, the last first, each on its own line. */
 static void compile_decorations(SPYContext *c, Program *p, Node *decorators) {
     if (!decorators) return;
@@ -17770,20 +17751,13 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (!expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) && !(p->calls == PAUSING && loads_name(n)))
         stacked = (right = operator_right(n)) ? NULL : stacked_right(n);
     /* Operands emitted as they were parsed are its first steps (finished). */
-    size_t branch, end, parts, start = n->a && (n->a->flags & F_EMITTED) ? n->a->steps_at : p->len;
+    size_t branch, parts, start = n->a && (n->a->flags & F_EMITTED) ? n->a->steps_at : p->len;
     switch (n->kind) {
     case N_JOINED:
         /* The parts stay on the stack for the join, as many as arg. */
         parts = 0;
         for (Node *part = n->args; part; part = part->next, parts++) compile_expr(c, p, part);
         emit(c, p, BC_JOIN, n, (int)parts); break;
-    case N_TEMPLATE:
-        parts = p->len;
-        for (Node *part = n->args; part; part = part->next) {
-            compile_expr(c, p, part); emit(c, p, BC_ADD, part, 0);
-        }
-        if (!c->error_type[0]) emit_before(c, p, parts, BC_NEW, n, SPY_LIST);
-        emit(c, p, BC_TEMPLATE, n, 0); break;
     case N_INTERPOLATION:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INTERPOLATION, n, n->op); break;
     case N_FORMAT:
@@ -17828,42 +17802,16 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     case N_SLICE:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); compile_expr(c, p, n->c);
         emit(c, p, BC_SLICE, n, 0); break;
-    case N_COND: {
-        /* The test is evaluated first. */
-        Mark value = mark(p);
-        compile_expr(c, p, n->a);
-        Mark test = mark(p);
-        branch = compile_branch(c, p, n->b, n);
-        if (c->error_type[0]) break;
-        emit_after(p, value, test, &branch);
-        end = emit(c, p, BC_JUMP, n, 0);
-        patch(p, branch, p->len); compile_expr(c, p, n->c); patch(p, end, p->len); break;
-    }
     case N_COMPARE: compile_expr(c, p, n->a); p->split = n->args->a->flags & F_EMITTED ? n->args->a->steps_at : p->len; compile_operation(c, p, n); break;
-    case N_LIST: case N_TUPLE: case N_SET: case N_DICT:
-        if (packed(n)) {
-            /* BC_NEW takes the items atop the stack, as many as arg's count. */
-            int count = 0;
-            for (Node *a = n->args; a; a = a->next, count++) compile_expr(c, p, a);
-            emit(c, p, BC_NEW, n, (n->kind == N_LIST ? SPY_LIST : SPY_TUPLE) | count << 8);
-            break;
-        }
-        size_t display = p->len;
-        for (Node *a = n->args; a; a = a->next) {
-            if (a->kind == N_STAR || a->kind == N_MAPPING) {
-                compile_expr(c, p, a->a); emit(c, p, BC_EXTEND, a, n->kind == N_TUPLE && !a->next);
-            } else if (n->kind == N_DICT) {
-                compile_expr(c, p, a->a); compile_expr(c, p, a->b); emit(c, p, BC_MAP, a, 0);
-            } else if (n->kind == N_SET) {
-                /* An element is stored as a dict key is, with None (display_add). */
-                compile_expr(c, p, a); emit(c, p, BC_NONE, a, 0); emit(c, p, BC_MAP, a, 0);
-            } else { compile_expr(c, p, a); emit(c, p, BC_ADD, a, n->kind == N_TUPLE && !a->next); }
-        }
-        /* A tuple without a starred item is allocated its size, its other. */
-        if (c->error_type[0] || emit_before(c, p, display, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT) == SIZE_MAX) break;
-        for (Node *a = n->args; a && n->kind == N_TUPLE; a = a->next)
-            p->items[display].other = a->kind == N_STAR ? 0 : p->items[display].other + 1;
+    case N_LIST: case N_TUPLE: case N_DICT: {
+        /* A packed display or an empty one: BC_NEW takes the items atop
+         * the stack, as many as arg's count (other displays add each item
+         * as it is parsed). */
+        int count = 0;
+        for (Node *a = n->args; a; a = a->next, count++) compile_expr(c, p, a);
+        emit(c, p, BC_NEW, n, (n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : SPY_DICT) | count << 8);
         break;
+    }
     case N_CALL:
         if (plain_call(n) && (n->a->kind == N_ATTR || at_hand(n->a)) && !expands(n->a->kind == N_ATTR ? n->a->a : n->a, modes(p)) && !list_expands(n->args, modes(p)) &&
             !sort_call(n) && fused_arguments(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
@@ -17874,22 +17822,13 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
             patch(p, fused, p->len);
             break;
         }
-        if (plain_call(n) || keyword_plain_call(n)) { compile_stack_call(c, p, n); break; }
-        compile_expr(c, p, n->a); emit(c, p, BC_ARGS, n, 0);
-        compile_arguments(c, p, n->args);
-        emit(c, p, BC_CALL, n, 0); break;
+        /* A general call's steps follow its arguments' (call_stream). */
+        compile_stack_call(c, p, n); break;
     case N_NAMED:
         compile_expr(c, p, n->b); emit(c, p, BC_NAMED, n->a, 0); break;
     case N_COMPREHENSION:
         compile_expr(c, p, n->a->a); emit(c, p, BC_COMPREHENSION, n, n->a->op);
         if (n->op != N_TUPLE && n->asynchronous) emit(c, p, BC_DELEGATE, n, DELEGATE_COMPREHENSION);
-        break;
-    default: /* N_LAMBDA, the last expression that can contain a yield */
-        parts = p->len;
-        for (Node *a = n->args; a; a = a->next) if (a->a) {
-            compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, a->op == P_KWONLY);
-        }
-        if (!c->error_type[0]) emit_before(c, p, parts, BC_FUNCTION, n, 0);
         break;
     }
     if (right || stacked) fuse_steps(c, p, n, right ? operand_shape(c, n->a) : SHAPE_STACK, right ? right : stacked, 0, right ? start : p->split);
@@ -17931,7 +17870,7 @@ static Node *short_end(Parser *p, Node *n, size_t branch) {
  * makes it a general call, which adds each argument after its value
  * (BC_ARG), once the callee readied it (BC_ARGS). A starred argument's
  * go before those of the keywords since the last positional one, from
- * *keywords on (compile_arguments). The call's state, or 0 when its steps
+ * *keywords on, positional and starred arguments first. The call's state, or 0 when its steps
  * cannot follow its arguments'. */
 static int call_stream(Parser *p, Node *n, Node *arg, Mark start, int state, Mark *keywords) {
     SPYContext *c = p->ctx;
@@ -18010,25 +17949,25 @@ static int generic_header_end(Parser *p, Node *n, Program *emitting, EmitMark fr
 static int class_arguments(Parser *p, Node *n) {
     return n->flags & F_HEADER && emit(p->ctx, p->emitting, BC_ARGS, n, 0) == SIZE_MAX ? -1 : 0;
 }
-/* With item's expression emitted from before on to the end: its entry,
- * as with_begin lays it out, linked to the last item's in *last. Whether
- * it was. */
+/* With item's expression emitted (from before on, to the end): its
+ * entry, its enter's async delegation first, linked to the last item's
+ * entry in *last, the chain with_end closes. -1 on an error. */
 static int with_item(Parser *p, Node *item, EmitMark before, int asynchronous, uint32_t *last) {
     SPYContext *c = p->ctx;
     Program *program = p->emitting;
-    if (!(item->a->flags & F_EMITTED) || item->a->steps_at != before.steps.mark.at || item->a->steps_end != program->len) return 0;
-    if (asynchronous && (emit(c, program, BC_AENTER, item, 0) == SIZE_MAX || emit(c, program, BC_DELEGATE, item, DELEGATE_AENTER) == SIZE_MAX)) return 0;
+    (void)before;
+    if (asynchronous && (emit(c, program, BC_AENTER, item, 0) == SIZE_MAX || emit(c, program, BC_DELEGATE, item, DELEGATE_AENTER) == SIZE_MAX)) return -1;
     size_t start = emit(c, program, asynchronous ? BC_AWITH : BC_WITH, item, 0);
-    if (start == SIZE_MAX) return 0;
+    if (start == SIZE_MAX) return -1;
     program->items[start].other = *last; *last = (uint32_t)start;
-    return 1;
+    return 0;
 }
-/* Its target emitted from before on to the end: its store (compile_target). Whether it was. */
+/* Its target emitted (from before on, to the end): its store. -1 on an error. */
 static int with_target(Parser *p, Node *item, EmitMark before) {
     Node *t = item->b;
-    return t->steps_at == before.steps.mark.at && t->steps_end == p->emitting->len &&
-           target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 0, TARGET_CHECK) &&
-           target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 1, TARGET_STORE);
+    (void)before;
+    return target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 0, TARGET_CHECK) &&
+           target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 1, TARGET_STORE) ? 0 : -1;
 }
 static int emit_pop(Parser *p, Node *n) { return emit(p->ctx, p->emitting, BC_POP, n, 0) == SIZE_MAX ? -1 : 0; }
 /* Move the steps of from from m on, which jump only among themselves,
@@ -18763,7 +18702,6 @@ static int emitted_operands(Program *p, Node *fixed[3], Node *list) {
     }
     return !last || last->steps_end == p->len;
 }
-static void compile_target(SPYContext *, Program *, Node *);
 /* Whether attribute or item target n of literals or names is stored at
  * hand (store_operands), outside a class body and while calls cannot pause. */
 static int store_at_hand(Program *p, Node *n) {
@@ -18774,10 +18712,6 @@ static void compile_targeted(SPYContext *, Program *, Node *, Node *);
 static void compile_store(SPYContext *c, Program *p, Node *n, Node *at) {
     if (n->kind == N_NAME) emit(c, p, BC_STORE, n, 1);
     else compile_targeted(c, p, n, at);
-}
-static void compile_target(SPYContext *c, Program *p, Node *n) {
-    if (n->kind == N_NAME) emit(c, p, BC_STORE, n, 0);
-    else compile_targeted(c, p, n, NULL);
 }
 /* Target n, no name, of the value on top of the stack, popped after it
  * at popped when set. A subscript's or attribute's object and key are
@@ -18880,27 +18814,8 @@ static int compile_comprehension(SPYContext *c, Node *n) {
     emit(c, n->scope->code, BC_FLOW, n, FLOW_RETURN);
     return c->error_type[0] ? -1 : 0;
 }
-/* The items of a with statement, entered in order, which the parser
- * compiles before its suite (with_statement): the last item's cleanup
- * site, linked to the one before; then after the suite, each item's exit
- * in reverse order. */
-static uint32_t with_begin(SPYContext *c, Program *p, Node *item, int asynchronous) {
-    uint32_t last = NO_STEP;
-    for (; item && !c->error_type[0]; item = item->next) {
-        compile_expr(c, p, item->a);
-        if (asynchronous) {
-            emit(c, p, BC_AENTER, item, 0);
-            emit(c, p, BC_DELEGATE, item, DELEGATE_AENTER);
-        }
-        size_t start = emit(c, p, asynchronous ? BC_AWITH : BC_WITH, item, 0);
-        if (start == SIZE_MAX) return NO_STEP;
-        if (item->b) compile_target(c, p, item->b);
-        emit(c, p, BC_POP, item, 0);
-        /* Link cleanup sites while compiling, then patch them in reverse. */
-        p->items[start].other = last; last = start;
-    }
-    return last;
-}
+/* After a with statement's suite, each item's exit in reverse order,
+ * from last, the last item's entry (with_item), back along their links. */
 static void with_end(SPYContext *c, Program *p, uint32_t last, int asynchronous) {
     while (last != NO_STEP && !c->error_type[0]) {
         size_t start = last;
@@ -19083,7 +18998,6 @@ static void assignment_fused(SPYContext *c, Program *p, Node *n, size_t at) {
 /* The clauses of an if statement n, which the parser compiles as it
  * parses them (if_statement): the test, whose branch skips the suite;
  * after the suite, the jump past the rest, where the branch goes on. */
-static size_t if_begin(SPYContext *c, Program *p, Node *n) { return compile_branch(c, p, n->a, n); }
 static size_t if_else(SPYContext *c, Program *p, Node *n, size_t branch) {
     size_t end = emit(c, p, BC_JUMP, n, 0);
     patch(p, branch, p->len);
@@ -19566,15 +19480,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     case N_ASSIGN:
         if (n->op != '=') {
             Node *target = n->a;
-            /* An item or attribute emitted as parsed is loaded (augmented_target). */
+            /* An item or attribute was loaded as it was parsed (augmented_target). */
             if (target->kind == N_NAME) compile_expr(c, p, target);
-            else if (!(target->flags & F_EMITTED)) {
-                compile_expr(c, p, target->a);
-                if (target->kind == N_INDEX) compile_expr(c, p, target->b);
-                /* While calls can pause, the target's read is a step of its own. */
-                emit(c, p, BC_LOAD_TARGET, target, p->calls == PAUSING);
-                if (p->calls == PAUSING) emit(c, p, target->kind == N_INDEX ? BC_INDEX : BC_ATTR, target, 0);
-            }
             compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
             if (target->kind == N_NAME) emit(c, p, BC_STORE, target, 1);
             else emit(c, p, BC_SAVE_TARGET, target, 0);
@@ -19585,7 +19492,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         Mark targets = mark(p);
         Node *target = n->a;
         if (target->kind == N_NAME && !n->args) { compile_expr(c, p, n->b); compile_store(c, p, target, n); break; }
-        for (Node *next = n->args; next; target = next, next = next->next) compile_target(c, p, target);
         compile_store(c, p, target, n);
         Mark value = mark(p);
         compile_expr(c, p, n->b);
@@ -19609,22 +19515,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         }
         compile_decorations(c, p, n->decorators);
         emit(c, p, BC_STORE, n->a, 1); break;
-    case N_ANNASSIGN:
-        /* Without a value, an attribute or subscript target's primary is
-         * evaluated, and nothing stored. */
-        if (n->c) {
-            Mark target = mark(p);
-            compile_store(c, p, n->a, n);
-            Mark value = mark(p);
-            compile_expr(c, p, n->c);
-            emit_after(p, target, value, NULL);
-        }
-        else if (n->a->kind != N_NAME) {
-            compile_expr(c, p, n->a->a); emit(c, p, BC_POP, n, 0);
-            if (n->a->kind == N_INDEX) { compile_expr(c, p, n->a->b); emit(c, p, BC_POP, n, 0); }
-        }
-        if (n->flags & (F_FUTURE | F_CONDITIONAL)) { emit_annotation(c, p, n); emit(c, p, BC_POP, n, 0); }
-        break;
     case N_RETURN:
         /* A return of a name or literal returns it in its own step, before
          * the plain steps that run when the name is not at hand; one through
@@ -19639,11 +19529,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         if (!n->a) { emit(c, p, BC_RAISE, n, 2); break; }
         compile_expr(c, p, n->a); compile_expr(c, p, n->b);
         emit(c, p, BC_RAISE, n, n->b != NULL); break;
-    case N_ASSERT:
-        branch = compile_branch(c, p, n->a, n);
-        end = emit(c, p, BC_JUMP, n, 0); patch(p, branch, p->len);
-        if (n->b) compile_expr(c, p, n->b);
-        emit(c, p, BC_ASSERT, n, n->b != NULL); patch(p, end, p->len); break;
     case N_DELETE: compile_delete(c, p, n->a); break;
     /* A store of None by the statement (import_step). */
     case N_IMPORT: case N_FROM: emit_import(c, p, n); break;
@@ -19661,10 +19546,6 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         if (!(n->flags & F_HEADER)) {
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
             emit(c, p, BC_BUILDER, n, 0);
-            if (stacked) {
-                emit(c, p, BC_ARGS, n, 0);
-                compile_arguments(c, p, n->args);
-            }
         }
         /* The body is a call (class_part); a generic class's type
          * parameters' env is under it (arg 1). */
@@ -19788,19 +19669,6 @@ static int compile_generator(SPYContext *c, Node *n) {
         compile_body(c, p, n->b);
     }
     if (generator) { n->scope->code = p; n->scope->flat = NULL; }
-    c->code_work++;
-    if (n->kind == N_CLASS && n->params && n->args && !(n->params->scope && n->params->scope->flat)) {
-        /* A generic class's bases and keywords, in its type parameters'
-         * frame (header_step), unless they streamed (generic_header). */
-        Program *header = allocate(c, sizeof(*header));
-        if (!header) { c->code_work--; return -1; }
-        if (!body_scope(c, n->params)) { mem_free(header); c->code_work--; return -1; }
-        header->calls = mode; header->loads = c->string_source != 0; n->params->scope->flat = header;
-        emit(c, header, BC_CLASS, n, 18); emit(c, header, BC_ARGS, n, 0);
-        compile_arguments(c, header, n->args);
-        emit(c, header, BC_CLASS, n, 19); emit(c, header, BC_FLOW, NULL, FLOW_RETURN);
-    }
-    c->code_work--;
     /* The implicit return has no node: it runs on the last line executed;
      * a class body's returns its __class__ cell (class_part). */
     emit(c, p, n->kind == N_CLASS ? BC_CLASS : BC_NONE, NULL, 6); emit(c, p, BC_FLOW, NULL, FLOW_RETURN);
