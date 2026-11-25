@@ -8949,7 +8949,7 @@ static void drop_docstring(Node *body) {
     if (body && body->kind == N_EXPR && body->a->kind == N_STRING) { body->kind = N_PASS; body->a = NULL; }
 }
 static int compile_generator(SPYContext *, Node *);
-static int compile_comprehension(SPYContext *, Node *);
+static int comprehension_finish(SPYContext *, Node *);
 /* The nodes parsed since start, newest first, but those an inner
  * statement's call finished: a negated number as a constant, as CPython folds it, an inner negation before its
  * outer; then the instructions of the bodies among them, inner ones
@@ -8964,7 +8964,7 @@ static int nodes_finish(Parser *p, Node *start) {
         if (n->flags & F_FINISHED) continue;
         n->flags |= F_FINISHED;
         if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
-        if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
+        if (n->kind == N_COMPREHENSION) comprehension_finish(c, n);
     }
     return c->error_type[0] ? -1 : 0;
 }
@@ -17928,7 +17928,6 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     }
     if (right || stacked) fuse_steps(c, p, n, right ? operand_shape(c, n->a) : SHAPE_STACK, right ? right : stacked, 0, right ? start : p->split);
 }
-static void compile_body(SPYContext *, Program *, Node *);
 /* Compile n now, its steps from at on: its operands' already, the rest
  * its own (compile_expr); a folded negation's are its operand's. */
 static Node *emit_parsed(Parser *p, Node *n, size_t at) {
@@ -18160,10 +18159,10 @@ static Program *comprehension_opened(Parser *p, Node *n, EmitMark element) {
 /* For clause loop, its target emitted into the comprehension's program
  * from target on, then its iterable from iterable on there unless it is
  * the first: the iterable's steps before the target's, and the loop's
- * opening and next item's between, as compile_comprehension_clause lays
- * them out, the target's made its store; the loop's step and its next's
- * kept in loop's range to close it (comprehension_close). 1 when they are,
- * 0 when they cannot be, -1 on an error. */
+ * opening and next item's between, the target's made its store; the
+ * loop's step and its next's kept in loop's range to close it
+ * (comprehension_close). 1 when they are, 0 when they cannot be, -1 on
+ * an error. */
 static int comprehension_for(Parser *p, Node *loop, EmitMark target, EmitMark iterable, int first) {
     SPYContext *c = p->ctx;
     Program *program = p->emitting;
@@ -18196,24 +18195,14 @@ static int comprehension_if(Parser *p, Node *test, EmitMark at) {
     return 1;
 }
 /* Comprehension n parsed, its element's steps emitted from element on,
- * then its first iterable's from iterable on. With body, its clauses'
- * all emitted there: the iterable's steps go before the element's, which
- * move to body after its clauses' openings, its item's added, then the
- * clauses closed, innermost first, as compile_comprehension lays them
- * out. Without, its own program is undone, and so are the element's
- * steps, and it compiles from its nodes. -1 on an error. */
+ * then its first iterable's from iterable on, its clauses' all in body:
+ * the iterable's steps go before the element's, which move to body after
+ * its clauses' openings, its item's added, then the clauses closed,
+ * innermost first. -1 on an error. */
 static int comprehension_close(Parser *p, Node *n, Program *body, EmitMark element, EmitMark iterable, Mark opening) {
     SPYContext *c = p->ctx;
     Program *outer = p->emitting;
     Node *source = n->a->a;
-    if (!body || !(source->flags & F_EMITTED) || source->steps_at != iterable.steps.mark.at || source->steps_end != outer->len) {
-        /* An element emitted apart is undone in its program. */
-        if (opening.at) p->emitting = n->scope->code;
-        emit_back(p, element);
-        p->emitting = outer;
-        free_program(n->scope->code); n->scope->code = NULL;
-        return 0;
-    }
     size_t count = 0;
     for (Node *clause = n->a; clause; clause = clause->b) count++;
     if (opening.at) {
@@ -18835,13 +18824,8 @@ static size_t loop_next(SPYContext *c, Program *p, Node *n, Node *target) {
     if (!n->op && !p->namespace && target->kind == N_NAME && target->line == n->line && next != SIZE_MAX) p->items[next].other = 1;
     return next;
 }
-static size_t compile_next(SPYContext *c, Program *p, Node *n, Node *target) {
-    size_t next = loop_next(c, p, n, target);
-    compile_store(c, p, target, n);
-    return next;
-}
-/* The steps of comprehension n's element, which its clauses' steps go
- * before (compile_comprehension_clause). */
+/* The steps of comprehension n's element, which its clauses' openings go
+ * before (comprehension_close). */
 static void compile_comprehension_item(SPYContext *c, Program *p, Node *n) {
     Node *item = n->args;
     if (n->op == N_TUPLE) {
@@ -18865,44 +18849,13 @@ static void compile_comprehension_item(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, item); emit(c, p, BC_NONE, item, 0); emit(c, p, BC_MAP, item, 0);
     } else { compile_expr(c, p, item); emit(c, p, BC_ADD, item, 0); }
 }
-/* The steps of clause and those after it, around the element's, which
- * were compiled first, from item on, and are moved after their opening
- * steps; *moved then counts the steps those opening steps moved back by. */
-static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Node *clause, Mark item, Mark opening, size_t *moved) {
-    if (c->error_type[0]) return;
-    if (!clause) { emit_after(p, item, opening, NULL); *moved = opening.at - item.at; return; }
-    if (clause->kind == N_IF) {
-        size_t end = compile_branch(c, p, clause->a, clause);
-        compile_comprehension_clause(c, p, n, clause->b, item, opening, moved); patch(p, end - *moved, p->len);
-        return;
-    }
-    /* The first iterator is acquired eagerly in the enclosing frame. */
-    if (clause != n->a) compile_expr(c, p, clause->a);
-    size_t loop = emit(c, p, BC_LOOP, clause, clause == n->a ? 3 : clause->op ? 2 : 1);
-    size_t start = p->len, end = compile_next(c, p, clause, clause->args);
-    compile_comprehension_clause(c, p, n, clause->b, item, opening, moved);
-    if (c->error_type[0]) return;
-    loop -= *moved; start -= *moved; end -= *moved;
-    patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
-    patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, clause, 0); patch(p, loop, p->len);
-}
-static int compile_comprehension(SPYContext *c, Node *n) {
+/* Comprehension n's scope, defined before or after this (scope_of),
+ * asynchronous with an async first clause; its program was compiled as it
+ * was parsed (comprehension_close), or none runs. */
+static int comprehension_finish(SPYContext *c, Node *n) {
     if (!body_scope(c, n)) return -1;
-    /* Its scope is defined before or after this (scope_of). */
     if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
-    /* Its program was compiled as it was parsed (comprehension_close), or none runs. */
-    if (n->scope->code || (n->flags & F_UNEVALUATED)) return 0;
-    n->scope->code = allocate(c, sizeof(*n->scope->code));
-    if (!n->scope->code) return -1;
-    n->scope->code->calls = c->pausing ? PAUSING : BODY; n->scope->code->loads = c->string_source != 0;
-    Program *code = n->scope->code;
-    Mark item = mark(code);
-    compile_comprehension_item(c, code, n);
-    size_t moved = 0;
-    compile_comprehension_clause(c, code, n, n->a, item, mark(code), &moved);
-    if (n->op == N_TUPLE) emit(c, n->scope->code, BC_NONE, n, 0);
-    emit(c, n->scope->code, BC_FLOW, n, FLOW_RETURN);
-    return c->error_type[0] ? -1 : 0;
+    return 0;
 }
 /* After a with statement's suite, each item's exit in reverse order,
  * from last, the last item's entry (with_item), back along their links. */
@@ -18956,7 +18909,6 @@ static void compile_operation(SPYContext *c, Program *p, Node *n) {
         if (p->items[i].op == BC_COMPARE && !p->items[i].target) p->items[i].target = p->len;
 }
 static void compile_statement(SPYContext *, Program *, Node *);
-static void compile_body(SPYContext *, Program *, Node *);
 /* Around the body of handler h; with unbinds, a namespace's, it stores
  * the exception atop the stack in its name and, however it ends, stores
  * None there and deletes it, as a finally block (15.4.1) that keeps the
@@ -18993,9 +18945,6 @@ static void annotation_steps(SPYContext *c, Program *p, int lazy, Node *at, Node
     pc = emit(c, p, BC_CLASS, entry, (lazy ? 15 : 14) | (star ? ANNOTATION_STAR : 0));
     if (pc != SIZE_MAX) p->items[pc].constant = key;
     patch(p, branch, p->len);
-}
-static void compile_body(SPYContext *c, Program *p, Node *body) {
-    for (Node *n = body; n && !c->error_type[0]; n = n->next) compile_statement(c, p, n);
 }
 /* Whether statement n adds a name or constant to a name, or subtracts it:
  * a counter's or an accumulator's step. */
@@ -19094,7 +19043,6 @@ static size_t loop_begin(Parser *parser, Program *p, Node *n, size_t *loop) {
     if (n->kind != N_FOR) return compile_branch(c, p, n->a, n);
     /* Its target's steps, parsed apart (loop_target), become its store. */
     size_t at = p->len + 1;
-    if (!apart_owned(parser, n->args)) return compile_next(c, p, n, n->args);
     size_t next = loop_next(c, p, n, n->args);
     if (!apart_took(parser, p, n->args) || !target_steps(c, p, n->args, at, n, 1, TARGET_STORE)) return SIZE_MAX;
     return next;
@@ -19753,18 +19701,11 @@ static int compile_generator(SPYContext *c, Node *n) {
     if (name && !n->scope->name && (!(n->scope->name = copy_text(c, name->name.text, strlen(name->name.text))) ||
                                     (name->original && !(n->scope->spelling = copy_text(c, name->original, strlen(name->original))))))
         return -1;
-    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS)), mode = c->pausing ? PAUSING : BODY;
-    /* A parsed def's or class's statements were compiled as they were
-     * parsed (body_begin); a lambda's body, an __annotate__ function's or
-     * a lazy value's is compiled now. */
+    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS));
+    /* Its statements were compiled as they were parsed (body_begin), or
+     * none runs. */
     Program *p = n->scope->flat;
-    if (!p && (n->flags & F_UNEVALUATED)) return 0;
-    if (!p) {
-        if (!(p = allocate(c, sizeof(*p)))) return -1;
-        p->calls = mode; p->loads = c->string_source != 0;
-        n->scope->flat = p;
-        compile_body(c, p, n->b);
-    }
+    if (!p) return 0;
     if (generator) { n->scope->code = p; n->scope->flat = NULL; }
     /* The implicit return has no node: it runs on the last line executed;
      * a class body's returns its __class__ cell (class_part). */
@@ -41337,7 +41278,7 @@ static SPYValue *delegate_thrown(Machine *m) {
     return thrown;
 }
 /* Loop item item, which the loop step next took: stored to the name the
- * step stores (compile_next), 1 for its BC_STORE to be skipped; else, as
+ * step stores (loop_next), 1 for its BC_STORE to be skipped; else, as
  * when the store calls a namespace's Python __setitem__, pushed, 0, for
  * the steps after next to take it. */
 static ALWAYS_INLINE int loop_item(SPYContext *c, Machine *m, Frame *f, Instruction *next, SPYValue *item) {
