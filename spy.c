@@ -5469,8 +5469,11 @@ static Node *import_name(Parser *p) {
 static Node *expression(Parser *, int);
 static Node *plain_expression(Parser *, int);
 static Node *apart_expression(Parser *, Node *(*)(Parser *, int), int);
+static Node *loop_target(Parser *, int);
 static Node *annotation_expression(Parser *, Node *(*)(Parser *, int), int);
 static void apart_drop(Parser *, size_t);
+static int apart_owned(Parser *, Node *);
+static int apart_took(Parser *, Program *, Node *);
 static void apart_detach(Parser *, Program *);
 static Node *expression_mode(Parser *, int, int);
 static Node *syntax_at(Parser *, Node *, const char *);
@@ -5503,7 +5506,7 @@ static void scope_define(Node *);
 static int scope_unhold(SPYContext *, Scope *);
 static void site_settle(Site *);
 static SPYValue *docstring(SPYContext *, Node *);
-static size_t loop_begin(SPYContext *, Program *, Node *, size_t *);
+static size_t loop_begin(Parser *, Program *, Node *, size_t *);
 static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
 static void patch(Program *, size_t, size_t);
 static size_t program_len(Program *);
@@ -7424,6 +7427,16 @@ static Node *apart_expression(Parser *p, Node *(*parse)(Parser *, int), int min)
     Node *value = parse(p, min);
     return apart_end(p, value, emitting, from) ? NULL : value;
 }
+/* A for statement's target, parsed apart in the body's modes when it
+ * emits and its steps can become its store (target_steps). */
+static Node *loop_target(Parser *p, int emits) {
+    if (!emits) return expression_list(p, 4);
+    Program *emitting;
+    EmitMark from = apart_begin(p, &emitting, p->body.program);
+    Node *t = expression_list(p, 4);
+    Node *kept = t && p->emitting && target_steps(p->ctx, p->emitting, t, 0, NULL, 0, TARGET_CHECK) ? t : NULL;
+    return apart_end(p, kept, emitting, from) ? NULL : t;
+}
 /* A function's annotation, parsed apart unless PEP 563 makes it a string
  * (annotation_entry), when it emits nothing. */
 static Node *annotation_expression(Parser *p, Node *(*parse)(Parser *, int), int min) {
@@ -8381,7 +8394,7 @@ static Node *statement_body(Parser *p, int emits) {
         if (!n) return NULL;
         n->op = asynchronous;
         if (is_for) {
-            n->args = expression_list(p, 4);
+            n->args = loop_target(p, emits);
             if (n->args && !target(p, n->args)) return p->ctx->error_type[0] ? NULL : target_error(p, n->args, TARGETS_FOR);
             if (!n->args || !take_word(p, "in")) return syntax(p, "invalid syntax");
         }
@@ -8397,7 +8410,7 @@ static Node *statement_body(Parser *p, int emits) {
         /* With emits compiled in place, as compile_statement does (loop_begin). */
         if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits && !is_for) branch = kept ? branch_parsed(p->ctx, p->body.program, n->a, n) : compile_branch(p->ctx, p->body.program, n->a, n);
-        else if (emits) branch = loop_begin(p->ctx, p->body.program, n, &loop);
+        else if (emits) branch = loop_begin(p, p->body.program, n, &loop);
         p->loops++; n->b = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
         if (!n->b) return NULL;
         if (emits) loop_else(p->ctx, p->body.program, n, loop, branch);
@@ -18184,19 +18197,30 @@ static int apart_end(Parser *p, Node *value, Program *emitting, EmitMark from) {
     p->emitting = emitting;
     return c->error_type[0] ? -1 : 0;
 }
+/* Where value was parsed apart into a program the parse holds, or SIZE_MAX. */
+static size_t apart_of(Parser *p, Node *value) {
+    for (size_t i = p->apart_len; i--;) {
+        struct Apart *apart = &p->aparts[i];
+        if (apart->value == value && apart->start == value->start && apart->kind == value->kind) return i;
+    }
+    return SIZE_MAX;
+}
+static int apart_owned(Parser *p, Node *value) { return apart_of(p, value) != SIZE_MAX; }
+/* Value's steps, parsed apart, moved after to's. Whether they were. */
+static int apart_took(Parser *p, Program *to, Node *value) {
+    size_t i = apart_of(p, value);
+    if (i == SIZE_MAX) return 0;
+    Program *from = p->aparts[i].program;
+    p->aparts[i] = p->aparts[--p->apart_len];
+    int moved = !emit_take(p->ctx, from, (Mark){0, NULL}, 0, from->values_len, to);
+    free_program(from);
+    return moved;
+}
 /* Value's steps after to's: those it was parsed apart into, or compiled
  * from its nodes. */
 static void apart_take(Parser *p, Program *to, Node *value) {
-    for (size_t i = p->apart_len; i--;) {
-        struct Apart *apart = &p->aparts[i];
-        if (apart->value != value || apart->start != value->start || apart->kind != value->kind) continue;
-        Program *from = apart->program;
-        *apart = p->aparts[--p->apart_len];
-        if (emit_take(p->ctx, from, (Mark){0, NULL}, 0, from->values_len, to)) { free_program(from); return; }
-        free_program(from);
-        return;
-    }
-    compile_expr(p->ctx, to, value);
+    if (!apart_owned(p, value)) compile_expr(p->ctx, to, value);
+    else apart_took(p, to, value);
 }
 /* The program of annotation function fn, made as it is parsed, its
  * scope's: its annotations' dictionary, then each entry that ran stored
@@ -18715,9 +18739,13 @@ static void compile_targeted(SPYContext *c, Program *p, Node *n, Node *popped) {
 /* The step taking loop n's next item into target: a name on the loop's
  * line, outside a class body, is stored by the step itself (other 1),
  * which skips the name's BC_STORE after it unless that store calls Python. */
-static size_t compile_next(SPYContext *c, Program *p, Node *n, Node *target) {
+static size_t loop_next(SPYContext *c, Program *p, Node *n, Node *target) {
     size_t next = emit(c, p, BC_NEXT, n, n->op);
     if (!n->op && !p->namespace && target->kind == N_NAME && target->line == n->line && next != SIZE_MAX) p->items[next].other = 1;
+    return next;
+}
+static size_t compile_next(SPYContext *c, Program *p, Node *n, Node *target) {
+    size_t next = loop_next(c, p, n, target);
     compile_store(c, p, target, n);
     return next;
 }
@@ -18998,10 +19026,17 @@ static size_t if_else(SPYContext *c, Program *p, Node *n, size_t branch) {
  * parses them: its block, at loop, and its step, whose branch leaves the
  * suite; after the suite, the jump back to the step, and the block's end
  * before an else suite. */
-static size_t loop_begin(SPYContext *c, Program *p, Node *n, size_t *loop) {
+static size_t loop_begin(Parser *parser, Program *p, Node *n, size_t *loop) {
+    SPYContext *c = parser->ctx;
     if (n->kind == N_FOR) compile_expr(c, p, n->a);
     *loop = loop_open(c, p, n);
-    return n->kind == N_FOR ? compile_next(c, p, n, n->args) : compile_branch(c, p, n->a, n);
+    if (n->kind != N_FOR) return compile_branch(c, p, n->a, n);
+    /* Its target's steps, parsed apart (loop_target), become its store. */
+    size_t at = p->len + 1;
+    if (!apart_owned(parser, n->args)) return compile_next(c, p, n, n->args);
+    size_t next = loop_next(c, p, n, n->args);
+    if (!apart_took(parser, p, n->args) || !target_steps(c, p, n->args, at, n, 1, TARGET_STORE)) return SIZE_MAX;
+    return next;
 }
 static size_t loop_open(SPYContext *c, Program *p, Node *n) {
     size_t loop = emit(c, p, BC_LOOP, n, n->kind == N_FOR ? 1 + n->op : 0);
