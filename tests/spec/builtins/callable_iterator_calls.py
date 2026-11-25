@@ -70,15 +70,17 @@ def ends():
 
 assert_eq(ends(), [([], []), ("b",), 3, []])
 
-# A builtin's function ends the iterator by StopIteration, and its other
-# exceptions propagate.
+# A builtin's function ends the iterator by StopIteration or an equal
+# result, for good, and its other exceptions propagate.
 def natives():
-    out = [list(iter(iter([1, 2]).__next__, 0))]
+    out = [list(iter(iter([1, 2]).__next__, 0)), list(iter(int, 0))]
+    it = iter(iter([1, 0, 2]).__next__, 0)
+    out.append((list(it), list(it)))
     try: list(iter([1].pop, None))
     except IndexError as e: out.append(str(e))
     return out
 
-assert_eq(natives(), [[1, 2], "pop from empty list"])
+assert_eq(natives(), [[1, 2], [], ([1], []), "pop from empty list"])
 
 # A builtin callable's StopIteration ends the iterator, and another error
 # propagates, whatever takes its items: a starred display, unpacking,
