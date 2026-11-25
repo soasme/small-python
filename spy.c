@@ -4672,6 +4672,10 @@ typedef struct {
      * the statement (a module's are all conditional), the next index. */
     int collecting, conditional, annotation_index;
     Node *annotations, **annotations_tail;
+    /* The collecting body's __annotate__ program, its entries emitted as
+     * they are parsed (annotation_parsed), from annotating_from on; every
+     * one begun, which the parse frees unless a scope took it. */
+    Program *annotating, **annotate_programs; size_t annotate_len, annotate_cap; EmitMark annotating_from;
     int awaits; /* The awaits and async for clauses parsed (comprehension). */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     int line_open; /* A body's line continues after a statement and its ';' (line_statements). */
@@ -7406,6 +7410,11 @@ static Node *annotation_string(Parser *p, Node *annotation) {
     n->op = (int)text.len;
     return n->name.text ? n : NULL;
 }
+static int annotation_open(Parser *);
+static EmitMark annotation_value(Parser *, Node *, EmitMark);
+static int annotation_parsed(Parser *, Node *);
+static int annotation_close(Parser *, Program *, Node *);
+static void annotation_steps(SPYContext *, Program *, int, Node *, Node *, size_t);
 static Node *annotation_entry(Parser *p, const char *name, Node *annotation, int index, int flags) {
     Node *entry = node(p, N_KEYWORD);
     if (!entry) return NULL;
@@ -7445,7 +7454,7 @@ static int annotated(Parser *p, Node *n) {
     if (!(n->flags & F_SIMPLE)) return 0;
     if (p->future_annotations) { n->flags |= F_FUTURE; p->annotation_index++; return 0; }
     Node *entry = annotation_entry(p, n->a->name.text, n->b, p->annotation_index, p->conditional ? F_CONDITIONAL : 0);
-    if (!entry) return -1;
+    if (!entry || annotation_parsed(p, entry)) return -1;
     /* A body's annotations are compiled when it ends (collect_end). */
     keep_tree(entry);
     n->op = p->annotation_index++;
@@ -7454,24 +7463,27 @@ static int annotated(Parser *p, Node *n) {
     return 0;
 }
 /* The annotation state of a body, saved across a nested one. */
-typedef struct { int collecting, conditional, index, annotated, conditional_annotations; Node *annotations, **tail; } Annotations;
+typedef struct { int collecting, conditional, index, annotated, conditional_annotations; Node *annotations, **tail; Program *annotating; } Annotations;
 /* Begin collecting the annotations of a class body, or of the module's
  * (conditional), or stop for a function body. */
 static Annotations collect_begin(Parser *p, int collecting, int conditional) {
-    Annotations saved = {p->collecting, p->conditional, p->annotation_index, p->annotated, p->conditional_annotations, p->annotations, p->annotations_tail};
+    Annotations saved = {p->collecting, p->conditional, p->annotation_index, p->annotated, p->conditional_annotations,
+                         p->annotations, p->annotations_tail, p->annotating};
     p->collecting = collecting; p->conditional = conditional; p->annotation_index = 0;
     p->annotated = p->conditional_annotations = 0;
-    p->annotations = NULL; p->annotations_tail = &p->annotations;
+    p->annotations = NULL; p->annotations_tail = &p->annotations; p->annotating = NULL;
     return saved;
 }
 /* The collected annotations of owner's body, or the module's: its flags
  * and its __annotate__ in *out; then the enclosing body's state again. */
 static int collect_end(Parser *p, Node *owner, Node **out, Annotations saved) {
     Node *entries = p->annotations;
+    Program *annotating = p->annotating;
     int annotated = p->annotated, conditional = p->conditional_annotations;
     p->collecting = saved.collecting; p->conditional = saved.conditional; p->annotation_index = saved.index;
     p->annotated = saved.annotated; p->conditional_annotations = saved.conditional_annotations;
     p->annotations = saved.annotations; p->annotations_tail = saved.tail;
+    p->annotating = saved.annotating;
     *out = NULL;
     if (conditional && owner) owner->flags |= F_CONDITIONAL;
     else if (conditional) p->unit->as.unit.conditional_annotations = 1;
@@ -7486,7 +7498,9 @@ static int collect_end(Parser *p, Node *owner, Node **out, Annotations saved) {
     /* Its scope, made as the first annotation was analysed (annotation_scope). */
     Scope *body = owner ? owner->scope : p->unit->as.unit.scope, *annotate = body ? body->annotate : NULL;
     if (annotate) { (*out)->scope = annotate; annotate->owner = *out; scope_adopt(body, annotate); scope_define(*out); }
-    return 0;
+    /* Its program, its entries emitted as they were parsed, returns. */
+    if (annotate && annotating && !annotate->flat && !annotation_close(p, annotating, (*out)->b)) annotate->flat = annotating;
+    return p->ctx->error_type[0] ? -1 : 0;
 }
 static int function_annotations(Parser *p, Node *def) {
     Node *entries = NULL, **tail = &entries;
@@ -8618,7 +8632,14 @@ static Node *expression_statement(Parser *p, Node *n) {
         p->pos++;
         n->kind = N_ANNASSIGN;
         if (target->kind == N_NAME && !parenthesized) n->flags |= F_SIMPLE;
-        if (!(n->b = expression(p, 0)) || (p->future_annotations && !(n->b = annotation_string(p, n->b)))) return NULL;
+        /* A collected annotation emits into its body's __annotate__ (annotation_parsed). */
+        Program *emitting = p->emitting;
+        EmitMark from = {0};
+        if (p->collecting && (n->flags & F_SIMPLE) && !p->future_annotations && annotation_open(p)) from = emit_mark(p);
+        n->b = expression(p, 0);
+        p->annotating_from = p->emitting != emitting && n->b ? annotation_value(p, n->b, from) : (EmitMark){{{SIZE_MAX, NULL}, 0, 0, 0}, 0};
+        p->emitting = emitting;
+        if (!n->b || (p->future_annotations && !(n->b = annotation_string(p, n->b)))) return NULL;
         if (take(p, '=')) {
             /* The target and annotation are not read where they stand. */
             emitted_drop(p);
@@ -9891,6 +9912,8 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
     }
 lexer_error:
     mem_free(p.tokens); mem_free(p.literal_error); mem_free(p.emitted);
+    for (size_t i = 0; i < p.annotate_len; i++) free_program(p.annotate_programs[i]);
+    mem_free(p.annotate_programs);
     if (c->error_type[0]) {
         put_text(c->filename, sizeof(c->filename), filename); c->filename_from = c->quiet_unit = NULL;
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
@@ -18040,6 +18063,54 @@ static Program *guard_program(Parser *p) {
     program->calls = body->calls; program->loads = body->loads; program->namespace = body->namespace; program->unbinds = body->unbinds;
     return program;
 }
+/* Before a collected annotation is parsed: whether it emits into the
+ * body's __annotate__ program, which its first begins. */
+static int annotation_open(Parser *p) {
+    SPYContext *c = p->ctx;
+    if (!p->emitting) return 0;
+    if (!p->annotating) {
+        if (grow(c, (void **)&p->annotate_programs, &p->annotate_cap, p->annotate_len + 1, sizeof(*p->annotate_programs)) ||
+            !(p->annotating = allocate(c, sizeof(*p->annotating)))) return 0;
+        p->annotate_programs[p->annotate_len++] = p->annotating;
+        p->annotating->calls = c->pausing ? PAUSING : BODY; p->annotating->loads = c->string_source != 0;
+    }
+    p->emitting = p->annotating;
+    return 1;
+}
+/* Collected annotation value, parsed into the body's __annotate__ from
+ * from on: its steps there, compiled from its nodes unless they were all
+ * its own. Where they begin. */
+static EmitMark annotation_value(Parser *p, Node *value, EmitMark from) {
+    if (!(value->flags & F_EMITTED) || value->steps_at != from.steps.mark.at || value->steps_end != p->emitting->len) {
+        emit_back(p, from);
+        compile_expr(p->ctx, p->emitting, value);
+    }
+    return from;
+}
+/* Entry of the body's __annotate__, its value's steps there from
+ * annotating_from on: its steps around them (annotation_steps), the
+ * program's first step before the first. -1 on an error. */
+static int annotation_parsed(Parser *p, Node *entry) {
+    SPYContext *c = p->ctx;
+    Program *program = p->annotating;
+    size_t start = p->annotating_from.steps.mark.at;
+    p->annotating_from.steps.mark.at = SIZE_MAX;
+    if (!program || start == SIZE_MAX) return 0;
+    /* The function's first step, at its first entry's line (annotation_function). */
+    if (!start) {
+        size_t pc = emit_before(c, program, 0, BC_CLASS, entry, 12);
+        if (pc != SIZE_MAX) program->items[pc].target = 0;
+        start = 1;
+    }
+    annotation_steps(c, program, 0, entry, entry, start);
+    return c->error_type[0] ? -1 : 0;
+}
+/* Its __annotate__'s program, body that function's: its return, the
+ * program then its scope's, not the parse's. -1 on an error. */
+static int annotation_close(Parser *p, Program *program, Node *body) {
+    for (size_t i = 0; i < p->annotate_len; i++) if (p->annotate_programs[i] == program) p->annotate_programs[i] = NULL;
+    return emit(p->ctx, program, BC_FLOW, body, FLOW_RETURN) == SIZE_MAX ? -1 : 0;
+}
 /* A dictionary or set display n compiled as it is parsed: its first
  * step, a dictionary's until an element makes it a set (display_end);
  * after each item's steps, from start on, those adding it; display's
@@ -18659,6 +18730,25 @@ static void handler_end(SPYContext *c, Program *p, Node *h, int unbinds, size_t 
     emit(c, p, BC_LEAVE, NULL, 0); patch(p, final, p->len);
     emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_STORE, h->c, 1); emit(c, p, BC_DELETE, h->c, 3); emit(c, p, BC_POP, NULL, 0);
     emit(c, p, BC_END_FINALLY, NULL, 0);
+}
+/* The steps of entry of an annotation function's body, at, around its
+ * value's, from start to the end: a conditional one's test of whether its
+ * statement ran before them, its store after, of its value alone for a
+ * lazy value's (lazy). */
+static void annotation_steps(SPYContext *c, Program *p, int lazy, Node *at, Node *entry, size_t start) {
+    size_t branch = SIZE_MAX, pc;
+    if (entry->flags & F_CONDITIONAL) {
+        if ((pc = emit_before(c, p, start, BC_CLASS, entry, 13)) != SIZE_MAX) p->items[pc].target = (uint32_t)entry->op;
+        branch = emit_before(c, p, start + 1, BC_FALSE, entry, 0);
+    }
+    int star = entry->a->kind == N_STAR;
+    if (star) emit(c, p, BC_CLASS, at, 16);
+    SPYValue *key = lazy ? NULL : spy_string(c, entry->name.text, strlen(entry->name.text));
+    if (!lazy && (!key || grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)))) { spy_release(key); return; }
+    if (key) p->values[p->values_len++] = key;
+    pc = emit(c, p, BC_CLASS, entry, (lazy ? 15 : 14) | (star ? ANNOTATION_STAR : 0));
+    if (pc != SIZE_MAX) p->items[pc].constant = key;
+    patch(p, branch, p->len);
 }
 static void compile_body(SPYContext *c, Program *p, Node *body) {
     for (Node *n = body; n && !c->error_type[0]; n = n->next) compile_statement(c, p, n);
@@ -19287,21 +19377,10 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
          * in it (annotation_step); a lazy value's returns its value. */
         size_t pc = emit(c, p, BC_CLASS, n, 12);
         if (pc != SIZE_MAX) p->items[pc].target = n->op == 1;
-        for (Node *entry = n->args; entry; entry = entry->next) {
-            branch = SIZE_MAX;
-            if (entry->flags & F_CONDITIONAL) {
-                if ((pc = emit(c, p, BC_CLASS, entry, 13)) != SIZE_MAX) p->items[pc].target = (uint32_t)entry->op;
-                branch = emit(c, p, BC_FALSE, entry, 0);
-            }
-            int star = entry->a->kind == N_STAR;
-            compile_expr(c, p, star ? entry->a->a : entry->a);
-            if (star) emit(c, p, BC_CLASS, n, 16);
-            SPYValue *key = n->op == 1 ? NULL : spy_string(c, entry->name.text, strlen(entry->name.text));
-            if (n->op != 1 && (!key || grow(c, (void **)&p->values, &p->values_cap, p->values_len + 1, sizeof(*p->values)))) { spy_release(key); break; }
-            if (key) p->values[p->values_len++] = key;
-            pc = emit(c, p, BC_CLASS, entry, (n->op == 1 ? 15 : 14) | (star ? ANNOTATION_STAR : 0));
-            if (pc != SIZE_MAX) p->items[pc].constant = key;
-            patch(p, branch, p->len);
+        for (Node *entry = n->args; entry && !c->error_type[0]; entry = entry->next) {
+            size_t start = p->len;
+            compile_expr(c, p, entry->a->kind == N_STAR ? entry->a->a : entry->a);
+            annotation_steps(c, p, n->op == 1, n, entry, start);
         }
         emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
     }
