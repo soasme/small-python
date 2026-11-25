@@ -612,8 +612,6 @@ struct SPYContext {
     SPYValue *searched, *searched_class, *searched_hook;
     /* On a machine's stack, under the pair a group's split returns to an except* step (star_split). */
     SPYValue *splitting;
-    /* The code unit_enter runs in place of its unit's body: a generic class's header (header_step). */
-    Program *k_code;
     int interactive_input; /* eval_source parses interactive input, whose expression statements display their values. */
     SPYValue *pattern_calls[2]; /* The builtin len and isinstance, as a pattern's steps call them (pattern_step). */
     Node *node_open; /* The node of the last compile-time SyntaxError, while analysis runs (analysis_defer). */
@@ -9398,6 +9396,17 @@ static int scope_string_annotation(SPYContext *c, Node *n) {
     scope_define(n);
     return 0;
 }
+/* A generic class n is made in a frame of its type parameters' scope
+ * generic (header_step), named for it and starting where n does. */
+static int generic_class_scope(SPYContext *c, Scope *generic, Node *n) {
+    generic->first_line = n->scope->first_line;
+    if (generic->name) return 0;
+    const char *name = n->a->name.text;
+    size_t len = strlen(name);
+    if (!(generic->name = allocate(c, len + 25))) return -1;
+    memcpy(generic->name, "<generic parameters of ", 23); memcpy(generic->name + 23, name, len); generic->name[23 + len] = '>';
+    return 0;
+}
 /* The annotation scope binding a definition's type parameters. */
 static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
     if (!scope_of(c, generic, parent)) return NULL;
@@ -9629,6 +9638,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         if (!outer) return -1;
         if (n->kind == N_CLASS && scope_arguments(c, outer, n->args)) return -1;
         if (!scope_of(c, n, outer)) return -1;
+        if (n->kind == N_CLASS && n->params && generic_class_scope(c, outer, n)) return -1;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_record(c, n->scope, param, S_PARAM)) return -1;
         if (scope_annotations(c, outer, n->annotate, "an annotation")) return -1;
@@ -18000,29 +18010,29 @@ static int class_header(Parser *p, Node *n, EmitMark from) {
     n->flags |= F_HEADER;
     return emit(p->ctx, p->emitting, BC_BUILDER, n, 0) == SIZE_MAX ? -1 : 0;
 }
-/* Generic class n's bases and keywords to follow: a program of their
- * own, parsed apart (apart_begin) until they end, its first step
- * emitted, n marked as streaming them (call_arguments); from is where
- * they begin. -1 on an error. */
+/* Generic class n's bases and keywords to follow: its type parameters'
+ * scope's program (header_step), parsed apart (apart_begin) until they
+ * end, its first steps emitted, n marked as streaming them
+ * (call_arguments); from is where they begin. -1 on an error. */
 static int generic_header(Parser *p, Node *n, EmitMark *from) {
     Program *emitting;
     apart_begin(p, &emitting, NULL);
-    if (!p->emitting || emit(p->ctx, p->emitting, BC_CLASS, n, 18) == SIZE_MAX) return -1;
+    if (!p->emitting || emit(p->ctx, p->emitting, BC_CLASS, n, 18) == SIZE_MAX || emit(p->ctx, p->emitting, BC_CLASS, n, 21) == SIZE_MAX) return -1;
     n->flags |= F_HEADER;
     *from = emit_mark(p);
     return 0;
 }
 /* Its bases and keywords parsed: when they streamed, their program, its
- * last steps emitted, its type parameters' scope's (header_step); else
- * undone, to compile from their nodes. Then emitting again. -1 on an
- * error. */
+ * steps making their pair emitted, its type parameters' scope's, which
+ * the class statement ends; else undone, to compile from their nodes.
+ * Then emitting again. -1 on an error. */
 static int generic_header_end(Parser *p, Node *n, Program *emitting, EmitMark from) {
     SPYContext *c = p->ctx;
     Program *header = p->emitting;
     int streamed = (n->flags & F_HEADER) != 0;
     n->flags &= ~F_HEADER;
     apart_detach(p, header);
-    if (streamed) { emit(c, header, BC_CLASS, n, 19); emit(c, header, BC_FLOW, NULL, FLOW_RETURN); }
+    if (streamed) emit(c, header, BC_CLASS, n, 19);
     else emit_back(p, from);
     p->emitting = emitting;
     if (streamed && !c->error_type[0] && body_scope(c, n->params)) { n->params->scope->flat = header; return 0; }
@@ -19612,18 +19622,29 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     default: { /* N_CLASS, the last statement that can contain a yield */
         /* Decorators, __build_class__ (BC_BUILDER), then the bases and
          * keywords as its arguments; a generic class's bases cannot suspend. */
-        int stacked = n->args && !n->params;
         /* Unless they were emitted as the header was parsed (class_header). */
         if (!(n->flags & F_HEADER)) {
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
             emit(c, p, BC_BUILDER, n, 0);
         }
-        /* The body is a call (class_part); a generic class's type
-         * parameters' env is under it (arg 1). */
-        if (n->params) emit(c, p, BC_CLASS, n, 1);
-        if (n->params && n->args) emit(c, p, BC_CLASS, n, 20);
-        emit(c, p, BC_CLASS, n, stacked || (n->params && n->args) ? 3 : 4); emit(c, p, BC_CALLN, n, 0); emit(c, p, BC_CLASS, n, 5);
-        emit(c, p, BC_CLASS, n, 7);
+        /* The body is a call (class_part). A generic class is made in a
+         * frame of its type parameters' scope, their env under it (arg
+         * 1), entered by 20; its program, the bases' (generic_header) or
+         * its own, ends with the call. */
+        Program *made = p;
+        if (n->params) {
+            emit(c, p, BC_CLASS, n, 1); emit(c, p, BC_CLASS, n, 20);
+            Scope *generic = body_scope(c, n->params);
+            if (generic && !generic->flat && !n->args && (generic->flat = allocate(c, sizeof(*generic->flat)))) {
+                generic->flat->calls = p->calls; generic->flat->loads = p->loads;
+                emit(c, generic->flat, BC_CLASS, n, 18);
+            }
+            if (!generic || !generic->flat) break;
+            made = generic->flat;
+        }
+        emit(c, made, BC_CLASS, n, n->args ? 3 : 4); emit(c, made, BC_CALLN, n, 0); emit(c, made, BC_CLASS, n, 5);
+        emit(c, made, BC_CLASS, n, 7);
+        if (made != p) emit(c, made, BC_FLOW, NULL, FLOW_RETURN);
         compile_decorations(c, p, n->decorators);
         emit(c, p, BC_STORE, n->a, 1); break;
     }
@@ -20241,7 +20262,13 @@ static const char *generic_name(Scope *generic) {
 }
 static int append_qualname(Buffer *out, Scope *scope) {
     if (!scope || !scope->form) return 0;
-    if (scope->form == N_GENERIC) return append_qualname(out, scope->parent);
+    if (scope->form == N_GENERIC) {
+        /* A generic definition's type parameters, within its enclosing scope. */
+        Scope *parent = scope->parent;
+        if (append_qualname(out, parent) || (out->len && puts_buffer(out, parent->kind == S_FUNCTION ? ".<locals>." : ".")) ||
+            puts_buffer(out, "<generic parameters of ") || puts_buffer(out, generic_name(scope)) || puts_buffer(out, ">")) return -1;
+        return 0;
+    }
     if (scope->flags & F_TYPEPARAMS) {
         /* A lazy bound, default or alias value is named in the scope that
          * holds the generic definition or type statement. */
@@ -20268,8 +20295,6 @@ static int append_qualname(Buffer *out, Scope *scope) {
     else if (parent && parent->form == N_GENERIC) parent = parent->parent;
     Symbol *binding = scope->form == N_DEF || scope->form == N_CLASS ? scope_symbol(parent, scope->name) : NULL;
     if ((!binding || !(binding->flags & S_GLOBAL)) && append_qualname(out, parent)) return -1;
-    if (generic && ((out->len && puts_buffer(out, parent->parent && parent->parent->kind == S_FUNCTION ? ".<locals>." : ".")) ||
-        puts_buffer(out, "<generic parameters of ") || puts_buffer(out, generic_name(parent)) || puts_buffer(out, ">"))) return -1;
     if (out->len && puts_buffer(out, !generic && parent && parent->kind == S_FUNCTION ? ".<locals>." : ".")) return -1;
     const char *name = scope->form == N_LAMBDA ? "<lambda>" : scope->form == N_COMPREHENSION ? "<genexpr>" : scope_name(scope);
     return puts_buffer(out, name);
@@ -21715,13 +21740,13 @@ static int start_annotations(SPYContext *, Frame *, Scope *, const char *);
  * references, releasing them when it fails. The body's instructions of no
  * node tick on its first statement; the first binds its annotation names
  * (annotation_step). */
-static NO_INLINE Call *unit_enter(SPYContext *c, SPYValue *unit, SPYValue *env, Program *code, Machine *caller) {
-    Frame frame = {env, unit, !code && unit->as.unit.expression == 2};
+static NO_INLINE Call *unit_enter(SPYContext *c, SPYValue *unit, SPYValue *env, Machine *caller) {
+    Frame frame = {env, unit, unit->as.unit.expression == 2};
     if (!enter_frame(c, env, unit)) {
-        if ((code || !setup_annotations(c, &frame, unit->as.unit.setup_annotations)) &&
+        if (!setup_annotations(c, &frame, unit->as.unit.setup_annotations) &&
             ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c))) {
             Call *call = c->calls[c->calls_len++];
-            call->m.code = code ? code : unit->as.unit.flat; call->m.pc = call->m.code->entry; call->m.owner = unit->as.unit.body ? unit->as.unit.scope : NULL;
+            call->m.code = unit->as.unit.flat; call->m.pc = call->m.code->entry; call->m.owner = unit->as.unit.body ? unit->as.unit.scope : NULL;
             call->m.frame = frame;
             call->caller = caller; call->fn = unit;
             call->caller_env = c->eval_env; c->eval_env = env;
@@ -22243,9 +22268,8 @@ static NO_INLINE Machine *k_enter(SPYContext *c, Machine *m) {
     SPYValue *fn = c->k_fn, *env = c->k_env, *ctx = c->k_ctx;
     SPYContinuation host = c->k_host;
     int kind = c->k_kind, unit = c->k_unit;
-    Program *code = c->k_code;
-    c->k = NULL; c->k_fn = c->k_env = c->k_ctx = NULL; c->k_kind = c->k_unit = 0; c->k_code = NULL;
-    Call *call = unit >= 2 ? compare_enter(c, m, fn, env, unit - 2, CALL_K) : unit ? unit_enter(c, fn, env, code, m) : call_enter(c, fn, env, m);
+    c->k = NULL; c->k_fn = c->k_env = c->k_ctx = NULL; c->k_kind = c->k_unit = 0;
+    Call *call = unit >= 2 ? compare_enter(c, m, fn, env, unit - 2, CALL_K) : unit ? unit_enter(c, fn, env, m) : call_enter(c, fn, env, m);
     if (call) {
         call->k = k; call->k_ctx = ctx; call->host = host;
         call->m.outermost = k ? CALL_K : kind ? kind : CALL_CHECKED;
@@ -40472,25 +40496,28 @@ static SPYValue *class_built(SPYContext *c, Machine *m, SPYValue *ctx, SPYValue 
  * state and __class__ cell, or two Nones, under the class for arg 7,
  * which checks the cell (class_made) and pops the builder; a metaclass
  * call it defers is entered first (class_new_call). */
-/* BC_CLASS 18 to 20, the header of a generic class statement n, its
- * bases and keywords, run in a frame of its type parameters' env: 20
- * enters it on m (unit_enter), the env first atop m's stack, its pair
- * pushed as is (unchanged). There 18 pushes the statement's
- * __build_class__, under the type parameters on its caller's stack, for
- * the arguments (BC_ARG); 19 returns them, the bases and keywords, as a
- * pair. */
+/* BC_CLASS 18 to 21, a generic class statement n made in a frame of its
+ * type parameters' scope, as a function of it (16.7): 20 calls it on m,
+ * in their env, first of the tuple atop m's stack, the class it returns
+ * pushed as is (unchanged). There 18 moves the statement's
+ * __build_class__ and that tuple from its caller's stack, for the steps
+ * making the class (class_part); 21 pushes the __build_class__ again,
+ * for the bases and keywords (BC_ARG), which 19 returns as a pair. */
 static NO_INLINE SPYValue *header_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
     if (ins->arg == 18) {
         Machine *caller = c->calls[c->calls_len - 1]->caller;
-        return spy_retain(caller->stack[caller->len - 2]);
+        caller->len -= 2;
+        if (machine_push(c, m, caller->stack[caller->len])) { spy_release(caller->stack[caller->len + 1]); return NULL; }
+        return caller->stack[caller->len + 1];
     }
+    if (ins->arg == 21) return spy_retain(m->stack[m->len - 2]);
     if (ins->arg == 19) {
         SPYValue *parts[] = {m->stack[m->len - 2], m->stack[m->len - 1]}, *pair = tuple_of(c, 2, parts);
         for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
         return pair;
     }
-    c->k_fn = spy_retain(f->unit); c->k_env = spy_retain(m->stack[m->len - 1]->as.seq.items[0]); c->k_unit = 1;
-    c->k_code = ins->definition->generic->flat; c->k = unchanged; c->k_ctx = NULL;
+    if (!(c->k_fn = function_new(c, f, ins->definition->generic))) return NULL;
+    c->k_env = spy_retain(m->stack[m->len - 1]->as.seq.items[0]); c->k = unchanged; c->k_ctx = NULL;
     return NULL;
 }
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
@@ -43583,7 +43610,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (UNLIKELY(value == c->unbound)) { spy_release(value); c->k_kind = special; goto enter_k; }
         m->pc = pc;
         {
-            Call *call = special >= CALL_EXEC ? unit_enter(c, value, callee_env, NULL, m) : call_enter(c, value, callee_env, m);
+            Call *call = special >= CALL_EXEC ? unit_enter(c, value, callee_env, m) : call_enter(c, value, callee_env, m);
             if (!call) continue;
             call->m.outermost = special;
             m = &call->m;

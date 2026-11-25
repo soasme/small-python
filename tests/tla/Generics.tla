@@ -14,7 +14,9 @@
 (* subscripted. A type alias's repr is its qualified name: the name, after *)
 (* the function or class holding the type statement. Such parameters'      *)
 (* __module__ is typing; TypeVar, TypeVarTuple, ParamSpec and              *)
-(* TypeAliasType called directly take their caller's module.               *)
+(* TypeAliasType called directly take their caller's module. A generic     *)
+(* class is made in a frame of its parameters' scope, which an exception   *)
+(* from its bases, keywords or body passes through.                        *)
 (*                                                                         *)
 (* A parameter program defines a function, class, or type alias with one   *)
 (* parameter: T, T: int, T: (str, bytes), T = int, *T, or **T; and reads   *)
@@ -30,8 +32,11 @@
 (* type g[T] at module level, in a function f, or in a class C, and reads  *)
 (* its repr, __name__, or __type_params__. A construct program calls one   *)
 (* of the four classes from module m's code, at its top level or in a      *)
-(* function, and reads __module__. The outcome is the result or            *)
-(* the exception.                                                          *)
+(* function, and reads __module__. A frame program defines class g[T] at   *)
+(* module level, in a function f, or in a class C, raises in its base, a   *)
+(* keyword, or its body, and reads the qualified name of the frame the     *)
+(* traceback passes through between the definer and the raise. The        *)
+(* outcome is the result or the exception.                                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -44,6 +49,7 @@ Programs == [part : {"param"}, kind : {"function", "class", "alias"}, param : Pa
             \cup [part : {"class"}, query : {"bases", "orig", "subscript"}]
             \cup [part : {"alias"}, where : {"module", "function", "class"}, query : {"repr", "name", "params"}]
             \cup [part : {"construct"}, cls : {"TypeVar", "TypeVarTuple", "ParamSpec", "TypeAliasType"}, where : {"module", "function"}]
+            \cup [part : {"frame"}, where : {"module", "function", "class"}, at : {"base", "keyword", "body"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -70,6 +76,9 @@ Class(p) == CASE p.query = "bases" -> "(Generic,)" [] p.query = "orig" -> "(Gene
 
 Qualified(where) == CASE where = "function" -> "f.<locals>.g" [] where = "class" -> "C.g" [] OTHER -> "g"
 
+Frame(where) == CASE where = "function" -> "f.<locals>.<generic parameters of g>"
+                   [] where = "class" -> "C.<generic parameters of g>" [] OTHER -> "<generic parameters of g>"
+
 Alias(p) == CASE p.query = "repr" -> Qualified(p.where) [] p.query = "name" -> "g" [] p.query = "params" -> "(T,)"
 
 Run(p) == CASE p.part = "param" -> Param(p)
@@ -79,6 +88,7 @@ Run(p) == CASE p.part = "param" -> Param(p)
             [] p.part = "class" -> Class(p)
             [] p.part = "alias" -> Alias(p)
             [] p.part = "construct" -> "m"
+            [] p.part = "frame" -> Frame(p.where)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -93,4 +103,7 @@ KindIndependent == Done /\ program.part = "param" => outcome = Param([program EX
 \* Where an alias is defined qualifies its repr, never its name or parameters.
 AliasQualified == Done /\ program.part = "alias" /\ program.query # "repr" =>
                       outcome = Alias([program EXCEPT !.where = "module"])
+
+\* Bases, keywords and body all run in the class's type parameters' frame.
+OneFrame == Done /\ program.part = "frame" => outcome = Frame(program.where)
 =============================================================================

@@ -83,7 +83,29 @@ def construct(p):
     return namespace["result"]
 
 
-PARTS = {"param": param, "visible": visible, "syntax": syntax, "class": klass, "alias": alias, "construct": construct}
+def frame(p):
+    # The frame between the definer's and the raise's, read from the traceback.
+    header = {"base": "class g[T](fail()): pass", "keyword": "class g[T](metaclass=fail()): pass",
+              "body": "class g[T]:\n    fail()"}[p["at"]]
+    body = {"module": header, "function": "def f():\n" + indented(header) + "\nf()",
+            "class": "class C:\n" + indented(header)}[p["where"]]
+    try:
+        exec("def fail(): raise LookupError\n" + body, {})
+    except LookupError as error:
+        names, tb = [], error.__traceback__
+        while tb:
+            names.append(tb.tb_frame.f_code.co_qualname)
+            tb = tb.tb_next
+        # Before fail's frame, and the body's.
+        return names[-3 if p["at"] == "body" else -2]
+
+
+def indented(source):
+    return "\n".join("    " + line for line in source.split("\n"))
+
+
+PARTS = {"param": param, "visible": visible, "syntax": syntax, "class": klass, "alias": alias, "construct": construct,
+         "frame": frame}
 
 
 def outcome(p):
