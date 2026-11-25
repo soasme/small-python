@@ -32,7 +32,7 @@ Cases == {"unused", "used", "from_unused", "from_used", "placeholder", "from_pla
           "in_function", "in_try", "in_class", "star", "future",
           "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function",
           "compat_getitem", "compat_hook", "attribute_hook", "hook_used", "hook_dotted", "method_read",
-          "lazy_hook", "lazy_hook_missing"}
+          "lazy_hook", "lazy_hook_missing", "policy"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -81,6 +81,9 @@ Run(p) ==
       \* its result bound as __import__'s is, and no module runs
       [] p.case = "lazy_hook" -> "([('pkg', None, 0), ('pkg', ('sub',), 0)], True, 'r-sub') []"
       [] p.case = "lazy_hook_missing" -> "ImportError: __lazy_import__ not found []"
+      \* a Python __contains__ of __lazy_modules__ names each import lazy, then the host's
+      \* policy is asked, its verdict's Python __bool__ making each eager, in order
+      [] p.case = "policy" -> "([('in', 'pkg'), ('policy', 'pkg', None), 'bool', ('in', 'pkg'), ('policy', 'pkg', ('sub',)), 'bool'], 'module', 'module') ['pkg', 'sub']"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

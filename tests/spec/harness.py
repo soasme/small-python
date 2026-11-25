@@ -284,6 +284,12 @@ class Host:
     def set_async_gen_hooks(self, firstiter, finalizer):
         self._sys().set_asyncgen_hooks(firstiter, finalizer)
 
+    def set_lazy_import_policy(self, policy):
+        """Install policy, called with (importer, name, fromlist) when an
+        import is lazy, as HostLazyImportPolicy (B.1.4): its result's truth
+        decides; None removes it."""
+        self._sys().set_lazy_imports_filter(policy)
+
     def recursion_limit(self):
         """The recursion limit execution parameter (B.6)."""
         return self._sys().getrecursionlimit()
@@ -348,6 +354,9 @@ class EngineHost(Host):
 
     def collect(self):
         self.primitives._collect()
+
+    def set_lazy_import_policy(self, policy):
+        self.primitives._setting("lazy_imports_filter", policy)
 
     def disable_automatic_collection(self):
         self.primitives._collection_limit(0)

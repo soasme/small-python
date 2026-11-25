@@ -42,6 +42,11 @@ SOURCES = {
     "attribute_hook": "import builtins\nreal = builtins.__import__\nseen = []\ndef hook(name, *a):\n    for _ in (): pass\n    seen.append(name)\n    return real(name, *a)\nh = type(builtins)('h')\nh.__dict__['__builtins__'] = {'__import__': hook, '__lazy_import__': builtins.__lazy_import__}\nexec('lazy from pkg import sub, pub', h.__dict__)\nresult = (getattr(h, 'sub').x, '{0.pub}'.format(h), seen)",
     "compat_hook": "import builtins\nreal = builtins.__import__\nseen = []\ndef hook(name, *a):\n    for _ in (): pass\n    seen.append(name)\n    return 'given'\n__lazy_modules__ = ['pkg']\nbuiltins.__import__ = hook\nimport other, pkg\nbuiltins.__import__ = real\nresult = (seen, other, type(globals()['pkg']).__name__)",
     "lazy_hook": "import builtins\nreal = builtins.__lazy_import__\nseen = []\nclass R:\n    sub = 'r-sub'\ndef hook(name, g, l, f, lv):\n    for _ in (): pass\n    seen.append((name, f, lv))\n    return R\nbuiltins.__lazy_import__ = hook\ntry:\n    ns = {}\n    exec('lazy import pkg\\nlazy from pkg import sub', ns)\n    result = (seen, ns['pkg'] is R, ns['sub'])\nfinally:\n    builtins.__lazy_import__ = real",
+    "policy": "from harness import host\nseen = []\nclass Listed:\n    def __contains__(self, n):\n        for _ in (): pass\n        seen.append(('in', n))\n        return True\n"
+              "class No:\n    def __bool__(self):\n        for _ in (): pass\n        seen.append('bool')\n        return False\n"
+              "def policy(i, n, f):\n    for _ in (): pass\n    seen.append(('policy', n, f))\n    return No()\n"
+              "__lazy_modules__ = Listed()\nhost.set_lazy_import_policy(policy)\nimport pkg\nfrom pkg import sub\nhost.set_lazy_import_policy(None)\n"
+              "result = (seen, type(pkg).__name__, type(sub).__name__)",
     "lazy_hook_missing": "import builtins\nreal = builtins.__lazy_import__\ndel builtins.__lazy_import__\ntry:\n    exec('lazy import pkg', {})\nfinally:\n    builtins.__lazy_import__ = real",
     "hook_used": "import builtins\nreal = builtins.__import__\nseen = []\ndef hook(name, *a):\n    for _ in (): pass\n    if name.startswith('pkg'): seen.append(name)\n    return real(name, *a)\nbuiltins.__import__ = hook\nlazy import pkg\nlazy from pkg import sub\ntry:\n    result = (pkg.pub, sub.x, seen)\nfinally:\n    builtins.__import__ = real",
 }
