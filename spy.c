@@ -4731,7 +4731,6 @@ static Node *display_end(Parser *, Node *, size_t);
 static size_t cond_test(Parser *, Node *, EmitMark, EmitMark);
 static size_t branch_parsed(SPYContext *, Program *, Node *, Node *);
 static size_t loop_open(SPYContext *, Program *, Node *);
-static size_t compile_branch(SPYContext *, Program *, Node *, Node *);
 static Node *cond_end(Parser *, Node *, size_t, EmitMark);
 /* A slice's steps while it is parsed (slice_lay). */
 typedef struct { size_t start, at; int done; } SliceSteps;
@@ -17720,24 +17719,7 @@ static Node *stacked_right(Node *n) {
     Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a : n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     return right && item_at_hand(right) && !item_at_hand(n->a) ? right : NULL;
 }
-/* An expression whose truth the next instruction tests: an and/or passes
- * on the truth its BC_SHORT computed. */
-static void compile_test(SPYContext *, Program *, Node *);
-/* The test of n and the BC_FALSE at at after it, returned: a not is no
- * step, its BC_FALSE jumping on a true operand instead (arg 1). */
-static size_t compile_branch(SPYContext *c, Program *p, Node *n, Node *at) {
-    int negated = 0;
-    for (; n->kind == N_UNARY && n->op == O_NOT; n = n->a) negated ^= 1;
-    compile_test(c, p, n);
-    if (negated) p->tested = 0;
-    return emit(c, p, BC_FALSE, at, negated);
-}
 static void retest(SPYContext *, Program *, Node *, size_t);
-static void compile_test(SPYContext *c, Program *p, Node *n) {
-    size_t start = p->len;
-    compile_expr(c, p, n);
-    retest(c, p, n, start);
-}
 /* Make the value of n, whose steps from start on compiled it, a test:
  * its fused step tests it, or it takes one now; a constant folded from
  * an operand not at hand stays a value. */
@@ -17846,7 +17828,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (!expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) && !(p->calls == PAUSING && loads_name(n)))
         stacked = (right = operator_right(n)) ? NULL : stacked_right(n);
     /* Operands emitted as they were parsed are its first steps (finished). */
-    size_t branch, parts, start = n->a && (n->a->flags & F_EMITTED) ? n->a->steps_at : p->len;
+    size_t parts, start = n->a && (n->a->flags & F_EMITTED) ? n->a->steps_at : p->len;
     switch (n->kind) {
     case N_JOINED:
         /* The parts stay on the stack for the join, as many as arg. */
@@ -17885,18 +17867,9 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a);
         emit(c, p, n->kind == N_UNARY ? BC_UNARY : BC_ATTR, n, n->kind == N_UNARY ? n->op : 0); break;
     case N_BINARY:
-        if (n->op == O_AND || n->op == O_OR) {
-            size_t left = p->len;
-            compile_expr(c, p, n->a); retest(c, p, n->a, left);
-            branch = emit(c, p, BC_SHORT, n, n->op);
-            compile_expr(c, p, n->b); patch(p, branch, p->len);
-        } else { compile_expr(c, p, n->a); p->split = n->b->flags & F_EMITTED ? n->b->steps_at : p->len; compile_operation(c, p, n); }
-        break;
+        compile_expr(c, p, n->a); p->split = n->b->flags & F_EMITTED ? n->b->steps_at : p->len; compile_operation(c, p, n); break;
     case N_INDEX:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INDEX, n, 0); break;
-    case N_SLICE:
-        compile_expr(c, p, n->a); compile_expr(c, p, n->b); compile_expr(c, p, n->c);
-        emit(c, p, BC_SLICE, n, 0); break;
     case N_COMPARE: compile_expr(c, p, n->a); p->split = n->args->a->flags & F_EMITTED ? n->args->a->steps_at : p->len; compile_operation(c, p, n); break;
     case N_LIST: case N_TUPLE: case N_DICT: {
         /* A packed display or an empty one: BC_NEW takes the items atop
@@ -18337,8 +18310,9 @@ static Node *display_end(Parser *p, Node *n, size_t display) {
     p->emitting->items[display].arg = n->kind == N_SET ? SPY_SET : SPY_DICT;
     return parsed_steps(p, n, display);
 }
-/* Test n, emitted as it was parsed, made the test of branch at, as
- * compile_branch makes it: a not is no step. The branch, or SIZE_MAX. */
+/* Test n, emitted as it was parsed, made the test of branch at: a not is
+ * no step, the branch's BC_FALSE jumping on a true operand instead (arg
+ * 1). The branch, or SIZE_MAX. */
 static size_t branch_parsed(SPYContext *c, Program *program, Node *n, Node *at) {
     int negated = 0;
     for (; n->kind == N_UNARY && n->op == O_NOT; n = n->a) { negated ^= 1; emit_drop(program, program->len - 1); }
@@ -18425,7 +18399,7 @@ static EmitMark lambda_body(Parser *p, Node *n) {
     return emit_mark(p);
 }
 /* Its body parsed: kept, its return compiled after it, when its steps are
- * all its own, else undone, and it compiles from its nodes (compile_generator). */
+ * all its own, else, as when its body raised a syntax error, undone. */
 static void lambda_kept(Parser *p, Node *n, EmitMark from) {
     Program *program = p->emitting;
     if (!program) return;
@@ -18548,7 +18522,8 @@ static void assignment_fused(SPYContext *, Program *, Node *, size_t);
  * storing the value atop the stack into it (compile_store), the value
  * popped at popped when set, an item or attribute of literals and names
  * stored by a fused step first with stores_at (store_at_hand); or with
- * deletes, deleting it (compile_delete): their length, or 0 when its
+ * deletes, deleting it, a class or module body's name through its
+ * namespace (name_delete), its None popped: their length, or 0 when its
  * steps are not a target's or on an error. With check, only whether
  * they are. */
 /* Whether t is an empty target list, which deletes in no steps. */
@@ -18870,24 +18845,6 @@ static void with_end(SPYContext *c, Program *p, uint32_t last, int asynchronous)
         emit_line(c, p, BC_END_WITH, NULL, line, 0);
     }
 }
-/* A del of a subscript or attribute evaluates its object (and key) on
- * the stack; BC_DELETE with argument 0 deletes a name. */
-static void compile_delete(SPYContext *c, Program *p, Node *n) {
-    /* A class or module body's deletes a name through its namespace (name_delete), its None popped. */
-    if (n->kind == N_NAME && p->unbinds) { emit(c, p, BC_DELETE, n, 3); emit(c, p, BC_POP, n, 0); return; }
-    if (n->kind == N_NAME) { emit(c, p, BC_DELETE, n, 0); return; }
-    if (n->kind == N_LIST || n->kind == N_TUPLE) {
-        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) compile_delete(c, p, item);
-        return;
-    }
-    compile_expr(c, p, n->a);
-    if (n->kind == N_INDEX) compile_expr(c, p, n->b);
-    /* While calls can pause, BC_SET_TARGET deletes a subscript or an
-     * attribute, calling a Python __delitem__ or deleter on the machine
-     * (store_call). */
-    if (p->calls == PAUSING) emit(c, p, BC_SET_TARGET, n, 1);
-    else emit(c, p, BC_DELETE, n, n->kind == N_INDEX ? 2 : 1);
-}
 /* The steps of arithmetic or a comparison n after its left operand's. */
 static void compile_operation(SPYContext *c, Program *p, Node *n) {
     if (n->kind == N_BINARY) { compile_expr(c, p, n->b); emit(c, p, BC_BINARY, n, n->op); return; }
@@ -19032,15 +18989,14 @@ static size_t if_else(SPYContext *c, Program *p, size_t branch) {
     patch(p, branch, p->len);
     return end;
 }
-/* The clauses of a for or while statement n, compiled as the parser
- * parses them: its block, at loop, and its step, whose branch leaves the
- * suite; after the suite, the jump back to the step, and the block's end
- * before an else suite. */
+/* The clauses of a for statement n, compiled as the parser parses them:
+ * its block, at loop, and its step, whose branch leaves the suite; after
+ * the suite, the jump back to the step, and the block's end before an
+ * else suite. */
 static size_t loop_begin(Parser *parser, Program *p, Node *n, size_t *loop) {
     SPYContext *c = parser->ctx;
-    if (n->kind == N_FOR) compile_expr(c, p, n->a);
+    compile_expr(c, p, n->a);
     *loop = loop_open(c, p, n);
-    if (n->kind != N_FOR) return compile_branch(c, p, n->a, n);
     /* Its target's steps, parsed apart (loop_target), become its store. */
     size_t at = p->len + 1;
     size_t next = loop_next(c, p, n, n->args);
@@ -19348,7 +19304,7 @@ static void case_begin(Parser *parser, Program *p, Node *item, Case *k, Program 
             k->guard = branch_parsed(c, p, item->b, item->b);
         }
         free_program(guard);
-    } else k->guard = item->b ? compile_branch(c, p, item->b, item->b) : SIZE_MAX;
+    }
     emit(c, p, BC_POP, item, 0);
 }
 static void case_end(SPYContext *c, Program *p, Node *item, Case *k, uint32_t *exits) {
@@ -19558,12 +19514,12 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         if (!n->a) { emit(c, p, BC_RAISE, n, 2); break; }
         compile_expr(c, p, n->a); compile_expr(c, p, n->b);
         emit(c, p, BC_RAISE, n, n->b != NULL); break;
-    case N_DELETE: compile_delete(c, p, n->a); break;
     /* A store of None by the statement (import_step). */
     case N_IMPORT: case N_FROM: emit_import(c, p, n); break;
     /* The alias (alias_step), stored as a name. */
     case N_TYPEALIAS: emit(c, p, BC_CLASS, n, 11); emit(c, p, BC_STORE, n->a, 1); break;
-    case N_GLOBAL: case N_NONLOCAL: break;
+    /* A del's steps were emitted as it was parsed (deletion_parsed). */
+    case N_DELETE: case N_GLOBAL: case N_NONLOCAL: break;
     /* A pass is a step to the next, for its line. */
     case N_PASS: patch(p, emit(c, p, BC_JUMP, n, 0), p->len); break;
     case N_BREAK: case N_CONTINUE: emit(c, p, BC_FLOW, n, n->kind == N_BREAK ? FLOW_BREAK : FLOW_CONTINUE); break;
@@ -19702,8 +19658,8 @@ static int compile_generator(SPYContext *c, Node *n) {
                                     (name->original && !(n->scope->spelling = copy_text(c, name->original, strlen(name->original))))))
         return -1;
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS));
-    /* Its statements were compiled as they were parsed (body_begin), or
-     * none runs. */
+    /* Its statements were compiled as they were parsed (body_begin,
+     * lambda_kept); one without them is unevaluated, and none runs. */
     Program *p = n->scope->flat;
     if (!p) return 0;
     if (generator) { n->scope->code = p; n->scope->flat = NULL; }
