@@ -825,6 +825,8 @@ Unreleased (0.10.0):
 - `x * seq` repeats seq by x once x's class drops its own repetition; `x *= seq` raises for an instance of any Python class and for dict, set, range, views and memoryview
 - `x *= n` of a list or bytearray subclass calls its own `__mul__` first and repeats in place once that declines; `[1] *= 'a'` reports a sequence's non-int count
 - a lambda in a generic function's annotation is qualified by `<generic parameters of f>`, not of `__annotate__`
+- `bytes.translate` and `bytearray.translate` accept any bytes-like table and deleted bytes, and a non-buffer argument raises TypeError
+- `compile`, `eval` and `exec` accept any bytes-like source, such as a memoryview
 - a generic class is made in a frame named `<generic parameters of C>`, which its bases, keywords and body run in and tracebacks show
 - iter(f, sentinel) takes a comparison result whose descriptor `__bool__` raises AttributeError as absent, falling back to `__len__`
 - a trace function sees no line event for a function's docstring, for any docstring a statement follows under -OO, or at an if's or case's header after its suite; a function of only a docstring traces its first line

@@ -143,6 +143,7 @@ SOURCES = {
     "maketrans_translate": "t = bytes.maketrans(b'abc', b'xyz')\nresult = (len(t), b'aabbcc'.translate(t), b'read this short text'.translate(None, b'aeiou'))",
     "maketrans_unequal": "result = bytes.maketrans(b'ab', b'x')",
     "translate_bad_table": "result = b'a'.translate(b'short')",
+    "translate_buffers": "t = bytes(range(256))\ntry: b'a'.translate(t, 1)\nexcept TypeError as e: m = str(e)\nresult = (b'zab'.translate(memoryview(t), memoryview(b'a')), bytearray(b'zb').translate(None, memoryview(b'b')), m)",
     "zfill": "result = (b'42'.zfill(5), b'-42'.zfill(5), bytearray(b'+1').zfill(4))",
     "replace_count": "result = (b'aaa'.replace(b'a', b'b', 2), b'abc'.replace(b'', b'-'))",
     "decode": "result = (b'caf\\xc3\\xa9'.decode(), b'\\xe9'.decode('latin-1'), b'\\xff'.decode('utf-8', 'replace'), b'\\xff'.decode('ascii', 'ignore'))",

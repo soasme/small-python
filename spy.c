@@ -47479,13 +47479,17 @@ static SPYValue *bytes_translate(SPYContext *c, size_t argc, SPYValue *const *ar
     int type = (int)(intptr_t)data;
     SPYValue *self = method_self(c, argc, argv, type, "translate"), *args[2];
     if (!self || parse_arguments(c, "translate", argc - 1, argv + 1, keywords, names, 2, 1, 1, args)) return NULL;
-    SPYValue *table = args[0]->type == SPY_NONE ? NULL : builtin_value(c, args[0], SPY_BYTES);
-    if (!table && args[0]->type != SPY_NONE) table = builtin_value(c, args[0], SPY_BYTEARRAY);
-    if (args[0]->type != SPY_NONE && (!table || table->as.string.len != 256))
-        return spy_error(c, "ValueError", "translation table must be 256 characters long");
-    SPYValue *drop = args[1] ? builtin_value(c, args[1], SPY_BYTES) : NULL;
-    if (args[1] && !drop) drop = builtin_value(c, args[1], SPY_BYTEARRAY);
-    if (args[1] && !drop) return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(args[1]));
+    /* The table's buffer and length, then the deleted bytes' buffer. */
+    SPYValue *table_copy = NULL, *drop_copy = NULL, *table = NULL, *drop = NULL, *result = NULL;
+    if (args[0]->type != SPY_NONE && !(table = buffer_bytes(c, args[0], &table_copy))) {
+        if (!c->error_type[0]) errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(args[0]));
+        return NULL;
+    }
+    if (table && table->as.string.len != 256) { spy_release(table_copy); return spy_error(c, "ValueError", "translation table must be 256 characters long"); }
+    if (args[1] && !(drop = buffer_bytes(c, args[1], &drop_copy))) {
+        if (!c->error_type[0]) errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(args[1]));
+        spy_release(table_copy); return NULL;
+    }
     Buffer out = {.ctx = c};
     for (size_t i = 0; i < self->as.string.len && !c->error_type[0]; i++) {
         unsigned char byte = (unsigned char)self->as.string.data[i];
@@ -47493,9 +47497,8 @@ static SPYValue *bytes_translate(SPYContext *c, size_t argc, SPYValue *const *ar
         char mapped = table ? table->as.string.data[byte] : (char)byte;
         append(&out, &mapped, 1);
     }
-    SPYValue *result = c->error_type[0] ? NULL : type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
-        spy_bytes(c, out.data ? out.data : "", out.len);
-    mem_free(out.data);
+    if (!c->error_type[0]) result = type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) : spy_bytes(c, out.data ? out.data : "", out.len);
+    mem_free(out.data); spy_release(table_copy); spy_release(drop_copy);
     return result;
 }
 static SPYValue *str_format_map(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -50534,14 +50537,16 @@ static SPYValue *source_unit(SPYContext *c, Machine *m, int id, size_t argc, SPY
                 }
             text = spy_retain(text);
         } else {
-            SPYValue *bytes = builtin_value(c, a, SPY_BYTES);
-            if (!bytes) bytes = builtin_value(c, a, SPY_BYTEARRAY);
+            SPYValue *copy, *bytes = buffer_bytes(c, a, &copy);
+            /* A buffer's failure, too, is the argument's TypeError. */
             if (!bytes) {
+                spy_clear_error(c);
                 if (id == B_COMPILE) spy_error(c, "TypeError", "compile() arg 1 must be a string, bytes or AST object");
                 else errorf(c, "TypeError", "%s() arg 1 must be a string, bytes or code object", id == B_EVAL ? "eval" : "exec");
                 goto execution_fail;
             }
             text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
+            spy_release(copy);
         }
         if (text && c->policy && policy_event(c, "exec", 1, &a)) { spy_release(text); goto execution_fail; }
         /* exec and eval inherit the running code's future statements. */

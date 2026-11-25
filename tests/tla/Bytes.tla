@@ -138,7 +138,7 @@ Cases == {"literal_forms", "hex_group_first", "hex_sep_length", "search_needle_l
           "repr_escapes", "immutable", "concat_repeat", "concat_str", "contains", "contains_str", "compare",
           "hash", "hash_bytearray", "contains_index", "contains_index_fails", "count_int", "count_range", "search_str", "case_ascii_only",
           "predicates", "expandtabs", "splitlines", "split_maxsplit", "split_str_sep", "join", "join_str",
-          "maketrans_translate", "maketrans_unequal", "translate_bad_table", "zfill", "replace_count",
+          "maketrans_translate", "maketrans_unequal", "translate_bad_table", "translate_buffers", "zfill", "replace_count",
           "decode", "decode_error", "decode_unicode_escape", "decode_unicode_escape_error",
           "removeprefix_types", "strip_bytes_arg", "bytearray_mutations",
           "bytearray_methods", "bytearray_inplace", "bytearray_setitem_range", "bytearray_append_bad",
@@ -227,6 +227,8 @@ Case(c) ==
       [] c = "maketrans_translate" -> "(256, b'xxyyzz', b'rd ths shrt txt')"
       [] c = "maketrans_unequal" -> "ValueError: maketrans arguments must have same length"
       [] c = "translate_bad_table" -> "ValueError: translation table must be 256 characters long"
+      \* The table and the deleted bytes are read by their buffers; no buffer is a TypeError.
+      [] c = "translate_buffers" -> "(b'zb', bytearray(b'z'), \"a bytes-like object is required, not 'int'\")"
       [] c = "zfill" -> "(b'00042', b'-0042', bytearray(b'+001'))"
       [] c = "replace_count" -> "(b'bba', b'-a-b-c-')"
       [] c = "decode" -> "('caf\\xe9', '\\xe9', '\\ufffd', '')"

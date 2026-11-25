@@ -25,6 +25,8 @@ SOURCES = {
     "exec_returns_none": "result = exec('1 + 2')",
     "eval_strips": "result = eval('  1 + 1\\n')",
     "eval_bytes": "result = eval(b'2 * 3')",
+    "eval_buffer": "result = (eval(memoryview(b'2 * 3')), eval(compile(memoryview(b'x7')[1:], '<s>', 'eval')))",
+    "exec_buffer_fails": "class Failing:\n    def __buffer__(self, flags): raise ValueError('no')\nexec(Failing())",
     "eval_bad_type": 'result = eval(1)',
     "eval_globals_type": "result = eval('1', [])",
     "eval_locals_mapping": "class M:\n    def __getitem__(self, k): return k * 2\n    def keys(self): return []\nresult = eval('ab', {}, M())",

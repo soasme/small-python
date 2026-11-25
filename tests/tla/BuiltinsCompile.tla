@@ -32,7 +32,7 @@ Opt(b, v) == IF b THEN v ELSE "None"
 Show(r, g, l) == "(" \o r \o ", " \o g \o ", " \o l \o ")"
 
 
-Cases == {"eval_expression_only", "eval_code_object", "exec_returns_none", "eval_strips", "eval_bytes",
+Cases == {"eval_expression_only", "eval_code_object", "exec_returns_none", "eval_strips", "eval_bytes", "eval_buffer", "exec_buffer_fails",
           "eval_bad_type", "eval_globals_type", "eval_locals_mapping", "eval_locals_keyword",
           "exec_closure", "exec_closure_mismatch", "function_code_calls", "compile_argument_order", "builtins_injected", "compile_modes", "compile_bad_mode",
           "compile_single_multi", "compile_eval_statement", "compile_filename", "compile_null",
@@ -67,6 +67,9 @@ Case(c) ==
       [] c = "exec_returns_none" -> "None"
       [] c = "eval_strips" -> "2"
       [] c = "eval_bytes" -> "6"
+      \* Any buffer is a source; one that fails is the argument's TypeError.
+      [] c = "eval_buffer" -> "(6, 7)"
+      [] c = "exec_buffer_fails" -> "TypeError: exec() arg 1 must be a string, bytes or code object"
       [] c = "eval_bad_type" -> "TypeError: eval() arg 1 must be a string, bytes or code object"
       [] c = "eval_globals_type" -> "TypeError: globals must be a real dict or a frozendict; try eval(expr, {}, mapping)"
       [] c = "eval_locals_mapping" -> "'abab'"
