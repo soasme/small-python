@@ -4730,6 +4730,7 @@ static Node *template_parsed(Parser *, Node *);
 static int augmented_target(Parser *, Node *);
 static Node *format_parsed(Parser *, Node *);
 static Node *starred_parsed(Parser *, Node *);
+static Node *yield_unmade(Parser *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -6214,7 +6215,7 @@ static Node *yield_expression(Parser *p) {
         if (!(n->a = expression_list(p, 0))) return NULL;
         if (n->a->kind == N_STAR) return syntax_at(p, n->a, "can't use starred expression here");
     }
-    return span(p, n, start);
+    return finished(p, span(p, n, start));
 }
 static SPYValue *literal_value(SPYContext *, Node *);
 static Node *atom_node(Parser *);
@@ -6648,8 +6649,9 @@ static Node *expression_inner(Parser *p, int min, int named) {
         if (awaiting) {
             Node *n = node(p, N_AWAIT);
             if (!n) return NULL;
-            n->a = left; n->line = await_line; left = n;
+            n->a = left; n->line = await_line;
             p->awaits++;
+            if (!(left = finished(p, n))) return NULL;
         }
     }
     for (;;) {
@@ -8376,7 +8378,8 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     p->emitting = program;
     Node *statement = rest(p, n), *first = NULL, *last = NULL;
     int kind = statement ? statement->kind : N_PASS;
-    if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
+    if (kind == N_EXPR && statement->a->kind == N_YIELD && !statement->a->op) first = last = yield_unmade(p, statement->a);
+    else if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
     else if (kind == N_ASSIGN)
         first = statement->op == '=' ? statement->b : statement->a, last = statement->b;
     else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
@@ -17456,7 +17459,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
          * past the plain steps that run when the name is not at hand; while
          * calls can pause, a name takes those alone. */
         if (n->kind == N_YIELD && !n->op && n->a && ((n->a->kind == N_NAME && p->calls != PAUSING) || n->a->constant)) {
-            size_t start = p->len;
+            size_t start = n->a->flags & F_EMITTED ? n->a->steps_at : p->len;
             compile_expr(c, p, n->a); emit(c, p, BC_YIELD, n, 0);
             patch(p, c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_YIELD, n, 1), p->len); break;
         }
@@ -17773,6 +17776,21 @@ static Node *starred_parsed(Parser *p, Node *n) {
         program->items[start].other = a->kind == N_STAR ? 0 : program->items[start].other + 1;
     return parsed_steps(p, n, start);
 }
+/* Yield n, a statement of its own, emitted as parsed up to the end: its
+ * steps but its value's are undone, the statement yielding as its own
+ * (compile_statement). Its value, or NULL. */
+static Node *yield_unmade(Parser *p, Node *n) {
+    Program *program = p->emitting;
+    Node *value = n->a;
+    if (!value || !(n->flags & F_EMITTED) || n->steps_end != program->len || !(value->flags & F_EMITTED)) return NULL;
+    emit_drop(program, program->len - 1);
+    /* A leaf's own step went before its value's, which then begin where
+     * they were recorded to (compile_expr). */
+    Instruction *first = &program->items[n->steps_at];
+    if (first->op == BC_YIELD && first->arg == 1) emit_drop(program, n->steps_at);
+    n->flags &= ~F_EMITTED;
+    return value;
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -17797,6 +17815,7 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_LAMBDA) return lambda_parsed(p, n);
     else if (n->kind == N_INTERPOLATION) fixed[1] = n->b;
     else if (n->kind == N_NAMED) fixed[0] = n->b;
+    else if (n->kind == N_YIELD || n->kind == N_AWAIT) { if (!n->a) fixed[0] = NULL; }
     else if (n->kind == N_TEMPLATE) return template_parsed(p, n);
     /* A field's conversion and format() call are steps between its value and spec. */
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
@@ -18567,7 +18586,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         /* A yield statement drops the sent value rather than popping it (arg 2). */
         if (n->a->kind == N_YIELD && !n->a->op) {
             int leaf = n->a->a && ((n->a->a->kind == N_NAME && p->calls != PAUSING) || n->a->a->constant);
-            size_t start = p->len;
+            size_t start = n->a->a && (n->a->a->flags & F_EMITTED) ? n->a->a->steps_at : p->len;
             compile_expr(c, p, n->a->a);
             emit(c, p, BC_YIELD, n->a, 2);
             if (leaf && !c->error_type[0]) patch(p, emit_before(c, p, start, BC_YIELD, n->a, 3), p->len);
