@@ -380,7 +380,15 @@ compiling it again is no step.
   pattern's literals, dotted names and classes are parsed apart; each
   `__annotate__` or lazy-value function's program is made from them as
   the function is. Under `from __future__ import annotations` a
-  function's annotations become strings and are not parsed apart.
+  function's annotations become strings, each parsed apart as a
+  constant. A lambda or comprehension inside an annotation that no code
+  evaluates (a function local's, or one that is a string) gets no program.
+
+No spec test and no module of CPython's `Lib` compiles an expression
+from its nodes any more: every expression's steps are those emitted as
+it was parsed. A statement's own steps (an expression statement's pop,
+a def's making step and store, a class's call) are still laid out from
+its node when the next statement begins.
 
 The test of an `if`, `elif` or `while` header and the iterable of a `for`
 header are emitted the same way, after a statement the body held back and
