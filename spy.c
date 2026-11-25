@@ -8532,6 +8532,27 @@ static Node *missing_block(Parser *p, const char *what, size_t line) {
 }
 /* CPython forces ':' after 'else', 'try', 'finally' and a function header;
  * other headers report it only when the line ends (invalid_*_stmt). */
+/* A suite on its header's line, analysed; when its statements compile in
+ * place (suite_of), each is parsed, analysed and compiled in turn, as a
+ * body's are (statements), one block deeper. */
+static Node *inline_statements(Parser *p) {
+    if (!p->body.program || p->body.depth != p->depth + 1) {
+        Node *body = line_statements(p, 0);
+        return body && analyse_statements(p, body) ? NULL : body;
+    }
+    Node *head = NULL, **tail = &head;
+    p->depth++;
+    do {
+        Node *start = p->unit->as.unit.nodes, *n = line_statements(p, 1);
+        if (!n || nodes_finish(p, start) || analyse_statements(p, n)) { head = NULL; break; }
+        *tail = n;
+        while (*tail) tail = &(*tail)->next;
+        p->body.head = head;
+        if (body_statements(p, head, NULL)) { head = NULL; break; }
+    } while (p->line_open);
+    p->depth--;
+    return head;
+}
 static Node *suite_after(Parser *p, const char *what, size_t line) {
     int forced = !strcmp(what, "'else' statement") || !strcmp(what, "'try' statement") ||
                  !strcmp(what, "'finally' statement") || !strcmp(what, "function definition");
@@ -8542,9 +8563,9 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
     p->conditional += compound;
     if (!take(p, T_NL)) {
         p->inline_suite = 1;
-        body = line_statements(p, 0);
+        body = inline_statements(p);
         p->inline_suite = 0;
-        if (body && analyse_statements(p, body)) return NULL;
+        if (!body) return NULL;
     }
     else {
         while (take(p, T_NL)) {}
