@@ -3462,6 +3462,23 @@ int main(int argc, char **argv) {
     assert(keyed && !spy_as_int(c, keyed, &seven) && seven == 7);
     spy_release(sys_name); spy_release(host_sys); spy_release(host_maxsize); spy_release(keyed);
 
+    /* Called by the host outside any step machine: an unbound super
+     * subclass's __get__ binds by calling its class. */
+    execute(c, "class HostSuper(super): pass\nhost_unbound = HostSuper(int)\n");
+    SPYValue *unbound = spy_get_global(c, "host_unbound"), *super_get = unbound ? spy_get_attr(c, unbound, "__get__") : NULL;
+    SPYValue *bound_to = spy_int(c, 7), *bound = super_get && bound_to ? spy_call(c, super_get, 1, &bound_to) : NULL;
+    assert(bound && !spy_set_global(c, "host_bound", bound));
+    execute(c, "assert type(host_bound) is HostSuper and host_bound.__self__ == 7 and host_bound.__thisclass__ is int\n");
+    spy_release(bound); spy_release(bound_to); spy_release(super_get); spy_release(unbound);
+    /* list() called by the host asks its argument's length hint in C,
+     * whose error ends it. */
+    execute(c, "class HostHint:\n    def __iter__(self): return iter('ab')\n"
+               "    def __length_hint__(self): raise ValueError('hint')\nhost_hint = HostHint()\n");
+    SPYValue *host_list = spy_get_global(c, "list"), *hint = spy_get_global(c, "host_hint");
+    assert(host_list && hint && !spy_call(c, host_list, 1, &hint) && !strcmp(spy_error_type(c), "ValueError"));
+    spy_clear_error(c);
+    spy_release(hint); spy_release(host_list);
+
     SPYContext *other = spy_context_new();
     assert(other);
     SPYValue *foreign = spy_int(other, 3);
