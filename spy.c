@@ -4683,6 +4683,9 @@ typedef struct {
      * emitted; emits says the statement line_statements begins may. */
     Program *emitting; Node **emitted; size_t emitted_len, emitted_cap; int emits;
     EmitMark emitting_from; /* Where the statement's steps begin. */
+    /* An assignment's: where its value's begin, after its targets' unless
+     * they were undone (target_parsed). */
+    EmitMark assigned; int unassigned;
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
@@ -4732,6 +4735,8 @@ static Node *format_parsed(Parser *, Node *);
 static Node *starred_parsed(Parser *, Node *);
 static Node *yield_unmade(Parser *, Node *);
 static void debug_text(Parser *, Node *, Node *);
+static void target_parsed(Parser *, Node *);
+static int assignment_parsed(Parser *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -8379,8 +8384,8 @@ static Node *statement_body(Parser *p, int emits) {
 static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
     Program *program = p->body.program;
-    p->emitting_from = (EmitMark){emitted(program), 0};
-    p->emitting = program;
+    p->emitting_from = p->assigned = (EmitMark){emitted(program), 0};
+    p->emitting = program; p->unassigned = 0;
     Node *statement = rest(p, n), *first = NULL, *last = NULL;
     int kind = statement ? statement->kind : N_PASS;
     if (kind == N_EXPR && statement->a->kind == N_YIELD && !statement->a->op) first = last = yield_unmade(p, statement->a);
@@ -8391,6 +8396,10 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
     int kept = first && (first->flags & F_EMITTED) && (last->flags & F_EMITTED) && first->steps_at == p->emitting_from.steps.mark.at &&
                (first == last || first->steps_end == last->steps_at) && last->steps_end == program_len(program);
+    /* An assignment's targets kept as they were parsed come first (target_parsed). */
+    if (kind == N_ASSIGN && statement->op == '=' && !p->unassigned)
+        kept = (last->flags & F_EMITTED) && last->steps_at == p->assigned.steps.mark.at && last->steps_end == program_len(program) &&
+               assignment_parsed(p, statement);
     if (!kept || (p->ctx->optimize > 1 && kind == N_EXPR && first->kind == N_STRING)) emitted_drop(p);
     p->emitting = NULL; p->emitted_len = 0;
     return statement;
@@ -8468,14 +8477,14 @@ static Node *expression_statement(Parser *p, Node *n) {
         }
         if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
         p->pos++; n->kind = N_ASSIGN; n->op = op;
-        if (op == '=') emitted_drop(p);
+        if (op == '=') target_parsed(p, n->a);
         else if (n->a->kind != N_NAME && p->emitting && augmented_target(p, n->a)) return NULL;
         n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
         if (!n->b) return NULL;
         Node **tail = &n->args;
         while (op == '=' && take(p, '=')) {
             if (!target(p, n->b)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
-            emitted_drop(p);
+            target_parsed(p, n->b);
             *tail = n->b; tail = &n->b->next;
             n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->b) return NULL;
@@ -17842,6 +17851,102 @@ static void debug_text(Parser *p, Node *text, Node *value) {
     value->steps_at += length; value->steps_end += length;
     text->steps_at = at; text->steps_end = at + length;
 }
+static int store_at_hand(Program *, Node *);
+static size_t target_count(Node *, size_t *);
+static int assigns_at_hand(Program *, Node *);
+static void assignment_fused(SPYContext *, Program *, Node *, size_t);
+/* Target t's steps from at on, emitted as it was parsed, made those
+ * storing the value atop the stack into it (compile_store), the value
+ * popped at popped when set, an item or attribute of literals and names
+ * stored by a fused step first with stores_at (store_at_hand): their
+ * length, or 0 when its steps are not a target's or on an error. With
+ * check, only whether they are. */
+static size_t target_store(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int check) {
+    size_t length = t->steps_end - t->steps_at;
+    if (!(t->flags & F_EMITTED) || !length || at + length > p->len) return 0;
+    Instruction *x = &p->items[at];
+    if (t->kind == N_NAME) {
+        if (length != 1 || x->op != BC_NAME) return 0;
+        if (!check) { x->op = BC_STORE; x->step = c->steps ? c->steps[BC_STORE] : NULL; x->arg = popped != NULL; }
+        return 1;
+    }
+    if (t->kind == N_ATTR || t->kind == N_INDEX) {
+        if (p->items[at + length - 1].op != (t->kind == N_ATTR ? BC_ATTR : BC_INDEX)) return 0;
+        if (check) return length;
+        /* Its read becomes its store, without the fused read before it. */
+        if (x->op == BC_OPERATE && x->target == at + length) emit_drop(p, at), length--;
+        x = &p->items[at + length - 1];
+        x->op = BC_SET_TARGET; x->step = c->steps ? c->steps[BC_SET_TARGET] : NULL; x->arg = 0;
+        if (popped && emit_before(c, p, at + length++, BC_POP, popped, 0) == SIZE_MAX) return 0;
+        if (stores_at && store_at_hand(p, t)) {
+            size_t fused = emit_before(c, p, at, BC_STORE_AT, t, popped != NULL);
+            if (fused == SIZE_MAX) return 0;
+            patch(p, fused, at + ++length);
+        }
+        return length;
+    }
+    if ((t->kind != N_TUPLE && t->kind != N_LIST) || !t->args) return 0;
+    /* A display's own steps make it: one before its items and one after
+     * each (starred_parsed), or one after them all. */
+    int starred = !packed(t);
+    size_t pos = at + starred;
+    if (starred ? x->op != BC_NEW : p->items[at + length - 1].op != BC_NEW) return 0;
+    for (Node *item = t->args; item; item = item->next) {
+        Node *value = item->kind == N_STAR ? item->a : item;
+        if (!target_store(c, p, value, pos, item, stores_at, 1)) return 0;
+        pos += value->steps_end - value->steps_at;
+        if (starred && (pos >= p->len || p->items[pos].op != (item->kind == N_STAR ? BC_EXTEND : BC_ADD))) return 0;
+        pos += starred;
+    }
+    if (pos + !starred != at + length) return 0;
+    if (check) return length;
+    emit_drop(p, starred ? at : at + length - 1);
+    pos = at;
+    for (Node *item = t->args; item; item = item->next) {
+        size_t steps = target_store(c, p, item->kind == N_STAR ? item->a : item, pos, item, stores_at, 0);
+        if (!steps) return 0;
+        pos += steps;
+        if (starred) emit_drop(p, pos);
+    }
+    size_t star, unpack = emit_before(c, p, at, BC_UNPACK, t, (int)target_count(t, &star));
+    if (unpack == SIZE_MAX) return 0;
+    p->items[unpack].other = star == SIZE_MAX ? NO_STEP : (uint32_t)star;
+    pos++;
+    if (popped && emit_before(c, p, pos++, BC_POP, popped, 0) == SIZE_MAX) return 0;
+    return pos - at;
+}
+/* Assignment target t, its '=' read: its steps are kept, after the
+ * targets' before it, when they can become its store (target_store);
+ * else all the statement's are undone, and its targets compile from
+ * their nodes. Its value's steps begin after. */
+static void target_parsed(Parser *p, Node *t) {
+    Program *program = p->emitting;
+    if (!program) return;
+    if (p->unassigned || t->steps_at != p->assigned.steps.mark.at || t->steps_end != program->len ||
+        !target_store(p->ctx, program, t, t->steps_at, NULL, 0, 1)) { emitted_drop(p); p->unassigned = 1; }
+    p->assigned = emit_mark(p);
+}
+/* Assignment n, its targets' steps then its value's emitted as they were
+ * parsed: its steps, as compile_statement lays them out, the targets'
+ * made their stores and the value's moved before them, a fused step
+ * before all when n is at hand (compile_assignment). Whether they are,
+ * n then emitted. */
+static int assignment_parsed(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    size_t start = n->a->steps_at, at = start, length = n->b->steps_end - n->b->steps_at;
+    int fused = assigns_at_hand(program, n);
+    for (Node *t = n->a, *rest = n->args; t; t = rest, rest = rest ? rest->next : NULL) {
+        size_t steps = target_store(c, program, t, at, rest ? NULL : n, !fused, 0);
+        if (!steps) return 0;
+        at += steps;
+    }
+    emit_after(program, p->emitting_from.steps.mark, (Mark){program->len - length, p->assigned.steps.mark.last}, NULL);
+    if (fused) assignment_fused(c, program, n, start);
+    if (c->error_type[0]) return 0;
+    n->flags |= F_EMITTED;
+    return 1;
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -18159,11 +18264,10 @@ static int assigns_steps(Program *p, Node *n) {
  * those run. Its arg holds whether the target is an item, whether n is
  * augmented, the value's shape (SHAPE_FUSED a fused operator), and from bit 5 the
  * value's first step after it; other, an augmented n's operator. */
+static void assignment_fused(SPYContext *, Program *, Node *, size_t);
 static void compile_assignment(SPYContext *c, Program *p, Node *n) {
     Node *t = n->a;
     int item = t->kind == N_INDEX, augmented = n->op != '=';
-    if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
-    int shape = operator_right(n->b) ? SHAPE_FUSED : operand_shape(c, n->b);
     Mark target = mark(p);
     /* Steps emitted as they were parsed begin with a name's value, or the
      * name augmented. */
@@ -18182,7 +18286,15 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
         emit_after(p, target, value, NULL);
         emit(c, p, BC_SET_TARGET, t, 0); emit(c, p, BC_POP, n, 0);
     } else { compile_expr(c, p, n->b); emit(c, p, BC_STORE, t, 1); }
-    size_t fused = c->error_type[0] ? SIZE_MAX : emit_before(c, p, target.at, BC_ASSIGN, n, item | augmented << 1 | shape << 2 | (augmented ? item ? 3 : 1 : 0) << 5);
+    assignment_fused(c, p, n, target.at);
+}
+/* Assignment n's fused step, before its plain steps from at to the end. */
+static void assignment_fused(SPYContext *c, Program *p, Node *n, size_t at) {
+    Node *t = n->a;
+    int item = t->kind == N_INDEX, augmented = n->op != '=';
+    if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
+    int shape = operator_right(n->b) ? SHAPE_FUSED : operand_shape(c, n->b);
+    size_t fused = c->error_type[0] ? SIZE_MAX : emit_before(c, p, at, BC_ASSIGN, n, item | augmented << 1 | shape << 2 | (augmented ? item ? 3 : 1 : 0) << 5);
     if (fused != SIZE_MAX && augmented) p->items[fused].other = (uint32_t)operators[n->op - T_ADDEQ].token;
     patch(p, fused, p->len);
 }
