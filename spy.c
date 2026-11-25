@@ -14556,6 +14556,17 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 if (bases && bases->type == SPY_TUPLE && bases->as.seq.len > 1 && best) return spy_retain(best);
                 return spy_retain(v->as.map.parent ? v->as.map.parent : c->none);
             }
+            /* A class without its own __module__: type.__module__ raises
+             * (type_module); a metaclass's own, not a data descriptor, comes
+             * after the bases' own, a static type's never one. */
+            if (!strcmp(name, "__module__") && !static_type(c, v) && !name_local(v, name)) {
+                SPYValue *meta_value = v->as.map.meta ? instance_lookup(v->as.map.meta, name) : NULL;
+                if (!meta_value) return errorf(c, "AttributeError", "__module__");
+                if (!data_descriptor_get(meta_value)) {
+                    SPYValue *found = instance_lookup(v, name);
+                    return found ? descriptor_get(c, found, NULL, v) : descriptor_get(c, meta_value, v, v->as.map.meta);
+                }
+            }
             /* type.__type_params__ reads the class's own dictionary, not its bases. */
             if (!strcmp(name, "__type_params__") && !(v->as.map.meta && class_lookup(v->as.map.meta, name))) {
                 SPYValue *params = name_local(v, name);
@@ -24398,7 +24409,7 @@ static SPYValue *new_class(SPYContext *c, const char *name, SPYValue *base, SPYV
     SPYValue *bases = value_new(c, SPY_TUPLE);
     int status = !bases || (base && sequence_append(c, bases, base)) || class_bases(c, cls, bases);
     spy_release(bases);
-    status = status || name_set(c, cls, "__name__", text) || name_set(c, cls, "__qualname__", text) || name_set(c, cls, "__module__", module);
+    status = status || name_set(c, cls, "__name__", text) || name_set(c, cls, "__qualname__", text) || (module && name_set(c, cls, "__module__", module));
     spy_release(text);
     if (status) { spy_release(cls); return NULL; }
     return cls;
@@ -24859,7 +24870,8 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     namespace = storage;
     SPYValue *module = name_local(namespace, "__module__");
     if (!module) module = name_local(module_env(c, c->eval_env ? c->eval_env : c->globals), "__name__");
-    SPYValue *cls = new_user_class(c, text->as.string.data, bases, module ? module : c->none);
+    /* Without a __module__ or a global __name__ the class has none (type_new_set_module). */
+    SPYValue *cls = new_user_class(c, text->as.string.data, bases, module);
     if (cls && given != bases && bases->as.seq.len && set_class_bases(c, cls, given)) { spy_release(cls); return NULL; }
     if (!cls) return NULL;
     /* A str subclass name is kept as the class's name and default qualified name. */
