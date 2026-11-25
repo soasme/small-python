@@ -34445,8 +34445,8 @@ static int empty_format(SPYContext *, SPYValue *, SPYValue *);
  * descriptor's call takes the sequence first (slot_searched). */
 static NO_INLINE SPYValue *call_searched(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *seq, int id, size_t argc, SPYValue *const *argv,
                                          size_t popped, SPYValue **env) {
-    size_t skip = callee->type == SPY_NATIVE, at;
-    int64_t tally;
+    size_t skip = callee->type == SPY_NATIVE, at = 0;
+    int64_t tally = 0;
     SPYValue *x = spy_retain(argv[skip]), *result = NULL, *function = NULL;
     if (seq->type != SPY_RANGE) search_span(c, seq, id, argc - skip, argv + skip, &at, &tally);
     spy_retain(callee); spy_retain(seq);
