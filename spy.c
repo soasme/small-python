@@ -5470,6 +5470,12 @@ static void star_expression_error(Parser *, size_t);
 static int named_equals_error(Parser *, size_t);
 static const char *expression_name(Node *);
 static Node *comprehension(Parser *, Node *, int, EmitMark);
+static Program *comprehension_begin(Parser *, Node *, EmitMark);
+static int comprehension_for(Parser *, Node *, EmitMark, EmitMark, int);
+static int comprehension_if(Parser *, Node *, EmitMark);
+static int comprehension_close(Parser *, Node *, Program *, EmitMark, EmitMark);
+static void compile_comprehension_item(SPYContext *, Program *, Node *);
+static int emit_take(SPYContext *, Program *, Mark, size_t, size_t, Program *);
 static Node *statements(Parser *);
 static Node *suite_after(Parser *, const char *, size_t);
 static Body body_begin(Parser *, Node *, size_t);
@@ -7037,39 +7043,56 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element) {
         return NULL;
     }
     n->op = n->kind; n->kind = N_COMPREHENSION;
-    emit_back(p, element);
-    Program *emitting = p->emitting; p->emitting = NULL;
+    Program *emitting = p->emitting;
+    /* Its element and its clauses but its first iterable emit into its
+     * own program as they are parsed (comprehension_begin); else its
+     * element's steps are undone. */
+    Program *body = comprehension_begin(p, n, element);
+    if (!body) emit_back(p, element);
+    if (p->ctx->error_type[0]) return NULL;
+    EmitMark iterable = {0};
     Node **tail = &n->a;
     size_t clauses = 0;
-    int outer = 0; /* The first iterable's awaits. */
+    int outer = 0, streams; /* The first iterable's awaits. */
     while (keyword(p, "for") || keyword(p, "async")) {
         int asynchronous = take_word(p, "async");
         if (!take_word(p, "for")) return p->emitting = emitting, syntax(p, "invalid syntax");
         if (++clauses > 128) return p->emitting = emitting, syntax(p, "too many comprehension clauses");
         Node *loop = node(p, N_FOR);
+        p->emitting = body;
+        EmitMark target_at = emit_mark(p);
         if (!loop || !(loop->args = expression_list(p, 4))) return p->emitting = emitting, NULL;
         loop->op = asynchronous; p->awaits += asynchronous;
         /* invalid_for_if_clause precedes invalid_for_target. */
         if (!keyword(p, "in")) return p->emitting = emitting, syntax(p, "'in' expected after for-loop variables");
         if (!target(p, loop->args)) return p->emitting = emitting, p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
         p->pos++;
-        int before = p->awaits;
-        if (tail == &n->a) p->emitting = emitting;
+        int before = p->awaits, first = tail == &n->a;
+        p->emitting = first ? emitting : body;
+        EmitMark at = emit_mark(p);
+        if (first) iterable = at;
         loop->a = expression(p, 1);
         p->emitting = NULL;
         if (!loop->a) { p->emitting = emitting; return NULL; }
-        if (tail == &n->a) outer = p->awaits - before;
+        if (first) outer = p->awaits - before;
         *tail = loop; tail = &loop->b;
+        p->emitting = body;
+        if (body && !(streams = comprehension_for(p, loop, target_at, at, first))) body = NULL;
+        if (body && streams < 0) return p->emitting = emitting, NULL;
         while (take_word(p, "if")) {
             if (++clauses > 128) return p->emitting = emitting, syntax(p, "too many comprehension clauses");
             Node *test = node(p, N_IF);
+            p->emitting = body; at = emit_mark(p);
             if (!test || !(test->a = expression(p, 1))) return p->emitting = emitting, NULL;
             *tail = test; tail = &test->b;
+            if (body && !(streams = comprehension_if(p, test, at))) body = NULL;
+            if (body && streams < 0) return p->emitting = emitting, NULL;
         }
     }
     p->emitting = emitting;
     if (p->awaits - awaits > outer) n->asynchronous = 1;
     if (n->op == N_TUPLE) p->awaits = awaits + outer;
+    if (n->scope && n->scope->code && comprehension_close(p, n, body, element, iterable)) return NULL;
     return finished(p, n);
 }
 /* Whether token i is the keyword s. */
@@ -17799,6 +17822,124 @@ static int with_target(Parser *p, Node *item, EmitMark before) {
            target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 1, TARGET_STORE);
 }
 static int emit_pop(Parser *p, Node *n) { return emit(p->ctx, p->emitting, BC_POP, n, 0) == SIZE_MAX ? -1 : 0; }
+/* Move the steps of from from m on, which jump only among themselves,
+ * and its values from v0 to v1, after to's, or with to NULL drop them. */
+static int emit_take(SPYContext *c, Program *from, Mark m, size_t v0, size_t v1, Program *to) {
+    size_t count = from->len - m.at, values = v1 - v0, base = to ? to->len : 0;
+    if (to && (grow(c, (void **)&to->items, &to->cap, to->len + count, sizeof(*to->items)) ||
+               grow(c, (void **)&to->values, &to->values_cap, to->values_len + values, sizeof(*to->values)))) return -1;
+    Operand **head = m.last ? &m.last->next : &from->operands, *operands = *head;
+    if (to) {
+        for (size_t i = 0; i < count; i++) {
+            Instruction *x = &to->items[to->len + i];
+            *x = from->items[m.at + i];
+            if (steps_target(x)) x->target = (uint32_t)(x->target - m.at + base);
+            if (steps_other(x) && x->other) x->other = (uint32_t)(x->other - m.at + base);
+        }
+        to->len += count;
+        if (operands) { if (to->last) to->last->next = operands; else to->operands = operands; to->last = from->last; }
+        memcpy(to->values + to->values_len, from->values + v0, values * sizeof(*to->values));
+        to->values_len += values;
+        if (from->tested > m.at) to->tested = from->tested - m.at + base;
+    } else {
+        for (Operand *o = operands, *next; o; o = next) { next = o->next; mem_free(o); }
+        for (size_t i = v0; i < v1; i++) spy_release(from->values[i]);
+    }
+    *head = NULL; from->last = m.last;
+    memmove(from->values + v0, from->values + v1, (from->values_len - v1) * sizeof(*from->values));
+    from->values_len -= values; from->len = m.at;
+    if (from->tested > m.at) from->tested = 0;
+    if (from->split > m.at) from->split = 0;
+    return 0;
+}
+/* Comprehension n, its element emitted from element on to the end: its
+ * own program, its scope's, which its clauses' steps emit into as they
+ * are parsed, but its first iterable's, when the element's steps can
+ * move there; else NULL. */
+static Program *comprehension_begin(Parser *p, Node *n, EmitMark element) {
+    SPYContext *c = p->ctx;
+    Program *outer = p->emitting;
+    Node *item = n->args, *fixed[3] = {item->kind == N_STAR || item->kind == N_MAPPING || n->op == N_DICT ? item->a : item};
+    if (n->op == N_DICT && item->kind != N_MAPPING) fixed[1] = item->b;
+    int calls = c->pausing ? PAUSING : BODY, loads = c->string_source != 0;
+    if (!outer || outer->calls != calls || outer->loads != loads || !emitted_operands(outer, fixed, NULL) ||
+        fixed[0]->steps_at != element.steps.mark.at || !body_scope(c, n)) return NULL;
+    Program *program = allocate(c, sizeof(*program));
+    if (!program) return NULL;
+    program->calls = calls; program->loads = loads;
+    return n->scope->code = program;
+}
+/* For clause loop, its target emitted into the comprehension's program
+ * from target on, then its iterable from iterable on there unless it is
+ * the first: the iterable's steps before the target's, and the loop's
+ * opening and next item's between, as compile_comprehension_clause lays
+ * them out, the target's made its store; the loop's step and its next's
+ * kept in loop's range to close it (comprehension_close). 1 when they are,
+ * 0 when they cannot be, -1 on an error. */
+static int comprehension_for(Parser *p, Node *loop, EmitMark target, EmitMark iterable, int first) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    Node *t = loop->args, *source = loop->a;
+    size_t at = target.steps.mark.at, end = first ? program->len : iterable.steps.mark.at;
+    if (!(t->flags & F_EMITTED) || t->steps_at != at || t->steps_end != end) return 0;
+    if (!first) {
+        if (!(source->flags & F_EMITTED) || source->steps_at != end || source->steps_end != program->len) return 0;
+        emit_after(program, target.steps.mark, iterable.steps.mark, NULL);
+        at += program->len - end;
+    }
+    if (!target_steps(c, program, t, at, loop, 1, TARGET_CHECK)) return 0;
+    size_t opening = emit_before(c, program, at, BC_LOOP, loop, first ? 3 : loop->op ? 2 : 1);
+    size_t next = opening == SIZE_MAX ? SIZE_MAX : emit_before(c, program, at + 1, BC_NEXT, loop, loop->op);
+    if (next == SIZE_MAX) return -1;
+    if (!loop->op && t->kind == N_NAME && t->line == loop->line) program->items[next].other = 1;
+    if (!target_steps(c, program, t, at + 2, loop, 1, TARGET_STORE)) return c->error_type[0] ? -1 : 0;
+    loop->steps_at = opening; loop->steps_end = next;
+    return 1;
+}
+/* If clause test, its condition emitted from at on to the end: its
+ * branch, kept in its range. 1 when it is, 0 when it cannot be, -1 on an error. */
+static int comprehension_if(Parser *p, Node *test, EmitMark at) {
+    Program *program = p->emitting;
+    Node *condition = test->a;
+    if (!(condition->flags & F_EMITTED) || condition->steps_at != at.steps.mark.at || condition->steps_end != program->len) return 0;
+    size_t branch = branch_parsed(p->ctx, program, condition, test);
+    if (branch == SIZE_MAX) return -1;
+    test->steps_at = branch;
+    return 1;
+}
+/* Comprehension n parsed, its element's steps emitted from element on,
+ * then its first iterable's from iterable on. With body, its clauses'
+ * all emitted there: the iterable's steps go before the element's, which
+ * move to body after its clauses' openings, its item's added, then the
+ * clauses closed, innermost first, as compile_comprehension lays them
+ * out. Without, its own program is undone, and so are the element's
+ * steps, and it compiles from its nodes. -1 on an error. */
+static int comprehension_close(Parser *p, Node *n, Program *body, EmitMark element, EmitMark iterable) {
+    SPYContext *c = p->ctx;
+    Program *outer = p->emitting;
+    Node *source = n->a->a;
+    if (!body || !(source->flags & F_EMITTED) || source->steps_at != iterable.steps.mark.at || source->steps_end != outer->len) {
+        emit_back(p, element);
+        free_program(n->scope->code); n->scope->code = NULL;
+        return 0;
+    }
+    Mark moved = emit_after(outer, element.steps.mark, iterable.steps.mark, NULL);
+    source->steps_at = element.steps.mark.at; source->steps_end = moved.at;
+    if (emit_take(c, outer, moved, element.steps.values, iterable.steps.values, body)) return -1;
+    compile_comprehension_item(c, body, n);
+    size_t count = 0;
+    for (Node *clause = n->a; clause; clause = clause->b) count++;
+    while (count-- && !c->error_type[0]) {
+        Node *clause = n->a;
+        for (size_t i = 0; i < count; i++) clause = clause->b;
+        if (clause->kind == N_IF) { patch(body, clause->steps_at, body->len); continue; }
+        patch(body, emit(c, body, BC_JUMP, NULL, 0), clause->steps_end);
+        patch(body, clause->steps_end, body->len); emit(c, body, BC_POP_BLOCK, clause, 0); patch(body, clause->steps_at, body->len);
+    }
+    if (n->op == N_TUPLE) emit(c, body, BC_NONE, n, 0);
+    emit(c, body, BC_FLOW, n, FLOW_RETURN);
+    return c->error_type[0] ? -1 : 0;
+}
 /* A dictionary or set display n compiled as it is parsed: its first
  * step, a dictionary's until an element makes it a set (display_end);
  * after each item's steps, from start on, those adding it; display's
@@ -18313,11 +18454,13 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
 }
 static int compile_comprehension(SPYContext *c, Node *n) {
     if (!body_scope(c, n)) return -1;
+    /* Its scope is defined before or after this (scope_of). */
+    if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
+    /* Its program was compiled as it was parsed (comprehension_close). */
+    if (n->scope->code) return 0;
     n->scope->code = allocate(c, sizeof(*n->scope->code));
     if (!n->scope->code) return -1;
     n->scope->code->calls = c->pausing ? PAUSING : BODY; n->scope->code->loads = c->string_source != 0;
-    /* Its scope is defined before or after this (scope_of). */
-    if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
     Program *code = n->scope->code;
     Mark item = mark(code);
     compile_comprehension_item(c, code, n);
