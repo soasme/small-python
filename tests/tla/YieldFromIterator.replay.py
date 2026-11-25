@@ -21,6 +21,7 @@ def iterator(kind, called):
             for _ in range(2):
                 pass
             yield 1
+            return 8
 
         class One:
             def __init__(self):
@@ -36,7 +37,7 @@ def iterator(kind, called):
                     raise StopIteration
                 self.left = 0
                 return 1
-        return enumerate(gen()) if kind == "enumerate" else zip(One(), gen())
+        return enumerate(gen()) if kind == "enumerate" else zip(gen(), One())
     if kind == "map":
         def function(x):
             for _ in ():

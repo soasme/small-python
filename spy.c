@@ -41108,6 +41108,15 @@ static Result generator_pause(SPYContext *, SPYValue *, Result);
 static SPYValue *generator_end(SPYContext *, SPYValue *, Result);
 static void generator_close(SPYValue *);
 static NO_INLINE Machine *delegate_left(SPYContext *, Machine *, SPYValue **, Result *);
+/* Raise StopIteration of value, which it takes: none for None, as a
+ * generator's return raises it. */
+static NO_INLINE void stop_with(SPYContext *c, SPYValue *value) {
+    if (value && value->type != SPY_NONE) {
+        SPYValue *exception = exception_create(c, c->exceptions[X_STOP_ITERATION], 1, &value);
+        if (exception) { raise_value(c, exception); spy_release(exception); }
+    }
+    spy_release(value);
+}
 /* A generator resumer resumed returned value: next()'s StopIteration
  * takes it (B_NEXT), as close returns it; others drop it. */
 static NO_INLINE void returned_to(Machine *resumer, SPYValue *value) {
@@ -41273,11 +41282,13 @@ static ALWAYS_INLINE int zip_strict(SPYValue *v) {
 }
 /* The end of the generator that strict zip or map v resumed for an item
  * (zip_fill) or to check it ends (zip_checked): a ValueError, or a yield
- * of no item, to ask v again; an error ends the check. next(), top a
- * block taking v's item, drops the generator's return value. */
+ * of no item, to ask v again; an error ends the check. It drops the
+ * generator's return value, next()'s, top a block taking v's item, or
+ * the StopIteration a yield from's raised (stop_with). */
 static NO_INLINE Result zip_left(SPYContext *c, SPYValue *v, Block *top) {
     SPYValue *pending = v->as.iterator.counter;
     if (top && top->kind == BLOCK_CONSUME && top->consumer->id == B_NEXT) { spy_release(top->consumer->sent); top->consumer->sent = NULL; }
+    if (error_is(c, "StopIteration")) spy_clear_error(c);
     if (c->error_type[0]) { v->as.iterator.index = 0; return (Result){FLOW_NORMAL, NULL}; }
     if (v->as.iterator.index) v->as.iterator.index++;
     else if (zip_ended(c, v, (v->as.iterator.kind == I_MAP) + (pending ? pending->as.seq.len : 0))) return (Result){FLOW_NORMAL, NULL};
@@ -41287,10 +41298,16 @@ static SPYValue *adapted_chain(SPYContext *, Machine *, SPYValue *, int *, int, 
 /* What the generator the adapters on m's stack wait for gave in flow
  * (adapted_call), each taking it in turn, innermost first (adapted_chain):
  * a yield of the outermost's item, top's value; of none, to ask it again;
- * else its end or error. next() drops the generator's return value. */
+ * else its end or error. The value the generator returned to next() is
+ * a StopIteration they pass on, as a strict one does not. */
 static NO_INLINE Result adapters_resumed(SPYContext *c, Machine *m, Block *top, Result flow) {
     int again = 0;
-    if (top->kind == BLOCK_CONSUME && top->consumer->id == B_NEXT) { spy_release(top->consumer->sent); top->consumer->sent = NULL; }
+    if (top->kind == BLOCK_CONSUME && top->consumer->id == B_NEXT) {
+        /* Without a default to give instead (result). */
+        if (top->consumer->result) spy_release(top->consumer->sent);
+        else stop_with(c, top->consumer->sent);
+        top->consumer->sent = NULL;
+    }
     SPYValue *item = adapted_chain(c, m, flow.flow == FLOW_YIELD ? flow.value : NULL, &again, 1, CALL_NEXT);
     return again || item ? (Result){FLOW_YIELD, item} : (Result){FLOW_NORMAL, NULL};
 }
@@ -43247,7 +43264,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* The generator a yield from's iterator, or the adapters on
              * its stack, wait for (delegate_next) gives its item or its
              * end, as to a loop's. */
-            if (flow.flow == FLOW_RETURN) { g->as.generator.returned = 1; spy_release(flow.value); flow.value = NULL; generator_close(g); }
+            /* What it returned is the StopIteration they pass on (stop_with). */
+            if (flow.flow == FLOW_RETURN) { g->as.generator.returned = 1; stop_with(c, flow.value); flow.value = NULL; generator_close(g); }
             else if (flow.flow != FLOW_YIELD) generator_end(c, g, flow);
             m = resumer; f = m->frame; code = m->code->items; pc = m->pc;
             SPYValue *d = m->delegate;
