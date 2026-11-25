@@ -3406,6 +3406,21 @@ static const char *const programs[] = {
     "print(eg.split(lambda e: T())[0] is not None, range(5).count(EqAll()))\n"
     "print(complex(C()), list(filter(lambda x: T(), [1])))\n"
     "with Ex(): raise KeyError\n",
+    /* Format fields whose item and attribute reads call Python. */
+    "class FG:\n"
+    "    def __getitem__(self, k):\n"
+    "        for i in range(1): pass\n"
+    "        return k * 2\n"
+    "class FA:\n"
+    "    @property\n"
+    "    def p(self):\n"
+    "        for i in range(1): pass\n"
+    "        return 'p'\n"
+    "    def __getattr__(self, n): return n + '!'\n"
+    "def fg():\n"
+    "    return ['{0[ab]}|{0[3]}|{1.p}|{1.q}'.format(FG(), FA()), ['{x[k]!r:{w}}'.format(x=FG(), w=6), "
+    "['{0[a]:>{0[1]}}'.format(FG()), '{0.p}{0[c]}'.format(type('M', (FA, FG), {})())]]]\n"
+    "print(fg())\n",
     /* A function's first intrinsic loads them on the machine. */
     "def f():\n"
     "    for i in range(1): pass\n"

@@ -51727,8 +51727,8 @@ again:;
                  * field taking up its value (format_read): here when it
                  * returned at once, its flag in ctx true until then. */
                 SPYValue *ctx = done && parts[0] && parts[1] && parts[2] && place ? spy_list(c) : NULL, *read = NULL;
-                if (ctx && !sequence_append(c, ctx, state) && !sequence_append(c, ctx, c->booleans[1]))
-                    read = attribute_callk(c, m, object, key->as.string.data, format.looking, format_read, spy_retain(ctx));
+                if (ctx && (sequence_append(c, ctx, state) || sequence_append(c, ctx, c->booleans[1]))) { spy_release(ctx); ctx = NULL; }
+                if (ctx) read = attribute_callk(c, m, object, key->as.string.data, format.looking, format_read, spy_retain(ctx));
                 else spy_release(format.looking);
                 spy_release(object); spy_release(key);
                 if (read == c->stepped) { spy_release(ctx); goto again; }
