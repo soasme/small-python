@@ -122,8 +122,9 @@ typedef struct ImportRecord { struct ImportRecord *next; const char *module; int
 /* A body or suite being parsed: its program, which its statements at
  * depth are compiled into as each ends (body_statements), the first and
  * the last compiled; whether the last parsed waits for the body's end, as
- * a module's does, and whether the first may be a docstring. */
-typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int holds, docs, tries; } Body;
+ * a module's does, and whether the first may be a docstring; whether a
+ * statement has ended in it, and whether one waits to compile. */
+typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int holds, docs, tries, begun, pending; } Body;
 /* A statement's place for an error raised after its nodes go: the node
  * while it lives, then its line and the source it covers (free_parsed). */
 typedef struct { Node *node; size_t line; const char *start, *end; } Site;
@@ -7215,7 +7216,7 @@ static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
     if (!emits) return suite_after(p, what, line);
     Body outer = p->body;
     Node *start = p->unit->as.unit.nodes;
-    p->body = (Body){outer.program, NULL, NULL, NULL, p->depth + 1, 0, 0, outer.tries};
+    p->body = (Body){outer.program, NULL, NULL, NULL, p->depth + 1, 0, 0, outer.tries, 0, 0};
     Node *body = suite_after(p, what, line);
     int failed = !body || (!p->body.done && nodes_finish(p, start)) || body_statements(p, body, NULL);
     p->body = outer;
@@ -8079,6 +8080,8 @@ static Node *expression_statement(Parser *, Node *);
 static Node *return_statement(Parser *, Node *);
 static Node *raise_statement(Parser *, Node *);
 static Node *emitted_statement(Parser *, Node *, Node *(*)(Parser *, Node *));
+static int docstring_at(Parser *, Node *);
+static void drop_docstring(Node *);
 static Node *delete_statement(Parser *, Node *);
 static Node *assert_statement(Parser *, Node *);
 static Node *yield_statement(Parser *, Node *);
@@ -8133,6 +8136,18 @@ static Node *statement(Parser *p) {
         if (!future && !(!p->top_statements && n && n->kind == N_EXPR && n->a && n->a->kind == N_STRING)) p->future_closed = 1;
         p->top_statements++;
     }
+    /* A statement its parse did not compile compiles as it ends, unless
+     * one before it waits (body_statements); under -OO a docstring is a
+     * pass. */
+    if (n && emits) {
+        if (p->ctx->optimize > 1 && docstring_at(p, n)) drop_docstring(n);
+        if (!(n->flags & F_EMITTED) && n->kind != N_EXPR && !p->body.pending) {
+            compile_statement(p->ctx, p->body.program, n);
+            n->flags |= F_EMITTED;
+        } else if (!(n->flags & F_EMITTED)) p->body.pending = 1;
+        if (p->ctx->error_type[0]) return NULL;
+    }
+    if (n) p->body.begun = 1;
     if (n && (n->kind == N_IF || n->kind == N_WHILE || n->kind == N_FOR || n->kind == N_DEF || n->kind == N_CLASS ||
               n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH) && first->line >= p->last_stmt_line) {
         p->last_stmt_line = first->line; p->last_stmt = first->start;
@@ -8602,6 +8617,10 @@ static Node *yield_statement(Parser *p, Node *n) {
  * one after another from its start to the end: its value's, after an
  * augmented name's; a raise's exception's, then its cause's. Other
  * statements compile when they end, their emitted steps undone. */
+/* Whether statement n, as it ends, is its body's docstring. */
+static int docstring_at(Parser *p, Node *n) {
+    return n && n->kind == N_EXPR && n->a->kind == N_STRING && p->body.docs && !p->body.begun;
+}
 static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
     Program *program = p->body.program;
@@ -8623,7 +8642,8 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     if (kind == N_ASSIGN && statement->op == '=' && !p->unassigned)
         kept = (last->flags & F_EMITTED) && last->steps_at == p->assigned.steps.mark.at && last->steps_end == program_len(program) &&
                assignment_parsed(p, statement);
-    if (!kept || (p->ctx->optimize > 1 && kind == N_EXPR && first->kind == N_STRING)) emitted_drop(p);
+    /* Under -OO a docstring becomes pass (statement). */
+    if (!kept || (p->ctx->optimize > 1 && docstring_at(p, statement))) emitted_drop(p);
     /* An expression statement, return or raise kept compiles its own steps
      * now; a module's last expression gives up its pop for the body's value
      * (module_body_finish). */
@@ -19675,6 +19695,7 @@ static int body_statements(Parser *p, Node *head, Node *stop) {
     /* The statement held back is the next to compile, its body's done
      * statement perhaps freed (free_lines). */
     p->body.todo = s;
+    p->body.pending = s && !(s->flags & F_EMITTED);
     return c->error_type[0] ? -1 : 0;
 }
 /* Begin the body of def or class n, or with n NULL the module's, whose
@@ -19686,7 +19707,7 @@ static Body body_begin(Parser *p, Node *n, size_t depth) {
     Body enclosing = p->body;
     /* A def's or class's scope holds its program from the start. */
     Program *program = n && !body_scope(c, n) ? NULL : allocate(c, sizeof(*program));
-    p->body = (Body){program, NULL, NULL, NULL, depth, !n, 1, 0};
+    p->body = (Body){program, NULL, NULL, NULL, depth, !n, 1, 0, 0, 0};
     if (!program) return enclosing;
     program->calls = c->pausing ? PAUSING : BODY;
     program->namespace = n && n->kind == N_CLASS;
