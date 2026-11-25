@@ -356,13 +356,31 @@ compiling it again is no step.
   the loop's opening and next-item steps go between, and an `if`
   clause's branch follows its test. At the comprehension's end the
   element's steps move from the enclosing program to its own, after the
-  clauses' openings, and the clauses close innermost first. A
-  comprehension in a class body, whose program loads names differently,
-  undoes its element and compiles its body from its nodes.
+  clauses' openings, and the clauses close innermost first. A dictionary
+  or set display that becomes a comprehension drops the new value it
+  emitted at its first item. In a class body, whose program loads names
+  differently, a display whose first item has a `for` ahead emits that
+  item into the comprehension's program from the start, and the clauses'
+  openings are rotated before it at the end.
 - A def's decorators and defaults, a class's decorators, its
   `__build_class__` step and its bases and keywords, a `with`
-  statement's items and their targets' stores, and an `except` clause's
-  types emit into the enclosing program as they are parsed.
+  statement's items and their targets' stores, an `except` clause's
+  types and a `match` statement's subject emit into the enclosing program
+  as they are parsed. A generic class's bases and keywords emit into the
+  program of its type parameters' frame, and a case's guard into a
+  program of its own, appended after the case's pattern.
+- An annotated assignment's target becomes its store as a plain
+  assignment's does; without a value, an attribute's or item's primary
+  and key are evaluated and popped.
+- An expression whose steps are needed later, elsewhere, is parsed apart:
+  it emits into a program of its own, which the parse holds until the
+  code compiling it appends those steps (`apart_take`), or frees on an
+  error. A function's, class's or module's annotations, a type
+  parameter's bound or default, a type alias's value and a match
+  pattern's literals, dotted names and classes are parsed apart; each
+  `__annotate__` or lazy-value function's program is made from them as
+  the function is. Under `from __future__ import annotations` a
+  function's annotations become strings and are not parsed apart.
 
 The test of an `if`, `elif` or `while` header and the iterable of a `for`
 header are emitted the same way, after a statement the body held back and
