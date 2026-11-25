@@ -40702,8 +40702,10 @@ static SPYValue *converted_result(SPYContext *c, SPYValue *v, const char *method
 }
 /* BC_FALSE, or BC_SHORT, on m given the truth of the value it tests: the
  * test jumps when false; the and/or jumps keeping the value atop m, its
- * truth plus one in *known for the test it lands on, or pops it. */
-static void short_or_false(Machine *m, Instruction *ins, int truth, size_t *pc, int *known) {
+ * truth plus one in *known for the test it lands on, or pops it. Inlined,
+ * so run_steps' pc and known are not address-taken, which collapses its
+ * dispatch. */
+static ALWAYS_INLINE void short_or_false(Machine *m, Instruction *ins, int truth, size_t *pc, int *known) {
     if (ins->op == BC_FALSE) { if (!truth == !ins->arg) *pc = ins->target; }
     else if ((ins->arg == O_OR) == truth) { *pc = ins->target; *known = truth + 1; }
     else spy_release(machine_pop(m));
