@@ -137,7 +137,8 @@ typedef struct { size_t final, handler, skip, first, rest; int has_final, except
  * values it leaves above its case's slots, to drops that leave base. */
 typedef struct { size_t pc, temps; } PatternExit;
 /* A pattern's failing exits, and the names its case captures, in a slot each (case_begin). */
-typedef struct { PatternExit *exits; size_t len, cap, base; const char **names; size_t count; } PatternFail;
+/* Its parser, when its values were parsed apart (pattern_value). */
+typedef struct { PatternExit *exits; size_t len, cap, base; const char **names; size_t count; struct Parser *parser; } PatternFail;
 typedef struct { PatternFail fail; size_t guard; const char **names; } Case;
 typedef struct Machine Machine;
 /* callk's continuation (as Lua's lua_KFunction): given its context and
@@ -4628,7 +4629,7 @@ static int inlined_comprehension(SPYValue *env) {
 }
 enum { P_POSITIONAL, P_POSONLY, P_VARARGS, P_KWONLY, P_KWARGS };
 typedef struct { int kind; const char *start; size_t len, line, level; } Token;
-typedef struct {
+typedef struct Parser {
     SPYContext *ctx;
     Token *tokens;
     size_t len, cap, pos, depth;
@@ -4672,8 +4673,11 @@ typedef struct {
      * the statement (a module's are all conditional), the next index. */
     int collecting, conditional, annotation_index;
     Node *annotations, **annotations_tail;
-    /* The expressions parsed apart, each with its own program (apart_end). */
-    struct Apart { Node *value; Program *program; } *aparts; size_t apart_len, apart_cap;
+    /* The expressions parsed apart, each with its own program (apart_end),
+     * known by node and by where and what it is, the node being freed with
+     * its line. */
+    struct Apart { Node *value; const char *start; int kind; Program *program; } *aparts; size_t apart_len, apart_cap;
+    int matching; /* A case's patterns parsed, its values apart (pattern_apart). */
     int awaits; /* The awaits and async for clauses parsed (comprehension). */
     int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     int line_open; /* A body's line continues after a statement and its ';' (line_statements). */
@@ -5465,6 +5469,9 @@ static Node *import_name(Parser *p) {
 static Node *expression(Parser *, int);
 static Node *plain_expression(Parser *, int);
 static Node *apart_expression(Parser *, Node *(*)(Parser *, int), int);
+static Node *annotation_expression(Parser *, Node *(*)(Parser *, int), int);
+static void apart_drop(Parser *, size_t);
+static void apart_detach(Parser *, Program *);
 static Node *expression_mode(Parser *, int, int);
 static Node *syntax_at(Parser *, Node *, const char *);
 static Node *expression_list(Parser *, int);
@@ -5501,7 +5508,7 @@ static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
 static void patch(Program *, size_t, size_t);
 static size_t program_len(Program *);
 static uint32_t with_begin(SPYContext *, Program *, Node *, int);
-static void case_begin(SPYContext *, Program *, Node *, Case *, Program *);
+static void case_begin(Parser *, Program *, Node *, Case *, Program *);
 static void case_end(SPYContext *, Program *, Node *, Case *, uint32_t *);
 static void match_end(SPYContext *, Program *, Node *, uint32_t);
 static void try_begin(SPYContext *, Program *, Node *, Try *);
@@ -5581,10 +5588,10 @@ static int parameter_list(Parser *p, Node *n, int close) {
                     Node *star = node(p, N_STAR);
                     p->pos++;
                     if (!star) return -1;
-                    if (!(star->a = apart_expression(p, expression, 0))) return -1;
+                    if (!(star->a = annotation_expression(p, expression, 0))) return -1;
                     arg->b = star;
                 } else {
-                    if (!(arg->b = apart_expression(p, plain_expression, 0))) return -1;
+                    if (!(arg->b = annotation_expression(p, plain_expression, 0))) return -1;
                 }
                 if (at(p, T_WALRUS)) { syntax(p, "invalid syntax"); return -1; }
             }
@@ -5805,15 +5812,15 @@ static int rules_parameters(ParamRules *r) {
     return rules_star_etc(r);
 }
 static int parameters(Parser *p, Node *n, int close) {
-    size_t start = p->pos;
+    size_t start = p->pos, aparts = p->apart_len;
     if (!parameter_list(p, n, close)) return 0;
     if (!error_is(p->ctx, "SyntaxError")) return -1;
     spy_clear_error(p->ctx);
-    p->pos = start;
+    p->pos = start; apart_drop(p, aparts);
     ParamRules rules = {p, close == ':'};
     int status = rules_parameters(&rules);
     if (status < 0) return -1;
-    p->pos = start; n->args = NULL;
+    p->pos = start; n->args = NULL; apart_drop(p, aparts);
     if (!parameter_list(p, n, close)) return 0;
     /* No invalid_* rule matched: CPython reports a generic failure. */
     if (error_is(p->ctx, "SyntaxError") && strncmp(p->ctx->error_message, "duplicate parameter", 19)) {
@@ -7161,6 +7168,8 @@ static int header_emit(Parser *p, EmitMark *from) {
 static void def_header(Parser *, Node *, EmitMark);
 static int class_header(Parser *, Node *, EmitMark);
 static int class_arguments(Parser *, Node *);
+static int generic_header(Parser *, Node *, EmitMark *);
+static int generic_header_end(Parser *, Node *, Program *, EmitMark);
 static int with_item(Parser *, Node *, EmitMark, int, uint32_t *);
 enum { TARGET_STORE, TARGET_DELETE, TARGET_CHECK };
 static size_t target_steps(SPYContext *, Program *, Node *, size_t, Node *, int, int);
@@ -7406,14 +7415,28 @@ static Node *annotation_string(Parser *p, Node *annotation) {
     n->op = (int)text.len;
     return n->name.text ? n : NULL;
 }
-static EmitMark apart_begin(Parser *, Program **);
+static EmitMark apart_begin(Parser *, Program **, Program *);
 static int apart_end(Parser *, Node *, Program *, EmitMark);
 /* An expression parse parses, with min, apart (apart_begin). */
 static Node *apart_expression(Parser *p, Node *(*parse)(Parser *, int), int min) {
     Program *emitting;
-    EmitMark from = apart_begin(p, &emitting);
+    EmitMark from = apart_begin(p, &emitting, NULL);
     Node *value = parse(p, min);
     return apart_end(p, value, emitting, from) ? NULL : value;
+}
+/* A function's annotation, parsed apart unless PEP 563 makes it a string
+ * (annotation_entry), when it emits nothing. */
+static Node *annotation_expression(Parser *p, Node *(*parse)(Parser *, int), int min) {
+    if (!p->future_annotations) return apart_expression(p, parse, min);
+    Program *emitting = p->emitting;
+    p->emitting = NULL;
+    Node *value = parse(p, min);
+    p->emitting = emitting;
+    return value;
+}
+/* Forget the expressions parsed apart since the first count, their nodes parsed again. */
+static void apart_drop(Parser *p, size_t count) {
+    while (p->apart_len > count) free_program(p->aparts[--p->apart_len].program);
 }
 static int annotate_program(Parser *, Node *);
 static Scope *annotation_scope(SPYContext *, Scope *, size_t);
@@ -7548,7 +7571,18 @@ static int line_ends_block(Parser *p) {
     }
     return 0;
 }
-static Node *literal_pattern(Parser *p) {
+static Node *literal_body(Parser *);
+/* A pattern by parse whose value, its a, is parsed apart in a case whose
+ * patterns compile as they are parsed (case_begin). */
+static Node *pattern_apart(Parser *p, Node *(*parse)(Parser *)) {
+    if (!p->matching) return parse(p);
+    Program *emitting;
+    EmitMark from = apart_begin(p, &emitting, p->body.program);
+    Node *n = parse(p);
+    return apart_end(p, n ? n->a : NULL, emitting, from) || !n ? NULL : n;
+}
+static Node *literal_pattern(Parser *p) { return pattern_apart(p, literal_body); }
+static Node *literal_body(Parser *p) {
     Node *n = pattern_node(p, PT_LITERAL);
     if (!n) return NULL;
     if (at(p, T_STRING)) {
@@ -7562,7 +7596,7 @@ static Node *literal_pattern(Parser *p) {
         if (!value) return NULL;
         value->op = peek(p)->kind; p->pos++;
         if (!at(p, T_INT) && !at(p, T_FLOAT) && !at(p, T_IMAG)) return syntax(p, "invalid syntax");
-        if (!(value->a = atom(p))) return NULL;
+        if (!(value->a = atom(p)) || !(value = finished(p, value))) return NULL;
     } else if (!(value = atom(p))) return NULL;
     if (at(p, '+') || at(p, '-')) {
         Node *real = value->kind == N_UNARY ? value->a : value;
@@ -7573,8 +7607,7 @@ static Node *literal_pattern(Parser *p) {
         sum->op = peek(p)->kind; p->pos++;
         if (!at(p, T_IMAG)) return syntax(p, "imaginary number required in complex literal");
         sum->a = value;
-        if (!(sum->b = atom(p))) return NULL;
-        value = sum;
+        if (!(sum->b = atom(p)) || !(value = finished(p, sum))) return NULL;
     }
     n->a = value;
     return n;
@@ -7612,6 +7645,26 @@ static Node *closed_pattern_body(Parser *);
 static Node *closed_pattern(Parser *p) {
     size_t start = p->pos;
     return span(p, closed_pattern_body(p), start);
+}
+/* A None, True or False literal pattern. */
+static Node *keyword_pattern(Parser *p) {
+    Node *n = pattern_node(p, PT_LITERAL);
+    return n && (n->a = atom(p)) ? n : NULL;
+}
+/* A value pattern of a name and its attributes. */
+static Node *dotted_pattern(Parser *p) {
+    Node *n = pattern_node(p, PT_VALUE), *value = n ? identifier(p) : NULL;
+    if (!value || !(value = leaf(p, value))) return NULL;
+    while (take(p, '.')) {
+        Node *attr = node(p, N_ATTR);
+        if (!attr) return NULL;
+        attr->a = value;
+        if (!(attr->b = identifier(p))) return NULL;
+        attr->attribute.name = &attr->b->name; attr->attribute.line = attr->line;
+        if (!(value = finished(p, attr))) return NULL;
+    }
+    n->a = value;
+    return n;
 }
 static Node *closed_pattern_body(Parser *p) {
     if (take(p, '(')) {
@@ -7671,23 +7724,12 @@ static Node *closed_pattern_body(Parser *p) {
         }
         return expect(p, '}', "invalid syntax") ? n : NULL;
     }
-    if (keyword(p, "None") || keyword(p, "True") || keyword(p, "False")) {
-        Node *n = pattern_node(p, PT_LITERAL);
-        if (!n || !(n->a = atom(p))) return NULL;
-        return n;
-    }
+    if (keyword(p, "None") || keyword(p, "True") || keyword(p, "False")) return pattern_apart(p, keyword_pattern);
     if (at(p, T_NAME)) {
-        Node *name = identifier(p);
-        if (!name) return NULL;
-        Node *value = name;
-        while (take(p, '.')) {
-            Node *attr = node(p, N_ATTR);
-            if (!attr) return NULL;
-            attr->a = value;
-            if (!(attr->b = identifier(p))) return NULL;
-            attr->attribute.name = &attr->b->name; attr->attribute.line = attr->line;
-            value = attr;
-        }
+        /* A dotted name, a value, or a class pattern's class. */
+        int valued = p->pos + 1 < p->len && (p->tokens[p->pos + 1].kind == '.' || p->tokens[p->pos + 1].kind == '(');
+        Node *named = valued ? pattern_apart(p, dotted_pattern) : NULL, *value = named ? named->a : identifier(p);
+        if (!value) return NULL;
         if (take(p, '(')) {
             Node *n = pattern_node(p, PT_CLASS);
             if (!n) return NULL;
@@ -7725,13 +7767,9 @@ static Node *closed_pattern_body(Parser *p) {
             }
             return expect(p, ')', "invalid syntax") ? n : NULL;
         }
-        if (value != name) {
-            Node *n = pattern_node(p, PT_VALUE);
-            if (n) n->a = value;
-            return n;
-        }
-        Node *n = pattern_node(p, strcmp(name->name.text, "_") ? PT_CAPTURE : PT_WILDCARD);
-        if (n && n->op == PT_CAPTURE) n->a = name;
+        if (named) return named;
+        Node *n = pattern_node(p, strcmp(value->name.text, "_") ? PT_CAPTURE : PT_WILDCARD);
+        if (n && n->op == PT_CAPTURE) n->a = value;
         return n;
     }
     if (at(p, '-') || at(p, '+') || at(p, T_INT) || at(p, T_FLOAT) || at(p, T_IMAG) || at(p, T_STRING)) return literal_pattern(p);
@@ -7896,9 +7934,11 @@ static Node *match_statement(Parser *p) {
         size_t case_line = keyword_line(p);
         Case k = {{0}, 0, NULL};
         Program *guard = NULL;
+        p->matching = emits;
         Node *before = p->unit->as.unit.nodes, *item = case_header(p, emits ? &guard : NULL);
+        p->matching = 0;
         if (!item || analyse_statements(p, item) || (emits && header_ready(p, before))) { free_program(guard); return NULL; }
-        if (emits) case_begin(p->ctx, p->body.program, item, &k, guard);
+        if (emits) case_begin(p, p->body.program, item, &k, guard);
         if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); return NULL; }
         if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
         *tail = item; tail = &item->next;
@@ -8182,8 +8222,14 @@ static Node *statement_body(Parser *p, int emits) {
         p->emitting = emitting;
         if (emits && class_header(p, n, from)) return NULL;
         if (take(p, '(')) {
+            /* A generic class's bases and keywords stream into its type
+             * parameters' frame's program (generic_header). */
+            EmitMark header = {0};
+            int generic = n->params && !at(p, ')');
+            if (generic && generic_header(p, n, &header)) return NULL;
             if (!at(p, ')') && class_arguments(p, n)) return NULL;
             if (call_arguments(p, n)) return NULL;
+            if (generic && generic_header_end(p, n, emitting, header)) return NULL;
         }
         if (emits && !(n->flags & F_HEADER)) emit_back(p, from);
         if (emits) { p->emitting = NULL; p->emitted_len = 0; }
@@ -8376,7 +8422,7 @@ static Node *statement_body(Parser *p, int emits) {
         n->op = asynchronous;
         if (parameters(p, n, ')')) return NULL;
         if (emits) def_header(p, n, from);
-        if (take(p, T_ARROW) && !(n->c = apart_expression(p, expression, 0))) return NULL;
+        if (take(p, T_ARROW) && !(n->c = annotation_expression(p, expression, 0))) return NULL;
         if (function_annotations(p, n) || analyse_statements(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
@@ -8640,7 +8686,7 @@ static Node *expression_statement(Parser *p, Node *n) {
         if (p->emitting) target_parsed(p, target);
         Program *emitting = p->emitting;
         int collected = p->collecting && (n->flags & F_SIMPLE) && !p->future_annotations;
-        EmitMark from = collected ? apart_begin(p, &emitting) : (EmitMark){0};
+        EmitMark from = collected ? apart_begin(p, &emitting, NULL) : (EmitMark){0};
         if (!collected) p->emitting = NULL;
         n->b = expression(p, 0);
         if (collected && apart_end(p, n->b, emitting, from)) return NULL;
@@ -17861,6 +17907,35 @@ static int class_header(Parser *p, Node *n, EmitMark from) {
     n->flags |= F_HEADER;
     return emit(p->ctx, p->emitting, BC_BUILDER, n, 0) == SIZE_MAX ? -1 : 0;
 }
+/* Generic class n's bases and keywords to follow: a program of their
+ * own, parsed apart (apart_begin) until they end, its first step
+ * emitted, n marked as streaming them (call_arguments); from is where
+ * they begin. -1 on an error. */
+static int generic_header(Parser *p, Node *n, EmitMark *from) {
+    Program *emitting;
+    apart_begin(p, &emitting, NULL);
+    if (!p->emitting || emit(p->ctx, p->emitting, BC_CLASS, n, 18) == SIZE_MAX) return -1;
+    n->flags |= F_HEADER;
+    *from = emit_mark(p);
+    return 0;
+}
+/* Its bases and keywords parsed: when they streamed, their program, its
+ * last steps emitted, its type parameters' scope's (header_step); else
+ * undone, to compile from their nodes. Then emitting again. -1 on an
+ * error. */
+static int generic_header_end(Parser *p, Node *n, Program *emitting, EmitMark from) {
+    SPYContext *c = p->ctx;
+    Program *header = p->emitting;
+    int streamed = (n->flags & F_HEADER) != 0;
+    n->flags &= ~F_HEADER;
+    apart_detach(p, header);
+    if (streamed) { emit(c, header, BC_CLASS, n, 19); emit(c, header, BC_FLOW, NULL, FLOW_RETURN); }
+    else emit_back(p, from);
+    p->emitting = emitting;
+    if (streamed && !c->error_type[0] && body_scope(c, n->params)) { n->params->scope->flat = header; return 0; }
+    free_program(header);
+    return c->error_type[0] ? -1 : 0;
+}
 /* Class n's bases and keywords to follow, its header emitted: its
  * BC_ARGS first. -1 on an error. */
 static int class_arguments(Parser *p, Node *n) {
@@ -18076,15 +18151,25 @@ static Program *guard_program(Parser *p) {
     return program;
 }
 /* An expression parsed apart: emitted as it is parsed into a program of
- * its own, which apart_begin begins, the emission it was in in *emitting;
- * where its steps begin. */
-static EmitMark apart_begin(Parser *p, Program **emitting) {
+ * its own, of modes' modes or a function's, which the parse holds until
+ * it ends (apart_end); the emission it was in in *emitting. Where its
+ * steps begin. */
+static EmitMark apart_begin(Parser *p, Program **emitting, Program *modes) {
     SPYContext *c = p->ctx;
     *emitting = p->emitting;
     Program *program = allocate(c, sizeof(*program));
-    if (program) { program->calls = c->pausing ? PAUSING : BODY; program->loads = c->string_source != 0; }
+    if (program && grow(c, (void **)&p->aparts, &p->apart_cap, p->apart_len + 1, sizeof(*p->aparts))) { mem_free(program); program = NULL; }
+    if (program) {
+        p->aparts[p->apart_len++] = (struct Apart){NULL, NULL, -1, program};
+        program->calls = modes ? modes->calls : c->pausing ? PAUSING : BODY; program->loads = modes ? modes->loads : c->string_source != 0;
+        if (modes) { program->namespace = modes->namespace; program->unbinds = modes->unbinds; }
+    }
     p->emitting = program;
     return emit_mark(p);
+}
+/* The parse's hold on program, parsed apart, given up. */
+static void apart_detach(Parser *p, Program *program) {
+    for (size_t i = p->apart_len; i--;) if (p->aparts[i].program == program) { p->aparts[i] = p->aparts[--p->apart_len]; return; }
 }
 /* Value, parsed apart from from on: its program kept for the code that
  * compiles it (apart_take) when its steps are all its own, else undone;
@@ -18092,10 +18177,10 @@ static EmitMark apart_begin(Parser *p, Program **emitting) {
 static int apart_end(Parser *p, Node *value, Program *emitting, EmitMark from) {
     SPYContext *c = p->ctx;
     Program *program = p->emitting;
-    if (program && value && (value->flags & F_EMITTED) && !value->steps_at && value->steps_end == program->len &&
-        !grow(c, (void **)&p->aparts, &p->apart_cap, p->apart_len + 1, sizeof(*p->aparts)))
-        p->aparts[p->apart_len++] = (struct Apart){value, program};
-    else { emit_back(p, from); free_program(program); }
+    if (program && value && (value->flags & F_EMITTED) && !value->steps_at && value->steps_end == program->len) {
+        for (size_t i = p->apart_len; i--;)
+            if (p->aparts[i].program == program) p->aparts[i] = (struct Apart){value, value->start, value->kind, program};
+    } else if (program) { emit_back(p, from); apart_detach(p, program); free_program(program); }
     p->emitting = emitting;
     return c->error_type[0] ? -1 : 0;
 }
@@ -18104,7 +18189,7 @@ static int apart_end(Parser *p, Node *value, Program *emitting, EmitMark from) {
 static void apart_take(Parser *p, Program *to, Node *value) {
     for (size_t i = p->apart_len; i--;) {
         struct Apart *apart = &p->aparts[i];
-        if (apart->value != value) continue;
+        if (apart->value != value || apart->start != value->start || apart->kind != value->kind) continue;
         Program *from = apart->program;
         *apart = p->aparts[--p->apart_len];
         if (emit_take(p->ctx, from, (Mark){0, NULL}, 0, from->values_len, to)) { free_program(from); return; }
@@ -18983,9 +19068,15 @@ static void pattern_close(SPYContext *c, Program *p, PatternFail *fail, Node *n)
         level = next;
     }
     mem_free(fail->exits);
-    *fail = (PatternFail){.names = fail->names, .count = fail->count};
+    *fail = (PatternFail){.names = fail->names, .count = fail->count, .parser = fail->parser};
 }
 static void compile_pattern(SPYContext *, Program *, Node *, size_t, PatternFail *);
+static void apart_take(Parser *, Program *, Node *);
+/* A pattern's value, parsed apart (pattern_apart) when fail's parser is known. */
+static void pattern_value(SPYContext *c, Program *p, Node *value, PatternFail *fail) {
+    if (fail->parser) apart_take(fail->parser, p, value);
+    else compile_expr(c, p, value);
+}
 /* Move the steps of the patterns from a on after those from b on
  * (emit_after), with the exits of fail among them; where they begin. */
 static Mark pattern_after(Program *p, PatternFail *fail, Mark a, Mark b) {
@@ -19075,7 +19166,7 @@ static void compile_mapping_pattern(SPYContext *c, Program *p, Node *n, size_t t
             patterns = mark(p); exit = fail->len;
         }
         Mark key = mark(p);
-        compile_expr(c, p, entry->a);
+        pattern_value(c, p, entry->a, fail);
         patterns = pattern_after(p, fail, patterns, key);
         /* subject, keys, missing, the keys seen, get, then each value found. */
         compile_pattern(c, p, entry->b, temps + 3 - size, fail);
@@ -19109,7 +19200,7 @@ static void compile_class_pattern(SPYContext *c, Program *p, Node *n, size_t tem
     size_t positional = 0, keywords = 0, index = 0;
     for (Node *item = n->args; item; item = item->next) positional++;
     for (Node *entry = n->c; entry; entry = entry->next) keywords++;
-    compile_expr(c, p, n->a);
+    pattern_value(c, p, n->a, fail);
     emit_pattern(c, p, n, P_CLASS, 0);
     emit_pattern(c, p, n, P_INSTANCE, 0);
     pattern_test(c, p, n, fail, temps + 1);
@@ -19143,7 +19234,7 @@ static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, Pa
     case PT_WILDCARD: emit(c, p, BC_POP, n, 0); return;
     case PT_CAPTURE: pattern_bind(c, p, n, n->a, temps, fail); return;
     case PT_VALUE: case PT_LITERAL:
-        compile_expr(c, p, n->a);
+        pattern_value(c, p, n->a, fail);
         if (n->a->kind == N_NONE || n->a->kind == N_BOOL) emit_pattern(c, p, n, P_IS, 0);
         else emit(c, p, BC_BINARY, n, T_EQ);
         pattern_test(c, p, n, fail, temps - 1);
@@ -19158,7 +19249,7 @@ static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, Pa
          * names, so a later one overwrites a failed one's captures. */
         uint32_t ends = NO_STEP;
         for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
-            PatternFail alternative = {.base = temps, .names = fail->names, .count = fail->count};
+            PatternFail alternative = {.base = temps, .names = fail->names, .count = fail->count, .parser = fail->parser};
             emit_pattern(c, p, item, P_COPY, 0);
             compile_pattern(c, p, item, temps + 1, &alternative);
             emit(c, p, BC_POP, item, 0);
@@ -19185,12 +19276,13 @@ static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, Pa
  * guard; after the suite, its jump past the rest, linked to the earlier
  * cases' in exits; then the drops of a failed match, and the next case, where a failed
  * guard goes. After the last, the subject's pop, where those jumps go. */
-static void case_begin(SPYContext *c, Program *p, Node *item, Case *k, Program *guard) {
+static void case_begin(Parser *parser, Program *p, Node *item, Case *k, Program *guard) {
+    SPYContext *c = parser->ctx;
     const char *bad;
     size_t count = 0;
     if (!(k->names = allocate(c, 256 * sizeof(*k->names)))) { free_program(guard); return; }
     pattern_names(item->a, k->names, &count, 256, &bad);
-    k->fail.names = k->names; k->fail.count = count;
+    k->fail.names = k->names; k->fail.count = count; k->fail.parser = parser;
     emit_pattern(c, p, item, P_BEGIN, count);
     compile_pattern(c, p, item->a, 1, &k->fail);
     SPYValue *names = count ? spy_tuple(c, 0, NULL) : NULL;
@@ -19590,9 +19682,9 @@ static int compile_generator(SPYContext *c, Node *n) {
     }
     if (generator) { n->scope->code = p; n->scope->flat = NULL; }
     c->code_work++;
-    if (n->kind == N_CLASS && n->params && n->args) {
+    if (n->kind == N_CLASS && n->params && n->args && !(n->params->scope && n->params->scope->flat)) {
         /* A generic class's bases and keywords, in its type parameters'
-         * frame (header_step). */
+         * frame (header_step), unless they streamed (generic_header). */
         Program *header = allocate(c, sizeof(*header));
         if (!header) { c->code_work--; return -1; }
         if (!body_scope(c, n->params)) { mem_free(header); c->code_work--; return -1; }
