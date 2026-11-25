@@ -20251,10 +20251,11 @@ static SPYValue *number_literal(SPYContext *c, Node *n) {
     mem_free(s); return v;
 }
 /* The name of the definition or alias generic's parameters are for: its
- * child that is neither a parameter's bound nor its default. */
+ * child that is neither a parameter's bound nor its default, nor a
+ * function's __annotate__ (an annotation scope of no type parameters). */
 static const char *generic_name(Scope *generic) {
     for (Scope *child = generic->children; child; child = child->sibling) {
-        int lazy = 0;
+        int lazy = (child->flags & (F_ANNOTATE | F_TYPEPARAMS)) == F_ANNOTATE;
         for (TypeParameter *t = generic->type_params; t && t->name; t++) lazy |= child == t->bound || child == t->fallback;
         if (!lazy) return scope_name(child);
     }

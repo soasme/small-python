@@ -2,8 +2,8 @@
 # description: Lambdas and generator expressions inside annotation scopes
 # (annotate functions, type alias values, type parameter bounds and
 # defaults) are named where the scope's owner is; inside a type parameter's
-# lazy value or a generic alias's value, under the definition's
-# <generic parameters of name>.
+# lazy value, a generic alias's value or a generic function's
+# annotations, under the definition's <generic parameters of name>.
 from harness import *
 
 class C:
@@ -48,3 +48,17 @@ class G[V]:
     z: lambda: 1
     w: (i for i in ())
 assert_eq((G.__annotations__["z"].__qualname__, G.__annotations__["w"].__qualname__), ("G.<lambda>", "G.<genexpr>"))
+
+def gf[V](a: (lambda: 1), *, k: (lambda: 2) = 0) -> (lambda: 3): pass
+assert_eq([v.__qualname__ for v in gf.__annotations__.values()], ["<generic parameters of gf>.<lambda>"] * 3)
+
+class H:
+    def gm[V](self, a: (lambda: 1)): pass
+    async def ga[V](self, a: (lambda: 2)): pass
+assert_eq((H.gm.__annotations__["a"].__qualname__, H.ga.__annotations__["a"].__qualname__),
+          ("H.<generic parameters of gm>.<lambda>", "H.<generic parameters of ga>.<lambda>"))
+
+def outer2():
+    def gk[V](a: (lambda: 1)): pass
+    return gk
+assert_eq(outer2().__annotations__["a"].__qualname__, "outer2.<locals>.<generic parameters of gk>.<lambda>")
