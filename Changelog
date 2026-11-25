@@ -832,6 +832,7 @@ Unreleased (0.10.0):
 - a lazy import calls a replaced `__lazy_import__` from the builtins, and raises ImportError when there is none
 - globals with a Python `__getitem__` are asked for `__lazy_modules__` just before each module is imported
 - `enumerate`, `filter`, `map` and `zip` pass on their generator's return value to `next()` and `yield from`
+- a generator's, coroutine's and async generator's special methods are method-wrappers, with `__objclass__` and no `__module__`
 - a generic class is made in a frame named `<generic parameters of C>`, which its bases, keywords and body run in and tracebacks show
 - iter(f, sentinel) takes a comparison result whose descriptor `__bool__` raises AttributeError as absent, falling back to `__len__`
 - a trace function sees no line event for a function's docstring, for any docstring a statement follows under -OO, or at an if's or case's header after its suite; a function of only a docstring traces its first line

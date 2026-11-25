@@ -47,7 +47,7 @@ Cases == {"method_ctor", "method_not_callable", "module_ctor", "module_bad_name"
           "classmethod_descr_not_type", "classmethod_descr_not_subtype", "getset_get", "getset_readonly",
           "member_unset", "member_set", "method_descr_wrong_type", "method_descr_objclass", "method_descr_no_arg",
           "wrapper_descr_no_arg", "nonslot_dunder_kinds",
-          "wrapper_descr_call", "method_wrapper_self", "class_slot_bound", "descriptor_kinds", "builtin_self", "generator_no_ctor",
+          "wrapper_descr_call", "method_wrapper_self", "generator_wrappers", "class_slot_bound", "descriptor_kinds", "builtin_self", "generator_no_ctor",
           "function_no_subclass", "traceback_fields", "frame_back"}
 Programs == [name : DOMAIN Kind]
             \cup [case : Cases]
@@ -113,6 +113,8 @@ Case(c) ==
       [] c = "nonslot_dunder_kinds" -> "('method_descriptor', 'method_descriptor', 'method_descriptor', 'wrapper_descriptor')"
       [] c = "wrapper_descr_call" -> "('ab', True)"
       [] c = "method_wrapper_self" -> "(True, '__str__')"
+      \* a generator's special methods bind as method-wrappers, its others as builtin methods
+      [] c = "generator_wrappers" -> "('method-wrapper', 'method-wrapper', 'builtin_function_or_method', 'generator', False)"
       [] c = "class_slot_bound" -> "('method-wrapper', 'builtin_function_or_method')"
       [] c = "descriptor_kinds" -> "('method_descriptor', 'member_descriptor', 'member_descriptor', 'getset_descriptor')"
       [] c = "builtin_self" -> "('builtins', True)"

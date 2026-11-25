@@ -3274,6 +3274,9 @@ static SPYValue **builtin_module_slot(SPYValue *v) {
 static int slot_wrapper(const char *, const char *);
 static int native_kind(SPYValue *v) {
     if (v->type == SPY_METHOD && v->as.method.plain) return NATIVE_FUNCTION;
+    /* A generator's or code object's own methods: their slots are method-wrappers. */
+    if (v->type == SPY_BOUND_METHOD)
+        return v->as.bound.name && slot_wrapper(type_name(v->as.bound.self), v->as.bound.name->as.string.data) ? NATIVE_METHOD_WRAPPER : NATIVE_FUNCTION;
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
     if ((v->type != SPY_NATIVE && v->type != SPY_METHOD) || function->type != SPY_NATIVE) return NATIVE_FUNCTION;
     if (!function->as.native.owner || !function->as.native.method || !function->as.native.name)
@@ -14473,7 +14476,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 return missing_attribute(c, v, name);
         }
         if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__self__")) return spy_retain(v->as.bound.self);
-        if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__module__")) return spy_none(c);
+        /* A method-wrapper has its class's __objclass__ and no __module__. */
+        if (v->type == SPY_BOUND_METHOD && native_kind(v) == NATIVE_METHOD_WRAPPER && !strcmp(name, "__objclass__")) return spy_retain(owner);
+        if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__module__"))
+            return native_kind(v) == NATIVE_METHOD_WRAPPER ? missing_attribute(c, v, name) : spy_none(c);
         /* A builtin function is bound to its class (a static method such as
          * object.__new__) or to the builtins module; descriptors are unbound. */
         if (v->type == SPY_NATIVE && !strcmp(name, "__self__") && native_kind(v) == NATIVE_FUNCTION)
