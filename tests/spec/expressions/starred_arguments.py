@@ -3,7 +3,8 @@
 # instance's items through its class's Python __iter__ and __next__, in
 # order among the other arguments, inside functions as at module level;
 # an error in the generator, or an __iter__ returning no iterator, ends
-# the call before the callee runs.
+# the call before the callee runs. Positional and starred arguments are
+# evaluated before keyword and ** ones, a starred one after a keyword first.
 from harness import *
 
 log = []
@@ -61,3 +62,27 @@ expected = [((1, 2), {}), ((0, 3, 4, 1, 2), {"k": 5}), 9, ((), {}),
             [1, 2, "called", "called", 7, 9, 8, "called", 6]]
 assert_eq(calls(), expected)
 assert_eq(called(*gen(1), *Bag(2)), ((1, 2), {}))
+
+# Positional and starred arguments are evaluated before the keyword and
+# ** arguments, each kind in source order: a starred argument after a
+# keyword runs before it.
+order = []
+def v(name, value):
+    order.append(name)
+    return value
+def got(*args, **kw): return args, sorted(kw.items())
+def ordered():
+    del order[:]
+    results = [got(v("a", 1), k=v("k", 2), **v("m", {"z": 3})),
+               got(k=v("k", 1), *v("a", (2,))),
+               got(k=v("k", 1), *v("a", (2,)), **v("m", {"z": 3})),
+               got(*v("x", (0,)), k=v("k", 1), *v("a", (2,)), j=v("j", 3), *v("b", (4,))),
+               got(v("p", 1), k=v("k", 2), *v("c", (3,)), *v("d", (4,)), j=v("j", 5), **v("m", {"z": 6}))]
+    return results, list(order)
+expected = ([((1,), [("k", 2), ("z", 3)]), ((2,), [("k", 1)]), ((2,), [("k", 1), ("z", 3)]),
+             ((0, 2, 4), [("j", 3), ("k", 1)]), ((1, 3, 4), [("j", 5), ("k", 2), ("z", 6)])],
+            ["a", "k", "m", "a", "k", "a", "k", "m", "x", "a", "b", "k", "j", "p", "c", "d", "k", "j", "m"])
+assert_eq(ordered(), expected)
+def ordered_gen():
+    yield ordered()
+assert_eq(next(ordered_gen()), expected)

@@ -4708,7 +4708,7 @@ typedef struct {
 static Node *emit_parsed(Parser *, Node *, size_t);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
-static int call_stream(Parser *, Node *, Node *, size_t, int);
+static int call_stream(Parser *, Node *, Node *, Mark, int, Mark *);
 static Node *call_end(Parser *, Node *);
 static size_t emit_display(Parser *, Node *);
 static size_t display_item(Parser *, Node *, size_t, size_t);
@@ -6430,6 +6430,7 @@ static int call_arguments(Parser *p, Node *n) {
     int keywords = 0, mapping = 0;
     /* A call's steps emit as its arguments do (call_stream). */
     int stream = n->kind == N_CALL && p->emitting && (n->a->flags & F_EMITTED) && n->a->steps_end == program_len(p->emitting) ? CALL_PLAIN : 0;
+    Mark pending = {SIZE_MAX, NULL};
     if (!at(p, ')')) do {
         Node *arg;
         size_t first = p->pos;
@@ -6551,7 +6552,7 @@ static int call_arguments(Parser *p, Node *n) {
             break;
         }
         *tail = arg; tail = &arg->next;
-        if (stream && !(stream = call_stream(p, n, arg, before.steps.mark.at, stream)) && p->ctx->error_type[0]) return -1;
+        if (stream && !(stream = call_stream(p, n, arg, before.steps.mark, stream, &pending)) && p->ctx->error_type[0]) return -1;
         if (!take(p, ',')) break;
     } while (!at(p, ')'));
     if (!expect(p, ')', "invalid syntax")) return -1;
@@ -17585,26 +17586,38 @@ static Node *short_end(Parser *p, Node *n, size_t branch) {
  * on, while all before it were: a plain call's are its operands', which
  * it takes on the stack (finished); its first starred or ninth argument
  * makes it a general call, which adds each argument after its value
- * (BC_ARG), once the callee readied it (BC_ARGS). The call's state, or 0
- * when its steps cannot follow its arguments': a keyword's before such
- * an argument, or an argument before a keyword's, moves (compile_arguments). */
-static int call_stream(Parser *p, Node *n, Node *arg, size_t start, int state) {
+ * (BC_ARG), once the callee readied it (BC_ARGS). A starred argument's
+ * go before those of the keywords since the last positional one, from
+ * *keywords on (compile_arguments). The call's state, or 0 when its steps
+ * cannot follow its arguments'. */
+static int call_stream(Parser *p, Node *n, Node *arg, Mark start, int state, Mark *keywords) {
     SPYContext *c = p->ctx;
     Program *program = p->emitting;
-    Node *value = arg->kind == N_KEYWORD || arg->kind == N_STAR || arg->kind == N_MAPPING ? arg->a : arg, *args[9];
-    size_t count = 0;
-    int keywords = 0;
-    for (Node *a = n->args; a != arg; a = a->next) { keywords |= a->kind == N_KEYWORD || a->kind == N_MAPPING; args[count++ % 9] = a; }
-    if (!(value->flags & F_EMITTED) || value->steps_at != start || value->steps_end != program_len(program)) return 0;
+    int keyword = arg->kind == N_KEYWORD || arg->kind == N_MAPPING;
+    Node *value = keyword || arg->kind == N_STAR ? arg->a : arg, *args[8];
+    size_t count = 0, positional = 0;
+    for (Node *a = n->args; a != arg; a = a->next) {
+        if (count == 8) return 0;
+        positional += a->kind != N_KEYWORD;
+        args[count++] = a;
+    }
+    if (!(value->flags & F_EMITTED) || value->steps_at != start.at || value->steps_end != program->len) return 0;
+    if (keyword && keywords->at == SIZE_MAX) *keywords = start;
     if (state == CALL_PLAIN) {
         if (arg->kind != N_STAR && arg->kind != N_MAPPING && count < 8) return CALL_PLAIN;
-        if (keywords || !emitted_operands(program, (Node *[3]){n->a}, n->args)) return 0;
-        /* The earlier arguments' steps, then the callee's. */
+        if (!emitted_operands(program, (Node *[3]){n->a}, n->args)) return 0;
+        /* The earlier arguments' steps, then the callee's, each moving
+         * those after it on. */
         for (size_t i = count; i-- > 0;)
-            if (emit_before(c, program, args[i]->steps_end, BC_ARG, args[i], args[i]->kind) == SIZE_MAX) return 0;
+            if (emit_before(c, program, (args[i]->kind == N_KEYWORD ? args[i]->a : args[i])->steps_end, BC_ARG, args[i], args[i]->kind) == SIZE_MAX) return 0;
         if (emit_before(c, program, n->a->steps_end, BC_ARGS, n, 0) == SIZE_MAX) return 0;
-    } else if (keywords && arg->kind != N_KEYWORD && arg->kind != N_MAPPING) return 0;
-    return emit(c, program, BC_ARG, arg, arg->kind) == SIZE_MAX ? 0 : CALL_GENERAL;
+        /* A plain call's positional arguments come before its keywords. */
+        start.at += count + 1;
+        if (keywords->at != SIZE_MAX) keywords->at += positional + 1;
+    }
+    if (emit(c, program, BC_ARG, arg, arg->kind) == SIZE_MAX) return 0;
+    if (!keyword && keywords->at != SIZE_MAX) *keywords = emit_after(program, *keywords, start, NULL);
+    return CALL_GENERAL;
 }
 /* A dictionary or set display n compiled as it is parsed: its first
  * step, a dictionary's until an element makes it a set (display_end);
