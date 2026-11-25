@@ -191,6 +191,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_ANNOTATED = 2048 /* A class body with an annotated assignment. */, F_FINISHED = 4096 /* Seen by nodes_finish. */,
        F_EMITTED = 8192 /* A statement compiled in place as it was parsed (at_body). */,
        F_AITER = 16384 /* A comprehension whose first iterable is asynchronous. */,
+       F_HEADER = 32768 /* A class whose header's steps were emitted as it was parsed (class_header). */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */,
        F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */,
@@ -4686,6 +4687,7 @@ typedef struct {
     /* An assignment's: where its value's begin, after its targets' unless
      * they were undone (target_parsed). */
     EmitMark assigned; int unassigned;
+    EmitMark decorated; /* Where a definition's decorators' steps begin. */
     Body body; /* The body being parsed (body_begin). */
     size_t top_statements;
     /* The module statements analysed so far, the last of them, and the
@@ -5565,9 +5567,18 @@ static int parameter_list(Parser *p, Node *n, int close) {
                 if (kind == P_VARARGS && at(p, '*')) {
                     Node *star = node(p, N_STAR);
                     p->pos++;
-                    if (!star || !(star->a = expression(p, 0))) return -1;
+                    if (!star) return -1;
+                    Program *emitting = p->emitting; p->emitting = NULL;
+                    star->a = expression(p, 0);
+                    p->emitting = emitting;
+                    if (!star->a) return -1;
                     arg->b = star;
-                } else if (!(arg->b = plain_expression(p, 0))) return -1;
+                } else {
+                    Program *emitting = p->emitting; p->emitting = NULL;
+                    arg->b = plain_expression(p, 0);
+                    p->emitting = emitting;
+                    if (!arg->b) return -1;
+                }
                 if (at(p, T_WALRUS)) { syntax(p, "invalid syntax"); return -1; }
             }
             /* A parameter covers its name and annotation. */
@@ -6441,8 +6452,10 @@ static void star_expression_error(Parser *p, size_t star) {
 static int call_arguments(Parser *p, Node *n) {
     Node **tail = &n->args;
     int keywords = 0, mapping = 0;
-    /* A call's steps emit as its arguments do (call_stream). */
-    int stream = n->kind == N_CALL && p->emitting && (n->a->flags & F_EMITTED) && n->a->steps_end == program_len(p->emitting) ? CALL_PLAIN : 0;
+    /* A call's steps emit as its arguments do (call_stream), a class
+     * header's after its BC_ARGS (class_header). */
+    int stream = n->kind == N_CLASS ? p->emitting ? CALL_GENERAL : 0 :
+                 p->emitting && (n->a->flags & F_EMITTED) && n->a->steps_end == program_len(p->emitting) ? CALL_PLAIN : 0;
     Mark pending = {SIZE_MAX, NULL};
     if (!at(p, ')')) do {
         Node *arg;
@@ -6569,7 +6582,8 @@ static int call_arguments(Parser *p, Node *n) {
         if (!take(p, ',')) break;
     } while (!at(p, ')'));
     if (!expect(p, ')', "invalid syntax")) return -1;
-    if (stream == CALL_GENERAL && !call_end(p, n)) return -1;
+    if (n->kind == N_CLASS && !stream) n->flags &= ~F_HEADER;
+    else if (stream == CALL_GENERAL && n->kind == N_CALL && !call_end(p, n)) return -1;
     return 0;
 }
 static Node *expression_inner(Parser *p, int min, int named) {
@@ -7109,11 +7123,31 @@ static int header_emit(Parser *p, EmitMark *from) {
     p->emitting = p->body.program; *from = emit_mark(p);
     return 0;
 }
+static void def_header(Parser *, Node *, EmitMark);
+static int class_header(Parser *, Node *, EmitMark);
+static int class_arguments(Parser *, Node *);
+static int with_item(Parser *, Node *, EmitMark, int, uint32_t *);
+enum { TARGET_STORE, TARGET_DELETE, TARGET_CHECK };
+static size_t target_steps(SPYContext *, Program *, Node *, size_t, Node *, int, int);
+static int with_target(Parser *, Node *, EmitMark);
+static int emit_pop(Parser *, Node *);
 static int header_kept(Parser *p, Node *n, EmitMark from) {
     int kept = n && (n->flags & F_EMITTED) && n->steps_at == from.steps.mark.at && n->steps_end == program_len(p->emitting);
     if (!kept) emit_back(p, from);
     p->emitting = NULL; p->emitted_len = 0;
     return kept;
+}
+/* Def n's header parsed, its decorators' and defaults' steps emitted from
+ * from on: kept when they follow one another to the end, the rest of its
+ * steps compiled with the statement (compile_statement), else undone. */
+static void def_header(Parser *p, Node *n, EmitMark from) {
+    size_t at = from.steps.mark.at;
+    for (Node *d = n->decorators; d && at != SIZE_MAX; d = d->next)
+        at = (d->flags & F_EMITTED) && d->steps_at == at ? d->steps_end : SIZE_MAX;
+    for (Node *a = n->args; a && at != SIZE_MAX; a = a->next)
+        if (a->a) at = (a->a->flags & F_EMITTED) && a->a->steps_at == at ? a->a->steps_end : SIZE_MAX;
+    if (at != program_len(p->emitting)) emit_back(p, from);
+    p->emitting = NULL; p->emitted_len = 0;
 }
 /* A compound statement's suite after its header; with emits, its
  * statements compiled in place, as a body's are (body_end). */
@@ -7971,13 +8005,16 @@ static Node *statement(Parser *p) {
 static Node *statement_body(Parser *p, int emits) {
     if (at(p, '@')) {
         Node *decorators = NULL, **tail = &decorators;
+        /* A def's decorators emit as they are parsed (def_header). */
+        EmitMark from = {0};
+        if (at_body(p) && header_emit(p, &from)) return NULL;
         while (take(p, '@')) {
             Node *expr = expression(p, 0);
             if (!expr || !expect(p, T_NL, "expected newline after decorator")) return NULL;
             *tail = expr; tail = &expr->next;
         }
         if (!keyword(p, "def") && !keyword(p, "class") && !keyword(p, "async")) return syntax(p, "invalid syntax");
-        p->decorators = decorators;
+        p->decorators = decorators; p->decorated = from;
         Node *definition = statement(p);
         p->decorators = NULL;
         if (definition) definition->decorators = decorators;
@@ -8013,31 +8050,44 @@ static Node *statement_body(Parser *p, int emits) {
             }
             if (grouped) p->pos++;
         }
+        /* Its items emit as they are parsed (with_item), unless one cannot. */
+        EmitMark from = {0};
+        uint32_t last = NO_STEP;
+        int streams = emits;
+        if (emits && header_emit(p, &from)) return NULL;
         do {
             Node *item = node(p, N_ASSIGN);
+            EmitMark before = emit_mark(p);
             if (!item || !(item->a = expression(p, 0))) return NULL;
+            if (streams && !(streams = with_item(p, item, before, asynchronous, &last)) && p->ctx->error_type[0]) return NULL;
             if (take_word(p, "as")) {
                 /* invalid_with_item: an expression that ends the item is its target. */
                 size_t as = p->pos, expr_start = p->expr_start, expr_end = p->expr_end;
+                Program *emitting = p->emitting; p->emitting = NULL;
                 Node *whole = plain_expression(p, 0);
+                p->emitting = emitting;
                 if (whole && (at(p, ',') || at(p, ')') || at(p, ':')) && !target(p, whole))
                     return p->ctx->error_type[0] ? NULL : target_error(p, whole, TARGETS_STAR);
                 spy_clear_error(p->ctx); p->pos = as; p->expr_start = expr_start; p->expr_end = expr_end;
+                before = emit_mark(p);
                 if (take(p, '*')) {
                     if (!(item->b = node(p, N_STAR)) || !(item->b->a = expression(p, 4))) return NULL;
                     span(p, item->b, as);
                 } else if (!(item->b = expression(p, 4))) return NULL;
                 if (!target(p, item->b)) return p->ctx->error_type[0] ? NULL : target_error(p, item->b, TARGETS_STAR);
+                if (streams && !(streams = with_target(p, item, before)) && p->ctx->error_type[0]) return NULL;
             }
+            if (streams && emit_pop(p, item)) return NULL;
             *tail = item; tail = &item->next;
             if (!take(p, ',')) break;
             if (!grouped && at(p, ':')) { p->pos--; return syntax(p, "the last 'with' item has a trailing comma"); }
         } while (!grouped || !at(p, ')'));
         if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
         /* With emits compiled in place, as compile_statement does (with_begin). */
-        uint32_t last = NO_STEP;
+        if (emits && !streams) { emit_back(p, from); last = NO_STEP; }
+        if (emits) { p->emitting = NULL; p->emitted_len = 0; }
         if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
-        if (emits) last = with_begin(p->ctx, p->body.program, n->args, n->op);
+        if (emits && !streams) last = with_begin(p->ctx, p->body.program, n->args, n->op);
         if (!(n->b = suite_of(p, "'with' statement", n->line, emits))) return NULL;
         if (emits) { with_end(p->ctx, p->body.program, last, n->op); n->flags |= F_EMITTED; }
         return n;
@@ -8051,11 +8101,23 @@ static Node *statement_body(Parser *p, int emits) {
         n = node(p, N_CLASS);
         if (!n) return NULL;
         n->decorators = p->decorators; p->decorators = NULL;
+        /* Its decorators, __build_class__ and its bases and keywords emit
+         * as they are parsed (class_header), its type parameters in
+         * programs of their own later. */
+        EmitMark from = p->decorated;
+        int emits = at_body(p);
+        if (emits && !n->decorators && header_emit(p, &from)) return NULL;
+        Program *emitting = p->emitting; p->emitting = NULL;
         if (!(n->a = identifier(p))) return NULL;
         if (take(p, '[') && !(n->params = type_params(p))) return NULL;
+        p->emitting = emitting;
+        if (emits && class_header(p, n, from)) return NULL;
         if (take(p, '(')) {
+            if (!at(p, ')') && class_arguments(p, n)) return NULL;
             if (call_arguments(p, n)) return NULL;
         }
+        if (emits && !(n->flags & F_HEADER)) emit_back(p, from);
+        if (emits) { p->emitting = NULL; p->emitted_len = 0; }
         int loops = p->loops, functions = p->functions, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
         Site returned = p->returned;
@@ -8123,6 +8185,9 @@ static Node *statement_body(Parser *p, int emits) {
             if (!handler) return NULL;
             if (is_star && (at(p, ':') || at(p, T_NL))) return syntax(p, "expected one or more exception types");
             if (at(p, T_NL)) return syntax(p, "expected ':'");
+            /* Its types emit as they are parsed (header_emit). */
+            EmitMark from = {0};
+            if (emits && header_emit(p, &from)) return NULL;
             if (!at(p, ':')) {
                 size_t first = p->pos;
                 if (!(handler->a = expression(p, 0))) return NULL;
@@ -8135,7 +8200,7 @@ static Node *statement_body(Parser *p, int emits) {
                         if (!(*items = expression(p, 0))) return NULL;
                         items = &(*items)->next;
                     }
-                    handler->a = types;
+                    if (!(handler->a = finished(p, types))) return NULL;
                     if (keyword(p, "as")) {
                         /* The range runs from the first type up to the ':' closing the clause. */
                         size_t end = p->pos;
@@ -8149,7 +8214,9 @@ static Node *statement_body(Parser *p, int emits) {
                     /* invalid_except_stmt: 'as' followed by a non-name target. */
                     size_t name = p->pos;
                     if (!at(p, T_NAME) || reserved(peek(p)) || p->tokens[name + 1].kind != ':') {
+                        Program *emitting = p->emitting; p->emitting = NULL;
                         Node *bad = keyword(p, "lambda") || keyword(p, "yield") ? NULL : expression(p, 0);
+                        p->emitting = emitting;
                         if (bad && at(p, ':')) {
                             char message[96];
                             snprintf(message, sizeof(message), "cannot use except%s statement with %s", is_star ? "*" : "", expression_name(bad));
@@ -8160,6 +8227,7 @@ static Node *statement_body(Parser *p, int emits) {
                     if (!(handler->c = identifier(p))) return NULL;
                 }
             } else { bare = 1; bare_at = except_at; }
+            if (emits) header_kept(p, handler->a, from);
             int saved = p->star;
             size_t match = 0, final = 0;
             if (analyse_statements(p, handler) || (emits && header_ready(p, before))) return NULL;
@@ -8226,11 +8294,19 @@ static Node *statement_body(Parser *p, int emits) {
         n = node(p, N_DEF);
         if (!n) return NULL;
         n->decorators = p->decorators; p->decorators = NULL;
+        /* Its decorators and defaults emit as they are parsed, its type
+         * parameters and annotations in programs of their own later. */
+        EmitMark from = p->decorated;
+        int emits = at_body(p);
+        if (emits && !n->decorators && header_emit(p, &from)) return NULL;
+        Program *emitting = p->emitting; p->emitting = NULL;
         if (!(n->a = identifier(p))) return NULL;
         if (take(p, '[') && !(n->params = type_params(p))) return NULL;
+        p->emitting = emitting;
         if (!expect(p, '(', "expected '('")) return NULL;
         n->op = asynchronous;
         if (parameters(p, n, ')')) return NULL;
+        if (emits) def_header(p, n, from);
         if (take(p, T_ARROW) && !(n->c = expression(p, 0))) return NULL;
         if (function_annotations(p, n) || analyse_statements(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
@@ -17684,6 +17760,45 @@ static int call_stream(Parser *p, Node *n, Node *arg, Mark start, int state, Mar
     if (!keyword && keywords->at != SIZE_MAX) *keywords = emit_after(program, *keywords, start, NULL);
     return CALL_GENERAL;
 }
+/* Class n's header begun, its decorators' steps emitted from from on:
+ * when they follow one another to the end, and it has no type
+ * parameters, its steps go on as compile_statement lays them out, its
+ * bases and keywords to stream after them (call_arguments), and n is
+ * marked as such until one does not. -1 on an error. */
+static int class_header(Parser *p, Node *n, EmitMark from) {
+    size_t at = from.steps.mark.at;
+    for (Node *d = n->decorators; d && at != SIZE_MAX; d = d->next)
+        at = (d->flags & F_EMITTED) && d->steps_at == at ? d->steps_end : SIZE_MAX;
+    if (n->params || at != program_len(p->emitting)) return 0;
+    n->flags |= F_HEADER;
+    return emit(p->ctx, p->emitting, BC_BUILDER, n, 0) == SIZE_MAX ? -1 : 0;
+}
+/* Class n's bases and keywords to follow, its header emitted: its
+ * BC_ARGS first. -1 on an error. */
+static int class_arguments(Parser *p, Node *n) {
+    return n->flags & F_HEADER && emit(p->ctx, p->emitting, BC_ARGS, n, 0) == SIZE_MAX ? -1 : 0;
+}
+/* With item's expression emitted from before on to the end: its entry,
+ * as with_begin lays it out, linked to the last item's in *last. Whether
+ * it was. */
+static int with_item(Parser *p, Node *item, EmitMark before, int asynchronous, uint32_t *last) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    if (!(item->a->flags & F_EMITTED) || item->a->steps_at != before.steps.mark.at || item->a->steps_end != program->len) return 0;
+    if (asynchronous && (emit(c, program, BC_AENTER, item, 0) == SIZE_MAX || emit(c, program, BC_DELEGATE, item, DELEGATE_AENTER) == SIZE_MAX)) return 0;
+    size_t start = emit(c, program, asynchronous ? BC_AWITH : BC_WITH, item, 0);
+    if (start == SIZE_MAX) return 0;
+    program->items[start].other = *last; *last = (uint32_t)start;
+    return 1;
+}
+/* Its target emitted from before on to the end: its store (compile_target). Whether it was. */
+static int with_target(Parser *p, Node *item, EmitMark before) {
+    Node *t = item->b;
+    return t->steps_at == before.steps.mark.at && t->steps_end == p->emitting->len &&
+           target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 0, TARGET_CHECK) &&
+           target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 1, TARGET_STORE);
+}
+static int emit_pop(Parser *p, Node *n) { return emit(p->ctx, p->emitting, BC_POP, n, 0) == SIZE_MAX ? -1 : 0; }
 /* A dictionary or set display n compiled as it is parsed: its first
  * step, a dictionary's until an element makes it a set (display_end);
  * after each item's steps, from start on, those adding it; display's
@@ -17918,7 +18033,6 @@ static void assignment_fused(SPYContext *, Program *, Node *, size_t);
  * deletes, deleting it (compile_delete): their length, or 0 when its
  * steps are not a target's or on an error. With check, only whether
  * they are. */
-enum { TARGET_STORE, TARGET_DELETE, TARGET_CHECK };
 static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int mode) {
     size_t length = t->steps_end - t->steps_at;
     int check = mode == TARGET_CHECK, deletes = mode == TARGET_DELETE;
@@ -18889,9 +19003,12 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             for (Node *a = n->args; a; a = a->next) if (a->a) { compile_expr(c, p, a->a); count++; }
             emit(c, p, BC_GENERIC_FUNCTION, n, count);
         } else {
-            size_t start = p->len;
+            /* Each default, emitted as it was parsed (def_header) or now, is followed by its step. */
+            size_t start = p->len, added = 0;
             for (Node *a = n->args; a; a = a->next) if (a->a) {
-                compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, a->op == P_KWONLY);
+                if (!(a->a->flags & F_EMITTED)) { compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, a->op == P_KWONLY); continue; }
+                if (!added) start = a->a->steps_at;
+                emit_before(c, p, a->a->steps_end + added++, BC_DEFAULT, a, a->op == P_KWONLY);
             }
             if (!c->error_type[0]) emit_before(c, p, start, BC_FUNCTION, n, 0);
         }
@@ -18968,11 +19085,14 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         /* Decorators, __build_class__ (BC_BUILDER), then the bases and
          * keywords as its arguments; a generic class's bases cannot suspend. */
         int stacked = n->args && !n->params;
-        for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
-        emit(c, p, BC_BUILDER, n, 0);
-        if (stacked) {
-            emit(c, p, BC_ARGS, n, 0);
-            compile_arguments(c, p, n->args);
+        /* Unless they were emitted as the header was parsed (class_header). */
+        if (!(n->flags & F_HEADER)) {
+            for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
+            emit(c, p, BC_BUILDER, n, 0);
+            if (stacked) {
+                emit(c, p, BC_ARGS, n, 0);
+                compile_arguments(c, p, n->args);
+            }
         }
         /* The body is a call (class_part); a generic class's type
          * parameters' env is under it (arg 1). */
