@@ -7618,7 +7618,7 @@ static Node *literal_body(Parser *p) {
         Node *sum = node(p, N_BINARY);
         if (!sum) return NULL;
         sum->op = peek(p)->kind; p->pos++;
-        if (!at(p, T_IMAG)) return syntax(p, "imaginary number required in complex literal");
+        if (!at(p, T_IMAG)) return syntax(p, at(p, T_INT) || at(p, T_FLOAT) ? "imaginary number required in complex literal" : "invalid syntax");
         sum->a = value;
         if (!(sum->b = atom(p)) || !(value = finished(p, sum))) return NULL;
     }
