@@ -4729,6 +4729,9 @@ static int chain_parsed(Parser *, Node *, Node *, size_t, int);
 static Node *chain_end(Parser *, Node *);
 static int emit_default(Parser *, Node *);
 static Node *lambda_parsed(Parser *, Node *);
+static EmitMark lambda_body(Parser *, Node *);
+static void compile_statement(SPYContext *, Program *, Node *);
+static void lambda_kept(Parser *, Node *, EmitMark);
 static Node *template_parsed(Parser *, Node *);
 static int augmented_target(Parser *, Node *);
 static Node *format_parsed(Parser *, Node *);
@@ -6584,10 +6587,13 @@ static Node *expression_inner(Parser *p, int min, int named) {
         left->b = node(p, N_RETURN);
         if (!left->b) return NULL;
         int async_function = p->async_function; p->async_function = 0; p->functions++;
-        /* Its body is its own program's. */
+        /* Its body is its own program's, emitted as it is parsed when
+         * its statement's are (lambda_body). */
         Node *definition = p->definition; p->definition = left;
-        Program *emitting = p->emitting; p->emitting = NULL;
+        Program *emitting = p->emitting;
+        EmitMark from = lambda_body(p, left);
         left->b->a = plain_expression(p, 0);
+        lambda_kept(p, left, from);
         p->emitting = emitting; p->definition = definition;
         p->functions--; p->async_function = async_function;
         if (!left->b->a || !(left = finished(p, left))) return NULL;
@@ -8731,7 +8737,9 @@ static void analysis_raise(SPYContext *c, Analysis *a) {
 /* Free node n, which nothing reads, and its values; its scope, within
  * the unit's, keeps no pointer to it. */
 static void free_node(Node *n) {
-    if (n->scope && n->scope->owner == n) n->scope->owner = NULL;
+    /* A lambda's scope, begun as it was parsed, is its node's until analysis adopts it. */
+    if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
+    else if (n->scope && n->scope->owner == n) n->scope->owner = NULL;
     spy_release(n->constant); spy_release(n->name.global_key);
     mem_free(n->name.text); mem_free(n->original); mem_free(n);
 }
@@ -17766,6 +17774,31 @@ static Node *chain_end(Parser *p, Node *n) {
 static int emit_default(Parser *p, Node *arg) {
     if (!(arg->a->flags & F_EMITTED) || arg->a->steps_end != p->emitting->len) return 0;
     return emit(p->ctx, p->emitting, BC_DEFAULT, arg, arg->op == P_KWONLY) == SIZE_MAX ? -1 : 0;
+}
+/* Begin emitting the body of lambda n into its own program, its scope's
+ * from the start, when the statement around it emits; else nothing
+ * emits. Where its steps begin. */
+static EmitMark lambda_body(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting && body_scope(c, n) ? allocate(c, sizeof(*program)) : NULL;
+    p->emitting = program;
+    if (!program) return (EmitMark){0};
+    program->calls = c->pausing ? PAUSING : BODY; program->loads = c->string_source != 0;
+    n->scope->flat = program;
+    return emit_mark(p);
+}
+/* Its body parsed: kept, its return compiled after it, when its steps are
+ * all its own, else undone, and it compiles from its nodes (compile_generator). */
+static void lambda_kept(Parser *p, Node *n, EmitMark from) {
+    Program *program = p->emitting;
+    if (!program) return;
+    Node *body = n->b->a;
+    if (body && (body->flags & F_EMITTED) && body->steps_at == from.steps.mark.at && body->steps_end == program->len) {
+        compile_statement(p->ctx, program, n->b);
+        if (!p->ctx->error_type[0]) return;
+    }
+    emit_back(p, from);
+    free_program(program); n->scope->flat = NULL;
 }
 /* Lambda n, parsed: when each default's value and step follow the one
  * before from its start to the end, its making step goes before them. */
