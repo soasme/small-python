@@ -193,6 +193,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_EMITTED = 8192 /* A statement compiled in place as it was parsed (at_body). */,
        F_AITER = 16384 /* A comprehension whose first iterable is asynchronous. */,
        F_HEADER = 32768 /* A class whose header's steps were emitted as it was parsed (class_header). */,
+       F_UNEVALUATED = 65536 /* A lambda or comprehension in an annotation no code evaluates (Parser.unevaluated). */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */,
        F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */,
@@ -4715,6 +4716,10 @@ typedef struct Parser {
     size_t line_nodes;
     Node *last_statement;
     int module_begun;
+    /* Within an annotation no code evaluates: a function local's, or one
+     * PEP 563 makes a string; its lambdas and comprehensions get no
+     * program (F_UNEVALUATED). */
+    int unevaluated;
 } Parser;
 static Node *emit_parsed(Parser *, Node *, size_t);
 static Node *finished(Parser *, Node *);
@@ -6624,6 +6629,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         if (!left->a->name.text || parameters(p, left, ':')) return NULL;
         left->b = node(p, N_RETURN);
         if (!left->b) return NULL;
+        if (p->unevaluated) left->flags |= F_UNEVALUATED;
         int async_function = p->async_function; p->async_function = 0; p->functions++;
         /* Its body is its own program's, emitted as it is parsed when
          * its statement's are (lambda_body). */
@@ -7061,6 +7067,7 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Pro
         return NULL;
     }
     n->op = n->kind; n->kind = N_COMPREHENSION;
+    if (p->unevaluated) n->flags |= F_UNEVALUATED;
     /* Its element and its clauses but its first iterable emit into its
      * own program as they are parsed (comprehension_begin), its element
      * there already when enclosing's emits apart; else its element's
@@ -7409,6 +7416,8 @@ static int unparse(Buffer *b, Node *n, int level) {
 }
 /* The annotation as a string constant node, which keeps the expression for
  * scope analysis. */
+static EmitMark apart_begin(Parser *, Program **, Program *);
+static int apart_end(Parser *, Node *, Program *, EmitMark);
 static Node *annotation_string(Parser *p, Node *annotation) {
     Buffer text = {.ctx = p->ctx};
     Node *n = node(p, N_STRING);
@@ -7416,10 +7425,13 @@ static Node *annotation_string(Parser *p, Node *annotation) {
     n->line = annotation->line; n->annotate = annotation;
     n->name.text = text.data ? text.data : copy_text(p->ctx, "", 0);
     n->op = (int)text.len;
-    return n->name.text ? n : NULL;
+    if (!n->name.text) return NULL;
+    /* The string is parsed apart, as other annotations are (annotation_expression). */
+    Program *emitting;
+    EmitMark from = apart_begin(p, &emitting, NULL);
+    Node *kept = p->emitting ? emit_parsed(p, n, 0) : NULL;
+    return apart_end(p, kept, emitting, from) ? NULL : n;
 }
-static EmitMark apart_begin(Parser *, Program **, Program *);
-static int apart_end(Parser *, Node *, Program *, EmitMark);
 /* An expression parse parses, with min, apart (apart_begin). */
 static Node *apart_expression(Parser *p, Node *(*parse)(Parser *, int), int min) {
     Program *emitting;
@@ -7442,9 +7454,9 @@ static Node *loop_target(Parser *p, int emits) {
 static Node *annotation_expression(Parser *p, Node *(*parse)(Parser *, int), int min) {
     if (!p->future_annotations) return apart_expression(p, parse, min);
     Program *emitting = p->emitting;
-    p->emitting = NULL;
+    p->emitting = NULL; p->unevaluated++;
     Node *value = parse(p, min);
-    p->emitting = emitting;
+    p->emitting = emitting; p->unevaluated--;
     return value;
 }
 /* Forget the expressions parsed apart since the first count, their nodes parsed again. */
@@ -8238,11 +8250,13 @@ static Node *statement_body(Parser *p, int emits) {
             /* A generic class's bases and keywords stream into its type
              * parameters' frame's program (generic_header). */
             EmitMark header = {0};
-            int generic = n->params && !at(p, ')');
+            int generic = n->params && !at(p, ')'), emitted = n->flags & F_HEADER;
             if (generic && generic_header(p, n, &header)) return NULL;
             if (!at(p, ')') && class_arguments(p, n)) return NULL;
             if (call_arguments(p, n)) return NULL;
             if (generic && generic_header_end(p, n, emitting, header)) return NULL;
+            /* Its decorators and __build_class__ stand, whether or not its bases streamed. */
+            if (generic) n->flags |= emitted;
         }
         if (emits && !(n->flags & F_HEADER)) emit_back(p, from);
         if (emits) { p->emitting = NULL; p->emitted_len = 0; }
@@ -8700,9 +8714,10 @@ static Node *expression_statement(Parser *p, Node *n) {
         Program *emitting = p->emitting;
         int collected = p->collecting && (n->flags & F_SIMPLE) && !p->future_annotations;
         EmitMark from = collected ? apart_begin(p, &emitting, NULL) : (EmitMark){0};
-        if (!collected) p->emitting = NULL;
+        if (!collected) p->emitting = NULL, p->unevaluated++;
         n->b = expression(p, 0);
         if (collected && apart_end(p, n->b, emitting, from)) return NULL;
+        if (!collected) p->unevaluated--;
         p->emitting = emitting;
         if (!n->b || (p->future_annotations && !(n->b = annotation_string(p, n->b)))) return NULL;
         if (take(p, '=')) {
@@ -17696,6 +17711,10 @@ static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
     if (method && call != SIZE_MAX) p->items[call].attribute = attribute ? attribute : attribute_operand(c, p, n->a);
     if (!plain && call != SIZE_MAX) p->items[call].constant = keyword_names(c, p, n);
 }
+/* Whether yield n yields a name or literal in a step of its own (arg 1). */
+static int yields_leaf(Program *p, Node *n) {
+    return !n->op && n->a && ((n->a->kind == N_NAME && p->calls != PAUSING) || n->a->constant);
+}
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
@@ -17750,7 +17769,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         /* A yield of a name or literal yields it in its own step (arg 1),
          * past the plain steps that run when the name is not at hand; while
          * calls can pause, a name takes those alone. */
-        if (n->kind == N_YIELD && !n->op && n->a && ((n->a->kind == N_NAME && p->calls != PAUSING) || n->a->constant)) {
+        if (n->kind == N_YIELD && yields_leaf(p, n)) {
             size_t start = n->a->flags & F_EMITTED ? n->a->steps_at : p->len;
             compile_expr(c, p, n->a); emit(c, p, BC_YIELD, n, 0);
             patch(p, c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_YIELD, n, 1), p->len); break;
@@ -17908,15 +17927,16 @@ static int call_stream(Parser *p, Node *n, Node *arg, Mark start, int state, Mar
     return CALL_GENERAL;
 }
 /* Class n's header begun, its decorators' steps emitted from from on:
- * when they follow one another to the end, and it has no type
- * parameters, its steps go on as compile_statement lays them out, its
- * bases and keywords to stream after them (call_arguments), and n is
- * marked as such until one does not. -1 on an error. */
+ * when they follow one another to the end, its steps go on as
+ * compile_statement lays them out, its bases and keywords to stream
+ * after them (call_arguments; a generic class's into a program of their
+ * own, generic_header), and n is marked as such until one does not. -1
+ * on an error. */
 static int class_header(Parser *p, Node *n, EmitMark from) {
     size_t at = from.steps.mark.at;
     for (Node *d = n->decorators; d && at != SIZE_MAX; d = d->next)
         at = (d->flags & F_EMITTED) && d->steps_at == at ? d->steps_end : SIZE_MAX;
-    if (n->params || at != program_len(p->emitting)) return 0;
+    if (at != program_len(p->emitting)) return 0;
     n->flags |= F_HEADER;
     return emit(p->ctx, p->emitting, BC_BUILDER, n, 0) == SIZE_MAX ? -1 : 0;
 }
@@ -18452,8 +18472,7 @@ static Node *yield_unmade(Parser *p, Node *n) {
     emit_drop(program, program->len - 1);
     /* A leaf's own step went before its value's, which then begin where
      * they were recorded to (compile_expr). */
-    Instruction *first = &program->items[n->steps_at];
-    if (first->op == BC_YIELD && first->arg == 1) emit_drop(program, n->steps_at);
+    if (yields_leaf(program, n)) emit_drop(program, n->steps_at);
     n->flags &= ~F_EMITTED;
     return value;
 }
@@ -18478,6 +18497,8 @@ static void assignment_fused(SPYContext *, Program *, Node *, size_t);
  * deletes, deleting it (compile_delete): their length, or 0 when its
  * steps are not a target's or on an error. With check, only whether
  * they are. */
+/* Whether t is an empty target list, which deletes in no steps. */
+static int empty_target(Node *t) { return (t->kind == N_TUPLE || t->kind == N_LIST) && !t->args; }
 static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int mode) {
     size_t length = t->steps_end - t->steps_at;
     int check = mode == TARGET_CHECK, deletes = mode == TARGET_DELETE;
@@ -18508,7 +18529,17 @@ static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *
         }
         return length;
     }
-    if ((t->kind != N_TUPLE && t->kind != N_LIST) || !t->args) return 0;
+    if (t->kind != N_TUPLE && t->kind != N_LIST) return 0;
+    /* An empty target list's one step makes it: it unpacks to no items,
+     * and deletes nothing (no steps, as empty_target tells). */
+    if (!t->args) {
+        if (length != 1 || check) return length == 1;
+        emit_drop(p, at);
+        if (deletes) return 0;
+        if (emit_before(c, p, at, BC_UNPACK, t, 0) == SIZE_MAX) return 0;
+        p->items[at].other = NO_STEP;
+        return popped && emit_before(c, p, at + 1, BC_POP, popped, 0) == SIZE_MAX ? 0 : 1 + (popped != NULL);
+    }
     /* A display's own steps make it: one before its items and one after
      * each (starred_parsed), or one after them all. */
     int starred = !packed(t);
@@ -18527,7 +18558,7 @@ static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *
     pos = at;
     for (Node *item = t->args; item; item = item->next) {
         size_t steps = target_steps(c, p, item->kind == N_STAR ? item->a : item, pos, item, stores_at, mode);
-        if (!steps) return 0;
+        if (!steps && !empty_target(item)) return 0;
         pos += steps;
         if (starred) emit_drop(p, pos);
     }
@@ -18566,7 +18597,7 @@ static int deletion_parsed(Parser *p, Node *n) {
     Program *program = p->emitting;
     if (n->a->steps_at != p->emitting_from.steps.mark.at || n->a->steps_end != program->len ||
         !target_steps(p->ctx, program, n->a, n->a->steps_at, NULL, 0, TARGET_CHECK) ||
-        !target_steps(p->ctx, program, n->a, n->a->steps_at, NULL, 0, TARGET_DELETE)) return 0;
+        (!target_steps(p->ctx, program, n->a, n->a->steps_at, NULL, 0, TARGET_DELETE) && !empty_target(n->a))) return 0;
     n->flags |= F_EMITTED;
     return 1;
 }
@@ -18799,8 +18830,8 @@ static int compile_comprehension(SPYContext *c, Node *n) {
     if (!body_scope(c, n)) return -1;
     /* Its scope is defined before or after this (scope_of). */
     if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
-    /* Its program was compiled as it was parsed (comprehension_close). */
-    if (n->scope->code) return 0;
+    /* Its program was compiled as it was parsed (comprehension_close), or none runs. */
+    if (n->scope->code || (n->flags & F_UNEVALUATED)) return 0;
     n->scope->code = allocate(c, sizeof(*n->scope->code));
     if (!n->scope->code) return -1;
     n->scope->code->calls = c->pausing ? PAUSING : BODY; n->scope->code->loads = c->string_source != 0;
@@ -19709,6 +19740,7 @@ static int compile_generator(SPYContext *c, Node *n) {
      * parsed (body_begin); a lambda's body, an __annotate__ function's or
      * a lazy value's is compiled now. */
     Program *p = n->scope->flat;
+    if (!p && (n->flags & F_UNEVALUATED)) return 0;
     if (!p) {
         if (!(p = allocate(c, sizeof(*p)))) return -1;
         p->calls = mode; p->loads = c->string_source != 0;
