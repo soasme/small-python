@@ -8380,6 +8380,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     int kind = statement ? statement->kind : N_PASS;
     if (kind == N_EXPR && statement->a->kind == N_YIELD && !statement->a->op) first = last = yield_unmade(p, statement->a);
     else if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
+    else if (kind == N_ANNASSIGN) first = last = statement->c;
     else if (kind == N_ASSIGN)
         first = statement->op == '=' ? statement->b : statement->a, last = statement->b;
     else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
@@ -8447,6 +8448,8 @@ static Node *expression_statement(Parser *p, Node *n) {
         if (target->kind == N_NAME && !parenthesized) n->flags |= F_SIMPLE;
         if (!(n->b = expression(p, 0)) || (p->future_annotations && !(n->b = annotation_string(p, n->b)))) return NULL;
         if (take(p, '=')) {
+            /* The target and annotation are not read where they stand. */
+            emitted_drop(p);
             n->c = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->c) return NULL;
         }
