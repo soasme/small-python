@@ -47,6 +47,19 @@ class Sub(dict):
     pass
 
 
+class SecondHash:
+    """Hashes as "q" once, then returns no integer."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __hash__(self):
+        for _ in ():
+            pass
+        self.calls += 1
+        return hash("q") if self.calls == 1 else "no"
+
+
 def call(f, *args, **kwargs):
     return f(*args, **kwargs)
 
@@ -162,6 +175,13 @@ def act(p, namespace, fr, g):
             proxy[stored] = 7
             found += [proxy[stored], stored in proxy, absent in proxy]
             return " ".join(map(str, found)) + " " + "".join(log)
+        if op == "extra_hash":
+            proxy = fr.f_locals
+            proxy["z"] = 1
+            try:
+                proxy[SecondHash()] = 2
+            except TypeError as error:
+                return "dict key" if "as a dict key" in str(error) else "bare"
         if op == "repr_calls":
             proxy = fr.f_locals
             proxy["z"], proxy["p"] = Shown(log), proxy

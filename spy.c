@@ -45138,7 +45138,9 @@ static SPYValue *frame_extra_hashed(SPYContext *c, Machine *m, SPYValue *ext, SP
         full = spy_tuple(c, 4, (SPYValue *[]){items[0], items[1], items[2], hashed});
     spy_release(hashed);
     if (!full) {
+        /* The extra locals' dict names its key's TypeError (hash_failed). */
         SPYValue *state = spy_retain(items[0]);
+        hash_failed(c, items[2], items[1]);
         spy_release(ext);
         return k_resume(c, m, state, NULL);
     }
