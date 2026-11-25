@@ -333,24 +333,41 @@ compiling it again is no step.
 - A call stays a plain call until an argument makes it general; then the
   steps the general call takes between its arguments are put in after
   those already emitted, and each later argument is added as it ends.
-- An assignment undoes what its targets emitted at each `=`, so its value
-  is emitted first and its targets compile after it at the statement's
-  end; an augmented assignment to a name keeps its name's load.
+- An augmented assignment to a name keeps its name's load.
 - A dictionary or set display emits its new value at its first item and
   adds each item as it ends; its kind is set at its close.
 - A conditional expression emits its test and branch after its value,
   rotates them before it, and patches the jump once the alternative is
   emitted.
-- A comprehension undoes what its element emitted, from a mark taken
-  where the element began, and emits only its first iterable.
 - A field's expression in an f-string is parsed by an inner parser that
   emits into the same program; the text before the field is flushed
   before the field is parsed, except before a debug field.
 
+- An assignment keeps what its targets emitted: at the statement's end
+  each target's reads become its store (a name's load its store, an
+  item's or attribute's read its target step, a display's items
+  unpacked), and the value's steps move before them. A `del` makes its
+  targets' reads their deletes, and an `assert` emits its branch and the
+  jump over its message as its test ends.
+- A lambda's body emits into the lambda's own program, which its scope
+  holds from the start; its return compiles after it.
+- A comprehension emits its clauses, but its first iterable, into its
+  own program: a later clause's iterable is rotated before its target,
+  the loop's opening and next-item steps go between, and an `if`
+  clause's branch follows its test. At the comprehension's end the
+  element's steps move from the enclosing program to its own, after the
+  clauses' openings, and the clauses close innermost first. A
+  comprehension in a class body, whose program loads names differently,
+  undoes its element and compiles its body from its nodes.
+- A def's decorators and defaults, a class's decorators, its
+  `__build_class__` step and its bases and keywords, a `with`
+  statement's items and their targets' stores, and an `except` clause's
+  types emit into the enclosing program as they are parsed.
+
 The test of an `if`, `elif` or `while` header and the iterable of a `for`
 header are emitted the same way, after a statement the body held back and
-a `while`'s block step. An expression statement, assignment, `return` or
-`raise` keeps its steps when its operands' run from where it began to
+a `while`'s block step. An expression statement, assignment, `del`, `assert`,
+`yield`, `return` or `raise` keeps its steps when its operands' run from where it began to
 the program's end; otherwise it undoes every step it emitted, clears its
 nodes' marks and compiles at its end as before. The programs are the
 same, step for step, in both execution modes for every spec test except
