@@ -22,6 +22,8 @@
 (* without the file name) and the log of the modules that ran; for         *)
 (* compat_getitem, in globals whose Python __getitem__ answers ['pkg',     *)
 (* 'nosuchmod'] for __lazy_modules__, the result and how often it did.     *)
+(* A __lazy_import__ in the builtins other than the original is called     *)
+(* instead, at the statement; without one the statement raises.            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -29,7 +31,8 @@ Cases == {"unused", "used", "from_unused", "from_used", "placeholder", "from_pla
           "missing_used", "broken", "as", "not_cached", "in_function_use", "registry", "submodule",
           "in_function", "in_try", "in_class", "star", "future",
           "compat", "compat_used", "compat_other", "compat_from", "compat_try", "compat_function",
-          "compat_getitem", "compat_hook", "attribute_hook", "hook_used", "hook_dotted", "method_read"}
+          "compat_getitem", "compat_hook", "attribute_hook", "hook_used", "hook_dotted", "method_read",
+          "lazy_hook", "lazy_hook_missing"}
 Programs == [case : Cases]
 
 VARIABLES program, outcome
@@ -74,6 +77,10 @@ Run(p) ==
       [] p.case = "hook_dotted" -> "([('pkg.sub', None)], ['pkg', 'sub']) ['pkg', 'sub']"
       \* a lazily named submodule read for a call is imported first, then called
       [] p.case = "method_read" -> "(\"'module' object is not callable\", 'sub') ['pkg', 'sub']"
+      \* a Python __lazy_import__ is called at the statement with __import__'s arguments,
+      \* its result bound as __import__'s is, and no module runs
+      [] p.case = "lazy_hook" -> "([('pkg', None, 0), ('pkg', ('sub',), 0)], True, 'r-sub') []"
+      [] p.case = "lazy_hook_missing" -> "ImportError: __lazy_import__ not found []"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -84,6 +91,6 @@ Done == outcome # Pending
 
 \* A program that never uses a lazy name runs no module.
 Unused == {"unused", "from_unused", "placeholder", "from_placeholder", "missing_unused", "not_cached", "registry",
-           "compat", "compat_from", "compat_getitem"}
+           "compat", "compat_from", "compat_getitem", "lazy_hook", "lazy_hook_missing"}
 NothingRuns == Done /\ program.case \in Unused => SubSeq(outcome, Len(outcome) - 1, Len(outcome)) = "[]"
 =============================================================================

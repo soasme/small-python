@@ -829,6 +829,8 @@ Unreleased (0.10.0):
 - `compile`, `eval` and `exec` accept any bytes-like source, such as a memoryview
 - `str.format` no longer crashes when memory runs out as a field's attribute read calls Python
 - a frame locals proxy's extra locals report a key's TypeError from hashing as "cannot use '...' as a dict key (...)"
+- a lazy import calls a replaced `__lazy_import__` from the builtins, and raises ImportError when there is none
+- globals with a Python `__getitem__` are asked for `__lazy_modules__` just before each module is imported
 - a generic class is made in a frame named `<generic parameters of C>`, which its bases, keywords and body run in and tracebacks show
 - iter(f, sentinel) takes a comparison result whose descriptor `__bool__` raises AttributeError as absent, falling back to `__len__`
 - a trace function sees no line event for a function's docstring, for any docstring a statement follows under -OO, or at an if's or case's header after its suite; a function of only a docstring traces its first line
