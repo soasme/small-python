@@ -41592,8 +41592,17 @@ static SPYValue *sentinel_function(SPYContext *c, SPYValue *sentinel, SPYValue *
  * its result (sentinel_compared), and v on m's stack under c->converting;
  * NULL, an error when it fails. */
 static int sentinel_wait(SPYContext *c, Machine *m, SPYValue *v, SPYValue *item, SPYValue *sentinel, SPYValue *round) {
-    return machine_push(c, m, item) || machine_push(c, m, spy_retain(sentinel)) || machine_push(c, m, spy_retain(round)) ||
-           machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->converting));
+    if (machine_push(c, m, item) || machine_push(c, m, spy_retain(sentinel)) || machine_push(c, m, spy_retain(round)) ||
+        machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(c->converting))) return 1;
+    /* A descriptor's read the conversion makes first (special_env) keeps
+     * its state atop, for its return (descripted). */
+    SPYValue **top = m->stack + m->len, *read[3];
+    if (m->len >= 8 && top[-6] == c->descripting) {
+        memcpy(read, top - 8, sizeof read);
+        memmove(top - 8, top - 5, 5 * sizeof *top);
+        memcpy(top - 3, read, sizeof read);
+    }
+    return 0;
 }
 static SPYValue *sentinel_eq(SPYContext *c, Machine *m, SPYValue *v, SPYValue *item, SPYValue *sentinel, SPYValue *round,
                              SPYValue *function, SPYValue *self, SPYValue *other, int kind) {

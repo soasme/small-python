@@ -824,6 +824,7 @@ Unreleased (0.10.0):
 - a bytearray subclass's `+=` and `__iadd__` name the subclass in "can't concat" errors
 - `x * seq` repeats seq by x once x's class drops its own repetition; `x *= seq` raises for an instance of any Python class and for dict, set, range, views and memoryview
 - `x *= n` of a list or bytearray subclass calls its own `__mul__` first and repeats in place once that declines; `[1] *= 'a'` reports a sequence's non-int count
+- iter(f, sentinel) takes a comparison result whose descriptor `__bool__` raises AttributeError as absent, falling back to `__len__`
 - a trace function sees no line event for a function's docstring, for any docstring a statement follows under -OO, or at an if's or case's header after its suite; a function of only a docstring traces its first line
 - a class made by `type()` under globals without `__name__` has no `__module__`, and reading it raises AttributeError as in CPython
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
