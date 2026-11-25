@@ -7171,6 +7171,9 @@ static int class_arguments(Parser *, Node *);
 static int with_item(Parser *, Node *, EmitMark, int, uint32_t *);
 enum { TARGET_STORE, TARGET_DELETE, TARGET_CHECK };
 static size_t target_steps(SPYContext *, Program *, Node *, size_t, Node *, int, int);
+static int annotated_parsed(Parser *, Node *);
+static void operand_drop(Program *, AttributeOperand *);
+static void emit_annotation(SPYContext *, Program *, Node *);
 static int with_target(Parser *, Node *, EmitMark);
 static int emit_pop(Parser *, Node *);
 static int header_kept(Parser *p, Node *n, EmitMark from) {
@@ -8527,7 +8530,6 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     int kind = statement ? statement->kind : N_PASS;
     if (kind == N_EXPR && statement->a->kind == N_YIELD && !statement->a->op) first = last = yield_unmade(p, statement->a);
     else if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
-    else if (kind == N_ANNASSIGN) first = last = statement->c;
     else if (kind == N_ASSIGN)
         first = statement->op == '=' ? statement->b : statement->a, last = statement->b;
     else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
@@ -8535,6 +8537,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
                (first == last || first->steps_end == last->steps_at) && last->steps_end == program_len(program);
     if (kind == N_DELETE) kept = deletion_parsed(p, statement);
     if (kind == N_ASSERT) kept = (statement->flags & F_EMITTED) != 0;
+    if (kind == N_ANNASSIGN) kept = annotated_parsed(p, statement);
     /* An assignment's targets kept as they were parsed come first (target_parsed). */
     if (kind == N_ASSIGN && statement->op == '=' && !p->unassigned)
         kept = (last->flags & F_EMITTED) && last->steps_at == p->assigned.steps.mark.at && last->steps_end == program_len(program) &&
@@ -8632,17 +8635,19 @@ static Node *expression_statement(Parser *p, Node *n) {
         p->pos++;
         n->kind = N_ANNASSIGN;
         if (target->kind == N_NAME && !parenthesized) n->flags |= F_SIMPLE;
-        /* A collected annotation emits into its body's __annotate__ (annotation_parsed). */
+        /* Its target's steps become its store (annotated_parsed); its
+         * annotation emits only into its body's __annotate__ when that
+         * collects it (annotation_parsed). */
+        if (p->emitting) target_parsed(p, target);
         Program *emitting = p->emitting;
-        EmitMark from = {0};
-        if (p->collecting && (n->flags & F_SIMPLE) && !p->future_annotations && annotation_open(p)) from = emit_mark(p);
+        int collected = p->collecting && (n->flags & F_SIMPLE) && !p->future_annotations && annotation_open(p);
+        EmitMark from = emit_mark(p);
+        if (!collected) p->emitting = NULL;
         n->b = expression(p, 0);
-        p->annotating_from = p->emitting != emitting && n->b ? annotation_value(p, n->b, from) : (EmitMark){{{SIZE_MAX, NULL}, 0, 0, 0}, 0};
+        p->annotating_from = collected && n->b ? annotation_value(p, n->b, from) : (EmitMark){{{SIZE_MAX, NULL}, 0, 0, 0}, 0};
         p->emitting = emitting;
         if (!n->b || (p->future_annotations && !(n->b = annotation_string(p, n->b)))) return NULL;
         if (take(p, '=')) {
-            /* The target and annotation are not read where they stand. */
-            emitted_drop(p);
             n->c = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->c) return NULL;
         }
@@ -17455,6 +17460,14 @@ static Mark emit_after(Program *p, Mark a, Mark b, size_t *pc) {
     *head = b.last->next; p->last->next = start; b.last->next = NULL; p->last = b.last;
     return moved;
 }
+/* Remove attribute's operand from p, whose step goes. */
+static void operand_drop(Program *p, AttributeOperand *attribute) {
+    Operand *o = (Operand *)((char *)attribute - offsetof(Operand, attribute)), **at = &p->operands, *before = NULL;
+    while (*at != o) before = *at, at = &(*at)->next;
+    *at = o->next;
+    if (p->last == o) p->last = before;
+    mem_free(o);
+}
 static Emitted emitted(Program *p) { return (Emitted){mark(p), p->values_len, p->tested, p->split}; }
 /* Undo what p emitted since e. */
 static void emit_undo(Program *p, Emitted e) {
@@ -18465,6 +18478,41 @@ static int assignment_parsed(Parser *p, Node *n) {
     }
     emit_after(program, p->emitting_from.steps.mark, (Mark){program->len - length, p->assigned.steps.mark.last}, NULL);
     if (fused) assignment_fused(c, program, n, start);
+    if (c->error_type[0]) return 0;
+    n->flags |= F_EMITTED;
+    return 1;
+}
+/* Annotated assignment n, its target's steps then its value's emitted as
+ * they were parsed (target_parsed): its steps, as compile_statement lays
+ * them out, its target's made its store and its value's moved before
+ * them; without a value, an attribute's or item's primary and key
+ * evaluated and popped. Whether they are, n then emitted. */
+static int annotated_parsed(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    Node *t = n->a;
+    size_t at = t->steps_at, end = p->assigned.steps.mark.at;
+    if (p->unassigned) return 0;
+    if (n->c) {
+        if (!(n->c->flags & F_EMITTED) || n->c->steps_at != end || n->c->steps_end != program->len) return 0;
+        size_t length = n->c->steps_end - n->c->steps_at;
+        if (!target_steps(c, program, t, at, n, 1, TARGET_STORE)) return 0;
+        emit_after(program, p->emitting_from.steps.mark, (Mark){program->len - length, p->assigned.steps.mark.last}, NULL);
+    } else if (program->len != end) return 0;
+    else if (t->kind == N_NAME) emit_back(p, p->emitting_from);
+    else {
+        /* Its read goes, and its fused read before it; a subscript's
+         * primary is popped before its key is evaluated. */
+        if (!(t->a->flags & F_EMITTED)) return 0;
+        int fused = program->items[at].op == BC_OPERATE && program->items[at].target == end;
+        if (fused) emit_drop(program, at);
+        if (t->kind == N_ATTR) operand_drop(program, program->items[end - 1 - fused].attribute);
+        emit_drop(program, end - 1 - fused);
+        /* The primary's steps were recorded before the fused read went before them. */
+        if (t->kind == N_INDEX && emit_before(c, program, t->a->steps_end, BC_POP, n, 0) == SIZE_MAX) return 0;
+        emit(c, program, BC_POP, n, 0);
+    }
+    if (n->flags & (F_FUTURE | F_CONDITIONAL)) { emit_annotation(c, program, n); emit(c, program, BC_POP, n, 0); }
     if (c->error_type[0]) return 0;
     n->flags |= F_EMITTED;
     return 1;
