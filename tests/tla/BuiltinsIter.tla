@@ -61,7 +61,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 Cases == {"iter_sequence_protocol", "filter_nested_generator", "enumerate_start_first", "reversed_hook", "reversed_len", "reversed_subclass", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "adapt_iter_strict", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
-          "zip_strict_third", "zip_strict_mixed", "adapter_zip_generator", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
+          "zip_strict_third", "zip_strict_mixed", "adapter_zip_generator", "zip_ended_generator", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_class_unpack", "map_generator", "map_repr", "map_metaclass", "callable_generator", "iterator_subclass", "iterator_subclass_next", "adapter_subclass_iter", "adapter_subclass_init", "map_convert", "map_slot", "map_convert_bad", "map_class", "map_class_bad", "map_class_new", "callable_calls", "callable_sentinel_eq", "zip_sentinel_eq", "zip_callable", "zip_native_generator", "filter_generator", "starred_calls", "map_hash_tuple", "map_adapted", "map_index", "map_index_bad", "callable_bound", "sorted_sources", "sorted_later_calls", "filter_none", "filter_truth", "filter_builtin", "filter_next", "filter_adapted", "filter_next_truth",
           "filter_truth_bad", "filter_result_truth", "filter_class", "filter_method", "map_property", "callable_native_truth", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_unknown_keyword", "sorted_positional_key", "sorted_mixed",
@@ -141,6 +141,8 @@ Case(c) ==
       \* enumerate and filter of a zip mixing an instance and a generator take
       \* each item in order, the generator's reaching the zip first
       [] c = "adapter_zip_generator" -> "([(0, (1, 5)), (1, (0, 6))], [(0, 0)], [('it', 2), ('gen', 5), ('it', 1), ('gen', 6), ('it', 0), ('it', 1), ('gen', 0), ('it', 0)])"
+      \* a zip whose generator ended drops the instance's item; each later next() asks it again
+      [] c = "zip_ended_generator" -> "(['done', 'done', 'done'], [5, 4, 3])"
       [] c = "zip_shortest" -> "([('a', 0), ('b', 1)], [], [('a',)])"
       [] c = "zip_consumes" -> "[2, 3]"
       [] c = "zip_consumes_order" -> "[1, 2, 3]"

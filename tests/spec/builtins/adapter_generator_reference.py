@@ -1,7 +1,7 @@
 # spec: PLS-315 27.1.4, 27.1.5, 27.1.8, 13.16.3
 # description: enumerate(), filter() and zip(), strict or not, over a
-# generator, an instance iterator whose Python __next__ loops, or one
-# another, taken by list(), a for loop, a comprehension, next() or a
+# generator, an empty one, an instance iterator whose Python __next__
+# loops, or one another, taken by list(), a for loop, a comprehension, next() or a
 # (nested) yield from, ask each iterable in the order the equivalent
 # Python iterators do and give the same items, end and error.
 from harness import *
@@ -67,7 +67,7 @@ def wraps(e, f, z):
             lambda x: z(It("j", 3), x), lambda x: z(x, gen("c", 5, 6, 7), strict=True), lambda x: z(x)]
 builtin = wraps(enumerate, filter, zip)
 python = wraps(py_enumerate, py_filter, py_zip)
-leaves = [lambda: gen("a", 1, 2, 3), lambda: It("i", 3), lambda: [7, 8], bad]
+leaves = [lambda: gen("a", 1, 2, 3), lambda: It("i", 3), lambda: [7, 8], bad, lambda: gen("e")]
 def yf(it):
     r = yield from it
     log.append(("yf", r))
@@ -93,4 +93,4 @@ for leaf in leaves:
                 p = (lambda: python[j](python[i](leaf()))) if j is not None else (lambda: python[i](leaf()))
                 assert_eq(run(make, b), run(make, p))
                 checked += 1
-assert_eq(checked, 4 * 7 * 8 * 6)
+assert_eq(checked, 5 * 7 * 8 * 6)

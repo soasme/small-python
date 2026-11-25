@@ -119,6 +119,8 @@ SOURCES = {
     "next_non_iterator": 'result = next([1])',
     "iter_sentinel_noncallable": 'result = iter(1, 2)',
     "iter_two_args_kw": 'result = iter(int, sentinel=0)',
+    "zip_ended_generator": "log = []\nclass It:\n    k = 5\n    def __iter__(self): return self\n    def __next__(self):\n        for _ in (): pass\n        log.append(self.k); self.k -= 1\n        return self.k\n"
+                           "def gen():\n    for i in range(0): yield i\nz = zip(It(), gen())\nresult = ([next(z, 'done') for _ in range(3)], log)",
     "zip_strict_first_shorter": 'result = list(zip([1], [1, 2], strict=True))',
     "zip_strict_third": 'result = list(zip([1, 2], [1, 2], [1], strict=True))',
     "zip_shortest": "result = (list(zip('ab', range(5))), list(zip()), list(zip('a')))",

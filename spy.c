@@ -41281,6 +41281,13 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     }
     return 0;
 }
+/* A zip or map v whose generator ended drops the items it took for that
+ * call (zip_fill), as CPython's does; the next call asks them again. */
+static NO_INLINE void adapter_ended(SPYValue *v) {
+    if (v->type == SPY_ITERATOR && (v->as.iterator.kind == I_ZIP || v->as.iterator.kind == I_MAP) && v->as.iterator.counter) {
+        spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL;
+    }
+}
 /* Whether v is a strict zip or map of a generator (zip_left). */
 static ALWAYS_INLINE int zip_strict(SPYValue *v) {
     return v->type == SPY_ITERATOR && v->as.iterator.size && (v->as.iterator.kind == I_ZIP || v->as.iterator.kind == I_MAP) &&
@@ -43280,6 +43287,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             else {
                 if (flow.value) flow = adapted_flow(c, d, flow);
                 else if (flow.flow != FLOW_YIELD && zip_strict(d)) flow = zip_left(c, d, NULL);
+                else if (flow.flow != FLOW_YIELD) adapter_ended(d);
                 value = flow.flow == FLOW_YIELD ? flow.value : NULL;
                 again = flow.flow == FLOW_YIELD && !value;
             }
@@ -43310,6 +43318,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (UNLIKELY(top->value != g && m->len && m->stack[m->len - 1] == c->adapting)) flow = adapters_resumed(c, m, top, flow);
         else if (flow.value && top->value != g) flow = adapted_flow(c, top->value, flow);
         else if (UNLIKELY(top->value != g && flow.flow != FLOW_YIELD && zip_strict(top->value))) flow = zip_left(c, top->value, top);
+        else if (UNLIKELY(top->value != g && flow.flow != FLOW_YIELD)) adapter_ended(top->value);
         if (top->kind == BLOCK_CONSUME) {
             a = flow.flow == FLOW_YIELD ? flow.value : NULL;
             int dropped = flow.flow == FLOW_YIELD && !a;
