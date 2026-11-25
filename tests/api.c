@@ -3395,6 +3395,12 @@ int main(int argc, char **argv) {
             "assert open('api.c', 'rb').read(8) == b'#include'\n"
             "try:\n    open('/data/new.txt', 'w')\nexcept OSError as e:\n    assert type(e) is OSError and e.strerror, e\n"
             "try:\n    open('/data/../Makefile')\nexcept PermissionError:\n    pass\n", "mounted.py"));
+        /* Called by the host with keywords, outside any step machine. */
+        SPYValue *opener = spy_eval(files, "open", "open.py"), *path = spy_eval(files, "'/data/api.c'", "open.py");
+        SPYValue *mode = spy_eval(files, "{'mode': 'rb'}", "open.py"), *opened = spy_call_keywords(files, opener, 1, &path, mode);
+        assert(opened && !spy_set_global(files, "opened", opened));
+        assert(!spy_exec(files, "with opened as f:\n    assert f.read(8) == b'#include'\n", "opened.py"));
+        spy_release(opened); spy_release(mode); spy_release(path); spy_release(opener);
         spy_context_free(files);
     }
 
