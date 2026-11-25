@@ -4737,6 +4737,7 @@ static Node *yield_unmade(Parser *, Node *);
 static void debug_text(Parser *, Node *, Node *);
 static void target_parsed(Parser *, Node *);
 static int assignment_parsed(Parser *, Node *);
+static int deletion_parsed(Parser *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -7901,6 +7902,7 @@ static Node *expression_statement(Parser *, Node *);
 static Node *return_statement(Parser *, Node *);
 static Node *raise_statement(Parser *, Node *);
 static Node *emitted_statement(Parser *, Node *, Node *(*)(Parser *, Node *));
+static Node *delete_statement(Parser *, Node *);
 static void emitted_drop(Parser *);
 /* invalid_match_stmt: a soft-keyword line that failed to parse as anything
  * else may still be a misplaced match header or case clause. */
@@ -8032,22 +8034,8 @@ static Node *statement_body(Parser *p, int emits) {
     }
     if (take_word(p, "del")) {
         n = node(p, N_DELETE);
-        if (!n || !(n->a = expression_list(p, 0))) return NULL;
-        if (invalid_target(n->a, TARGETS_DEL)) return target_error(p, n->a, TARGETS_DEL);
-        if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : target_error(p, n->a, TARGETS_DEL);
-        /* Starred targets are only meaningful when consuming an iterable. */
-        Node *stack[256]; size_t count = 0;
-        stack[count++] = n->a;
-        while (count) {
-            Node *item = stack[--count];
-            if (item->kind == N_STAR) return syntax(p, "cannot delete starred");
-            if (item->kind == N_LIST || item->kind == N_TUPLE)
-                for (Node *child = item->args; child; child = child->next) {
-                    if (count == 256) return syntax(p, "deletion target is too deeply nested");
-                    stack[count++] = child;
-                }
-        }
-        return n;
+        if (!n) return NULL;
+        return emits ? emitted_statement(p, n, delete_statement) : delete_statement(p, n);
     }
     if (take_word(p, "class")) {
         n = node(p, N_CLASS);
@@ -8396,6 +8384,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
     int kept = first && (first->flags & F_EMITTED) && (last->flags & F_EMITTED) && first->steps_at == p->emitting_from.steps.mark.at &&
                (first == last || first->steps_end == last->steps_at) && last->steps_end == program_len(program);
+    if (kind == N_DELETE) kept = deletion_parsed(p, statement);
     /* An assignment's targets kept as they were parsed come first (target_parsed). */
     if (kind == N_ASSIGN && statement->op == '=' && !p->unassigned)
         kept = (last->flags & F_EMITTED) && last->steps_at == p->assigned.steps.mark.at && last->steps_end == program_len(program) &&
@@ -8413,6 +8402,25 @@ static void emit_back(Parser *p, EmitMark m) {
     for (size_t i = m.nodes; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
     p->emitted_len = m.nodes;
     emit_undo(p->emitting, m.steps);
+}
+/* The targets of del statement n. */
+static Node *delete_statement(Parser *p, Node *n) {
+    if (!(n->a = expression_list(p, 0))) return NULL;
+    if (invalid_target(n->a, TARGETS_DEL)) return target_error(p, n->a, TARGETS_DEL);
+    if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : target_error(p, n->a, TARGETS_DEL);
+    /* Starred targets are only meaningful when consuming an iterable. */
+    Node *stack[256]; size_t count = 0;
+    stack[count++] = n->a;
+    while (count) {
+        Node *item = stack[--count];
+        if (item->kind == N_STAR) return syntax(p, "cannot delete starred");
+        if (item->kind == N_LIST || item->kind == N_TUPLE)
+            for (Node *child = item->args; child; child = child->next) {
+                if (count == 256) return syntax(p, "deletion target is too deeply nested");
+                stack[count++] = child;
+            }
+    }
+    return n;
 }
 /* The exception and cause of raise statement n. */
 static Node *raise_statement(Parser *p, Node *n) {
@@ -17858,25 +17866,33 @@ static void assignment_fused(SPYContext *, Program *, Node *, size_t);
 /* Target t's steps from at on, emitted as it was parsed, made those
  * storing the value atop the stack into it (compile_store), the value
  * popped at popped when set, an item or attribute of literals and names
- * stored by a fused step first with stores_at (store_at_hand): their
- * length, or 0 when its steps are not a target's or on an error. With
- * check, only whether they are. */
-static size_t target_store(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int check) {
+ * stored by a fused step first with stores_at (store_at_hand); or with
+ * deletes, deleting it (compile_delete): their length, or 0 when its
+ * steps are not a target's or on an error. With check, only whether
+ * they are. */
+enum { TARGET_STORE, TARGET_DELETE, TARGET_CHECK };
+static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int mode) {
     size_t length = t->steps_end - t->steps_at;
+    int check = mode == TARGET_CHECK, deletes = mode == TARGET_DELETE;
     if (!(t->flags & F_EMITTED) || !length || at + length > p->len) return 0;
     Instruction *x = &p->items[at];
     if (t->kind == N_NAME) {
-        if (length != 1 || x->op != BC_NAME) return 0;
-        if (!check) { x->op = BC_STORE; x->step = c->steps ? c->steps[BC_STORE] : NULL; x->arg = popped != NULL; }
-        return 1;
+        if (length != 1 || x->op != BC_NAME || check) return length == 1 && x->op == BC_NAME;
+        /* A namespace deletes through its mapping, its None popped. */
+        int op = deletes ? BC_DELETE : BC_STORE;
+        x->op = op; x->step = c->steps ? c->steps[op] : NULL; x->arg = deletes ? 3 * p->unbinds : popped != NULL;
+        return deletes && p->unbinds ? emit_before(c, p, at + 1, BC_POP, t, 0) == SIZE_MAX ? 0 : 2 : 1;
     }
     if (t->kind == N_ATTR || t->kind == N_INDEX) {
         if (p->items[at + length - 1].op != (t->kind == N_ATTR ? BC_ATTR : BC_INDEX)) return 0;
         if (check) return length;
-        /* Its read becomes its store, without the fused read before it. */
+        /* Its read becomes its store, without the fused read before it;
+         * while calls can pause, BC_SET_TARGET deletes. */
         if (x->op == BC_OPERATE && x->target == at + length) emit_drop(p, at), length--;
         x = &p->items[at + length - 1];
-        x->op = BC_SET_TARGET; x->step = c->steps ? c->steps[BC_SET_TARGET] : NULL; x->arg = 0;
+        int op = deletes && p->calls != PAUSING ? BC_DELETE : BC_SET_TARGET;
+        x->op = op; x->step = c->steps ? c->steps[op] : NULL; x->arg = !deletes ? 0 : op == BC_SET_TARGET ? 1 : t->kind == N_INDEX ? 2 : 1;
+        if (deletes) return length;
         if (popped && emit_before(c, p, at + length++, BC_POP, popped, 0) == SIZE_MAX) return 0;
         if (stores_at && store_at_hand(p, t)) {
             size_t fused = emit_before(c, p, at, BC_STORE_AT, t, popped != NULL);
@@ -17893,7 +17909,7 @@ static size_t target_store(SPYContext *c, Program *p, Node *t, size_t at, Node *
     if (starred ? x->op != BC_NEW : p->items[at + length - 1].op != BC_NEW) return 0;
     for (Node *item = t->args; item; item = item->next) {
         Node *value = item->kind == N_STAR ? item->a : item;
-        if (!target_store(c, p, value, pos, item, stores_at, 1)) return 0;
+        if (!target_steps(c, p, value, pos, item, stores_at, TARGET_CHECK)) return 0;
         pos += value->steps_end - value->steps_at;
         if (starred && (pos >= p->len || p->items[pos].op != (item->kind == N_STAR ? BC_EXTEND : BC_ADD))) return 0;
         pos += starred;
@@ -17903,11 +17919,12 @@ static size_t target_store(SPYContext *c, Program *p, Node *t, size_t at, Node *
     emit_drop(p, starred ? at : at + length - 1);
     pos = at;
     for (Node *item = t->args; item; item = item->next) {
-        size_t steps = target_store(c, p, item->kind == N_STAR ? item->a : item, pos, item, stores_at, 0);
+        size_t steps = target_steps(c, p, item->kind == N_STAR ? item->a : item, pos, item, stores_at, mode);
         if (!steps) return 0;
         pos += steps;
         if (starred) emit_drop(p, pos);
     }
+    if (deletes) return pos - at;
     size_t star, unpack = emit_before(c, p, at, BC_UNPACK, t, (int)target_count(t, &star));
     if (unpack == SIZE_MAX) return 0;
     p->items[unpack].other = star == SIZE_MAX ? NO_STEP : (uint32_t)star;
@@ -17915,15 +17932,26 @@ static size_t target_store(SPYContext *c, Program *p, Node *t, size_t at, Node *
     if (popped && emit_before(c, p, pos++, BC_POP, popped, 0) == SIZE_MAX) return 0;
     return pos - at;
 }
+/* Del statement n, its targets emitted as they were parsed from the
+ * statement's start to the end: their deletes. Whether they are, n then
+ * emitted. */
+static int deletion_parsed(Parser *p, Node *n) {
+    Program *program = p->emitting;
+    if (n->a->steps_at != p->emitting_from.steps.mark.at || n->a->steps_end != program->len ||
+        !target_steps(p->ctx, program, n->a, n->a->steps_at, NULL, 0, TARGET_CHECK) ||
+        !target_steps(p->ctx, program, n->a, n->a->steps_at, NULL, 0, TARGET_DELETE)) return 0;
+    n->flags |= F_EMITTED;
+    return 1;
+}
 /* Assignment target t, its '=' read: its steps are kept, after the
- * targets' before it, when they can become its store (target_store);
+ * targets' before it, when they can become its store (target_steps);
  * else all the statement's are undone, and its targets compile from
  * their nodes. Its value's steps begin after. */
 static void target_parsed(Parser *p, Node *t) {
     Program *program = p->emitting;
     if (!program) return;
     if (p->unassigned || t->steps_at != p->assigned.steps.mark.at || t->steps_end != program->len ||
-        !target_store(p->ctx, program, t, t->steps_at, NULL, 0, 1)) { emitted_drop(p); p->unassigned = 1; }
+        !target_steps(p->ctx, program, t, t->steps_at, NULL, 0, TARGET_CHECK)) { emitted_drop(p); p->unassigned = 1; }
     p->assigned = emit_mark(p);
 }
 /* Assignment n, its targets' steps then its value's emitted as they were
@@ -17937,7 +17965,7 @@ static int assignment_parsed(Parser *p, Node *n) {
     size_t start = n->a->steps_at, at = start, length = n->b->steps_end - n->b->steps_at;
     int fused = assigns_at_hand(program, n);
     for (Node *t = n->a, *rest = n->args; t; t = rest, rest = rest ? rest->next : NULL) {
-        size_t steps = target_store(c, program, t, at, rest ? NULL : n, !fused, 0);
+        size_t steps = target_steps(c, program, t, at, rest ? NULL : n, !fused, TARGET_STORE);
         if (!steps) return 0;
         at += steps;
     }
