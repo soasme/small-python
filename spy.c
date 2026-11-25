@@ -6725,11 +6725,13 @@ assignment_expression:
         }
         Node *n = node(p, N_NAMED);
         if (!n) return NULL;
+        /* The name is stored, not read. */
+        emit_back(p, value);
         n->a = left; n->b = plain_expression(p, 0);
         if (!n->b) return NULL;
         if (n->b->kind == N_NAMED && !n->b->op) return syntax(p, "invalid syntax");
         extend(p, n, left);
-        left = n;
+        if (!(left = finished(p, n))) return NULL;
     }
     return left;
 }
@@ -17774,6 +17776,7 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_COMPREHENSION) fixed[0] = n->a->a;
     else if (n->kind == N_LAMBDA) return lambda_parsed(p, n);
     else if (n->kind == N_INTERPOLATION) fixed[1] = n->b;
+    else if (n->kind == N_NAMED) fixed[0] = n->b;
     else if (n->kind == N_TEMPLATE) return template_parsed(p, n);
     /* A field's conversion and format() call are steps between its value and spec. */
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
