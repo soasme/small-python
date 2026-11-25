@@ -24984,18 +24984,21 @@ static int class_names_store(SPYContext *c, SPYValue *env, SPYValue *names, size
     spy_release(names);
     return names && !c->error_type[0] ? 0 : -1;
 }
+/* The implicit names class statement n binds in env before its body,
+ * the global __name__ read for __module__ (16.4.1 step 8). */
+static int class_names_begin(SPYContext *c, Scope *n, SPYValue *env, SPYValue *type_params) {
+    SPYValue *module = name_get(c, env, "__name__");
+    int status = !module || class_names_store(c, env, class_names_before(c, n, module, type_params), 0);
+    spy_release(module);
+    return status;
+}
 /* Before class statement n's body runs in env (16.4.1 step 8): the
  * implicit names, which a body on the machine, unless generic, binds
- * itself through a Python __setitem__ or __getitem__ of its namespace
- * (class_part 9), and the set of its executed conditional annotations,
- * beside the namespace (conditional_env). */
+ * itself in its frame (class_part 9), through a Python __setitem__ or
+ * __getitem__ of its namespace too, and the set of its executed
+ * conditional annotations, beside the namespace (conditional_env). */
 static int class_body_begin(SPYContext *c, SPYValue *unit, Scope *n, SPYValue *env, SPYValue *type_params, int machine) {
-    if (!machine || n->generic || !hooked_namespace(c, env)) {
-        SPYValue *module = name_get(c, env, "__name__");
-        int status = !module || class_names_store(c, env, class_names_before(c, n, module, type_params), 0);
-        spy_release(module);
-        if (status) return -1;
-    }
+    if ((!machine || n->generic) && class_names_begin(c, n, env, type_params)) return -1;
     env->as.map.scope = n;
     env->as.map.unit = spy_retain(unit);
     declare_locals(c, env);
@@ -40479,7 +40482,8 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     SPYValue *bases = NULL, *arguments = NULL, *name, *body = NULL;
     if (ins->arg == 9)
         /* The body's implicit names that class_body_begin left (class_names_call). */
-        return n->generic || !hooked_namespace(c, f->env) ? spy_none(c) : class_names_call(c, m, f, NULL, spy_none(c));
+        return n->generic ? spy_none(c) : hooked_namespace(c, f->env) ? class_names_call(c, m, f, NULL, spy_none(c)) :
+               class_names_begin(c, n, f->env, NULL) ? NULL : spy_none(c);
     if (ins->arg == 6) {
         /* The body's end, in its env, whose scope is the class
          * body's, its line traced (trace_class_line). */

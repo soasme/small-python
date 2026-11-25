@@ -22,7 +22,10 @@
 (* runs class C(base()) with exec() under builtins whose Python            *)
 (* __missing__, which may loop, logs each name and gives base and          *)
 (* __build_class__, or lacks the latter: the outcome is the names looked   *)
-(* up, in order, and whether the statement raised NameError. A keyed      *)
+(* up, in order, and whether the statement raised NameError; with globals *)
+(* lacking __name__, the body's read of it for __module__ looks it up and  *)
+(* raises the NameError in the body's frame C, which the outcome names     *)
+(* with the innermost frame of the traceback. A keyed                      *)
 (* program replaces the builtins module's len key by an object of its hash *)
 (* whose Python __eq__, which may loop, counts its calls, then calls a     *)
 (* function that reads len as a call's callee, as an argument, or twice:   *)
@@ -33,7 +36,7 @@ EXTENDS Naturals, Sequences
 Programs == [part : {"lookup"}, builtins : {"absent", "module", "custom", "empty", "missing"}, shadow : BOOLEAN,
              name : {"len", "added", "import"}]
             \cup [part : {"insert"}]
-            \cup [part : {"builder"}, lacking : BOOLEAN, keyed : BOOLEAN]
+            \cup [part : {"builder"}, lacking : BOOLEAN, keyed : BOOLEAN, nameless : BOOLEAN]
             \cup [part : {"keyed"}, where : {"callee", "argument", "twice"}]
 
 VARIABLES program, outcome
@@ -52,10 +55,11 @@ Lookup(p) ==
 
 \* __build_class__ is looked up before the bases are evaluated (16.4.1);
 \* a stored key of its hash is compared before __missing__ is called.
-Built(p) == CASE p.keyed /\ p.lacking -> "eq __build_class__ NameError"
-              [] p.keyed -> "eq __build_class__ base"
-              [] p.lacking -> "__build_class__ NameError"
-              [] OTHER -> "__build_class__ base"
+Built(p) == LET eq == IF p.keyed THEN "eq " ELSE ""
+              IN  eq \o CASE p.lacking /\ p.nameless -> "__build_class__ NameError <module>"
+                         [] p.lacking -> "__build_class__ NameError"
+                         [] p.nameless -> "__build_class__ base __name__ NameError C"
+                         [] OTHER -> "__build_class__ base"
 
 Keyed(p) == CASE p.where = "callee" -> "2 1" [] p.where = "argument" -> "builtin_function_or_method 1" [] OTHER -> "0 2"
 

@@ -76,11 +76,17 @@ def built(p):
                 log.append("eq")
             return False
 
+    namespace = {"__builtins__": Logging({Key(): 0} if p["keyed"] else {})}
+    if not p["nameless"]:
+        namespace["__name__"] = "replay"
     try:
-        exec("class C(base()): pass", {"__builtins__": Logging({Key(): 0} if p["keyed"] else {}), "__name__": "replay"})
+        exec("class C(base()): pass", namespace)
         ended = []
-    except NameError:
-        ended = ["NameError"]
+    except NameError as e:
+        tb = e.__traceback__
+        while tb.tb_next:
+            tb = tb.tb_next
+        ended = ["NameError"] + ([tb.tb_frame.f_code.co_name] if p["nameless"] else [])
     return " ".join(log + ended)
 
 
