@@ -5494,7 +5494,7 @@ static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
 static void patch(Program *, size_t, size_t);
 static size_t program_len(Program *);
 static uint32_t with_begin(SPYContext *, Program *, Node *, int);
-static void case_begin(SPYContext *, Program *, Node *, Case *);
+static void case_begin(SPYContext *, Program *, Node *, Case *, Program *);
 static void case_end(SPYContext *, Program *, Node *, Case *, uint32_t *);
 static void match_end(SPYContext *, Program *, Node *, uint32_t);
 static void try_begin(SPYContext *, Program *, Node *, Try *);
@@ -7808,7 +7808,11 @@ static Node *pattern_reachable(Parser *p, Node *n, int allow) {
     return n;
 }
 /* A case clause's patterns and guard, after the 'case' keyword. */
-static Node *case_header(Parser *p) {
+/* A case's pattern and guard; with guard, the guard emits as it is
+ * parsed into *guard, a program of its own to follow the pattern's
+ * steps (case_begin), left NULL when they are not all its own. */
+static Program *guard_program(Parser *);
+static Node *case_header(Parser *p, Program **guard) {
     Node *item = node(p, N_EXCEPT);
     if (!item) return NULL;
     Node *first = star_or_pattern(p);
@@ -7827,8 +7831,13 @@ static Node *case_header(Parser *p) {
         first = sequence;
     } else if (first->op == PT_STAR) return syntax(p, "invalid syntax");
     item->a = first;
-    if (take_word(p, "if") && !(item->b = expression(p, 0))) return NULL;
-    return item;
+    if (!take_word(p, "if")) return item;
+    if (guard && !(*guard = guard_program(p))) return NULL;
+    p->emitting = guard ? *guard : NULL;
+    EmitMark from = emit_mark(p);
+    item->b = expression(p, 0);
+    if (guard && !header_kept(p, item->b, from)) { free_program(*guard); *guard = NULL; }
+    return item->b ? item : NULL;
 }
 static Node *match_statement(Parser *p) {
     /* With emits compiled in place, as compile_statement does (case_begin). */
@@ -7838,7 +7847,12 @@ static Node *match_statement(Parser *p) {
     if (!n) return NULL;
     p->pos++;
     size_t line = keyword_line(p);
-    if (!(n->a = expression_items(p, 0, 1)) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
+    /* Its subject emits as it is parsed (header_emit). */
+    EmitMark from = {0};
+    if (emits && header_emit(p, &from)) return NULL;
+    n->a = expression_items(p, 0, 1);
+    if (emits) header_kept(p, n->a, from);
+    if (!n->a || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
     if (emits) compile_expr(p->ctx, p->body.program, n->a);
     if (!expect(p, ':', at(p, T_NL) ? "expected ':'" : "invalid syntax") || !expect(p, T_NL, "invalid syntax")) return NULL;
     while (take(p, T_NL)) {}
@@ -7850,9 +7864,10 @@ static Node *match_statement(Parser *p) {
         p->pos++;
         size_t case_line = keyword_line(p);
         Case k = {{0}, 0, NULL};
-        Node *before = p->unit->as.unit.nodes, *item = case_header(p);
-        if (!item || analyse_statements(p, item) || (emits && header_ready(p, before))) return NULL;
-        if (emits) case_begin(p->ctx, p->body.program, item, &k);
+        Program *guard = NULL;
+        Node *before = p->unit->as.unit.nodes, *item = case_header(p, emits ? &guard : NULL);
+        if (!item || analyse_statements(p, item) || (emits && header_ready(p, before))) { free_program(guard); return NULL; }
+        if (emits) case_begin(p->ctx, p->body.program, item, &k, guard);
         if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); return NULL; }
         if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
         *tail = item; tail = &item->next;
@@ -7983,7 +7998,7 @@ static void soft_keyword_error(Parser *p, size_t start) {
     p->pos = start + 1;
     if (p->tokens[start].len == 5) {
         if (expression_list(p, 0) && at(p, T_NL)) { syntax(p, "expected ':'"); return; }
-    } else if (case_header(p) && at(p, ':')) {
+    } else if (case_header(p, NULL) && at(p, ':')) {
         Token *colon = peek(p);
         if (suite_after(p, "'case' statement", p->tokens[start].line)) {
             p->pos = start; syntax(p, "case statement must be inside match statement");
@@ -17940,6 +17955,13 @@ static int comprehension_close(Parser *p, Node *n, Program *body, EmitMark eleme
     emit(c, body, BC_FLOW, n, FLOW_RETURN);
     return c->error_type[0] ? -1 : 0;
 }
+/* A program for a case's guard, of the body's modes. */
+static Program *guard_program(Parser *p) {
+    Program *body = p->body.program, *program = allocate(p->ctx, sizeof(*program));
+    if (!program) return NULL;
+    program->calls = body->calls; program->loads = body->loads; program->namespace = body->namespace; program->unbinds = body->unbinds;
+    return program;
+}
 /* A dictionary or set display n compiled as it is parsed: its first
  * step, a dictionary's until an element makes it a set (display_end);
  * after each item's steps, from start on, those adding it; display's
@@ -18936,10 +18958,10 @@ static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, Pa
  * guard; after the suite, its jump past the rest, linked to the earlier
  * cases' in exits; then the drops of a failed match, and the next case, where a failed
  * guard goes. After the last, the subject's pop, where those jumps go. */
-static void case_begin(SPYContext *c, Program *p, Node *item, Case *k) {
+static void case_begin(SPYContext *c, Program *p, Node *item, Case *k, Program *guard) {
     const char *bad;
     size_t count = 0;
-    if (!(k->names = allocate(c, 256 * sizeof(*k->names)))) return;
+    if (!(k->names = allocate(c, 256 * sizeof(*k->names)))) { free_program(guard); return; }
     pattern_names(item->a, k->names, &count, 256, &bad);
     k->fail.names = k->names; k->fail.count = count;
     emit_pattern(c, p, item, P_BEGIN, count);
@@ -18954,7 +18976,16 @@ static void case_begin(SPYContext *c, Program *p, Node *item, Case *k) {
     if (pc != SIZE_MAX) { p->values[p->values_len++] = names; p->items[pc].constant = names; }
     else spy_release(names);
     for (size_t i = 0; pc != SIZE_MAX && i < count; i++) operand_new(c, p, k->names[i], USE_NAME);
-    k->guard = item->b ? compile_branch(c, p, item->b, item->b) : SIZE_MAX;
+    /* A guard emitted as it was parsed (case_header) follows the pattern's steps. */
+    k->guard = SIZE_MAX;
+    if (guard) {
+        size_t at = p->len;
+        if (!c->error_type[0] && !emit_take(c, guard, (Mark){0, NULL}, 0, guard->values_len, p)) {
+            item->b->steps_at = at; item->b->steps_end = p->len;
+            k->guard = branch_parsed(c, p, item->b, item->b);
+        }
+        free_program(guard);
+    } else k->guard = item->b ? compile_branch(c, p, item->b, item->b) : SIZE_MAX;
     emit(c, p, BC_POP, item, 0);
 }
 static void case_end(SPYContext *c, Program *p, Node *item, Case *k, uint32_t *exits) {
