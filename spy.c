@@ -10416,10 +10416,10 @@ static SPYValue *string_char(SPYContext *c, SPYValue *s, size_t index, size_t cu
     size_t at = string_offset(s, index, cursor);
     return spy_string(c, s->as.string.data + at, string_width(s, at));
 }
+/* The item at index of sequence v, which a sequence iterator walks or a
+ * subscript reads, NULL past its end. */
 static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     switch (v->type) {
-    case SPY_TEMPLATE_ITERATOR: case SPY_ITERATOR: case SPY_INSTANCE: case SPY_GENERATOR: case SPY_COROUTINE_ITERATOR:
-    case SPY_ASYNC_GENERATOR_ASEND: case SPY_ASYNC_GENERATOR_ATHROW: case SPY_ANEXT_AWAITABLE: return iterator_next(c, v);
     case SPY_LIST: case SPY_TUPLE:
         return index < v->as.seq.len ? spy_retain(v->as.seq.items[index]) : NULL;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_SET: case SPY_FROZENSET:
