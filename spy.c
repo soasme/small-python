@@ -4729,6 +4729,7 @@ static Node *lambda_parsed(Parser *, Node *);
 static Node *template_parsed(Parser *, Node *);
 static int augmented_target(Parser *, Node *);
 static Node *format_parsed(Parser *, Node *);
+static Node *starred_parsed(Parser *, Node *);
 /* A call's steps while its arguments are parsed (call_stream). */
 enum { CALL_PLAIN = 1, CALL_GENERAL };
 static Node *parsed_steps(Parser *, Node *, size_t);
@@ -17753,6 +17754,25 @@ static Node *format_parsed(Parser *p, Node *n) {
     if (emit(c, program, pausing ? BC_CALLN : BC_FORMAT, n, pausing ? 2 : 1) == SIZE_MAX) return NULL;
     return parsed_steps(p, n, n->a->steps_at);
 }
+/* List or tuple display n with a starred item, its items' values emitted
+ * one after another to the end: each is added or extends the new value
+ * its first step makes, as compile_expr lays them out. */
+static Node *starred_parsed(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    Program *program = p->emitting;
+    if (!emitted_operands(program, (Node *[3]){NULL}, n->args)) return n;
+    Node *first = n->args->kind == N_STAR ? n->args->a : n->args;
+    size_t added = 0, start = first->steps_at;
+    for (Node *a = n->args; a; a = a->next, added++) {
+        Node *value = a->kind == N_STAR ? a->a : a;
+        if (emit_before(c, program, value->steps_end + added, a->kind == N_STAR ? BC_EXTEND : BC_ADD, a, n->kind == N_TUPLE && !a->next) == SIZE_MAX) return NULL;
+    }
+    if (emit_before(c, program, start, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : SPY_TUPLE) == SIZE_MAX) return NULL;
+    /* A tuple's count of items after its last starred one, as compile_expr's. */
+    for (Node *a = n->args; a && n->kind == N_TUPLE; a = a->next)
+        program->items[start].other = a->kind == N_STAR ? 0 : program->items[start].other + 1;
+    return parsed_steps(p, n, start);
+}
 /* General call n's last step, its arguments' after. */
 static Node *call_end(Parser *p, Node *n) {
     return emit(p->ctx, p->emitting, BC_CALL, n, 0) == SIZE_MAX ? NULL : parsed_steps(p, n, n->a->steps_at);
@@ -17782,6 +17802,7 @@ static Node *finished(Parser *p, Node *n) {
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
     else if (n->kind == N_FORMAT) return format_parsed(p, n);
     else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
+    else if ((n->kind == N_LIST || n->kind == N_TUPLE) && n->args) return starred_parsed(p, n);
     else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) fixed[0] = NULL;
     else if (n->kind != N_UNARY && n->kind != N_ATTR) return n;
     Node *first = fixed[0] ? fixed[0] : list ? (list->kind == N_KEYWORD ? list->a : list) : NULL;
