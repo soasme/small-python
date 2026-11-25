@@ -7910,6 +7910,7 @@ static Node *raise_statement(Parser *, Node *);
 static Node *emitted_statement(Parser *, Node *, Node *(*)(Parser *, Node *));
 static Node *delete_statement(Parser *, Node *);
 static Node *assert_statement(Parser *, Node *);
+static Node *yield_statement(Parser *, Node *);
 static size_t assert_test(Parser *, Node *);
 static void assert_end(Parser *, Node *, size_t);
 static void emitted_drop(Parser *);
@@ -8358,12 +8359,14 @@ static Node *statement_body(Parser *p, int emits) {
     }
     n = node(p, N_EXPR);
     if (!n) return NULL;
-    if (keyword(p, "yield")) {
-        n->a = yield_expression(p);
-        if (n->a && at(p, '=')) return syntax_at(p, n->a, "assignment to yield expression not possible");
-        return n->a ? n : NULL;
-    }
-    return emits ? emitted_statement(p, n, expression_statement) : expression_statement(p, n);
+    Node *(*rest)(Parser *, Node *) = keyword(p, "yield") ? yield_statement : expression_statement;
+    return emits ? emitted_statement(p, n, rest) : rest(p, n);
+}
+/* The yield of yield statement n. */
+static Node *yield_statement(Parser *p, Node *n) {
+    n->a = yield_expression(p);
+    if (n->a && at(p, '=')) return syntax_at(p, n->a, "assignment to yield expression not possible");
+    return n->a ? n : NULL;
 }
 /* Statement n, the rest parsed by rest, emitted as it is parsed into
  * its body's program, once a held-back statement compiles. An
