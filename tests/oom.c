@@ -3535,6 +3535,10 @@ int main(int argc, char **argv) {
     native = NULL;
     imported = "'''A module of source.'''\nvalue = [i * i for i in range(3)]\n";
     if (argc == 1) check("import imported\nfrom imported import value\nprint(imported.value is value)\n", "<import>", from, 0);
+    /* __import__ called on the machine loads it there (module_loadk). */
+    if (argc == 1)
+        check("def f():\n    m = __import__('imported')\n    return m.value, __import__('imported', None, None, ['value']).value is m.value\n"
+              "print(f())\n", "<__import__>", from, 0);
     imported = NULL;
     for (int i = 1; i < argc; i++) {
         char *source = read_file(argv[i]);
