@@ -7175,7 +7175,7 @@ static int header_emit(Parser *p, EmitMark *from) {
     p->emitting = p->body.program; *from = emit_mark(p);
     return 0;
 }
-static void def_header(Parser *, Node *, EmitMark);
+static int def_header(Parser *, Node *, EmitMark);
 static int class_header(Parser *, Node *, EmitMark);
 static int class_arguments(Parser *, Node *);
 static int generic_header(Parser *, Node *, EmitMark *);
@@ -7196,15 +7196,18 @@ static int header_kept(Parser *p, Node *n, EmitMark from) {
 }
 /* Def n's header parsed, its decorators' and defaults' steps emitted from
  * from on: kept when they follow one another to the end, the rest of its
- * steps compiled with the statement (compile_statement), else undone. */
-static void def_header(Parser *p, Node *n, EmitMark from) {
+ * steps compiled at its end (compile_statement), else undone. Whether
+ * they were kept. */
+static int def_header(Parser *p, Node *n, EmitMark from) {
     size_t at = from.steps.mark.at;
     for (Node *d = n->decorators; d && at != SIZE_MAX; d = d->next)
         at = (d->flags & F_EMITTED) && d->steps_at == at ? d->steps_end : SIZE_MAX;
     for (Node *a = n->args; a && at != SIZE_MAX; a = a->next)
         if (a->a) at = (a->a->flags & F_EMITTED) && a->a->steps_at == at ? a->a->steps_end : SIZE_MAX;
-    if (at != program_len(p->emitting)) emit_back(p, from);
+    int kept = at == program_len(p->emitting);
+    if (!kept) emit_back(p, from);
     p->emitting = NULL; p->emitted_len = 0;
+    return kept;
 }
 /* A compound statement's suite after its header; with emits, its
  * statements compiled in place, as a body's are (body_end). */
@@ -8281,7 +8284,10 @@ static Node *statement_body(Parser *p, int emits) {
         if (n->scope) scope_define(n);
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
-        return n->b ? n : NULL;
+        if (!n->b) return NULL;
+        /* Its header kept, its body's call and store follow it. */
+        if (emits && (n->flags & F_HEADER)) { compile_statement(p->ctx, p->body.program, n); n->flags |= F_EMITTED; }
+        return p->ctx->error_type[0] ? NULL : n;
     }
     if (take_word(p, "raise")) {
         n = node(p, N_RAISE);
@@ -8448,7 +8454,7 @@ static Node *statement_body(Parser *p, int emits) {
         if (!expect(p, '(', "expected '('")) return NULL;
         n->op = asynchronous;
         if (parameters(p, n, ')')) return NULL;
-        if (emits) def_header(p, n, from);
+        int kept = emits && def_header(p, n, from);
         if (take(p, T_ARROW) && !(n->c = annotation_expression(p, expression, 0))) return NULL;
         if (function_annotations(p, n) || analyse_statements(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
@@ -8473,7 +8479,10 @@ static Node *statement_body(Parser *p, int emits) {
         n->scope->returned_start = first_return.start; n->scope->returned_end = first_return.end;
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
         scope_define(n);
-        return scope_unhold(p->ctx, n->scope) ? NULL : n;
+        if (scope_unhold(p->ctx, n->scope)) return NULL;
+        /* Its header kept, its making and store follow it. */
+        if (kept) { compile_statement(p->ctx, p->body.program, n); n->flags |= F_EMITTED; }
+        return p->ctx->error_type[0] ? NULL : n;
     }
     if (keyword(p, "global") || keyword(p, "nonlocal")) {
         n = node(p, keyword(p, "global") ? N_GLOBAL : N_NONLOCAL);
