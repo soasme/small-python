@@ -351,11 +351,40 @@ def traced_raise():
     raise KeyError("k")
 
 
+def traced_docstrings(optimize):
+    """A function's docstring, and under -OO any, traces no line."""
+    source = ('def doc():\n    "d"\n    return 1\ndef only():\n    "d"\nclass Doc:\n    "d"\n    x = 1\n'
+              'class Only:\n    "d"\ndoc(); only()\n')
+    exec(compile(source, "docs", "exec", optimize=optimize), {})
+
+
+def traced_branches(x):
+    """The end of an if's or a case's suite traces no line."""
+    if x:
+        pass
+    elif x:
+        pass
+    else:
+        pass
+    if x:
+        if x:
+            pass
+    match x:
+        case 1:
+            pass
+        case _:
+            pass
+    return x
+
+
 sys.settrace(tracer)
 traced_loop(1)
 list(traced_generator())
 traced_class()
 traced_exec()
+traced_docstrings(0)
+traced_docstrings(2)
+traced_branches(1)
 try:
     traced_raise()
 except KeyError:

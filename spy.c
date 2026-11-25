@@ -124,7 +124,7 @@ typedef struct ImportRecord { struct ImportRecord *next; const char *module; int
  * the last compiled; whether the last parsed waits for the body's end, as
  * a module's does, and whether the first may be a docstring; whether a
  * statement has ended in it, and whether one waits to compile. */
-typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int holds, docs, tries, begun, pending; } Body;
+typedef struct { Program *program; Node *head, *done, *todo; size_t depth; int holds, docs, tries, begun, pending; size_t first_line, doc_pass; } Body;
 /* A statement's place for an error raised after its nodes go: the node
  * while it lives, then its line and the source it covers (free_parsed). */
 typedef struct { Node *node; size_t line; const char *start, *end; } Site;
@@ -5507,7 +5507,7 @@ static Node *suite_after(Parser *, const char *, size_t);
 static Body body_begin(Parser *, Node *, size_t);
 static int body_end(Parser *, Node *, Node *, Body);
 static int body_statements(Parser *, Node *, Node *);
-static size_t if_else(SPYContext *, Program *, Node *, size_t);
+static size_t if_else(SPYContext *, Program *, size_t);
 static int nodes_finish(Parser *, Node *);
 static Scope *body_scope(SPYContext *, Node *);
 static void scope_define(Node *);
@@ -7258,7 +7258,7 @@ static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
     if (!emits) return suite_after(p, what, line);
     Body outer = p->body;
     Node *start = p->unit->as.unit.nodes;
-    p->body = (Body){outer.program, NULL, NULL, NULL, p->depth + 1, 0, 0, outer.tries, 0, 0};
+    p->body = (Body){outer.program, NULL, NULL, NULL, p->depth + 1, 0, 0, outer.tries, 0, 0, 0, 0};
     Node *body = suite_after(p, what, line);
     int failed = !body || (!p->body.done && nodes_finish(p, start)) || body_statements(p, body, NULL);
     p->body = outer;
@@ -7280,7 +7280,7 @@ static Node *if_statement(Parser *p, int emits) {
     if (!n->a || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
     if (emits) branch = branch_parsed(p->ctx, p->body.program, n->a, n);
     if (!(n->b = suite_of(p, what, line, emits))) return NULL;
-    if (emits) end = if_else(p->ctx, p->body.program, n, branch);
+    if (emits) end = if_else(p->ctx, p->body.program, branch);
     if (take_word(p, "elif")) {
         if (++p->depth > 128) { p->depth--; return syntax(p, "too many elif clauses"); }
         n->c = if_statement(p, emits); p->depth--;
@@ -8123,6 +8123,9 @@ static Node *return_statement(Parser *, Node *);
 static Node *raise_statement(Parser *, Node *);
 static Node *emitted_statement(Parser *, Node *, Node *(*)(Parser *, Node *));
 static int docstring_at(Parser *, Node *);
+static int docstring_passes(Parser *, Node *);
+static int docstring_pass(Parser *, Node *);
+static void docstring_unpass(Parser *);
 static void drop_docstring(Node *);
 static Node *delete_statement(Parser *, Node *);
 static Node *assert_statement(Parser *, Node *);
@@ -8164,6 +8167,7 @@ static Node *statement(Parser *p) {
     if (misplaced) defer(p, "from __future__ imports must occur at the beginning of the file");
     int emits = p->emits;
     p->emits = 0;
+    docstring_unpass(p);
     p->statement_level++;
     Node *n = statement_body(p, emits);
     p->statement_level--;
@@ -8179,13 +8183,15 @@ static Node *statement(Parser *p) {
         p->top_statements++;
     }
     /* A statement its parse did not compile compiles as it ends, unless
-     * one before it waits (body_statements); under -OO a docstring is a
-     * pass. */
+     * one before it waits (body_statements); a docstring that passes is a
+     * pass until the next statement. */
     if (n && emits) {
-        if (p->ctx->optimize > 1 && docstring_at(p, n)) drop_docstring(n);
+        int doc = docstring_at(p, n) && docstring_passes(p, n);
+        if (doc && docstring_pass(p, n)) return NULL;
         if (!(n->flags & F_EMITTED) && n->kind != N_EXPR && !p->body.pending) {
             compile_statement(p->ctx, p->body.program, n);
             n->flags |= F_EMITTED;
+            if (doc) p->body.doc_pass = program_len(p->body.program);
         } else if (!(n->flags & F_EMITTED)) p->body.pending = 1;
         if (p->ctx->error_type[0]) return NULL;
     }
@@ -8659,6 +8665,24 @@ static Node *yield_statement(Parser *p, Node *n) {
 static int docstring_at(Parser *p, Node *n) {
     return n && n->kind == N_EXPR && n->a->kind == N_STRING && p->body.docs && !p->body.begun;
 }
+/* Whether docstring n compiles no statement: under -OO, or in a
+ * function, whose docstring CPython never compiles. Then it is a pass
+ * until another statement follows it (statement). */
+static int docstring_passes(Parser *p, Node *n) {
+    return n && n->kind == N_EXPR && n->a->kind == N_STRING && p->body.docs && (p->ctx->optimize > 1 || p->body.first_line);
+}
+/* Docstring n that passes: a pass, a function's on its first line, where
+ * an empty body returns, but under -OO, its __doc__ read first; -1 on an
+ * error. */
+static int docstring_pass(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
+    if (c->optimize < 2) {
+        if (!p->scope->doc && !(p->scope->doc = docstring(c, n)) && c->error_type[0]) return -1;
+        n->line = p->body.first_line;
+    }
+    drop_docstring(n);
+    return 0;
+}
 static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node *)) {
     if (body_statements(p, p->body.head, NULL)) return NULL;
     Program *program = p->body.program;
@@ -8680,8 +8704,8 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     if (kind == N_ASSIGN && statement->op == '=' && !p->unassigned)
         kept = (last->flags & F_EMITTED) && last->steps_at == p->assigned.steps.mark.at && last->steps_end == program_len(program) &&
                assignment_parsed(p, statement);
-    /* Under -OO a docstring becomes pass (statement). */
-    if (!kept || (p->ctx->optimize > 1 && docstring_at(p, statement))) emitted_drop(p);
+    /* A docstring that passes becomes pass (statement). */
+    if (!kept || (docstring_at(p, statement) && docstring_passes(p, statement))) emitted_drop(p);
     /* An expression statement, return or raise kept compiles its own steps
      * now; a module's last expression gives up its pop for the body's value
      * (module_body_finish). */
@@ -17572,6 +17596,12 @@ static void emit_drop(Program *p, size_t at) {
     }
     if (p->tested > at + 1) p->tested--;
 }
+/* The pass of the body's docstring goes, a statement following it (docstring_pass). */
+static void docstring_unpass(Parser *p) {
+    Program *program = p->body.program;
+    if (p->body.doc_pass && program->len == p->body.doc_pass) emit_drop(program, p->body.doc_pass - 1);
+    p->body.doc_pass = 0;
+}
 /* Emit op as emit does, but at at, before the steps of the expression
  * from there on, which jump only among themselves; its index, or
  * SIZE_MAX with an error. */
@@ -19036,9 +19066,10 @@ static void assignment_fused(SPYContext *c, Program *p, Node *n, size_t at) {
 }
 /* The clauses of an if statement n, which the parser compiles as it
  * parses them (if_statement): the test, whose branch skips the suite;
- * after the suite, the jump past the rest, where the branch goes on. */
-static size_t if_else(SPYContext *c, Program *p, Node *n, size_t branch) {
-    size_t end = emit(c, p, BC_JUMP, n, 0);
+ * after the suite, the jump past the rest, where the branch goes on,
+ * on no line of its own, as the suite's end traces none. */
+static size_t if_else(SPYContext *c, Program *p, size_t branch) {
+    size_t end = emit(c, p, BC_JUMP, NULL, 0);
     patch(p, branch, p->len);
     return end;
 }
@@ -19363,7 +19394,8 @@ static void case_begin(Parser *parser, Program *p, Node *item, Case *k, Program 
     emit(c, p, BC_POP, item, 0);
 }
 static void case_end(SPYContext *c, Program *p, Node *item, Case *k, uint32_t *exits) {
-    size_t end = emit(c, p, BC_JUMP, item, 0);
+    /* The jump past the other cases, on no line of its own (if_else). */
+    size_t end = emit(c, p, BC_JUMP, NULL, 0);
     if (end != SIZE_MAX) { p->items[end].other = *exits; *exits = (uint32_t)end; }
     /* A failed pattern drops the slots too. */
     for (size_t i = 0; i < k->fail.len; i++) k->fail.exits[i].temps += k->fail.count;
@@ -19600,13 +19632,16 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
 /* A generator's, function's or class's body, on the machine: even a body
  * without a call may call Python through an operator or attribute. */
 /* Compile the statements of the body that head begins into its program,
- * from the first not yet compiled up to stop; under -OO its docstring
- * becomes pass first. */
+ * from the first not yet compiled up to stop; its docstring that passes
+ * compiles no step, or a pass when no statement follows it. */
 static int body_statements(Parser *p, Node *head, Node *stop) {
     SPYContext *c = p->ctx;
     Node *s = p->body.todo ? p->body.todo : p->body.done ? p->body.done->next : head;
     for (; s != stop && !c->error_type[0]; s = s->next) {
-        if (s == head && p->body.docs && c->optimize > 1) drop_docstring(s);
+        if (s == head && docstring_passes(p, s)) {
+            if (docstring_pass(p, s)) return -1;
+            if (s->next) s->flags |= F_EMITTED;
+        }
         /* A def's or class's docstring, read before its nodes go (free_line). */
         else if (s == head && p->body.docs && p->scope && !p->scope->doc && !(p->scope->doc = docstring(c, s)) && c->error_type[0]) return -1;
         if (!(s->flags & F_EMITTED)) compile_statement(c, p->body.program, s);
@@ -19627,7 +19662,9 @@ static Body body_begin(Parser *p, Node *n, size_t depth) {
     Body enclosing = p->body;
     /* A def's or class's scope holds its program from the start. */
     Program *program = n && !body_scope(c, n) ? NULL : allocate(c, sizeof(*program));
-    p->body = (Body){program, NULL, NULL, NULL, depth, !n, 1, 0, 0, 0};
+    /* A def's first line, its first decorator's, is where its docstring passes (docstring_pass). */
+    size_t first_line = n && n->kind == N_DEF ? n->decorators ? n->decorators->line : n->line : 0;
+    p->body = (Body){program, NULL, NULL, NULL, depth, !n, 1, 0, 0, 0, first_line, 0};
     if (!program) return enclosing;
     program->calls = c->pausing ? PAUSING : BODY;
     program->namespace = n && n->kind == N_CLASS;

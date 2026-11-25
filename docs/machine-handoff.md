@@ -134,11 +134,6 @@ pinned CPython oracle), then fix what they show.
     inherited `__length_hint__`.
   - Builtin adapters (`zip`, `enumerate`, `map`, `filter`) do not pass on
     the `StopIteration` value of the generator they end on.
-  - A trace function sees a `line` event for a function's docstring, and
-    under `-OO` for a class's removed docstring; CPython reports neither.
-    A function body compiles its docstring as an expression statement, and
-    `-OO` turns a removed docstring into `pass`. Without `-OO` both report
-    a class's docstring, which stores `__doc__`.
 
 ## 5 How each fix is made
 
