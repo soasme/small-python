@@ -13396,13 +13396,15 @@ static int static_type(SPYContext *, SPYValue *);
 static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
     if (!member_applies(c, d, object)) return NULL;
     const char *name = d->as.member.name->as.string.data;
-    if (d->as.member.flags & DESC_VALUE) {
+    /* A builtin subclass instance's __dict__ is its own (staticmethod's). */
+    int own = object->type == SPY_INSTANCE && !strcmp(name, "__dict__");
+    if ((d->as.member.flags & DESC_VALUE) && !own) {
         if (!strcmp(name, "__class__")) return spy_retain(value_class(c, object));
         SPYValue *base = object->type == SPY_INSTANCE ? object->as.map.base : object;
         if (!base) return missing_attribute(c, object, name);
         return attribute_value(c, base, name);
     }
-    if (d->as.member.flags & DESC_GENERIC) {
+    if ((d->as.member.flags & DESC_GENERIC) || own) {
         /* subtype_getweakref: None while no weak reference is listed. */
         if (name[2] == 'w')
             return class_has_weakref(c, value_class(c, object)) ? spy_none(c) : spy_error(c, "AttributeError", "This object has no __weakref__");
@@ -13428,7 +13430,8 @@ static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
 static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *value) {
     if (!member_applies(c, d, object)) return -1;
     const char *name = d->as.member.name->as.string.data;
-    if (d->as.member.flags & DESC_VALUE) {
+    int own = object->type == SPY_INSTANCE && !strcmp(name, "__dict__");
+    if ((d->as.member.flags & DESC_VALUE) && !own) {
         if (!strcmp(name, "__class__")) {
             if (value) return set_class(c, object, value);
             spy_error(c, "TypeError", "can't delete __class__ attribute"); return -1;
@@ -13439,7 +13442,7 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
         else errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, class_tname(d->as.member.owner));
         return -1;
     }
-    if (d->as.member.flags & DESC_GENERIC) {
+    if ((d->as.member.flags & DESC_GENERIC) || own) {
         if (name[2] == 'w') { spy_error(c, "AttributeError", "attribute '__weakref__' of 'object' objects is not writable"); return -1; }
         /* subtype_setdict defers to a builtin base's __dict__: a module's is
          * read-only, an exception's cannot be deleted. */
@@ -53479,7 +53482,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
         | T_AWAITABLES},
     {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR) | T_AWAITABLES},
     {"__del__", SLOT_OTHER, SLOT_DEL, T(SPY_GENERATOR) | T(SPY_COROUTINE) | T(SPY_ASYNC_GENERATOR)},
-    {"__contains__", SLOT_OTHER, SLOT_CONTAINS, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
+    {"__contains__", SLOT_OTHER, SLOT_CONTAINS, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_SET_VIEWS},
     {"__getitem__", SLOT_OTHER, SLOT_GETITEM, T_SEQUENCES | T_DICTS | T(SPY_RANGE)},
     {"__setitem__", SLOT_OTHER, SLOT_SETITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
     {"__delitem__", SLOT_OTHER, SLOT_DELITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
@@ -53794,6 +53797,11 @@ static SPYValue *sample_value(SPYContext *c, int type) {
     case SPY_BYTES: return spy_bytes(c, "", 0);
     case SPY_BYTEARRAY: return bytearray_new(c, "", 0);
     case SPY_LIST: case SPY_TUPLE: case SPY_DICT: case SPY_FROZENDICT: case SPY_SET: case SPY_FROZENSET: return value_new(c, type);
+    case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: {
+        SPYValue *view = value_new(c, type);
+        if (view && !(view->as.bound.self = value_new(c, SPY_DICT))) { spy_release(view); view = NULL; }
+        return view;
+    }
     case SPY_RANGE: case SPY_SLICE: {
         SPYValue *zero = spy_int(c, 0), *one = spy_int(c, 1);
         SPYValue *result = zero && one ? type == SPY_RANGE ? range_new(c, zero, one, one) : slice_new(c, zero, one, one) : NULL;
@@ -54369,8 +54377,11 @@ static int register_value_fields(SPYContext *c) {
         {SPY_FUNCTION, SPY_GETSET_DESCRIPTOR, 0,
          "__annotate__ __annotations__ __code__ __defaults__ __dict__ __kwdefaults__ __type_params__"},
         {SPY_NATIVE, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "__self__ __text_signature__"},
-        {SPY_STATICMETHOD, SPY_GETSET_DESCRIPTOR, 0, "__annotations__ __annotate__"},
-        {SPY_CLASSMETHOD, SPY_GETSET_DESCRIPTOR, 0, "__annotations__ __annotate__"},
+        {SPY_STATICMETHOD, SPY_GETSET_DESCRIPTOR, 0, "__annotations__ __annotate__ __dict__"},
+        {SPY_CLASSMETHOD, SPY_GETSET_DESCRIPTOR, 0, "__annotations__ __annotate__ __dict__"},
+        {SPY_DICT_KEYS, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "mapping"},
+        {SPY_DICT_VALUES, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "mapping"},
+        {SPY_DICT_ITEMS, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "mapping"},
         {SPY_MEMORYVIEW, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
          "obj nbytes readonly itemsize format ndim shape strides suboffsets c_contiguous f_contiguous contiguous"},
         {SPY_TEMPLATE, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "strings interpolations"},

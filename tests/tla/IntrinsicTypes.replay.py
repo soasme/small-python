@@ -163,6 +163,7 @@ SOURCES = {
     "method_descr_objclass": 'result = (str.join.__objclass__ is str, str.join.__name__, str.join.__qualname__)',
     "wrapper_descr_call": "result = (str.__dict__['__add__']('a', 'b'), object.__init__.__objclass__ is object)",
     "method_wrapper_self": 'o = object()\nresult = (o.__str__.__self__ is o, o.__str__.__name__)',
+    "view_descriptors": "d = {1: 2}\nks = [type(v) for v in (d.keys(), d.values(), d.items())]\nresult = ([type(k.__dict__['mapping']).__name__ for k in ks], ['isdisjoint' in k.__dict__ for k in ks], ['__contains__' in k.__dict__ for k in ks], ks[0].__dict__['mapping'].__get__(d.keys()) == d, type(staticmethod.__dict__['__dict__']).__name__)",
     "generator_wrappers": "def g(): yield 1\nx = g()\nresult = (type(x.__next__).__name__, type(x.__iter__).__name__, type(x.send).__name__, x.__next__.__objclass__.__name__, hasattr(x.__next__, '__module__'))",
     "class_slot_bound": 'class C: pass\nresult = (type(C.__call__).__name__, type(C.__subclasses__).__name__)',
     "descriptor_kinds": 'async def c(): pass\nasync def a(): yield\nk = lambda t, n: type(vars(t)[n]).__name__\n'

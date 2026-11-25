@@ -836,6 +836,8 @@ Unreleased (0.10.0):
 - a `zip` or `map` whose generator has ended asks its other iterables again on the next call
 - a class body's `NameError` reading `__name__` for `__module__` is raised in the body's frame
 - generators, coroutines and async generators have `__del__`, which finalizes them
+- the dictionary view classes hold `mapping`, and the keys and items classes `isdisjoint`; `dict_values` has no `__contains__`;
+  `staticmethod` and `classmethod` hold a `__dict__` descriptor
 - an import calls a Python `__contains__` of `__lazy_modules__`, the lazy-import filter and its verdict's `__bool__`
   without nesting on the C stack, so it can pause
 - a generic class is made in a frame named `<generic parameters of C>`, which its bases, keywords and body run in and tracebacks show
