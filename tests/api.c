@@ -3478,6 +3478,20 @@ int main(int argc, char **argv) {
     assert(host_list && hint && !spy_call(c, host_list, 1, &hint) && !strcmp(spy_error_type(c), "ValueError"));
     spy_clear_error(c);
     spy_release(hint); spy_release(host_list);
+    /* aiter() and anext() called by the host name the method a descriptor
+     * failed to read. */
+    execute(c, "class HostGone:\n    def __get__(self, o, t=None): raise AttributeError('gone')\n"
+               "class HostAsync:\n    __aiter__ = HostGone()\n    __anext__ = HostGone()\nhost_async = HostAsync()\n");
+    SPYValue *host_async = spy_get_global(c, "host_async");
+    const char *const async_builtins[] = {"aiter", "anext"};
+    for (int i = 0; i < 2; i++) {
+        SPYValue *builtin = spy_get_global(c, async_builtins[i]);
+        assert(builtin && host_async && !spy_call(c, builtin, 1, &host_async) && !strcmp(spy_error_type(c), "AttributeError"));
+        assert(strstr(spy_error_message(c), i ? "does not have __anext__ method" : "does not have __aiter__ method"));
+        spy_clear_error(c);
+        spy_release(builtin);
+    }
+    spy_release(host_async);
 
     SPYContext *other = spy_context_new();
     assert(other);

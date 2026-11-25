@@ -19808,15 +19808,11 @@ static SPYValue *function_named(SPYContext *c, SPYValue *qualname, SPYValue *mod
     mem_free(text.data); spy_release(qualname); spy_release(module);
     return result;
 }
-/* _PyObject_FunctionStr: "module.qualname()", "qualname()" when the module
- * is None or builtins, or str(f) when f has no __qualname__. */
+/* _PyObject_FunctionStr of f, a callable named_plainly: "module.qualname()",
+ * or "qualname()" when the module is None, builtins or missing. */
 static SPYValue *function_str(SPYContext *c, SPYValue *f) {
     SPYValue *qualname = attribute(c, f, "__qualname__"), *module = NULL;
-    if (!qualname) {
-        if (!error_is(c, "AttributeError")) return NULL;
-        spy_clear_error(c);
-        return stringify(c, f, 0);
-    }
+    if (!qualname) return NULL;
     if (!(module = attribute(c, f, "__module__"))) {
         if (!error_is(c, "AttributeError")) { spy_release(qualname); return NULL; }
         spy_clear_error(c);
