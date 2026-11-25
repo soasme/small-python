@@ -8615,6 +8615,13 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
         kept = (last->flags & F_EMITTED) && last->steps_at == p->assigned.steps.mark.at && last->steps_end == program_len(program) &&
                assignment_parsed(p, statement);
     if (!kept || (p->ctx->optimize > 1 && kind == N_EXPR && first->kind == N_STRING)) emitted_drop(p);
+    /* An expression statement, return or raise kept compiles its own steps
+     * now; a module's last expression gives up its pop for the body's value
+     * (module_body_finish). */
+    else if (kind == N_EXPR || kind == N_RETURN || kind == N_RAISE) {
+        compile_statement(p->ctx, program, statement);
+        statement->flags |= F_EMITTED;
+    }
     p->emitting = NULL; p->emitted_len = 0;
     return statement;
 }
@@ -19702,7 +19709,10 @@ static int module_body_finish(Parser *p, SPYValue *unit) {
     while (last->next) last = last->next;
     if (!unit->as.unit.annotate && !unit->as.unit.conditional_annotations) program->entry = 2;
     if (body_statements(p, body, last)) return -1;
-    if (last->kind == N_EXPR && !program->display) { compile_expr(c, program, last->a); emit(c, program, BC_FLOW, last, FLOW_RETURN); }
+    if (last->kind == N_EXPR && !program->display) {
+        if ((last->flags & F_EMITTED) && program->items[program->len - 1].op == BC_POP) program->len--;
+        compile_expr(c, program, last->a); emit(c, program, BC_FLOW, last, FLOW_RETURN);
+    }
     else {
         if (!(last->flags & F_EMITTED)) compile_statement(c, program, last);
         emit(c, program, BC_NONE, NULL, 0); emit(c, program, BC_FLOW, NULL, FLOW_RETURN);
