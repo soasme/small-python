@@ -7903,6 +7903,9 @@ static Node *return_statement(Parser *, Node *);
 static Node *raise_statement(Parser *, Node *);
 static Node *emitted_statement(Parser *, Node *, Node *(*)(Parser *, Node *));
 static Node *delete_statement(Parser *, Node *);
+static Node *assert_statement(Parser *, Node *);
+static size_t assert_test(Parser *, Node *);
+static void assert_end(Parser *, Node *, size_t);
 static void emitted_drop(Parser *);
 /* invalid_match_stmt: a soft-keyword line that failed to parse as anything
  * else may still be a misplaced match header or case clause. */
@@ -8277,14 +8280,8 @@ static Node *statement_body(Parser *p, int emits) {
     if (take_word(p, "pass")) return node(p, N_PASS);
     if (take_word(p, "assert")) {
         n = node(p, N_ASSERT);
-        if (!n || !(n->a = plain_expression(p, 0))) return NULL;
-        if (assert_equals_error(p, n->a)) return NULL;
-        if (take(p, ',')) {
-            n->b = plain_expression(p, 0);
-            if (!n->b || assert_equals_error(p, n->b)) return NULL;
-        }
-        if (p->ctx->optimize) { n->kind = N_PASS; n->a = n->b = NULL; }
-        return n;
+        if (!n) return NULL;
+        return emits ? emitted_statement(p, n, assert_statement) : assert_statement(p, n);
     }
     /* PEP 810: the soft keyword lazy before an import statement. */
     Token *after = &p->tokens[p->pos + 1];
@@ -8385,6 +8382,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     int kept = first && (first->flags & F_EMITTED) && (last->flags & F_EMITTED) && first->steps_at == p->emitting_from.steps.mark.at &&
                (first == last || first->steps_end == last->steps_at) && last->steps_end == program_len(program);
     if (kind == N_DELETE) kept = deletion_parsed(p, statement);
+    if (kind == N_ASSERT) kept = (statement->flags & F_EMITTED) != 0;
     /* An assignment's targets kept as they were parsed come first (target_parsed). */
     if (kind == N_ASSIGN && statement->op == '=' && !p->unassigned)
         kept = (last->flags & F_EMITTED) && last->steps_at == p->assigned.steps.mark.at && last->steps_end == program_len(program) &&
@@ -8402,6 +8400,20 @@ static void emit_back(Parser *p, EmitMark m) {
     for (size_t i = m.nodes; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
     p->emitted_len = m.nodes;
     emit_undo(p->emitting, m.steps);
+}
+/* The test and message of assert statement n; emitted as they are
+ * parsed, the test branches past a jump over the message (assert_test). */
+static Node *assert_statement(Parser *p, Node *n) {
+    if (!(n->a = plain_expression(p, 0))) return NULL;
+    if (assert_equals_error(p, n->a)) return NULL;
+    size_t jump = assert_test(p, n);
+    if (take(p, ',')) {
+        n->b = plain_expression(p, 0);
+        if (!n->b || assert_equals_error(p, n->b)) return NULL;
+    }
+    if (p->ctx->optimize) { n->kind = N_PASS; n->a = n->b = NULL; }
+    else assert_end(p, n, jump);
+    return n;
 }
 /* The targets of del statement n. */
 static Node *delete_statement(Parser *p, Node *n) {
@@ -17931,6 +17943,26 @@ static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *
     pos++;
     if (popped && emit_before(c, p, pos++, BC_POP, popped, 0) == SIZE_MAX) return 0;
     return pos - at;
+}
+/* Assert statement n, its test emitted as it was parsed from the
+ * statement's start: its branch and the jump over its message after it,
+ * as compile_statement lays them out. The jump, or SIZE_MAX. */
+static size_t assert_test(Parser *p, Node *n) {
+    Program *program = p->emitting;
+    if (!program || p->ctx->error_type[0] || !(n->a->flags & F_EMITTED) || n->a->steps_at != p->emitting_from.steps.mark.at ||
+        n->a->steps_end != program->len) return SIZE_MAX;
+    size_t branch = branch_parsed(p->ctx, program, n->a, n), jump = emit(p->ctx, program, BC_JUMP, n, 0);
+    patch(program, branch, program->len);
+    return jump;
+}
+/* Its message, emitted after jump: the assertion's step, n then emitted. */
+static void assert_end(Parser *p, Node *n, size_t jump) {
+    Program *program = p->emitting;
+    if (jump == SIZE_MAX || p->ctx->error_type[0] ||
+        (n->b && (!(n->b->flags & F_EMITTED) || n->b->steps_at != jump + 1 || n->b->steps_end != program->len))) return;
+    emit(p->ctx, program, BC_ASSERT, n, n->b != NULL);
+    patch(program, jump, program->len);
+    if (!p->ctx->error_type[0]) n->flags |= F_EMITTED;
 }
 /* Del statement n, its targets emitted as they were parsed from the
  * statement's start to the end: their deletes. Whether they are, n then
