@@ -18026,28 +18026,23 @@ static int with_target(Parser *p, Node *item, EmitMark before) {
 }
 static int emit_pop(Parser *p, Node *n) { return emit(p->ctx, p->emitting, BC_POP, n, 0) == SIZE_MAX ? -1 : 0; }
 /* Move the steps of from from m on, which jump only among themselves,
- * and its values from v0 to v1, after to's, or with to NULL drop them. */
+ * and its values from v0 to v1, after to's. */
 static int emit_take(SPYContext *c, Program *from, Mark m, size_t v0, size_t v1, Program *to) {
-    size_t count = from->len - m.at, values = v1 - v0, base = to ? to->len : 0;
-    if (to && (grow(c, (void **)&to->items, &to->cap, to->len + count, sizeof(*to->items)) ||
-               grow(c, (void **)&to->values, &to->values_cap, to->values_len + values, sizeof(*to->values)))) return -1;
+    size_t count = from->len - m.at, values = v1 - v0, base = to->len;
+    if (grow(c, (void **)&to->items, &to->cap, to->len + count, sizeof(*to->items)) ||
+        grow(c, (void **)&to->values, &to->values_cap, to->values_len + values, sizeof(*to->values))) return -1;
     Operand **head = m.last ? &m.last->next : &from->operands, *operands = *head;
-    if (to) {
-        for (size_t i = 0; i < count; i++) {
-            Instruction *x = &to->items[to->len + i];
-            *x = from->items[m.at + i];
-            if (steps_target(x)) x->target = (uint32_t)(x->target - m.at + base);
-            if (steps_other(x) && x->other) x->other = (uint32_t)(x->other - m.at + base);
-        }
-        to->len += count;
-        if (operands) { if (to->last) to->last->next = operands; else to->operands = operands; to->last = from->last; }
-        memcpy(to->values + to->values_len, from->values + v0, values * sizeof(*to->values));
-        to->values_len += values;
-        if (from->tested > m.at) to->tested = from->tested - m.at + base;
-    } else {
-        for (Operand *o = operands, *next; o; o = next) { next = o->next; mem_free(o); }
-        for (size_t i = v0; i < v1; i++) spy_release(from->values[i]);
+    for (size_t i = 0; i < count; i++) {
+        Instruction *x = &to->items[to->len + i];
+        *x = from->items[m.at + i];
+        if (steps_target(x)) x->target = (uint32_t)(x->target - m.at + base);
+        if (steps_other(x) && x->other) x->other = (uint32_t)(x->other - m.at + base);
     }
+    to->len += count;
+    if (operands) { if (to->last) to->last->next = operands; else to->operands = operands; to->last = from->last; }
+    memcpy(to->values + to->values_len, from->values + v0, values * sizeof(*to->values));
+    to->values_len += values;
+    if (from->tested > m.at) to->tested = from->tested - m.at + base;
     *head = NULL; from->last = m.last;
     memmove(from->values + v0, from->values + v1, (from->values_len - v1) * sizeof(*from->values));
     from->values_len -= values; from->len = m.at;
