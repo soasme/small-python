@@ -3445,6 +3445,19 @@ static const char *const programs[] = {
     "def fc():\n"
     "    return ['{0[f]:x}|{0[f]:{0[3]}}'.format(FG()), '{0[r]:{1}}|{0[l]:{1}}|{2:{1}}|{0[l]!s:{1}}'.format(FG(), '', [R()]), '{0[r]!r}|{0[r]!s:>3}|{1.r!r}|{1.r!s}|{0[x]!r}'.format(FG(), FA()), ['{0[r]!a:{0[3]}}'.format(FG())]]\n"
     "print(fc())\n",
+    /* A zip or map subclass of more iterables than a class call converts
+     * (adapter_owner) makes its instance as the builtin's call (adapter_step). */
+    "class W:\n"
+    "    def __iter__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return iter([1, 2])\n"
+    "class Z(zip): pass\n"
+    "class M(map): pass\n"
+    "def f():\n"
+    "    z = Z(W(), W(), W(), W(), W(), W(), W(), W(), W())\n"
+    "    m = M(lambda *a: sum(a), W(), W(), W(), W(), W(), W(), W(), W(), W())\n"
+    "    return [type(z).__name__, list(z)[0], type(m).__name__, list(m)]\n"
+    "print(f())\n",
     /* A function's first intrinsic loads them on the machine. */
     "def f():\n"
     "    for i in range(1): pass\n"
