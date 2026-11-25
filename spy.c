@@ -5489,6 +5489,9 @@ static void star_expression_error(Parser *, size_t);
 static int named_equals_error(Parser *, size_t);
 static const char *expression_name(Node *);
 static Node *comprehension(Parser *, Node *, int, EmitMark, Program *);
+static Node *comprehension_items_error(Parser *, Node *, Token *);
+static int clause_ahead(Parser *);
+static int word_at(Parser *, size_t, const char *);
 static Program *comprehension_apart(Parser *, Node *);
 static Mark mark(Program *);
 static void comprehension_apart_undo(Parser *, Node *, EmitMark, Program *);
@@ -6345,7 +6348,10 @@ static Node *atom_node(Parser *p) {
                 item = node(p, N_MAPPING);
                 if (!item || !(item->a = expression(p, 4))) return NULL;
                 span(p, item, item_at);
-                if (open != '{' && keyword(p, "for"))
+                /* invalid_comprehension: an only item, a for clause after it. */
+                int ahead = open != '{' && !n->args && (keyword(p, "for") || keyword(p, "async")) ? clause_ahead(p) : 0;
+                if (ahead < 0) return NULL;
+                if (ahead)
                     return syntax_at(p, item, open == '[' ? "cannot use dict unpacking in list comprehension" : "cannot use dict unpacking in generator expression");
                 if (open != '{' || n->kind == N_SET) return syntax_span(p, item_at, item_at + 1, "cannot use dict unpacking here");
             } else if (take(p, '*')) {
@@ -6377,7 +6383,7 @@ static Node *atom_node(Parser *p) {
             if (open == '{' && item->kind != N_MAPPING && at(p, ':')) {
                 if (item->kind == N_NAMED && !item->op) return syntax(p, "invalid syntax");
                 if (item->kind == N_STAR) return syntax_at(p, item, "cannot use a starred expression in a dictionary key");
-                if (n->kind == N_SET) return syntax(p, "invalid set display");
+                if (n->kind == N_SET) return syntax(p, "invalid syntax");
                 Node *pair = node(p, N_ASSIGN);
                 if (!pair || !expect(p, ':', "invalid syntax")) return NULL;
                 pair->a = item;
@@ -6412,6 +6418,10 @@ static Node *atom_node(Parser *p) {
                 break;
             }
             if (display != SIZE_MAX) display = display_item(p, item, item_start, display);
+            if (at(p, ',') && (word_at(p, p->pos + 1, "for") || word_at(p, p->pos + 1, "async"))) {
+                Token *comma = &p->tokens[p->pos++];
+                return comprehension_items_error(p, n, comma);
+            }
             if (!take(p, ',')) {
                 if (open == '(' && n->args == item) {
                     if (item->kind == N_STAR) return at(p, ')') ? syntax_at(p, item, "cannot use starred expression here") : syntax(p, "invalid syntax");
@@ -7049,6 +7059,47 @@ static Node *assignment_error(Parser *p, size_t start) {
     if (bare_yield) return syntax_at(p, bad, "assignment to yield expression not possible");
     return target_error(p, bad, TARGETS_STAR);
 }
+/* Whether the first for clause of a comprehension follows, as
+ * invalid_comprehension's for_if_clauses reads it: 1; else 0, the parser
+ * back at it, unless its target's error is raised (-1). */
+static int clause_ahead(Parser *p) {
+    size_t at = p->pos;
+    Program *emitting = p->emitting;
+    p->emitting = NULL;
+    take_word(p, "async");
+    Node *t = take_word(p, "for") ? expression_list(p, 4) : NULL;
+    int found = -1;
+    /* invalid_for_if_clause precedes invalid_for_target. */
+    if (t && !keyword(p, "in")) syntax(p, "'in' expected after for-loop variables");
+    else if (t && !target(p, t)) { if (!p->ctx->error_type[0]) target_error(p, t, TARGETS_FOR); }
+    else if (t) { p->pos++; found = expression(p, 1) != NULL; }
+    p->emitting = emitting;
+    if (found <= 0 && (!p->ctx->error_type[0] || !strcmp(p->ctx->error_message, "invalid syntax"))) {
+        spy_clear_error(p->ctx); p->pos = at; found = 0;
+    }
+    return found;
+}
+/* Display n, its items parsed, at a for or async that follows more than
+ * one, or a trailing comma, after its first: invalid_comprehension's
+ * error, over the items of a list or set from the first to the last, or
+ * to the comma; a dictionary's first unpacking, as unpacking in the items
+ * reports it (invalid_starred_expression_unpacking_sequence); else, or
+ * when no for clause follows, invalid syntax at the for. */
+static Node *comprehension_items_error(Parser *p, Node *n, Token *comma) {
+    Node *first = n->args, *last = first;
+    while (last->next) last = last->next;
+    if (n->kind == N_DICT && first->kind == N_MAPPING) {
+        syntax(p, "cannot use dict unpacking here");
+        p->ctx->line = first->line; p->error_start = first->start; p->error_end = first->start + 2;
+        return NULL;
+    }
+    int ahead = n->kind == N_LIST || n->kind == N_SET ? clause_ahead(p) : 0;
+    if (ahead <= 0) return ahead ? NULL : syntax(p, "invalid syntax");
+    syntax(p, "did you forget parentheses around the comprehension target?");
+    p->ctx->line = first->line; p->error_start = first->start;
+    p->error_end = first == last && comma ? comma->start + comma->len : last->end;
+    return NULL;
+}
 /* Comprehension n of the element already parsed, after awaits counted
  * before it: asynchronous when an await or async for is in its own scope,
  * all but its first iterable. A generator expression's own stay its own;
@@ -7057,14 +7108,7 @@ static Node *assignment_error(Parser *p, size_t start) {
 /* Comprehension n, its element parsed since element: only its first
  * iterable is evaluated where it is, the rest in its own program. */
 static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Program *enclosing) {
-    if (n->args->next) {
-        /* invalid_comprehension: the range of the unparenthesized targets. */
-        Node *last = n->args;
-        while (last->next) last = last->next;
-        syntax(p, "did you forget parentheses around the comprehension target?");
-        p->ctx->line = n->args->line; p->error_start = n->args->start; p->error_end = last->end;
-        return NULL;
-    }
+    if (n->args->next) return comprehension_items_error(p, n, NULL);
     n->op = n->kind; n->kind = N_COMPREHENSION;
     if (p->unevaluated) n->flags |= F_UNEVALUATED;
     /* Its element and its clauses but its first iterable emit into its
@@ -18963,27 +19007,16 @@ static int assigns_steps(Program *p, Node *n) {
  * value's first step after it; other, an augmented n's operator. */
 static void assignment_fused(SPYContext *, Program *, Node *, size_t);
 static void compile_assignment(SPYContext *c, Program *p, Node *n) {
+    /* Augmented n's steps, its target's emitted as it was parsed first;
+     * an unaugmented one's were all emitted (assignment_parsed). */
     Node *t = n->a;
-    int item = t->kind == N_INDEX, augmented = n->op != '=';
-    Mark target = mark(p);
-    /* Steps emitted as they were parsed begin with a name's value, or the
-     * name augmented. */
-    Node *first = augmented ? t : n->b;
-    if (first->flags & F_EMITTED) target.at = first->steps_at;
-    if (augmented) {
-        compile_expr(c, p, item ? t->a : t);
-        if (item && !(t->flags & F_EMITTED)) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
-        compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
-        emit(c, p, item ? BC_SAVE_TARGET : BC_STORE, t, !item);
-    } else if (item) {
-        /* The value is evaluated before the item's object and key. */
-        compile_expr(c, p, t->a); compile_expr(c, p, t->b);
-        Mark value = mark(p);
-        compile_expr(c, p, n->b);
-        emit_after(p, target, value, NULL);
-        emit(c, p, BC_SET_TARGET, t, 0); emit(c, p, BC_POP, n, 0);
-    } else { compile_expr(c, p, n->b); emit(c, p, BC_STORE, t, 1); }
-    assignment_fused(c, p, n, target.at);
+    int item = t->kind == N_INDEX;
+    size_t at = t->flags & F_EMITTED ? t->steps_at : p->len;
+    compile_expr(c, p, item ? t->a : t);
+    if (item && !(t->flags & F_EMITTED)) { compile_expr(c, p, t->b); emit(c, p, BC_LOAD_TARGET, t, 0); }
+    compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
+    emit(c, p, item ? BC_SAVE_TARGET : BC_STORE, t, !item);
+    assignment_fused(c, p, n, at);
 }
 /* Assignment n's fused step, before its plain steps from at to the end. */
 static void assignment_fused(SPYContext *c, Program *p, Node *n, size_t at) {
