@@ -138,7 +138,7 @@ typedef struct { size_t final, handler, skip, first, rest; int has_final, except
  * values it leaves above its case's slots, to drops that leave base. */
 typedef struct { size_t pc, temps; } PatternExit;
 /* A pattern's failing exits, and the names its case captures, in a slot each (case_begin). */
-/* Its parser, when its values were parsed apart (pattern_value). */
+/* Its parser, which holds its values parsed apart (pattern_apart). */
 typedef struct { PatternExit *exits; size_t len, cap, base; const char **names; size_t count; struct Parser *parser; } PatternFail;
 typedef struct { PatternFail fail; size_t guard; const char **names; } Case;
 typedef struct Machine Machine;
@@ -5475,7 +5475,6 @@ static Node *apart_expression(Parser *, Node *(*)(Parser *, int), int);
 static Node *loop_target(Parser *, int);
 static Node *annotation_expression(Parser *, Node *(*)(Parser *, int), int);
 static void apart_drop(Parser *, size_t);
-static int apart_owned(Parser *, Node *);
 static int apart_took(Parser *, Program *, Node *);
 static void apart_detach(Parser *, Program *);
 static Node *expression_mode(Parser *, int, int);
@@ -18086,13 +18085,13 @@ static Program *comprehension_begin(Parser *p, Node *n, EmitMark element) {
  * comprehension's for at its own depth. */
 static int comprehension_ahead(Parser *p) {
     size_t depth = 0;
-    for (size_t i = p->pos; i < p->len; i++) {
+    /* The tokens end with T_END. */
+    for (size_t i = p->pos;; i++) {
         int kind = p->tokens[i].kind;
         if (kind == '(' || kind == '[' || kind == '{') depth++;
         else if ((kind == ')' || kind == ']' || kind == '}') && !depth--) return 0;
         else if (!depth && (word_at(p, i, "for") || kind == T_NL || kind == T_END)) return kind == T_NAME;
     }
-    return 0;
 }
 /* At display n's first item, a comprehension's for ahead, in a program that loads names unlike a comprehension's: its
  * scope and its own program begun, which its element then emits into;
@@ -18232,7 +18231,7 @@ static void apart_detach(Parser *p, Program *program) {
     for (size_t i = p->apart_len; i--;) if (p->aparts[i].program == program) { p->aparts[i] = p->aparts[--p->apart_len]; return; }
 }
 /* Value, parsed apart from from on: its program kept for the code that
- * compiles it (apart_take) when its steps are all its own, else undone;
+ * compiles it (apart_took) when its steps are all its own, else undone;
  * then emitting again. -1 on an error. */
 static int apart_end(Parser *p, Node *value, Program *emitting, EmitMark from) {
     SPYContext *c = p->ctx;
@@ -18244,30 +18243,17 @@ static int apart_end(Parser *p, Node *value, Program *emitting, EmitMark from) {
     p->emitting = emitting;
     return c->error_type[0] ? -1 : 0;
 }
-/* Where value was parsed apart into a program the parse holds, or SIZE_MAX. */
-static size_t apart_of(Parser *p, Node *value) {
-    for (size_t i = p->apart_len; i--;) {
-        struct Apart *apart = &p->aparts[i];
-        if (apart->value == value && apart->start == value->start && apart->kind == value->kind) return i;
-    }
-    return SIZE_MAX;
-}
-static int apart_owned(Parser *p, Node *value) { return apart_of(p, value) != SIZE_MAX; }
-/* Value's steps, parsed apart, moved after to's. Whether they were. */
+/* Value's steps, parsed apart into a program the parse holds, moved
+ * after to's. Whether they were: not when an error undid them. */
 static int apart_took(Parser *p, Program *to, Node *value) {
-    size_t i = apart_of(p, value);
+    size_t i = p->apart_len;
+    while (i-- && (p->aparts[i].value != value || p->aparts[i].start != value->start || p->aparts[i].kind != value->kind)) {}
     if (i == SIZE_MAX) return 0;
     Program *from = p->aparts[i].program;
     p->aparts[i] = p->aparts[--p->apart_len];
     int moved = !emit_take(p->ctx, from, (Mark){0, NULL}, 0, from->values_len, to);
     free_program(from);
     return moved;
-}
-/* Value's steps after to's: those it was parsed apart into, or compiled
- * from its nodes. */
-static void apart_take(Parser *p, Program *to, Node *value) {
-    if (!apart_owned(p, value)) compile_expr(p->ctx, to, value);
-    else apart_took(p, to, value);
 }
 /* The program of annotation function fn, made as it is parsed, its
  * scope's: its annotations' dictionary, then each entry that ran stored
@@ -18283,7 +18269,7 @@ static int annotate_program(Parser *p, Node *fn) {
     if (pc != SIZE_MAX) program->items[pc].target = body->op == 1;
     for (Node *entry = body->args; entry && !c->error_type[0]; entry = entry->next) {
         size_t start = program->len;
-        apart_take(p, program, entry->a->kind == N_STAR ? entry->a->a : entry->a);
+        apart_took(p, program, entry->a->kind == N_STAR ? entry->a->a : entry->a);
         annotation_steps(c, program, body->op == 1, body, entry, start);
     }
     emit(c, program, BC_FLOW, body, FLOW_RETURN);
@@ -19071,12 +19057,6 @@ static void pattern_close(SPYContext *c, Program *p, PatternFail *fail, Node *n)
     *fail = (PatternFail){.names = fail->names, .count = fail->count, .parser = fail->parser};
 }
 static void compile_pattern(SPYContext *, Program *, Node *, size_t, PatternFail *);
-static void apart_take(Parser *, Program *, Node *);
-/* A pattern's value, parsed apart (pattern_apart) when fail's parser is known. */
-static void pattern_value(SPYContext *c, Program *p, Node *value, PatternFail *fail) {
-    if (fail->parser) apart_take(fail->parser, p, value);
-    else compile_expr(c, p, value);
-}
 /* Move the steps of the patterns from a on after those from b on
  * (emit_after), with the exits of fail among them; where they begin. */
 static Mark pattern_after(Program *p, PatternFail *fail, Mark a, Mark b) {
@@ -19166,7 +19146,7 @@ static void compile_mapping_pattern(SPYContext *c, Program *p, Node *n, size_t t
             patterns = mark(p); exit = fail->len;
         }
         Mark key = mark(p);
-        pattern_value(c, p, entry->a, fail);
+        apart_took(fail->parser, p, entry->a);
         patterns = pattern_after(p, fail, patterns, key);
         /* subject, keys, missing, the keys seen, get, then each value found. */
         compile_pattern(c, p, entry->b, temps + 3 - size, fail);
@@ -19200,7 +19180,7 @@ static void compile_class_pattern(SPYContext *c, Program *p, Node *n, size_t tem
     size_t positional = 0, keywords = 0, index = 0;
     for (Node *item = n->args; item; item = item->next) positional++;
     for (Node *entry = n->c; entry; entry = entry->next) keywords++;
-    pattern_value(c, p, n->a, fail);
+    apart_took(fail->parser, p, n->a);
     emit_pattern(c, p, n, P_CLASS, 0);
     emit_pattern(c, p, n, P_INSTANCE, 0);
     pattern_test(c, p, n, fail, temps + 1);
@@ -19234,7 +19214,7 @@ static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, Pa
     case PT_WILDCARD: emit(c, p, BC_POP, n, 0); return;
     case PT_CAPTURE: pattern_bind(c, p, n, n->a, temps, fail); return;
     case PT_VALUE: case PT_LITERAL:
-        pattern_value(c, p, n->a, fail);
+        apart_took(fail->parser, p, n->a);
         if (n->a->kind == N_NONE || n->a->kind == N_BOOL) emit_pattern(c, p, n, P_IS, 0);
         else emit(c, p, BC_BINARY, n, T_EQ);
         pattern_test(c, p, n, fail, temps - 1);
