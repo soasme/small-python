@@ -489,9 +489,15 @@ expression's checks and binding (`EV_NAMED`), where a comprehension's
 iterables and clauses are (`EV_ITERABLE`, `EV_CLAUSE`), an annotated
 assignment's annotation (`EV_WITHIN`, `EV_ANNOTATE`), and a generic's
 table of type parameters, once their bounds' scopes exist
-(`EV_GENERIC`). Each is one function the walk calls too. Over a
-quarter of CPython's `Lib`, the walk now visits no node; it remains for
-sources the parser does not record, until it can be deleted.
+(`EV_GENERIC`), each one function the walk called too.
+
+The second step is done: every statement records its analysis as it
+is parsed, and `scope_visit` and the walk's helpers are gone.
+`analyse_statements` takes each statement's range in its scope, running
+the take-time events and recording the rest for the replay, in the
+order the walk visited them. Before the walk was deleted, a build that
+stopped on any statement left to it compiled all 2,060 files of
+CPython's `Lib` and ran the 1,147 specification tests without stopping.
 
 Each stage must preserve Python 3.15 semantics and report its own measured
 cost. Compiling every operation in the existing pausing mode is not an
