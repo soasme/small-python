@@ -18522,6 +18522,8 @@ static Node *parsed_steps(Parser *p, Node *n, size_t at) {
     n->steps_at = (uint32_t)at; n->steps_end = (uint32_t)p->emitting->len;
     n->flags |= F_EMITTED;
     p->emitted[p->emitted_len++] = n;
+    /* Its summary in its program's mode, while its operands are whole (expands). */
+    expands(n, modes(p->emitting));
     return c->error_type[0] ? NULL : n;
 }
 /* An and or or n, compiled as it is parsed: its left operand's test and
