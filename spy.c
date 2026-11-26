@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK };
 /* An EV_ERROR's SyntaxError, reported at its node. */
 static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
@@ -9127,12 +9127,27 @@ static int header_recorded(Parser *, Node *);
 static int definition_recorded(Parser *, Node *);
 static int self_attribute(Node *);
 static int scope_static(SPYContext *, Scope *, Node *);
+static int scope_check(SPYContext *, Scope *, Node *);
+static int scope_annotation_error(SPYContext *, Scope *, Node *);
+static int scope_await(SPYContext *, Scope *, Node *);
 static int lambda_recorded(Parser *, Node *);
 static int comprehension_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_LAMBDA) return lambda_recorded(p, n);
+    /* An await or yield is checked where the walk takes it, then its operand. */
+    if (n->kind == N_AWAIT || n->kind == N_YIELD) {
+        Node *a = n->a;
+        if (a && (!(a->flags & F_EVENTS) || (a->flags & F_ANALYSED) || a->events_end != p->events.len)) return 0;
+        size_t at = a ? a->events_at : p->events.len;
+        if (event_into(p->ctx, &p->events, EV_CHECK, 0, NULL, n, NULL)) return -1;
+        Event check = p->events.items[p->events.len - 1];
+        memmove(p->events.items + at + 1, p->events.items + at, (p->events.len - 1 - at) * sizeof(Event));
+        p->events.items[at] = check;
+        n->events_at = (uint32_t)at;
+        return parse_recorded(p, n, NULL, 1);
+    }
     if (n->kind == N_DEF || n->kind == N_CLASS) return definition_recorded(p, n);
     if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
     if (n->kind == N_FOR) return bound_recorded(p, n, n->args, NULL, n->a);
@@ -9705,6 +9720,7 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
                 status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
         } else if (v->kind == EV_LEAVE) depth--;
         else if (v->kind == EV_STATIC) status = scope_static(c, in, v->n);
+        else if (v->kind == EV_CHECK) status = scope_check(c, in, v->n);
         else if (v->kind == EV_NODES) in->nodes += v->flags;
         /* A name used, its node counted. */
         else if (v->kind == EV_USE) { in->nodes++; status = event_into(c, c->events, EV_BIND, S_USE, in, v->n, v->n); }
@@ -9789,6 +9805,21 @@ static int scope_static(SPYContext *c, Scope *scope, Node *n) {
         outer->statics[outer->statics_len++] = name;
         break;
     }
+    return 0;
+}
+/* Check await or yield n in scope, where it may not be or makes its
+ * function asynchronous or a generator. */
+static int scope_check(SPYContext *c, Scope *scope, Node *n) {
+    if (scope_annotation_error(c, scope, n)) return -1;
+    if (n->kind == N_AWAIT) return scope_await(c, scope, n);
+    if (scope->kind == S_COMPREHENSION) {
+        int comprehension = scope->owner->op;
+        node_error(c, n);
+        errorf(c, "SyntaxError", "'yield' inside %s", comprehension == N_LIST ? "list comprehension" :
+               comprehension == N_SET ? "set comprehension" : comprehension == N_DICT ? "dict comprehension" : "generator expression");
+        return -1;
+    }
+    if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = scope->op = 2;
     return 0;
 }
 static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
@@ -10058,19 +10089,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         if (scope_node(c, scope, n->c) || symbols_later(c, scope, from, mid)) return -1;
         return c->events ? event(c, EV_ANNOTATION, 0, scope, n, NULL) : annotated_symbol(scope, n);
     }
-    case N_AWAIT:
-        return scope_annotation_error(c, scope, n) || scope_await(c, scope, n) || scope_node(c, scope, n->a) ? -1 : 0;
-    case N_YIELD:
-        if (scope_annotation_error(c, scope, n)) return -1;
-        if (scope->kind == S_COMPREHENSION) {
-            int comprehension = scope->owner->op;
-            node_error(c, n);
-            errorf(c, "SyntaxError", "'yield' inside %s", comprehension == N_LIST ? "list comprehension" :
-                   comprehension == N_SET ? "set comprehension" : comprehension == N_DICT ? "dict comprehension" : "generator expression");
-            return -1;
-        }
-        if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = scope->op = 2;
-        return scope_node(c, scope, n->a);
+    case N_AWAIT: case N_YIELD: return scope_check(c, scope, n) || scope_node(c, scope, n->a) ? -1 : 0;
     case N_NAME: return scope_record(c, scope, n, S_USE);
     case N_STRING: return n->annotate ? scope_string_annotation(c, n) : 0;
     case N_GLOBAL: case N_NONLOCAL:
