@@ -131,6 +131,15 @@ typedef struct { Node *node; size_t line; const char *start, *end; } Site;
 /* An analysis error waiting for the end of the parse: its class, message
  * (owned), line and source span. */
 typedef struct { char type[64]; char *message; size_t line; const char *start, *end; Node *open; } Analysis;
+/* A step of analysis that reads or changes the symbols, recorded as the
+ * walk meets it and replayed after (analyse_statements): a binding of n
+ * (scope_bind) reported at at, a global added (EV_ADD), a mark of the
+ * symbols so far and the move of those since the mark before it after
+ * those since (scope_later), an annotated assignment n's target and its
+ * symbol's annotation, or a type parameter n. */
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM };
+typedef struct { int kind; unsigned flags; Scope *scope; Node *n, *at; } Event;
+typedef struct Events { Event *items; size_t len, cap; } Events;
 static int scope_walk(SPYContext *, Scope *, Node *);
 /* A try statement's shape and its instructions to patch (try_begin). */
 typedef struct { size_t final, handler, skip, first, rest; int has_final, excepts, star, otherwise; } Try;
@@ -618,6 +627,7 @@ struct SPYContext {
     SPYValue *next_call; /* The builtin next, as dict.fromkeys calls it on a machine (fromkeys_items). */
     SPYValue *ascii_field; /* The builtin ascii, as an f-string's !a field calls it while calls can pause. */
     int lazy_made; /* Whether a lazy import object was made, which a module's attribute may hold (attribute_step). */
+    struct Events *events; /* While analysis records (analyse_statements), where its symbol steps wait to replay. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -8986,8 +8996,9 @@ static int nodes_finish(Parser *p, Node *start) {
 }
 /* Set aside the pending error of analysing module statements in *a, as
  * analyse_statements reports it; a MemoryError is not set aside. */
-static int analysis_defer(Parser *p, Analysis *a) {
-    SPYContext *c = p->ctx;
+static int analysis_take(SPYContext *c, Analysis *a);
+static int analysis_defer(Parser *p, Analysis *a) { return analysis_take(p->ctx, a); }
+static int analysis_take(SPYContext *c, Analysis *a) {
     if (!strcmp(c->error_type, "MemoryError")) return -1;
     const char *message = c->error_text ? c->error_text : c->error_message;
     mem_free(a->message);
@@ -8999,6 +9010,34 @@ static int analysis_defer(Parser *p, Analysis *a) {
     a->open = c->node_open && !c->node_open->spanned ? c->node_open : NULL;
     spy_clear_error(c);
     return 0;
+}
+/* Replay the symbol steps that analysis recorded, as far as the first
+ * error. */
+static void scope_later(Scope *, size_t, size_t);
+static int scope_bind(SPYContext *, Scope *, Node *, unsigned, Node *);
+static int scope_global(SPYContext *, Scope *, Node *);
+static int annotated_target(SPYContext *, Scope *, Node *);
+static int annotated_symbol(Scope *, Node *);
+static int type_parameter(SPYContext *, Scope *, Node *);
+static int events_replay(SPYContext *c, Events *e) {
+    size_t *marks = NULL, len = 0, cap = 0;
+    int status = 0;
+    for (size_t i = 0; i < e->len && !status; i++) {
+        Event *v = &e->items[i];
+        switch (v->kind) {
+        case EV_BIND: status = scope_bind(c, v->scope, v->n, v->flags, v->at); break;
+        case EV_ADD: status = scope_global(c, v->scope, v->n); break;
+        case EV_MARK:
+            if ((status = grow(c, (void **)&marks, &cap, len + 1, sizeof(*marks)))) break;
+            marks[len++] = v->scope->len; break;
+        case EV_LATER: scope_later(v->scope, marks[len - 2], marks[len - 1]); len -= 2; break;
+        case EV_ANNOTATED: status = annotated_target(c, v->scope, v->n); break;
+        case EV_ANNOTATION: status = annotated_symbol(v->scope, v->n); break;
+        default: status = type_parameter(c, v->scope, v->n); break;
+        }
+    }
+    mem_free(marks);
+    return status;
 }
 /* Analyse statements n and those after it, or a compound statement's
  * header, as they are parsed, in the scope of the body being parsed, as
@@ -9016,7 +9055,20 @@ static int analyse_statements(Parser *p, Node *n) {
     /* A lazy import names the try statements around it (scope_node). */
     int tries = scope->tries, status = 0;
     scope->tries = p->body.tries;
-    if (scope_walk(c, scope, n)) status = analysis_defer(p, &p->symbols);
+    /* The walk records its symbol steps, replayed after it; its own error
+     * comes after theirs. */
+    Events events = {0};
+    Analysis walked = {0};
+    c->events = &events;
+    int failed = scope_walk(c, scope, n);
+    c->events = NULL;
+    if (failed && analysis_take(c, &walked)) status = -1;
+    else {
+        c->node_start = c->node_end = NULL; c->node_open = NULL;
+        if (events_replay(c, &events)) { mem_free(walked.message); status = analysis_defer(p, &p->symbols); }
+        else if (failed) p->symbols = walked;
+    }
+    mem_free(events.items);
     scope->tries = tries;
     for (; n; n = n->next) n->flags |= F_ANALYSED;
     c->node_start = start; c->node_end = end;
@@ -9255,7 +9307,25 @@ static int scope_unhold(SPYContext *c, Scope *scope) {
     }
     return 0;
 }
+static int event(SPYContext *c, int kind, unsigned flags, Scope *scope, Node *n, Node *at) {
+    Events *e = c->events;
+    if (grow(c, (void **)&e->items, &e->cap, e->len + 1, sizeof(*e->items))) return -1;
+    e->items[e->len++] = (Event){kind, flags, scope, n, at};
+    return 0;
+}
+/* The number of scope's symbols, *at, for a later move (symbols_later). */
+static int symbols_mark(SPYContext *c, Scope *scope, size_t *at) {
+    *at = scope->len;
+    return c->events ? event(c, EV_MARK, 0, scope, NULL, NULL) : 0;
+}
+static void scope_later(Scope *, size_t, size_t);
+static int symbols_later(SPYContext *c, Scope *scope, size_t from, size_t mid) {
+    if (c->events) return event(c, EV_LATER, 0, scope, NULL, NULL);
+    scope_later(scope, from, mid);
+    return 0;
+}
 static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node *at) {
+    if (c->events) return event(c, EV_BIND, flags, scope, n, at);
     if ((flags & (S_LOCAL | S_PARAM)) && !strcmp(n->name.text, "__debug__")) {
         node_error(c, at); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1;
     }
@@ -9287,6 +9357,13 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
     return 0;
 }
 static int scope_record(SPYContext *c, Scope *scope, Node *n, unsigned flags) { return scope_bind(c, scope, n, flags, n); }
+/* Name n is global in scope, with no check. */
+static int scope_global(SPYContext *c, Scope *scope, Node *n) {
+    if (c->events) return event(c, EV_ADD, S_GLOBAL, scope, n, NULL);
+    Symbol *global = scope_add(c, scope, n->name.text, n->line);
+    if (global) global->flags |= S_GLOBAL;
+    return global ? 0 : -1;
+}
 static int scope_walk(SPYContext *, Scope *, Node *);
 static int scope_node(SPYContext *, Scope *, Node *);
 static int check_debug_target(SPYContext *c, Node *n, int deleting) {
@@ -9423,18 +9500,21 @@ static int generic_class_scope(SPYContext *c, Scope *generic, Node *n) {
     memcpy(generic->name, "<generic parameters of ", 23); memcpy(generic->name + 23, name, len); generic->name[23 + len] = '>';
     return 0;
 }
+/* Type parameter param, bound in scope; another of its name is an error. */
+static int type_parameter(SPYContext *c, Scope *scope, Node *param) {
+    if (scope_symbol(scope, param->name.text)) {
+        c->line = param->line;
+        errorf(c, "SyntaxError", "duplicate type parameter '%s'", source_name(param));
+        return -1;
+    }
+    return scope_record(c, scope, param, S_LOCAL);
+}
 /* The annotation scope binding a definition's type parameters. */
 static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
     if (!scope_of(c, generic, parent)) return NULL;
     generic->scope->within = "the definition of a generic";
-    for (Node *param = generic->args; param; param = param->next) {
-        if (scope_symbol(generic->scope, param->name.text)) {
-            c->line = param->line;
-            errorf(c, "SyntaxError", "duplicate type parameter '%s'", source_name(param));
-            return NULL;
-        }
-        if (scope_record(c, generic->scope, param, S_LOCAL)) return NULL;
-    }
+    for (Node *param = generic->args; param; param = param->next)
+        if (c->events ? event(c, EV_TYPEPARAM, 0, generic->scope, param, NULL) : type_parameter(c, generic->scope, param)) return NULL;
     static const char *const defaults[] = {"a TypeVar default", "a TypeVarTuple default", "a ParamSpec default"};
     size_t count = 0;
     for (Node *param = generic->args; param; param = param->next) count++;
@@ -9494,6 +9574,34 @@ static int scope_mapping_keys(SPYContext *c, Node *n) {
     spy_release(seen);
     return c->error_type[0] ? -1 : 0;
 }
+/* Annotated assignment n's target: an annotated global or nonlocal is
+ * an error; a parenthesized name without a value is neither bound nor
+ * used, and a function's local only annotated is no code's local until
+ * it is used (held). */
+static int annotated_target(SPYContext *c, Scope *scope, Node *n) {
+    Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->name.text) : NULL;
+    if (symbol && scope->kind != S_MODULE && (symbol->flags & (S_GLOBAL | S_NONLOCAL))) {
+        node_error(c, n);
+        errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->name.text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
+        return -1;
+    }
+    int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
+    int held = !n->c && n->a->kind == N_NAME && !bare && scope->kind == S_FUNCTION && !symbol;
+    size_t i = 0;
+    while (held && i < scope->held_len && strcmp(scope->held[i], n->a->name.text)) i++;
+    if (held && i == scope->held_len) {
+        const char *name = scope_text(c, scope, n->a->name.text);
+        if (check_debug_target(c, n->a, 0) || !name || grow(c, (void **)&scope->held, &scope->held_cap, scope->held_len + 1, sizeof(*scope->held))) return -1;
+        scope->held[scope->held_len++] = name;
+    } else if (!held && !bare && scope_target(c, scope, n->a, n->c ? 1 : -1)) return -1;
+    return 0;
+}
+/* Annotated assignment n's simple name target is annotated. */
+static int annotated_symbol(Scope *scope, Node *n) {
+    Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->name.text) : NULL;
+    if (symbol) symbol->flags |= S_ANNOT;
+    return 0;
+}
 static int scope_visit(SPYContext *, Scope *, Node *);
 static void scope_reverse(Symbol *s, size_t i, size_t j) { for (; i + 1 < j; i++, j--) { Symbol t = s[i]; s[i] = s[j - 1]; s[j - 1] = t; } }
 /* Move the symbols scope added from from to mid after those added since:
@@ -9522,26 +9630,9 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
     scope->nodes++;
     switch (n->kind) {
     case N_ANNASSIGN: {
-        Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->name.text) : NULL;
-        if (symbol && scope->kind != S_MODULE && (symbol->flags & (S_GLOBAL | S_NONLOCAL))) {
-            node_error(c, n);
-            errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->name.text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
-            return -1;
-        }
-        /* The target, the annotation, then the value. A parenthesized name
-         * without a value is neither bound nor used. */
-        int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
-        /* A function's local only annotated is no code's local until it is used. */
-        int held = !n->c && n->a->kind == N_NAME && !bare && scope->kind == S_FUNCTION && !symbol;
-        size_t from = scope->len;
-        size_t i = 0;
-        while (held && i < scope->held_len && strcmp(scope->held[i], n->a->name.text)) i++;
-        if (held && i == scope->held_len) {
-            const char *name = scope_text(c, scope, n->a->name.text);
-            if (check_debug_target(c, n->a, 0) || !name || grow(c, (void **)&scope->held, &scope->held_cap, scope->held_len + 1, sizeof(*scope->held))) return -1;
-            scope->held[scope->held_len++] = name;
-        } else if (!held && !bare && scope_target(c, scope, n->a, n->c ? 1 : -1)) return -1;
-        size_t mid = scope->len;
+        size_t from, mid;
+        if (symbols_mark(c, scope, &from) || (c->events ? event(c, EV_ANNOTATED, 0, scope, n, NULL) : annotated_target(c, scope, n)) ||
+            symbols_mark(c, scope, &mid)) return -1;
         /* An annotation no __annotate__ evaluates is still analysed, in this
          * scope, as an annotation; a module's or class's, in the scope of
          * the __annotate__ that evaluates it (annotation_scope). */
@@ -9556,10 +9647,8 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
             Scope *annotate = annotation_scope(c, scope, n->line);
             if (!annotate || scope_node(c, annotate, n->b)) return -1;
         }
-        if (scope_node(c, scope, n->c)) return -1;
-        scope_later(scope, from, mid);
-        if ((n->flags & F_SIMPLE) && n->a->kind == N_NAME && (symbol = scope_symbol(scope, n->a->name.text))) symbol->flags |= S_ANNOT;
-        return 0;
+        if (scope_node(c, scope, n->c) || symbols_later(c, scope, from, mid)) return -1;
+        return c->events ? event(c, EV_ANNOTATION, 0, scope, n, NULL) : annotated_symbol(scope, n);
     }
     case N_AWAIT:
         return scope_annotation_error(c, scope, n) || scope_await(c, scope, n) || scope_node(c, scope, n->a) ? -1 : 0;
@@ -9601,13 +9690,10 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         return 0;
     case N_ASSIGN: {
         /* The targets before the value. */
-        size_t from = scope->len;
-        if (scope_target(c, scope, n->a, 1)) return -1;
+        size_t from, mid;
+        if (symbols_mark(c, scope, &from) || scope_target(c, scope, n->a, 1)) return -1;
         for (Node *target = n->args; target; target = target->next) if (scope_target(c, scope, target, 1)) return -1;
-        size_t mid = scope->len;
-        if (scope_node(c, scope, n->b)) return -1;
-        scope_later(scope, from, mid);
-        return 0;
+        return symbols_mark(c, scope, &mid) || scope_node(c, scope, n->b) || symbols_later(c, scope, from, mid) ? -1 : 0;
     }
     case N_DELETE:
         return scope_target(c, scope, n->a, 0) ? -1 : 0;
@@ -9627,11 +9713,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         if (!owner || scope_record(c, owner, n->a, S_LOCAL)) return -1;
         /* A module's name is global in the scopes between, the
          * comprehensions and an annotation scope holding them. */
-        for (Scope *s = scope; owner->kind == S_MODULE && s != owner; s = s->parent) {
-            Symbol *global = scope_add(c, s, n->a->name.text, n->a->line);
-            if (!global) return -1;
-            global->flags |= S_GLOBAL;
-        }
+        for (Scope *s = scope; owner->kind == S_MODULE && s != owner; s = s->parent) if (scope_global(c, s, n->a)) return -1;
         return scope_node(c, scope, n->b);
     }
     case N_TYPEALIAS: {
@@ -9642,9 +9724,8 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
     case N_DEF: case N_LAMBDA: case N_CLASS: {
         /* The name, the defaults, then the decorators; the name is stored
          * last. */
-        size_t from = scope->len;
-        if (n->kind != N_LAMBDA && scope_bind(c, scope, n->a, S_LOCAL, n)) return -1;
-        size_t mid = scope->len;
+        size_t from, mid;
+        if (symbols_mark(c, scope, &from) || (n->kind != N_LAMBDA && scope_bind(c, scope, n->a, S_LOCAL, n)) || symbols_mark(c, scope, &mid)) return -1;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_node(c, scope, param->a)) return -1;
         if (scope_walk(c, scope, n->decorators)) return -1;
@@ -9657,8 +9738,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         if (n->kind == N_CLASS && n->params && generic_class_scope(c, outer, n)) return -1;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_record(c, n->scope, param, S_PARAM)) return -1;
-        if (scope_annotations(c, outer, n->annotate, "an annotation")) return -1;
-        scope_later(scope, from, mid);
+        if (scope_annotations(c, outer, n->annotate, "an annotation") || symbols_later(c, scope, from, mid)) return -1;
         return scope_walk(c, n->scope, n->b);
     }
     case N_COMPREHENSION: {
@@ -9685,11 +9765,9 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
     }
     case N_FOR: {
         /* The target before the iterable. */
-        size_t from = scope->len;
-        if (scope_target(c, scope, n->args, 1)) return -1;
-        size_t mid = scope->len;
-        if (scope_node(c, scope, n->a)) return -1;
-        scope_later(scope, from, mid);
+        size_t from, mid;
+        if (symbols_mark(c, scope, &from) || scope_target(c, scope, n->args, 1) || symbols_mark(c, scope, &mid) ||
+            scope_node(c, scope, n->a) || symbols_later(c, scope, from, mid)) return -1;
         return scope_walk(c, scope, n->b) || scope_walk(c, scope, n->c) ? -1 : 0;
     }
     case N_WITH:

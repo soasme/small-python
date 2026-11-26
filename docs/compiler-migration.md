@@ -413,6 +413,47 @@ statements emitted before the error.
    executable tree allocation, scope tree walks and node-based code caches.
    Keep source spans and definition identity without retaining a tree.
 
+Scope analysis moves into the parse through an analysis log, the
+counterpart of emission. Each use, binding, declaration and check that
+the symbol-table walk makes becomes an event: its kind, the name's text,
+the scope it applies to, and the source span and line an error reports.
+Events hold no node. At a statement's end the parser replays them into
+the scopes in order, with the binding rules and diagnostics the walk has
+now, so the first error is still the first in the walk's order. The log
+has the emission stack's operations: a mark and a rollback for a parse
+that backtracks or a statement that recompiles, a rotation where the
+symbol table visits in another order than the source (targets before
+values, a conditional's test before its branches, a dictionary's keys
+before its values, a definition's name after its defaults), and a move
+of a range of events to another scope, as a comprehension's element
+moves to the comprehension's program. A name records no event when it
+completes: its parent records a use when it consumes the name as a
+value, and an assignment, `for`, `with`, `except`, `import`, pattern or
+`del` a binding when it consumes it as a target.
+
+The move is made in two steps, each checked by dumping every scope's
+symbols, flags and order with the first analysis error over the
+specification tests and CPython's `Lib`, before and after. First the
+walk records events and replays them, with no change in behaviour. Then
+each construct records its own events as it is parsed, and the walk
+skips what was recorded, until no statement is walked and `scope_visit`
+is gone.
+
+The first step is done. While `analyse_statements` walks a statement,
+`c->events` collects its symbol steps: a binding (`scope_bind`), a
+global a named expression adds in the scopes it passes, a mark of a
+scope's symbols and the move that follows it (`scope_later`), an
+annotated assignment's target and annotation, and a type parameter.
+Checks that read no symbol, scope creation and the node count stay in
+the walk. The replay follows the walk, so an error in a replayed step
+is reported before one the walk stopped at, which the walk met later.
+A walk that now goes on past a binding error makes more scopes for a
+statement that does not compile; no other scope changes. Over the 1,147
+specification tests the dumps of every scope's symbols, flags and order
+and the tests' output are the same before and after but for those
+failing compiles, and so are the 2,060 files of CPython's `Lib`
+compiled with `compile`.
+
 Each stage must preserve Python 3.15 semantics and report its own measured
 cost. Compiling every operation in the existing pausing mode is not an
 acceptable substitute for this work: it changes the runtime costs without
