@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE };
 /* An EV_ERROR's SyntaxError, reported at its node. */
 static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
@@ -9131,13 +9131,16 @@ static int definition_recorded(Parser *, Node *);
 static int self_attribute(Node *);
 static int scope_static(SPYContext *, Scope *, Node *);
 static int scope_check(SPYContext *, Scope *, Node *);
+static Scope *annotation_scope(SPYContext *, Scope *, size_t);
 static int scope_annotation_error(SPYContext *, Scope *, Node *);
 static int scope_await(SPYContext *, Scope *, Node *);
 static int lambda_recorded(Parser *, Node *);
 static int comprehension_recorded(Parser *, Node *);
+static int annotated_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
+    if (n->kind == N_ANNASSIGN) return annotated_recorded(p, n);
     if (n->kind == N_LAMBDA) return lambda_recorded(p, n);
     /* An await or yield is checked where the walk takes it, then its operand. */
     if (n->kind == N_AWAIT || n->kind == N_YIELD) {
@@ -9439,6 +9442,31 @@ static int case_recorded(Parser *p, Node *n, size_t at) {
     if (!scope) return -1;
     size_t end = e->len;
     if (pattern_events(p, scope, n->a) || (n->b && events_again(p, n->b)) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
+    size_t count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
+}
+/* Record annotated assignment n's analysis (scope_visit): its target,
+ * checked and bound as replayed; its annotation, where it is or in the
+ * scope's __annotate__ scope; its value; the target's symbols moved
+ * after the rest. */
+static int annotated_recorded(Parser *p, Node *n) {
+    Events *e = &p->events;
+    Node *b = n->b, *v = n->c;
+    if (!(b->flags & F_EVENTS) || (b->flags & F_ANALYSED) || (v && (!(v->flags & F_EVENTS) || (v->flags & F_ANALYSED)))) return 0;
+    Scope *scope = parse_scope(p);
+    if (!scope) return -1;
+    size_t at = target_at(n->a, b->events_at), end = e->len;
+    if (at > b->events_at) at = b->events_at;
+    int here = !(n->flags & F_SIMPLE) || scope->kind == S_FUNCTION || (n->flags & F_FUTURE);
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_ANNOTATED, 0, scope, n, NULL) ||
+        event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) ||
+        event_into(p->ctx, e, here ? EV_WITHIN : EV_ANNOTATE, here ? 0 : (unsigned)n->line, scope, NULL, NULL) ||
+        events_again(p, b) || event_into(p->ctx, e, here ? EV_UNWITHIN : EV_LEAVE, 0, scope, NULL, NULL) ||
+        (v && events_again(p, v)) || event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) ||
+        event_into(p->ctx, e, EV_ANNOTATION, 0, scope, n, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     size_t count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
     e->len = at + count;
@@ -9779,7 +9807,8 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
      * outside them: a definition's scope is made where the walk would
      * make it, in the scope around it, and entered. */
     Scope **entered = NULL;
-    size_t depth = 0, cap = 0;
+    size_t depth = 0, cap = 0, nodes = 0;
+    const char *within = NULL;
     int status = 0;
     for (uint32_t i = n->events_at; i < n->events_end && !status; i++) {
         Event *v = &from->items[i];
@@ -9787,7 +9816,15 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
         if (v->kind == EV_ENTER) {
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
                 status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
+        } else if (v->kind == EV_ANNOTATE) {
+            /* The __annotate__ scope of the scope taken in. */
+            Scope *annotate = NULL;
+            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
+                status = (annotate = annotation_scope(c, in, v->flags)) ? (entered[depth++] = annotate, 0) : -1;
         } else if (v->kind == EV_LEAVE) depth--;
+        /* An annotation analysed where it is, its nodes not counted. */
+        else if (v->kind == EV_WITHIN) { within = in->within; nodes = in->nodes; in->within = "an annotation"; }
+        else if (v->kind == EV_UNWITHIN) { in->within = within; in->nodes = nodes; }
         else if (v->kind == EV_STATIC) status = scope_static(c, in, v->n);
         else if (v->kind == EV_CHECK) status = scope_check(c, in, v->n);
         else if (v->kind == EV_NODES) in->nodes += v->flags;
