@@ -400,6 +400,25 @@ same, step for step, in both execution modes for every spec test except
 programs that a compile error discards, which now hold the steps their
 statements emitted before the error.
 
+The fifteenth stage deletes the compiler from nodes. Over every
+specification test, the C API tests, the allocation-failure tests and
+all 2,060 files of CPython's `Lib`, a probe build found no expression
+compiled from its nodes and no statement compiled from them at its end:
+a statement whose steps do not line up as kept is met only once an error
+is pending, which discards the program. So `compile_node` emits a node's
+own steps only, called as the parser completes the node, its operands'
+already emitted; `emit_absent` emits the None of an absent value. An
+assignment's targets always become their stores (`target_parsed` no
+longer undoes them), a `def`'s decorators and defaults and a class's
+header are always those parsed, and the store, target and method-callee
+compilers that took nodes are gone. The undos that valid programs
+reached go too: a keyword argument's name and an assignment expression's
+target are read without emitting a load (`NAME '='`, `NAME ':='`), and a
+yield statement adjusts its yield steps in place. Every program is the
+same, step for step, as before over those inputs. What still reads a
+node is a node's own step (its kind, operator and operands' shapes) and
+a statement's own steps at its end: the next stage replaces those reads.
+
 ## Remaining stages
 
 1. Emit expressions from the parser, in place of the finished
