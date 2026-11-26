@@ -1,5 +1,6 @@
 # spec: PLS-315 13.12, 8.6
-# description: name := e binds in the enclosing scope and returns the value; where it may appear.
+# description: name := e binds in the enclosing scope and returns the value;
+# where it may appear, and that its target is an unparenthesized name.
 from harness import *
 
 assert_eq((x := 5), 5)
@@ -27,3 +28,10 @@ assert_compiles("(x := 1)\ny = (x := 1)\nf(k=(x := 1))\nf(x := 1)\n")
 assert_eq(assert_syntax_error("(a.b := 1)\n").msg, "cannot use assignment expressions with attribute")
 assert_eq(assert_syntax_error("(a[0] := 1)\n").msg, "cannot use assignment expressions with subscript")
 assert_eq(assert_syntax_error("((a, b) := 1)\n").msg, "cannot use assignment expressions with tuple")
+# The target is a name alone: a parenthesized name is no target, wherever
+# the expression is, and a reserved word is none.
+for source in ("[(x) := 1]\n", "y = ((x) := 1)\n", "if (x) := 1: pass\n", "{(x) := 1}\n", "(True := 1)\n"):
+    name = "True" if "True" in source else "name"
+    assert_eq(assert_syntax_error(source).msg, "cannot use assignment expressions with " + name, source)
+for source in ("f((x) := 1)\n", "f(True := 1)\n"):
+    assert_eq(assert_syntax_error(source).msg, "invalid syntax", source)

@@ -4799,7 +4799,7 @@ static Node *template_parsed(Parser *, Node *);
 static int augmented_target(Parser *, Node *);
 static Node *format_parsed(Parser *, Node *);
 static Node *starred_parsed(Parser *, Node *);
-static Node *yield_unmade(Parser *, Node *);
+static int yield_kept(Parser *, Node *);
 static void debug_text(Parser *, Node *, Node *);
 static int events_before(Parser *, Node *, Node *);
 static void target_parsed(Parser *, Node *);
@@ -6609,27 +6609,26 @@ static int call_arguments(Parser *p, Node *n) {
             }
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
-            size_t start = p->pos, recorded = p->events.len;
-            arg = expression_mode(p, 0, 2);
-            if (arg && at(p, '=')) {
-                Token *name = &p->tokens[start];
-                /* A keyword's name, parsed as a name, emits nothing and is no use. */
-                emit_back(p, before); p->events.len = recorded;
+            size_t start = p->pos;
+            /* A keyword's name, NAME '=', is read as no expression: it
+             * emits nothing and is no use of the name. */
+            int named = at(p, T_NAME) && !reserved(peek(p)) && start + 1 < p->len && p->tokens[start + 1].kind == '=';
+            arg = named ? identifier(p) : expression_mode(p, 0, 2);
+            if (arg && !named && at(p, '=')) {
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {
                     char message[64];
                     snprintf(message, sizeof(message), "cannot assign to %s", expression_name(arg));
                     syntax_span(p, start, p->pos + 1, message); return -1;
                 }
-                if (name->kind != T_NAME || reserved(name) || start + 1 >= p->len || p->tokens[start + 1].kind != '=') {
-                    /* invalid_kwarg: the range runs from the expression to its '='. */
-                    syntax(p, "expression cannot contain assignment, perhaps you meant \"==\"?");
-                    p->ctx->line = arg->line; p->error_start = arg->start; return -1;
-                }
+                /* invalid_kwarg: the range runs from the expression to its '='. */
+                syntax(p, "expression cannot contain assignment, perhaps you meant \"==\"?");
+                p->ctx->line = arg->line; p->error_start = arg->start; return -1;
+            }
+            if (arg && named) {
                 p->pos++;
                 if (at(p, ',') || at(p, ')')) { syntax_span(p, start, p->pos, "expected argument value expression"); return -1; }
                 if (arg->original) { mem_free(arg->name.text); arg->name.text = arg->original; arg->original = NULL; }
-                /* A keyword is no use of its name. */
-                arg->kind = N_KEYWORD; arg->flags &= ~F_EVENTS;
+                arg->kind = N_KEYWORD;
                 for (Node *a = n->args; a; a = a->next)
                     if (a->kind == N_KEYWORD && !strcmp(a->name.text, arg->name.text)) {
                         char message[256];
@@ -6693,6 +6692,7 @@ static int call_arguments(Parser *p, Node *n) {
 }
 static Node *expression_inner(Parser *p, int min, int named) {
     Node *left;
+    int target = 0; /* Whether left is a named expression's target. */
     /* Operations begin where their first operand does, parentheses included. */
     size_t first = p->pos;
     EmitMark value = min == 0 ? emit_mark(p) : (EmitMark){0}; /* A conditional's value's steps begin here. */
@@ -6749,7 +6749,13 @@ static Node *expression_inner(Parser *p, int min, int named) {
         size_t await_line = peek(p)->line, atom_start;
         int awaiting = take_word(p, "await");
         atom_start = p->pos;
+        /* A named expression's target, NAME ':=', is stored, not read: it emits nothing. */
+        Program *emitting = p->emitting;
+        if (min == 0 && named && !awaiting && at(p, T_NAME) && !reserved(peek(p)) && p->pos + 1 < p->len && p->tokens[p->pos + 1].kind == T_WALRUS) {
+            p->emitting = NULL; target = 1;
+        }
         left = span(p, atom(p), atom_start);
+        p->emitting = emitting;
         if (!left) return NULL;
         while (at(p, '(') || at(p, '[') || at(p, '.')) {
             int kind = peek(p)->kind;
@@ -6859,7 +6865,8 @@ static Node *expression_inner(Parser *p, int min, int named) {
     }
 assignment_expression:
     if (min == 0 && named && take(p, T_WALRUS)) {
-        if (left->kind != N_NAME) {
+        /* Its target is a name alone, unparenthesized (invalid_named_expression). */
+        if (!target) {
             /* A call argument has no invalid_named_expression alternative. */
             if (named == 2) { p->pos--; return syntax(p, "invalid syntax"); }
             char message[96];
@@ -6868,8 +6875,6 @@ assignment_expression:
         }
         Node *n = node(p, N_NAMED);
         if (!n) return NULL;
-        /* The name is stored, not read. */
-        emit_back(p, value);
         n->a = left; n->b = plain_expression(p, 0);
         if (!n->b) return NULL;
         if (n->b->kind == N_NAMED && !n->b->op) return syntax(p, "invalid syntax");
@@ -8796,13 +8801,14 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     p->emitting = program; p->unassigned = 0;
     Node *statement = rest(p, n), *first = NULL, *last = NULL;
     int kind = statement ? statement->kind : N_PASS;
-    if (kind == N_EXPR && statement->a->kind == N_YIELD && !statement->a->op) first = last = yield_unmade(p, statement->a);
-    else if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
+    int yields = kind == N_EXPR && statement->a->kind == N_YIELD && !statement->a->op;
+    if (kind == N_EXPR || kind == N_RETURN) first = last = statement->a;
     else if (kind == N_ASSIGN)
         first = statement->op == '=' ? statement->b : statement->a, last = statement->b;
     else if (kind == N_RAISE) first = statement->a, last = statement->b ? statement->b : first;
     int kept = first && (first->flags & F_EMITTED) && (last->flags & F_EMITTED) && first->steps_at == p->emitting_from.steps.mark.at &&
                (first == last || first->steps_end == last->steps_at) && last->steps_end == program_len(program);
+    if (yields) kept = yield_kept(p, statement->a);
     if (kind == N_DELETE) kept = deletion_parsed(p, statement);
     if (kind == N_ASSERT) kept = (statement->flags & F_EMITTED) != 0;
     if (kind == N_ANNASSIGN) kept = annotated_parsed(p, statement);
@@ -8815,6 +8821,7 @@ static Node *emitted_statement(Parser *p, Node *n, Node *(*rest)(Parser *, Node 
     /* An expression statement, return or raise kept compiles its own steps
      * now; a module's last expression gives up its pop for the body's value
      * (module_body_finish). */
+    else if (yields) statement->flags |= F_EMITTED;
     else if (kind == N_EXPR || kind == N_RETURN || kind == N_RAISE) {
         compile_statement(p->ctx, program, statement);
         statement->flags |= F_EMITTED;
@@ -19088,19 +19095,16 @@ static Node *starred_parsed(Parser *p, Node *n) {
         program->items[start].other = a->kind == N_STAR ? 0 : program->items[start].other + 1;
     return parsed_steps(p, n, start);
 }
-/* Yield n, a statement of its own, emitted as parsed up to the end: its
- * steps but its value's are undone, the statement yielding as its own
- * (compile_statement). Its value, or NULL. */
-static Node *yield_unmade(Parser *p, Node *n) {
+/* Yield n, a statement of its own, emitted as parsed from its start to
+ * the end: it drops the value sent rather than giving it, its steps'
+ * args, a leaf's own step's too, 2 above an expression's (compile_expr).
+ * Whether they were. */
+static int yield_kept(Parser *p, Node *n) {
     Program *program = p->emitting;
-    Node *value = n->a;
-    if (!value || !(n->flags & F_EMITTED) || n->steps_end != program->len || !(value->flags & F_EMITTED)) return NULL;
-    emit_drop(program, program->len - 1);
-    /* A leaf's own step went before its value's, which then begin where
-     * they were recorded to (compile_expr). */
-    if (yields_leaf(program, n)) emit_drop(program, n->steps_at);
-    n->flags &= ~F_EMITTED;
-    return value;
+    if (!(n->flags & F_EMITTED) || n->steps_at != p->emitting_from.steps.mark.at || n->steps_end != program->len) return 0;
+    program->items[program->len - 1].arg = 2;
+    if (yields_leaf(program, n)) program->items[n->steps_at].arg = 3;
+    return 1;
 }
 /* The steps of text, a literal emitted after those of value up to the
  * end, put before them; a literal's own no operands to move. */

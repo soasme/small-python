@@ -32,7 +32,7 @@ Snippets == {"soft_keywords_as_names", "match_soft", "return_star", "assign_star
              "def_slash_first", "def_params_full", "def_duplicate_param", "def_default_order",
              "slice_tuple", "subscript_star", "with_parenthesized", "except_star", "except_mixed",
              "except_unparenthesized", "except_unparenthesized_as", "try_alone", "walrus_if",
-             "walrus_unparenthesized_stmt", "unpack_targets", "two_starred_targets", "fstring_debug",
+             "walrus_unparenthesized_stmt", "walrus_parenthesized_target", "unpack_targets", "two_starred_targets", "fstring_debug",
              "tstring", "type_stmt", "class_type_params", "annotated_single", "annotated_tuple",
              "assign_literal", "assign_call", "conditional_without_else", "print_statement",
              "missing_comma", "else_alone", "return_outside", "break_outside", "continue_outside",
@@ -105,6 +105,8 @@ Snippet(s) ==
       [] s = "try_alone" -> "SyntaxError: expected 'except' or 'finally' block"
       [] s = "walrus_if" -> "'compiled'"
       [] s = "walrus_unparenthesized_stmt" -> "SyntaxError: invalid syntax"
+      \* an assignment expression's target is a name alone, in any expression
+      [] s = "walrus_parenthesized_target" -> "SyntaxError: cannot use assignment expressions with name"
       [] s = "unpack_targets" -> "'compiled'"
       [] s = "two_starred_targets" -> "SyntaxError: multiple starred expressions in assignment"
       [] s = "fstring_debug" -> "'compiled'"
