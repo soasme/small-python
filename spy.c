@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE, EV_NAMED, EV_ITERABLE, EV_CLAUSE };
 /* An EV_ERROR's SyntaxError, reported at its node. */
 static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
@@ -9131,6 +9131,7 @@ static int definition_recorded(Parser *, Node *);
 static int self_attribute(Node *);
 static int scope_static(SPYContext *, Scope *, Node *);
 static int scope_check(SPYContext *, Scope *, Node *);
+static int scope_named(SPYContext *, Scope *, Node *, int);
 static Scope *annotation_scope(SPYContext *, Scope *, size_t);
 static int scope_annotation_error(SPYContext *, Scope *, Node *);
 static int scope_await(SPYContext *, Scope *, Node *);
@@ -9142,6 +9143,26 @@ static int parse_children(Parser *p, Node *n) {
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_ANNASSIGN) return annotated_recorded(p, n);
     if (n->kind == N_LAMBDA) return lambda_recorded(p, n);
+    /* A named expression is checked and binds where the walk takes it,
+     * around its value. */
+    if (n->kind == N_NAMED) {
+        Node *a = n->a, *b = n->b;
+        if (!(b->flags & F_EVENTS) || (b->flags & F_ANALYSED) || b->events_end != p->events.len) return 0;
+        /* The target's recorded use, just before the value's, becomes the check. */
+        int used = (a->flags & F_EVENTS) != 0;
+        if (used && (a->events_end != b->events_at || a->events_end - a->events_at != 1)) return 0;
+        size_t at = used ? a->events_at : b->events_at;
+        if (event_into(p->ctx, &p->events, EV_NAMED, 0, NULL, n, NULL)) return -1;
+        Event before = p->events.items[--p->events.len];
+        if (!used) {
+            memmove(p->events.items + at + 1, p->events.items + at, (p->events.len - at) * sizeof(Event));
+            p->events.len++;
+        }
+        p->events.items[at] = before;
+        if (event_into(p->ctx, &p->events, EV_NAMED, 1, NULL, n, NULL)) return -1;
+        n->events_at = (uint32_t)at;
+        return parse_recorded(p, n, NULL, 1);
+    }
     /* An await or yield is checked where the walk takes it, then its operand. */
     if (n->kind == N_AWAIT || n->kind == N_YIELD) {
         Node *a = n->a;
@@ -9382,11 +9403,16 @@ static int comprehension_recorded(Parser *p, Node *n) {
     }
     if (total != e->len - at) return 0;
     size_t end = e->len;
-    if ((n->a->a && events_again(p, n->a->a)) || event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
+    if (event_into(p->ctx, e, EV_ITERABLE, 1, NULL, NULL, NULL) || (n->a->a && events_again(p, n->a->a)) ||
+        event_into(p->ctx, e, EV_ITERABLE, 0, NULL, NULL, NULL) || event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
     for (Node *clause = n->a; clause; clause = clause->b) {
-        if (clause->kind == N_FOR && target_events(p, NULL, clause->args, 1)) return -1;
+        int loop = clause->kind == N_FOR;
+        if (event_into(p->ctx, e, EV_CLAUSE, 0, NULL, clause, NULL) || (loop && target_events(p, NULL, clause->args, 1))) return -1;
+        if (loop && event_into(p->ctx, e, EV_ITERABLE, 1, NULL, NULL, NULL)) return -1;
         if (clause != n->a && clause->a && events_again(p, clause->a)) return -1;
+        if (loop && event_into(p->ctx, e, EV_ITERABLE, 0, NULL, NULL, NULL)) return -1;
     }
+    if (event_into(p->ctx, e, EV_CLAUSE, 0, NULL, NULL, NULL)) return -1;
     if ((element && events_again(p, element)) || (key && events_again(p, key)) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ||
         event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL)) return -1;
     size_t count = e->len - end;
@@ -9840,6 +9866,10 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
         else if (v->kind == EV_UNWITHIN) { in->within = within; in->nodes = nodes; }
         else if (v->kind == EV_STATIC) status = scope_static(c, in, v->n);
         else if (v->kind == EV_CHECK) status = scope_check(c, in, v->n);
+        else if (v->kind == EV_NAMED) status = scope_named(c, in, v->n, (int)v->flags);
+        /* A comprehension's iterable, where no named expression may be; its clause. */
+        else if (v->kind == EV_ITERABLE) in->iterables += v->flags ? 1 : -1;
+        else if (v->kind == EV_CLAUSE) in->clause = v->n;
         else if (v->kind == EV_NODES) in->nodes += v->flags;
         /* A name used, its node counted. */
         else if (v->kind == EV_USE) { in->nodes++; status = event_into(c, c->events, EV_BIND, S_USE, in, v->n, v->n); }
@@ -9924,6 +9954,26 @@ static int scope_static(SPYContext *c, Scope *scope, Node *n) {
         outer->statics[outer->statics_len++] = name;
         break;
     }
+    return 0;
+}
+/* Named expression n in scope, before its value (after 0) or after it:
+ * where it may not be; its target bound, in a comprehension before its
+ * value in the scope found first (scope_named_owner), else after it. */
+static Scope *scope_named_owner(SPYContext *, Scope *, Node *);
+static int scope_named(SPYContext *c, Scope *scope, Node *n, int after) {
+    if (after) return scope->kind == S_COMPREHENSION ? 0 : scope_record(c, scope, n->a, S_LOCAL);
+    if (scope_annotation_error(c, scope, n)) return -1;
+    for (Scope *s = scope; s; s = s->parent) if (s->iterables) {
+        node_error(c, n);
+        spy_error(c, "SyntaxError", "assignment expression cannot be used in a comprehension iterable expression");
+        return -1;
+    }
+    if (scope->kind != S_COMPREHENSION) return 0;
+    Scope *owner = scope_named_owner(c, scope, n);
+    if (!owner || scope_record(c, owner, n->a, S_LOCAL)) return -1;
+    /* A module's name is global in the scopes between, the
+     * comprehensions and an annotation scope holding them. */
+    for (Scope *s = scope; owner->kind == S_MODULE && s != owner; s = s->parent) if (scope_global(c, s, n->a)) return -1;
     return 0;
 }
 /* Check await or yield n in scope, where it may not be or makes its
@@ -10248,22 +10298,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
     case N_KEYWORD:
         if (!strcmp(n->name.text, "__debug__")) { node_error(c, n); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1; }
         return scope_node(c, scope, n->a);
-    case N_NAMED: {
-        if (scope_annotation_error(c, scope, n)) return -1;
-        for (Scope *s = scope; s; s = s->parent) if (s->iterables) {
-            node_error(c, n);
-            spy_error(c, "SyntaxError", "assignment expression cannot be used in a comprehension iterable expression");
-            return -1;
-        }
-        /* In a comprehension, its target binds in the scope found first. */
-        if (scope->kind != S_COMPREHENSION) return scope_node(c, scope, n->b) || scope_record(c, scope, n->a, S_LOCAL) ? -1 : 0;
-        Scope *owner = scope_named_owner(c, scope, n);
-        if (!owner || scope_record(c, owner, n->a, S_LOCAL)) return -1;
-        /* A module's name is global in the scopes between, the
-         * comprehensions and an annotation scope holding them. */
-        for (Scope *s = scope; owner->kind == S_MODULE && s != owner; s = s->parent) if (scope_global(c, s, n->a)) return -1;
-        return scope_node(c, scope, n->b);
-    }
+    case N_NAMED: return scope_named(c, scope, n, 0) || scope_node(c, scope, n->b) || scope_named(c, scope, n, 1) ? -1 : 0;
     case N_TYPEALIAS: {
         if (scope_record(c, scope, n->a, S_LOCAL)) return -1;
         Scope *outer = n->params ? scope_generic(c, scope, n->params) : scope;
