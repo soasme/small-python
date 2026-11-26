@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC };
 /* An EV_ERROR's SyntaxError, reported at its node. */
 static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
@@ -9032,7 +9032,11 @@ static Node *operator_right(Node *);
 static SPYValue *unary(SPYContext *, int, SPYValue *);
 /* Optimization level 2 keeps no docstrings: each becomes pass, so __doc__ is None. */
 static void drop_docstring(Node *body) {
-    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) { body->kind = N_PASS; body->a = NULL; }
+    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) {
+        body->kind = N_PASS; body->a = NULL;
+        /* Its analysis is its own node's, the last of its events. */
+        if (body->flags & F_EVENTS) body->events_at = body->events_end - 1;
+    }
 }
 static int compile_generator(SPYContext *, Node *);
 static int comprehension_finish(SPYContext *, Node *);
@@ -9121,6 +9125,8 @@ static Node *child_next(Children *k) {
 static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
 static int header_recorded(Parser *, Node *);
 static int definition_recorded(Parser *, Node *);
+static int self_attribute(Node *);
+static int scope_static(SPYContext *, Scope *, Node *);
 static int lambda_recorded(Parser *, Node *);
 static int comprehension_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
@@ -9136,9 +9142,7 @@ static int parse_children(Parser *p, Node *n) {
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
                                           N_ASSERT, N_PASS, N_BREAK, N_CONTINUE, N_JOINED, N_FORMAT, N_TEMPLATE,
                                           N_INTERPOLATION, N_IF, N_WHILE, N_TRY};
-    /* A docstring is left to the walk: it may become a pass (docstring_pass). */
     if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
-        (n->kind == N_EXPR && n->a->kind == N_STRING) ||
         (n->kind == N_KEYWORD && !strcmp(n->name.text, "__debug__"))) return 0;
     Events *e = &p->events;
     size_t at = e->len, total = 0, next = e->len;
@@ -9166,8 +9170,8 @@ static int parse_children(Parser *p, Node *n) {
     return parse_recorded(p, n, NULL, 1);
 }
 /* Whether target t's analysis can be built from its parts' recorded
- * events (scope_target): not one that reaches __debug__ or a self
- * attribute, whose checks and class statics stay with the walk. */
+ * events (scope_target): not one that reaches __debug__, whose check
+ * stays with the walk. */
 static int target_recorded(Node *t) {
     if (t->kind == N_STAR) return target_recorded(t->a);
     if (t->kind == N_LIST || t->kind == N_TUPLE) {
@@ -9176,7 +9180,7 @@ static int target_recorded(Node *t) {
     }
     if (!(t->flags & F_EVENTS) || (t->flags & F_ANALYSED)) return 0;
     if (t->kind == N_NAME) return strcmp(t->name.text, "__debug__") != 0;
-    if (t->kind == N_ATTR) return strcmp(t->b->name.text, "__debug__") && !(t->a->kind == N_NAME && !strcmp(t->a->name.text, "self"));
+    if (t->kind == N_ATTR) return strcmp(t->b->name.text, "__debug__") != 0;
     return t->kind == N_INDEX;
 }
 /* Append node t's recorded events to the log. */
@@ -9189,14 +9193,17 @@ static int events_again(Parser *p, Node *t) {
     return 0;
 }
 /* Append the analysis of target t, a name bound in scope; a list's,
- * tuple's or starred item's its items', uncounted. */
-static int target_events(Parser *p, Scope *scope, Node *t) {
-    if (t->kind == N_STAR) return target_events(p, scope, t->a);
+ * tuple's or starred item's its items', uncounted; a stored attribute
+ * of self a class's static first. */
+static int target_events(Parser *p, Scope *scope, Node *t, int store) {
+    if (t->kind == N_STAR) return target_events(p, scope, t->a, store);
     if (t->kind == N_LIST || t->kind == N_TUPLE) {
-        for (Node *item = t->args; item; item = item->next) if (target_events(p, scope, item)) return -1;
+        for (Node *item = t->args; item; item = item->next) if (target_events(p, scope, item, store)) return -1;
         return 0;
     }
-    return t->kind == N_NAME ? event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t) : events_again(p, t);
+    if (t->kind == N_NAME) return event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t);
+    if (store && self_attribute(t) && event_into(p->ctx, &p->events, EV_STATIC, 0, scope, t, NULL)) return -1;
+    return events_again(p, t);
 }
 /* Where target t's recorded events begin: its first name's or part's. */
 static size_t target_at(Node *t, size_t otherwise) {
@@ -9223,7 +9230,7 @@ static int header_recorded(Parser *p, Node *n) {
     for (Node *item = first; item; item = with ? item->next : NULL) {
         Node *b = with ? item->b : del ? item->a : item->c;
         if (!del && item->a && events_again(p, item->a)) return -1;
-        if (b && (b->kind == N_NAME && n->kind == N_EXCEPT ? event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, b, n) : target_events(p, scope, b)))
+        if (b && (b->kind == N_NAME && n->kind == N_EXCEPT ? event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, b, n) : target_events(p, scope, b, !del)))
             return -1;
     }
     if (event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
@@ -9343,7 +9350,7 @@ static int comprehension_recorded(Parser *p, Node *n) {
     size_t end = e->len;
     if ((n->a->a && events_again(p, n->a->a)) || event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
     for (Node *clause = n->a; clause; clause = clause->b) {
-        if (clause->kind == N_FOR && target_events(p, NULL, clause->args)) return -1;
+        if (clause->kind == N_FOR && target_events(p, NULL, clause->args, 1)) return -1;
         if (clause != n->a && clause->a && events_again(p, clause->a)) return -1;
     }
     if ((element && events_again(p, element)) || (key && events_again(p, key)) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ||
@@ -9365,8 +9372,8 @@ static int bound_recorded(Parser *p, Node *n, Node *target, Node *rest, Node *va
     Scope *scope = parse_scope(p);
     if (!scope) return -1;
     size_t at = target_at(target, value->events_at), end = e->len;
-    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, target)) return -1;
-    for (Node *t = rest; t; t = t->next) if (target_events(p, scope, t)) return -1;
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, target, 1)) return -1;
+    for (Node *t = rest; t; t = t->next) if (target_events(p, scope, t, 1)) return -1;
     if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || events_again(p, value) ||
         event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     size_t count = e->len - end;
@@ -9697,6 +9704,7 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
                 status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
         } else if (v->kind == EV_LEAVE) depth--;
+        else if (v->kind == EV_STATIC) status = scope_static(c, in, v->n);
         else if (v->kind == EV_NODES) in->nodes += v->flags;
         /* A name used, its node counted. */
         else if (v->kind == EV_USE) { in->nodes++; status = event_into(c, c->events, EV_BIND, S_USE, in, v->n, v->n); }
@@ -9769,6 +9777,20 @@ static int check_debug_target(SPYContext *c, Node *n, int deleting) {
         for (Node *item = n->args; item; item = item->next) if (check_debug_target(c, item, deleting)) return -1;
     return 0;
 }
+/* Whether n is an attribute of self. */
+static int self_attribute(Node *n) { return n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self"); }
+/* Stored attribute n of self is a static attribute of the class nearest
+ * around scope. */
+static int scope_static(SPYContext *c, Scope *scope, Node *n) {
+    for (Scope *outer = scope->parent; outer; outer = outer->parent) {
+        if (outer->kind != S_CLASS) continue;
+        const char *name = scope_text(c, outer, source_name(n->b));
+        if (!name || grow(c, (void **)&outer->statics, &outer->statics_cap, outer->statics_len + 1, sizeof(*outer->statics))) return -1;
+        outer->statics[outer->statics_len++] = name;
+        break;
+    }
+    return 0;
+}
 static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
     if (!n) return 0;
     if (check_debug_target(c, n, store == 0)) return -1;
@@ -9778,15 +9800,7 @@ static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
         for (Node *item = n->args; item; item = item->next) if (scope_target(c, scope, item, store)) return -1;
         return 0;
     }
-    if (store > 0 && n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self")) {
-        for (Scope *outer = scope->parent; outer; outer = outer->parent) {
-            if (outer->kind != S_CLASS) continue;
-            const char *name = scope_text(c, outer, source_name(n->b));
-            if (!name || grow(c, (void **)&outer->statics, &outer->statics_cap, outer->statics_len + 1, sizeof(*outer->statics))) return -1;
-            outer->statics[outer->statics_len++] = name;
-            break;
-        }
-    }
+    if (store > 0 && self_attribute(n) && scope_static(c, scope, n)) return -1;
     return scope_node(c, scope, n);
 }
 static int scope_await(SPYContext *c, Scope *scope, Node *n) {
