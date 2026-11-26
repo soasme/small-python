@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE, EV_NAMED, EV_ITERABLE, EV_CLAUSE, EV_GENERIC };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE, EV_NAMED, EV_ITERABLE, EV_CLAUSE, EV_GENERIC, EV_TARGET };
 /* What an annotation function entered (EV_ENTER) is within, by its flags;
  * 2 enters a string annotation's scope. */
 static const char *const enter_within[] = {NULL, "an annotation", NULL, "a TypeVar bound", "a TypeVar constraint",
@@ -9141,11 +9141,14 @@ static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
 static int header_recorded(Parser *, Node *);
 static int definition_recorded(Parser *, Node *);
 static int alias_recorded(Parser *, Node *);
+static int events_first(Parser *, Node *, int, unsigned);
+static int debug_named(Node *);
 static int self_attribute(Node *);
 static int scope_static(SPYContext *, Scope *, Node *);
 static int scope_check(SPYContext *, Scope *, Node *);
 static Scope *string_scope(SPYContext *, Node *);
 static int generic_table(SPYContext *, Node *);
+static int check_debug_target(SPYContext *, Node *, int);
 static int scope_named(SPYContext *, Scope *, Node *, int);
 static Scope *annotation_scope(SPYContext *, Scope *, size_t);
 static int scope_annotation_error(SPYContext *, Scope *, Node *);
@@ -9200,8 +9203,7 @@ static int parse_children(Parser *p, Node *n) {
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
                                           N_ASSERT, N_PASS, N_BREAK, N_CONTINUE, N_JOINED, N_FORMAT, N_TEMPLATE,
                                           N_INTERPOLATION, N_IF, N_WHILE, N_TRY, N_MATCH};
-    if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
-        (n->kind == N_KEYWORD && !strcmp(n->name.text, "__debug__"))) return 0;
+    if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate)) return 0;
     Events *e = &p->events;
     size_t at = e->len, total = 0, next = e->len;
     int ordered = 1;
@@ -9225,11 +9227,34 @@ static int parse_children(Parser *p, Node *n) {
         memcpy(e->items + at, e->items + e->len, total * sizeof(Event));
     }
     n->events_at = (uint32_t)at;
+    /* A keyword __debug__ is checked first, where the walk takes it. */
+    if (n->kind == N_KEYWORD && debug_named(n) && events_first(p, n, EV_TARGET, 0)) return -1;
     return parse_recorded(p, n, NULL, 1);
 }
+/* Put an event of kind and flags on n first in the log's last range,
+ * n's from its start. */
+static int events_first(Parser *p, Node *n, int kind, unsigned flags) {
+    Events *e = &p->events;
+    if (event_into(p->ctx, e, kind, flags, NULL, n, NULL)) return -1;
+    Event first = e->items[--e->len];
+    if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + 1, sizeof(Event))) return -1;
+    memmove(e->items + n->events_at + 1, e->items + n->events_at, (e->len - n->events_at) * sizeof(Event));
+    e->items[n->events_at] = first; e->len++;
+    return 0;
+}
+/* Whether target or keyword n names __debug__, itself, as an attribute
+ * or among its items (check_debug_target). */
+static int debug_named(Node *n) {
+    if (n->kind == N_STAR) return debug_named(n->a);
+    if (n->kind == N_LIST || n->kind == N_TUPLE) {
+        for (Node *item = n->args; item; item = item->next) if (debug_named(item)) return 1;
+        return 0;
+    }
+    Node *name = n->kind == N_NAME || n->kind == N_KEYWORD ? n : n->kind == N_ATTR ? n->b : NULL;
+    return name && !strcmp(name->name.text, "__debug__");
+}
 /* Whether target t's analysis can be built from its parts' recorded
- * events (scope_target): not one that reaches __debug__, whose check
- * stays with the walk. */
+ * events (scope_target). */
 static int target_recorded(Node *t) {
     if (t->kind == N_STAR) return target_recorded(t->a);
     if (t->kind == N_LIST || t->kind == N_TUPLE) {
@@ -9237,9 +9262,7 @@ static int target_recorded(Node *t) {
         return 1;
     }
     if (!(t->flags & F_EVENTS) || (t->flags & F_ANALYSED)) return 0;
-    if (t->kind == N_NAME) return strcmp(t->name.text, "__debug__") != 0;
-    if (t->kind == N_ATTR) return strcmp(t->b->name.text, "__debug__") != 0;
-    return t->kind == N_INDEX;
+    return t->kind == N_NAME || t->kind == N_ATTR || t->kind == N_INDEX;
 }
 /* Move node t's events, the log's last, before node n's, just before
  * them, as the walk takes t first. */
@@ -9272,17 +9295,20 @@ static int events_again(Parser *p, Node *t) {
     e->len += count;
     return 0;
 }
-/* Append the analysis of target t, a name bound in scope; a list's,
- * tuple's or starred item's its items', uncounted; a stored attribute
- * of self a class's static first. */
+/* Append the analysis of target t, stored (store 1), deleted (0) or
+ * only annotated (-1), as scope_target's: one naming __debug__ checked
+ * first; a name bound in scope; a list's, tuple's or starred item's its
+ * items', uncounted; a stored attribute of self a class's static
+ * first. */
 static int target_events(Parser *p, Scope *scope, Node *t, int store) {
+    if (debug_named(t)) return event_into(p->ctx, &p->events, EV_TARGET, store == 0, NULL, t, NULL);
     if (t->kind == N_STAR) return target_events(p, scope, t->a, store);
     if (t->kind == N_LIST || t->kind == N_TUPLE) {
         for (Node *item = t->args; item; item = item->next) if (target_events(p, scope, item, store)) return -1;
         return 0;
     }
     if (t->kind == N_NAME) return event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t);
-    if (store && self_attribute(t) && event_into(p->ctx, &p->events, EV_STATIC, 0, scope, t, NULL)) return -1;
+    if (store > 0 && self_attribute(t) && event_into(p->ctx, &p->events, EV_STATIC, 0, scope, t, NULL)) return -1;
     return events_again(p, t);
 }
 /* Where target t's recorded events begin: its first name's or part's. */
@@ -9618,7 +9644,7 @@ static int annotated_recorded(Parser *p, Node *n) {
     int here = !(n->flags & F_SIMPLE) || scope->kind == S_FUNCTION || (n->flags & F_FUTURE);
     int part = n->a->kind != N_NAME && target_recorded(n->a);
     if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) ||
-        (part ? target_events(p, scope, n->a, n->c != NULL) : event_into(p->ctx, e, EV_ANNOTATED, 0, scope, n, NULL)) ||
+        (part ? target_events(p, scope, n->a, n->c ? 1 : -1) : event_into(p->ctx, e, EV_ANNOTATED, 0, scope, n, NULL)) ||
         event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) ||
         event_into(p->ctx, e, here ? EV_WITHIN : EV_ANNOTATE, here ? 0 : (unsigned)n->line, scope, NULL, NULL) ||
         events_again(p, b) || event_into(p->ctx, e, here ? EV_UNWITHIN : EV_LEAVE, 0, scope, NULL, NULL) ||
@@ -10001,6 +10027,7 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
         else if (v->kind == EV_ITERABLE) in->iterables += v->flags ? 1 : -1;
         else if (v->kind == EV_CLAUSE) in->clause = v->n;
         else if (v->kind == EV_GENERIC) status = generic_table(c, v->n);
+        else if (v->kind == EV_TARGET) status = check_debug_target(c, v->n, (int)v->flags);
         else if (v->kind == EV_NODES) in->nodes += v->flags;
         /* A name used, its node counted. */
         else if (v->kind == EV_USE) { in->nodes++; status = event_into(c, c->events, EV_BIND, S_USE, in, v->n, v->n); }
@@ -10064,7 +10091,7 @@ static int scope_walk(SPYContext *, Scope *, Node *);
 static int scope_node(SPYContext *, Scope *, Node *);
 static int check_debug_target(SPYContext *c, Node *n, int deleting) {
     if (!n) return 0;
-    Node *name = n->kind == N_NAME ? n : n->kind == N_ATTR ? n->b : NULL;
+    Node *name = n->kind == N_NAME || n->kind == N_KEYWORD ? n : n->kind == N_ATTR ? n->b : NULL;
     if (name && !strcmp(name->name.text, "__debug__")) {
         node_error(c, n); errorf(c, "SyntaxError", "cannot %s __debug__", deleting ? "delete" : "assign to"); return -1;
     }
@@ -10442,9 +10469,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
     }
     case N_DELETE:
         return scope_target(c, scope, n->a, 0) ? -1 : 0;
-    case N_KEYWORD:
-        if (!strcmp(n->name.text, "__debug__")) { node_error(c, n); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1; }
-        return scope_node(c, scope, n->a);
+    case N_KEYWORD: return check_debug_target(c, n, 0) || scope_node(c, scope, n->a) ? -1 : 0;
     case N_NAMED: return scope_named(c, scope, n, 0) || scope_node(c, scope, n->b) || scope_named(c, scope, n, 1) ? -1 : 0;
     case N_TYPEALIAS: {
         if (scope_record(c, scope, n->a, S_LOCAL)) return -1;
