@@ -4766,7 +4766,7 @@ static Scope *parse_scope(Parser *);
 static void parse_record(Parser *, Node *);
 static int parse_recorded(Parser *, Node *, Scope *, unsigned);
 static int import_recorded(Parser *, Node *);
-static int parse_operands(Parser *, Node *, Node *const *, size_t);
+static int parse_children(Parser *, Node *);
 static Node *too_complex(Parser *);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
@@ -6284,7 +6284,7 @@ static Node *string_node(Parser *p) {
         if (literal.len > INT_MAX) { mem_free(literal.data); return syntax(p, "string literal too large"); }
         n->kind = bytes ? N_BYTES : N_STRING; n->op = (int)literal.len;
         n->name.text = literal.data ? literal.data : copy_text(p->ctx, "", 0);
-        return n->name.text ? n : NULL;
+        return n->name.text && !parse_children(p, n) ? n : NULL;
     }
     int status = flush_literal(p, &tail, &literal);
     mem_free(literal.data);
@@ -6336,7 +6336,7 @@ static Node *finished(Parser *, Node *);
 static Node *atom_node(Parser *p) {
     Node *n;
     if (at(p, T_STRING)) return string_node(p);
-    if (at(p, T_ELLIPSIS)) { n = node(p, N_ELLIPSIS); p->pos++; return n && !parse_operands(p, n, NULL, 0) ? n : NULL; }
+    if (at(p, T_ELLIPSIS)) { n = node(p, N_ELLIPSIS); p->pos++; return n && !parse_children(p, n) ? n : NULL; }
     if (at(p, T_INT) || at(p, T_FLOAT) || at(p, T_IMAG)) {
         n = node(p, at(p, T_INT) ? N_INT : at(p, T_IMAG) ? N_IMAG : N_FLOAT);
         if (!n) return NULL;
@@ -6352,16 +6352,16 @@ static Node *atom_node(Parser *p) {
             const char *message = c->error_text ? c->error_text : c->error_message;
             p->literal_error = copy_text(c, message, strlen(message)); p->literal_line = t->line;
         }
-        return n->constant && !parse_operands(p, n, NULL, 0) ? n : NULL;
+        return n->constant && !parse_children(p, n) ? n : NULL;
     }
     if (keyword(p, "None") || keyword(p, "True") || keyword(p, "False")) {
         n = node(p, keyword(p, "None") ? N_NONE : N_BOOL);
         if (!n) return NULL;
-        n->op = keyword(p, "True"); p->pos++; return parse_operands(p, n, NULL, 0) ? NULL : n;
+        n->op = keyword(p, "True"); p->pos++; return parse_children(p, n) ? NULL : n;
     }
     if (at(p, T_NAME)) {
         n = identifier(p);
-        if (n && p->ctx->optimize && !strcmp(n->name.text, "__debug__")) { n->kind = N_BOOL; n->op = 0; if (parse_operands(p, n, NULL, 0)) return NULL; }
+        if (n && p->ctx->optimize && !strcmp(n->name.text, "__debug__")) { n->kind = N_BOOL; n->op = 0; if (parse_children(p, n)) return NULL; }
         /* Its use, unless it is a target (scope_target). */
         else if (n) {
             parse_record(p, n);
@@ -6563,6 +6563,7 @@ static int call_arguments(Parser *p, Node *n) {
                 return -1;
             }
             span(p, arg, star);
+            if (parse_children(p, arg)) return -1;
             /* invalid_starred_expression_unpacking and invalid_kwarg */
             if (at(p, '=')) {
                 p->pos++;
@@ -6596,12 +6597,12 @@ static int call_arguments(Parser *p, Node *n) {
             }
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
-            size_t start = p->pos;
+            size_t start = p->pos, recorded = p->events.len;
             arg = expression_mode(p, 0, 2);
             if (arg && at(p, '=')) {
                 Token *name = &p->tokens[start];
-                /* A keyword's name, parsed as a name, emits nothing. */
-                emit_back(p, before);
+                /* A keyword's name, parsed as a name, emits nothing and is no use. */
+                emit_back(p, before); p->events.len = recorded;
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {
                     char message[64];
                     snprintf(message, sizeof(message), "cannot assign to %s", expression_name(arg));
@@ -6630,6 +6631,7 @@ static int call_arguments(Parser *p, Node *n) {
                     }
                 if (!(arg->a = plain_expression(p, 0))) return -1;
                 extend(p, arg, arg);
+                if (parse_children(p, arg)) return -1;
                 keywords = 1;
             } else if (keywords && !keyword(p, "for") && !keyword(p, "async")) {
                 syntax(p, mapping ? "positional argument follows keyword argument unpacking" : "positional argument follows keyword argument");
@@ -9080,19 +9082,29 @@ static int parse_recorded(Parser *p, Node *n, Scope *scope, unsigned nodes) {
     n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
     return 0;
 }
-/* Construct n's analysis, when the walk would visit just its operands,
- * count of them, in that order: their recorded events, one after
- * another up to the end of the parse's, then n's own node counted. An
- * operand without them leaves n to the walk. */
-static int parse_operands(Parser *p, Node *n, Node *const *operands, size_t count) {
+/* Record n's analysis when the walk only counts it and visits its
+ * children, in the order scope_visit does: their recorded events, one
+ * after another up to the end of the parse's, then n's own node
+ * counted. A child without them leaves n to the walk. */
+static int parse_children(Parser *p, Node *n) {
+    static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
+                                          N_TUPLE, N_SET, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_STAR, N_SLICE,
+                                          N_CALL, N_KEYWORD, N_MAPPING};
+    if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
+        (n->kind == N_KEYWORD && !strcmp(n->name.text, "__debug__"))) return 0;
+    /* An attribute's object; a keyword's value; a call's function, its
+     * positional arguments, then its keyword ones (scope_arguments);
+     * otherwise every child, scope_visit's default. */
+    int attr = n->kind == N_ATTR || n->kind == N_KEYWORD, call = n->kind == N_CALL;
+    Node *children[] = {n->a, attr || call ? NULL : n->b, attr || call ? NULL : n->c, attr ? NULL : n->args, call ? n->args : NULL};
     uint32_t at = (uint32_t)p->events.len, next = UINT32_MAX;
-    for (size_t i = 0; i < count; i++) {
-        Node *o = operands[i];
-        if (!o) continue;
-        if (!(o->flags & F_EVENTS) || (next != UINT32_MAX && o->events_at != next)) return 0;
-        if (next == UINT32_MAX) at = o->events_at;
-        next = o->events_end;
-    }
+    for (size_t i = 0; i < 5; i++)
+        for (Node *o = children[i]; o; o = i == 0 && (attr || call) ? NULL : o->next) {
+            if (call && i >= 3 && (o->kind == N_KEYWORD || o->kind == N_MAPPING) != (i == 4)) continue;
+            if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED) || (next != UINT32_MAX && o->events_at != next)) return 0;
+            if (next == UINT32_MAX) at = o->events_at;
+            next = o->events_end;
+        }
     if (next != UINT32_MAX && next != p->events.len) return 0;
     n->events_at = at;
     return parse_recorded(p, n, NULL, 1);
@@ -18912,9 +18924,7 @@ static Node *finished(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     if (n && n->kind == N_UNARY && n->op == '-' && !n->constant && n->a->constant && (n->a->kind <= N_IMAG || n->a->kind == N_UNARY) &&
         !(n->constant = unary(c, '-', n->a->constant))) return NULL;
-    /* An operator's, attribute's or item's analysis is its operands'. */
-    if (n && !c->error_type[0] && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_INDEX || n->kind == N_ATTR) &&
-        parse_operands(p, n, (Node *[]){n->a, n->kind == N_ATTR ? NULL : n->b}, 2)) return NULL;
+    if (n && !c->error_type[0] && parse_children(p, n)) return NULL;
     if (!n || !p->emitting || c->error_type[0] || (n->flags & F_EMITTED)) return n;
     Program *program = p->emitting;
     Node *fixed[3] = {n->a}, *list = NULL;

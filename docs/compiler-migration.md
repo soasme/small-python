@@ -457,9 +457,10 @@ compiled with `compile`.
 
 The second step has begun. A `global` or `nonlocal` declaration and an
 `import` record their events as they are parsed, an import's errors
-among them; so do a name, a number, `None`, `True`, `False`, `...`, and
-an operator, attribute or subscription whose operands recorded theirs
-in order. The parser keeps each recorded node's range of the log, and
+among them; so do a name, a constant, and an operator, comparison,
+attribute, subscription, slice, display, starred item or call whose
+parts recorded theirs in the order the walk visits them (a call's
+keyword arguments after its positional ones). The parser keeps each recorded node's range of the log, and
 the walk takes a range in the place it would have visited the node.
 Since the walk no longer descends a long run of prefix operators, the
 parser counts the run toward its depth limit, as CPython's does.
