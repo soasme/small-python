@@ -137,7 +137,13 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR };
+/* An EV_ERROR's SyntaxError, reported at its node. */
+static const char *const event_errors[] = {
+    "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
+    "lazy import not allowed inside classes", "lazy from ... import not allowed inside try/except blocks",
+    "lazy from ... import not allowed inside functions", "lazy from ... import not allowed inside classes",
+    "lazy from ... import * is not allowed", "import * only allowed at module level"};
 typedef struct { int kind; unsigned flags; Scope *scope; Node *n, *at; } Event;
 /* A walk's events, or the parse's: what each construct the parser
  * analyses records (F_EVENTS), its nodes counted (EV_NODES), which the
@@ -4759,6 +4765,7 @@ static int event_into(SPYContext *, Events *, int, unsigned, Scope *, Node *, No
 static Scope *parse_scope(Parser *);
 static void parse_record(Parser *, Node *);
 static int parse_recorded(Parser *, Node *, Scope *, unsigned);
+static int import_recorded(Parser *, Node *);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
 static int call_stream(Parser *, Node *, Node *, Mark, int, Mark *);
@@ -8635,7 +8642,7 @@ static Node *statement_body(Parser *p, int emits) {
                 return syntax(p, "lazy from __future__ import is not allowed");
             }
             if (!n->op && !strcmp(source_name(n->a), "__future__") && at(p, '*')) defer(p, "future feature * is not defined");
-            if (at(p, '*')) { size_t star = p->pos++; n->args = node(p, N_STAR); return n->args ? (span(p, n->args, star), n) : NULL; }
+            if (at(p, '*')) { size_t star = p->pos++; n->args = node(p, N_STAR); return n->args && !import_recorded(p, n) ? (span(p, n->args, star), n) : NULL; }
         }
         int future = from && !n->op && !strcmp(source_name(n->a), "__future__");
         if (at(p, T_NL)) { syntax(p, "Expected one or more names after 'import'"); p->error_end = p->error_start; return NULL; }
@@ -8678,12 +8685,31 @@ static Node *statement_body(Parser *p, int emits) {
         /* __lazy_modules__ may make a module-level import outside try lazy. */
         if (!lazy && n->args->kind != N_STAR && !p->body.tries && p->body.program && p->body.program == p->unit->as.unit.flat)
             n->flags |= F_LAZY_COMPAT;
-        return n;
+        return import_recorded(p, n) ? NULL : n;
     }
     n = node(p, N_EXPR);
     if (!n) return NULL;
     Node *(*rest)(Parser *, Node *) = keyword(p, "yield") ? yield_statement : expression_statement;
     return emits ? emitted_statement(p, n, rest) : rest(p, n);
+}
+/* Import statement n's analysis: a lazy import's place, a star's, and
+ * each name it binds. */
+static int import_recorded(Parser *p, Node *n) {
+    Scope *scope = parse_scope(p);
+    if (!scope) return -1;
+    parse_record(p, n);
+    int error = -1;
+    if (n->flags & F_LAZY) {
+        int where = p->body.tries ? 0 : scope->kind == S_FUNCTION ? 1 : scope->kind == S_CLASS ? 2 : -1;
+        error = where >= 0 ? where + (n->kind == N_FROM) * 3 : n->args->kind == N_STAR ? 6 : -1;
+    }
+    if (error < 0 && n->args->kind == N_STAR && scope->kind != S_MODULE) error = 7;
+    if (error >= 0 && event_into(p->ctx, &p->events, EV_ERROR, (unsigned)error, scope, n, error == 7 ? n->args : n)) return -1;
+    for (Node *item = n->args; error < 0 && item && item->kind != N_STAR; item = item->next) {
+        Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
+        if (event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, binding, item)) return -1;
+    }
+    return parse_recorded(p, n, scope, 1);
 }
 /* The yield of yield statement n. */
 static Node *yield_statement(Parser *p, Node *n) {
@@ -9046,6 +9072,7 @@ static int scope_global(SPYContext *, Scope *, Node *);
 static int annotated_target(SPYContext *, Scope *, Node *);
 static int annotated_symbol(Scope *, Node *);
 static int type_parameter(SPYContext *, Scope *, Node *);
+static void node_error(SPYContext *, Node *);
 static int events_replay(SPYContext *c, Events *e) {
     size_t *marks = NULL, len = 0, cap = 0;
     int status = 0;
@@ -9060,6 +9087,7 @@ static int events_replay(SPYContext *c, Events *e) {
         case EV_LATER: scope_later(v->scope, marks[len - 2], marks[len - 1]); len -= 2; break;
         case EV_ANNOTATED: status = annotated_target(c, v->scope, v->n); break;
         case EV_ANNOTATION: status = annotated_symbol(v->scope, v->n); break;
+        case EV_ERROR: node_error(c, v->at); spy_error(c, "SyntaxError", event_errors[v->flags]); status = -1; break;
         default: status = type_parameter(c, v->scope, v->n); break;
         }
     }
