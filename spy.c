@@ -9171,19 +9171,10 @@ static int parse_children(Parser *p, Node *n) {
     /* A named expression is checked and binds in visiting order,
      * around its value. */
     if (n->kind == N_NAMED) {
-        Node *a = n->a, *b = n->b;
-        if (!(b->flags & F_EVENTS) || (b->flags & F_ANALYSED) || b->events_end != p->events.len) return 0;
         /* The target's recorded use, just before the value's, becomes the check. */
-        int used = (a->flags & F_EVENTS) != 0;
-        if (used && (a->events_end != b->events_at || a->events_end - a->events_at != 1)) return 0;
-        size_t at = used ? a->events_at : b->events_at;
+        size_t at = n->a->events_at;
         if (event_into(p->ctx, &p->events, EV_NAMED, 0, NULL, n, NULL)) return -1;
-        Event before = p->events.items[--p->events.len];
-        if (!used) {
-            memmove(p->events.items + at + 1, p->events.items + at, (p->events.len - at) * sizeof(Event));
-            p->events.len++;
-        }
-        p->events.items[at] = before;
+        p->events.items[at] = p->events.items[--p->events.len];
         if (event_into(p->ctx, &p->events, EV_NAMED, 1, NULL, n, NULL)) return -1;
         n->events_at = (uint32_t)at;
         return parse_recorded(p, n, NULL, 1);
