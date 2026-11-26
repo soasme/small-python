@@ -6842,6 +6842,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         }
         if (!n->c || (jump != SIZE_MAX && !cond_end(p, n, jump, value))) return NULL;
         extend(p, n, left);
+        if (parse_children(p, n)) return NULL;
         left = n;
     }
 assignment_expression:
@@ -9083,34 +9084,71 @@ static int parse_recorded(Parser *p, Node *n, Scope *scope, unsigned nodes) {
     n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
     return 0;
 }
+/* The children of n in the order scope_visit visits them, the next on
+ * each call; NULL after the last. */
+typedef struct { Node *n, *o; int slot; } Children;
+static Node *child_next(Children *k) {
+    Node *n = k->n;
+    int kind = n->kind, attr = kind == N_ATTR || kind == N_KEYWORD;
+    for (;;) {
+        if (k->o) {
+            Node *o = k->o;
+            /* A slot's first child stands alone (an attribute's object, a
+             * keyword's value, a call's function, a conditional's parts). */
+            k->o = attr || kind == N_COND || (kind == N_CALL && k->slot == 1) ? NULL : o->next;
+            int keyword = o->kind == N_KEYWORD || o->kind == N_MAPPING;
+            if (kind == N_CALL && k->slot > 1 && keyword != (k->slot == 3)) continue;
+            /* A dictionary's keys, then its values, an unpacked mapping's among them. */
+            if (kind == N_DICT && k->slot == 1) { if (o->kind == N_MAPPING) continue; return o->a; }
+            if (kind == N_DICT) return o->kind == N_MAPPING ? o->a : o->b;
+            return o;
+        }
+        Node *slots[4];
+        if (attr) slots[0] = n->a, slots[1] = slots[2] = slots[3] = NULL;
+        else if (kind == N_CALL) slots[0] = n->a, slots[1] = slots[2] = n->args, slots[3] = NULL;
+        else if (kind == N_COND) slots[0] = n->b, slots[1] = n->a, slots[2] = n->c, slots[3] = NULL;
+        else if (kind == N_DICT) slots[0] = slots[1] = n->args, slots[2] = slots[3] = NULL;
+        else slots[0] = n->a, slots[1] = n->b, slots[2] = n->c, slots[3] = n->args;
+        if (k->slot == 4) return NULL;
+        k->o = slots[k->slot++];
+    }
+}
 /* Record n's analysis when the walk only counts it and visits its
- * children, in the order scope_visit does: their recorded events, one
- * after another up to the end of the parse's, then n's own node
- * counted. A child without them leaves n to the walk. */
+ * children: their recorded events, which together run from the first's
+ * to the end of the parse's, put in the order the walk visits them,
+ * then n's own node counted. A child without them leaves n to the walk. */
 static int parse_children(Parser *p, Node *n) {
     static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
-                                          N_TUPLE, N_SET, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_STAR, N_SLICE,
-                                          N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE, N_ASSERT, N_PASS,
-                                          N_BREAK, N_CONTINUE};
+                                          N_TUPLE, N_SET, N_DICT, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_COND,
+                                          N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
+                                          N_ASSERT, N_PASS, N_BREAK, N_CONTINUE};
     /* A docstring is left to the walk: it may become a pass (docstring_pass). */
     if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
         (n->kind == N_EXPR && n->a->kind == N_STRING) ||
         (n->kind == N_KEYWORD && !strcmp(n->name.text, "__debug__"))) return 0;
-    /* An attribute's object; a keyword's value; a call's function, its
-     * positional arguments, then its keyword ones (scope_arguments);
-     * otherwise every child, scope_visit's default. */
-    int attr = n->kind == N_ATTR || n->kind == N_KEYWORD, call = n->kind == N_CALL;
-    Node *children[] = {n->a, attr || call ? NULL : n->b, attr || call ? NULL : n->c, attr ? NULL : n->args, call ? n->args : NULL};
-    uint32_t at = (uint32_t)p->events.len, next = UINT32_MAX;
-    for (size_t i = 0; i < 5; i++)
-        for (Node *o = children[i]; o; o = i == 0 && (attr || call) ? NULL : o->next) {
-            if (call && i >= 3 && (o->kind == N_KEYWORD || o->kind == N_MAPPING) != (i == 4)) continue;
-            if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED) || (next != UINT32_MAX && o->events_at != next)) return 0;
-            if (next == UINT32_MAX) at = o->events_at;
-            next = o->events_end;
+    Events *e = &p->events;
+    size_t at = e->len, total = 0, next = e->len;
+    int ordered = 1;
+    Children k = {n, NULL, 0};
+    for (Node *o; (o = child_next(&k));) {
+        if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) return 0;
+        if (o->events_at < at) at = o->events_at;
+        ordered &= total == 0 || o->events_at == next;
+        total += o->events_end - o->events_at; next = o->events_end;
+    }
+    /* The children's ranges are disjoint, parsed one after another. */
+    if (total != e->len - at) return 0;
+    if (!ordered) {
+        if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + total, sizeof(Event))) return -1;
+        Event *copy = e->items + e->len;
+        k = (Children){n, NULL, 0};
+        for (Node *o; (o = child_next(&k));) {
+            memcpy(copy, e->items + o->events_at, (o->events_end - o->events_at) * sizeof(Event));
+            copy += o->events_end - o->events_at;
         }
-    if (next != UINT32_MAX && next != p->events.len) return 0;
-    n->events_at = at;
+        memcpy(e->items + at, e->items + e->len, total * sizeof(Event));
+    }
+    n->events_at = (uint32_t)at;
     return parse_recorded(p, n, NULL, 1);
 }
 /* Replay the symbol steps that analysis recorded, as far as the first
