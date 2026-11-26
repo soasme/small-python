@@ -4194,6 +4194,21 @@ static int set_hidden_field(SPYContext *c, SPYValue *v, const char *name, SPYVal
     if (!v->as.map.class_cell && !(v->as.map.class_cell = value_new(c, SPY_DICT))) return -1;
     return name_set(c, v->as.map.class_cell, name, value);
 }
+/* type.__text_signature__ of class cls: in the doc it was made with,
+ * the parenthesized text after the last dotted part of its name, up to
+ * the first ")" that "\n--\n\n" follows, with no blank line before it;
+ * else None. */
+static SPYValue *class_signature(SPYContext *c, SPYValue *cls) {
+    SPYValue *doc = cls->as.map.class_cell ? name_local(cls->as.map.class_cell, "__doc__") : NULL;
+    SPYValue *name = doc ? builtin_value(c, name_text(cls, "__name__"), SPY_STRING) : NULL;
+    const char *text = name ? strrchr(name->as.string.data, '.') : NULL, *at = doc ? doc->as.string.data : NULL;
+    text = text ? text + 1 : name ? name->as.string.data : NULL;
+    if (!text || strncmp(at, text, strlen(text)) || at[strlen(text)] != '(') return spy_none(c);
+    at += strlen(text);
+    for (const char *end = at; *end && !(end[0] == '\n' && end[1] == '\n'); end++)
+        if (!strncmp(end, ")\n--\n\n", 6)) return spy_string(c, at, (size_t)(end + 1 - at));
+    return spy_none(c);
+}
 /* Whether OSError_str uses its errno form: a filename, or both errno and strerror. */
 static int oserror_text(SPYValue *v) {
     SPYValue *code = hidden_field(v, "errno"), *text = hidden_field(v, "strerror"), *file = hidden_field(v, "filename");
@@ -14610,6 +14625,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                     return found ? descriptor_get(c, found, NULL, v) : descriptor_get(c, meta_value, v, v->as.map.meta);
                 }
             }
+            if (!strcmp(name, "__text_signature__") && !(v->as.map.meta && class_lookup(v->as.map.meta, name))) return class_signature(c, v);
             /* type.__type_params__ reads the class's own dictionary, not its bases. */
             if (!strcmp(name, "__type_params__") && !(v->as.map.meta && class_lookup(v->as.map.meta, name))) {
                 SPYValue *params = name_local(v, name);
@@ -14944,7 +14960,8 @@ static const struct { const char *name; int type, flags; } type_fields[] = {
     {"__mro__", SPY_GETSET_DESCRIPTOR, DESC_READONLY}, {"__dict__", SPY_GETSET_DESCRIPTOR, DESC_READONLY},
     {"__doc__", SPY_GETSET_DESCRIPTOR, 0}, {"__type_params__", SPY_GETSET_DESCRIPTOR, 0},
     {"__annotations__", SPY_GETSET_DESCRIPTOR, 0}, {"__annotate__", SPY_GETSET_DESCRIPTOR, 0},
-    {"__abstractmethods__", SPY_GETSET_DESCRIPTOR, 0}, {"__base__", SPY_MEMBER_DESCRIPTOR, DESC_READONLY}};
+    {"__abstractmethods__", SPY_GETSET_DESCRIPTOR, 0}, {"__base__", SPY_MEMBER_DESCRIPTOR, DESC_READONLY},
+    {"__text_signature__", SPY_GETSET_DESCRIPTOR, DESC_READONLY}};
 /* Whether a class answers its attribute name itself: one of type's fields, or its __class__. */
 static int type_field(const char *name) {
     for (size_t i = 0; i < sizeof(type_fields) / sizeof(*type_fields); i++) if (!strcmp(name, type_fields[i].name)) return 1;
@@ -17058,7 +17075,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     }
     if (object->type == SPY_CLASS) {
         if (!strcmp(name, "__base__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
-        if (!strcmp(name, "__mro__") || !strcmp(name, "__dict__")) {
+        if (!strcmp(name, "__mro__") || !strcmp(name, "__dict__") || !strcmp(name, "__text_signature__")) {
             errorf(c, "AttributeError", "attribute '%s' of 'type' objects is not writable", name); return -1;
         }
         if (!strcmp(name, "__bases__")) return class_assign_bases(c, object, value);
@@ -24891,8 +24908,11 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
             else cell_set(c, entry->value, cls);
         } else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
     }
-    SPYValue *qualname = name_local(cls, "__qualname__");
+    SPYValue *qualname = name_local(cls, "__qualname__"), *doc = name_local(cls, "__doc__");
+    doc = doc ? builtin_value(c, doc, SPY_STRING) : NULL;
     if (!builtin_value(c, qualname, SPY_STRING)) errorf(c, "TypeError", "type __qualname__ must be a str, not %s", type_name(qualname));
+    /* The doc the class is made with gives its __text_signature__ (class_signature). */
+    else if (doc) set_hidden_field(c, cls, "__doc__", doc);
     if (meta != c->types[SPY_CLASS]) cls->as.map.meta = spy_retain(meta);
     /* The callbacks' state; given state, a Python mro() is first, with
      * the namespace for class_slots (class_callback). */
@@ -27130,7 +27150,9 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
                 if (!strcmp(name, fixed[i])) {
                     errorf(c, "TypeError", "cannot delete '%s' attribute of type '%s'", name, class_tname(object)); return -1;
                 }
-            if (!strcmp(name, "__mro__")) { errorf(c, "AttributeError", "attribute '%s' of 'type' objects is not writable", name); return -1; }
+            if (!strcmp(name, "__mro__") || !strcmp(name, "__text_signature__")) {
+                errorf(c, "AttributeError", "attribute '%s' of 'type' objects is not writable", name); return -1;
+            }
             if (!strcmp(name, "__base__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
             if (!strcmp(name, "__abstractmethods__") && !name_local(object, name)) { spy_error(c, "AttributeError", name); return -1; }
             if (!strcmp(name, "__abstractmethods__")) object->as.map.flags &= ~CLASS_ABSTRACT;

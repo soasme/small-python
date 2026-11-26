@@ -58,6 +58,10 @@ def outcome(p):
                     for _ in (): pass
                     return (o, t.__name__)
             return repr(type("D", (C,), {"__doc__": Doc()}).__doc__)
+        if op == "textsig":
+            D = type("D", (C,), {"__doc__": "D(a)\n--\n\n"})
+            D.__doc__ = "D(b)\n--\n\n"
+            return repr(D.__text_signature__)
         if op == "subclasses":
             return name(A.__subclasses__())
         if op == "classset":

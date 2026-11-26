@@ -19,6 +19,7 @@
 (* its method m assigns self.b and self.a. It reads one attribute of C, or *)
 (* does one of: C.__dict__["x"] = 1; D(C).__doc__; the __doc__ of D(C)   *)
 (* whose own __doc__ is a descriptor with a Python __get__;               *)
+(* __text_signature__ of D(C) made with a signature doc, then reassigned;  *)
 (* A.__subclasses__();                                                     *)
 (* C.w = 1 then A.w; c.w = 5 then C.w; c.z = 1 then c.__dict__;            *)
 (* c.__class__. A read may give C a metaclass whose property of that name *)
@@ -31,8 +32,8 @@ EXTENDS Naturals, Sequences
 
 Bases == {<<>>, <<"A">>, <<"A", "B">>, <<"A", "int">>, <<"int">>}
 Reads == {"__name__", "__qualname__", "__module__", "__dict__", "__bases__", "__base__", "__doc__", "__annotations__",
-          "__annotate__", "__type_params__", "__static_attributes__", "__firstlineno__", "__mro__"}
-Ops == {"dictwrite", "subdoc", "docget", "subclasses", "classset", "instanceset", "instancedict", "class"}
+          "__annotate__", "__type_params__", "__static_attributes__", "__firstlineno__", "__mro__", "__text_signature__"}
+Ops == {"dictwrite", "subdoc", "docget", "textsig", "subclasses", "classset", "instanceset", "instancedict", "class"}
 Programs == [bases : Bases, doc : BOOLEAN, ann : BOOLEAN, generic : BOOLEAN, nested : BOOLEAN, op : {"read"}, attr : Reads, meta : BOOLEAN]
             \cup [bases : Bases, doc : BOOLEAN, ann : BOOLEAN, generic : BOOLEAN, nested : BOOLEAN, op : Ops]
 
@@ -65,6 +66,8 @@ Read(p, a) ==
       [] a = "__static_attributes__" -> "('a', 'b')"
       [] a = "__firstlineno__" -> IF p.nested THEN "4" ELSE "3"
       [] a = "__mro__" -> Tuple(Mro(p))
+      \* Its doc does not begin "C(".
+      [] a = "__text_signature__" -> "None"
 
 HasA(p) == \E i \in DOMAIN p.bases : p.bases[i] = "A"
 Run(p) ==
@@ -75,6 +78,8 @@ Run(p) ==
            [] p.op = "subdoc" -> "None"                            \* not inherited
            \* A subclass D's own __doc__, a descriptor, read through its __get__.
            [] p.op = "docget" -> "(None, 'D')"
+           \* D made with __doc__ "D(a)\n--\n\n", then given another.
+           [] p.op = "textsig" -> "'(a)'"
            [] p.op = "subclasses" -> IF HasA(p) THEN "[C]" ELSE "[]"
            [] p.op = "classset" -> "0"                          \* A.w is untouched
            [] p.op = "instanceset" -> IF HasA(p) THEN "0" ELSE "AttributeError"
