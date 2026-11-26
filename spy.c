@@ -137,9 +137,12 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES };
 typedef struct { int kind; unsigned flags; Scope *scope; Node *n, *at; } Event;
-typedef struct Events { Event *items; size_t len, cap; } Events;
+/* A walk's events, or the parse's: what each construct the parser
+ * analyses records (F_EVENTS), its nodes counted (EV_NODES), which the
+ * walk takes in its place (scope_node). */
+typedef struct Events { Event *items; size_t len, cap; struct Events *parsed; } Events;
 static int scope_walk(SPYContext *, Scope *, Node *);
 /* A try statement's shape and its instructions to patch (try_begin). */
 typedef struct { size_t final, handler, skip, first, rest; int has_final, excepts, star, otherwise; } Try;
@@ -207,7 +210,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */,
        F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */,
-       F_ANALYSED = 2097152 /* A statement, or a compound statement's header, analysed as it was parsed. */ };
+       F_ANALYSED = 2097152 /* A statement, or a compound statement's header, analysed as it was parsed. */,
+       F_EVENTS = 4194304 /* A construct whose analysis the parser recorded (events_at). */ };
 /* A text operand and its name-lookup cache. Literal nodes use only text.
  * Instructions can borrow this record without inspecting a syntax tree. */
 typedef struct {
@@ -241,6 +245,7 @@ struct Node {
      * plus one. Expressions are whole when they compile. */
     unsigned char expands_known, expands_value, loads;
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
+    uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
     char *original;
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
@@ -4731,6 +4736,7 @@ typedef struct Parser {
      * them. */
     Node *analysed;
     Analysis symbols;
+    Events events;
     Scope *scope;
     Node *decorators;
     /* The newest node and module child scope resolved (resolve_new), and
@@ -4749,6 +4755,10 @@ typedef struct Parser {
     int unevaluated;
 } Parser;
 static Node *emit_parsed(Parser *, Node *, size_t);
+static int event_into(SPYContext *, Events *, int, unsigned, Scope *, Node *, Node *);
+static Scope *parse_scope(Parser *);
+static void parse_record(Parser *, Node *);
+static int parse_recorded(Parser *, Node *, Scope *, unsigned);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
 static int call_stream(Parser *, Node *, Node *, Mark, int, Mark *);
@@ -8569,15 +8579,18 @@ static Node *statement_body(Parser *p, int emits) {
     }
     if (keyword(p, "global") || keyword(p, "nonlocal")) {
         n = node(p, keyword(p, "global") ? N_GLOBAL : N_NONLOCAL);
-        if (!n) return NULL;
+        Scope *scope = n ? parse_scope(p) : NULL;
+        if (!scope) return NULL;
         p->pos++;
         Node **tail = &n->args;
+        /* Each name is declared in the body's scope, reported at the statement. */
+        parse_record(p, n);
         do {
             Node *name = identifier(p);
-            if (!name) return NULL;
+            if (!name || event_into(p->ctx, &p->events, EV_BIND, n->kind == N_GLOBAL ? S_GLOBAL : S_NONLOCAL, scope, name, n)) return NULL;
             *tail = name; tail = &name->next;
         } while (take(p, ','));
-        return n;
+        return parse_recorded(p, n, scope, 1) ? NULL : n;
     }
     if (p->star && (keyword(p, "return") || ((keyword(p, "break") || keyword(p, "continue")) && p->loops == p->star - 1)))
         return syntax(p, "'break', 'continue' and 'return' cannot appear in an except* block");
@@ -9011,6 +9024,20 @@ static int analysis_take(SPYContext *c, Analysis *a) {
     spy_clear_error(c);
     return 0;
 }
+/* The scope of the body being parsed; the module's made when first needed. */
+static Scope *parse_scope(Parser *p) {
+    SPYValue *unit = p->unit;
+    if (!p->scope && !unit->as.unit.scope) unit->as.unit.scope = scope_new(p->ctx, NULL, S_MODULE);
+    return p->scope ? p->scope : unit->as.unit.scope;
+}
+/* Construct n's analysis begins at the parse's events (parse_record). */
+static void parse_record(Parser *p, Node *n) { n->events_at = (uint32_t)p->events.len; }
+/* And ends, its nodes counted. */
+static int parse_recorded(Parser *p, Node *n, Scope *scope, unsigned nodes) {
+    if (event_into(p->ctx, &p->events, EV_NODES, nodes, scope, NULL, NULL)) return -1;
+    n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
+    return 0;
+}
 /* Replay the symbol steps that analysis recorded, as far as the first
  * error. */
 static void scope_later(Scope *, size_t, size_t);
@@ -9048,8 +9075,9 @@ static int analyse_statements(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     SPYValue *unit = p->unit;
     if (p->symbols.message || c->error_type[0]) return 0;
-    if (!p->scope && !unit->as.unit.scope && !(unit->as.unit.scope = scope_new(c, NULL, S_MODULE))) return -1;
-    Scope *scope = p->scope ? p->scope : unit->as.unit.scope;
+    (void)unit;
+    Scope *scope = parse_scope(p);
+    if (!scope) return -1;
     const char *start = c->node_start, *end = c->node_end;
     c->node_start = c->node_end = NULL; c->node_open = NULL;
     /* A lazy import names the try statements around it (scope_node). */
@@ -9057,7 +9085,7 @@ static int analyse_statements(Parser *p, Node *n) {
     scope->tries = p->body.tries;
     /* The walk records its symbol steps, replayed after it; its own error
      * comes after theirs. */
-    Events events = {0};
+    Events events = {.parsed = &p->events};
     Analysis walked = {0};
     c->events = &events;
     int failed = scope_walk(c, scope, n);
@@ -9212,7 +9240,8 @@ static Node *statements(Parser *p) {
         *tail = n;
         while (*tail) { last = *tail; tail = &(*tail)->next; }
         if (analyse_statements(p, n) || (!p->depth && resolve_statements(p))) return NULL;
-        if (!p->depth) { p->analysed = p->last_statement = last; module_first(p, head); }
+        /* A module statement's events are all taken. */
+        if (!p->depth) { p->analysed = p->last_statement = last; module_first(p, head); p->events.len = 0; }
         if (body) p->body.head = head;
         if (body && body_statements(p, head, p->body.holds ? last : NULL)) return NULL;
         if (!p->depth && body && !p->ctx->error_type[0]) free_lines(p, start);
@@ -9307,10 +9336,20 @@ static int scope_unhold(SPYContext *c, Scope *scope) {
     }
     return 0;
 }
-static int event(SPYContext *c, int kind, unsigned flags, Scope *scope, Node *n, Node *at) {
-    Events *e = c->events;
+static int event_into(SPYContext *c, Events *e, int kind, unsigned flags, Scope *scope, Node *n, Node *at) {
     if (grow(c, (void **)&e->items, &e->cap, e->len + 1, sizeof(*e->items))) return -1;
     e->items[e->len++] = (Event){kind, flags, scope, n, at};
+    return 0;
+}
+static int event(SPYContext *c, int kind, unsigned flags, Scope *scope, Node *n, Node *at) { return event_into(c, c->events, kind, flags, scope, n, at); }
+/* The walk takes construct n's recorded events, counting its nodes in scope. */
+static int events_take(SPYContext *c, Scope *scope, Node *n) {
+    Events *from = c->events->parsed;
+    for (uint32_t i = n->events_at; i < n->events_end; i++) {
+        Event *v = &from->items[i];
+        if (v->kind == EV_NODES) scope->nodes += v->flags;
+        else if (event_into(c, c->events, v->kind, v->flags, v->scope, v->n, v->at)) return -1;
+    }
     return 0;
 }
 /* The number of scope's symbols, *at, for a later move (symbols_later). */
@@ -9621,6 +9660,7 @@ static int scope_arguments(SPYContext *c, Scope *scope, Node *args) {
 /* Analyse n in scope, as deep as the stack allows. */
 static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     if (!n || c->error_type[0]) return c->error_type[0] ? -1 : 0;
+    if (n->flags & F_EVENTS) return events_take(c, scope, n);
     if (deeper(c, " during compilation")) return -1;
     int status = scope_visit(c, scope, n);
     c->depth--;
@@ -10191,7 +10231,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
-    mem_free(p.tokens); mem_free(p.literal_error); mem_free(p.emitted);
+    mem_free(p.tokens); mem_free(p.literal_error); mem_free(p.emitted); mem_free(p.events.items);
     for (size_t i = 0; i < p.apart_len; i++) free_program(p.aparts[i].program);
     mem_free(p.aparts);
     if (c->error_type[0]) {
