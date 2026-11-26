@@ -9264,19 +9264,22 @@ static int header_recorded(Parser *p, Node *n) {
     return 0;
 }
 /* Record definition n's header's analysis (scope_visit) when it has no
- * type parameters or annotations: its name bound, then a function's
- * defaults and decorators or a class's decorators and bases, positional
- * then keyword; its scope made, as the walk would make it next; a
- * function's parameters bound in that scope; the name's symbol moved
- * after the rest. Its parts' events are put in that order after the
- * log's end, then moved to where they began. */
+ * type parameters: its name bound, then a function's defaults and
+ * decorators or a class's decorators and bases, positional then
+ * keyword; its scope made, as the walk would make it next; a function's
+ * parameters bound in that scope; its annotations in their function's
+ * scope (scope_annotations); the name's symbol moved after the rest.
+ * Its parts' events are put in that order after the log's end, then
+ * moved to where they began. */
 static Scope *scope_of(SPYContext *, Node *, Scope *);
 static int definition_recorded(Parser *p, Node *n) {
     Events *e = &p->events;
-    if (n->params || n->annotate || p->symbols.message) return 0;
-    size_t count = 0, at = e->len, total = 0;
+    Node *fn = n->annotate;
+    if (n->params || p->symbols.message) return 0;
+    size_t count = 0, at = e->len, total = 0, outer;
     for (Node *o = n->decorators; o; o = o->next) count++;
     for (Node *o = n->args; o; o = o->next) count++;
+    for (Node *o = fn ? fn->b->args : NULL; o; o = o->next) count++;
     Node **parts = count ? allocate(p->ctx, count * sizeof(*parts)) : NULL;
     if (count && !parts) return -1;
     size_t len = 0;
@@ -9285,6 +9288,8 @@ static int definition_recorded(Parser *p, Node *n) {
     if (n->kind == N_CLASS)
         for (int pass = 0; pass < 2; pass++) for (Node *o = n->args; o; o = o->next)
             if ((o->kind == N_KEYWORD || o->kind == N_MAPPING) == pass) parts[len++] = o;
+    outer = len;
+    for (Node *o = fn ? fn->b->args : NULL; o; o = o->next) if (o->a) parts[len++] = o->a;
     int status = 0;
     for (size_t i = 0; i < len && status == 0; i++) {
         Node *o = parts[i];
@@ -9296,12 +9301,18 @@ static int definition_recorded(Parser *p, Node *n) {
     size_t end = e->len;
     status = event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, n->a, n) ||
              event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL);
-    for (size_t i = 0; i < len && !status; i++) status = events_again(p, parts[i]);
-    mem_free(parts);
-    if (status || !scope_of(p->ctx, n, scope)) return -1;
+    for (size_t i = 0; i < outer && !status; i++) status = events_again(p, parts[i]);
+    if (status || !scope_of(p->ctx, n, scope)) { mem_free(parts); return -1; }
     if (n->kind == N_DEF)
-        for (Node *param = n->args; param; param = param->next)
-            if (event_into(p->ctx, e, EV_BIND, S_PARAM, n->scope, param, param)) return -1;
+        for (Node *param = n->args; param && !status; param = param->next)
+            status = event_into(p->ctx, e, EV_BIND, S_PARAM, n->scope, param, param);
+    if (fn && !status) {
+        status = event_into(p->ctx, e, EV_ENTER, 1, scope, fn, NULL) || event_into(p->ctx, e, EV_BIND, S_PARAM, NULL, fn->args, fn->args);
+        for (size_t i = outer; i < len && !status; i++) status = events_again(p, parts[i]);
+        if (!status) status = event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
+    }
+    mem_free(parts);
+    if (status) return -1;
     if (event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
@@ -9816,6 +9827,8 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
         if (v->kind == EV_ENTER) {
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
                 status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
+            /* An annotation function's (scope_annotations). */
+            if (!status && v->flags) v->n->scope->within = "an annotation";
         } else if (v->kind == EV_ANNOTATE) {
             /* The __annotate__ scope of the scope taken in. */
             Scope *annotate = NULL;
