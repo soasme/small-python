@@ -842,6 +842,8 @@ Unreleased (0.10.0):
 - about 6,000 prefix operators in a row raise MemoryError "Parser stack overflowed - Python source too complex to parse"
 - a repeated name in a case pattern is reported at the pattern binding it again,
   two starred names at their sequence pattern, each with its end column
+- a set or frozenset compared with an instance of the other one's subclass, a dict or frozendict likewise, or a
+  bytearray with a bytes subclass's instance, answers by its own method without calling the instance's reflected one
 - an import calls a Python `__contains__` of `__lazy_modules__`, the lazy-import filter and its verdict's `__bool__`
   without nesting on the C stack, so it can pause
 - a generic class is made in a frame named `<generic parameters of C>`, which its bases, keywords and body run in and tracebacks show

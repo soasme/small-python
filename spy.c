@@ -14300,8 +14300,13 @@ static int number_kept(SPYContext *c, const Operator *o, int rich, SPYValue *a, 
            ((!o || value_class(c, a) != value_class(c, b)) && (y == b || builtin_base(c, b, o ? o->reflected : rich_names[reflected], NULL)) &&
             number_accepts(o, reflected, y, x));
 }
+static int base_compared(SPYContext *, SPYValue *, SPYValue *);
+/* left op right by their Python methods, or NULL when they decline; a
+ * builtin left taking right's builtin value (base_compared) declines, its
+ * own comparison answering. */
 static SPYValue *rich_compare(SPYContext *c, int op, SPYValue *left, SPYValue *right) {
     const int *reflected = rich_reflected;
+    if (base_compared(c, left, right)) return NULL;
     spy_retain(left); spy_retain(right);
     SPYValue *a = value_class(c, left), *b = value_class(c, right);
     int first = a != b && subclass(b, a);
@@ -31875,9 +31880,10 @@ static SPYValue *rich_function(SPYContext *c, SPYValue *x, SPYValue *y, int rich
 }
 /* The Python rich comparison rich of y, borrowed, that comparing x with y
  * calls once x's has declined, reflected (rich_function): none when x is
- * a number that takes y by its own method first (number_takes). */
+ * a number, or a builtin, that takes y by its own method first
+ * (number_takes, base_compared). */
 static SPYValue *rich_reflection(SPYContext *c, SPYValue *y, SPYValue *x, int rich) {
-    return number_takes(c, NULL, rich_reflected[rich], x, y) ? NULL : rich_function(c, y, x, rich);
+    return number_takes(c, NULL, rich_reflected[rich], x, y) || base_compared(c, x, y) ? NULL : rich_function(c, y, x, rich);
 }
 /* The comparison x op y whose x method returned result, taking it: a
  * NotImplemented leaves y's reflected method and then the default. */
@@ -36676,6 +36682,15 @@ static int based_declines(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
     return base->type == SPY_SET || base->type == SPY_FROZENSET ||
            (base != x && (base->type == SPY_INT || base->type == SPY_FLOAT || base->type == SPY_COMPLEX || rich_declines(c, base, rich)));
 }
+/* Whether builtin value x compares y, an instance of a subclass of
+ * another builtin than x's class, by its builtin value: a set or
+ * frozenset another, a dict or frozendict another, a bytearray bytes. */
+static int base_compared(SPYContext *c, SPYValue *x, SPYValue *y) {
+    SPYValue *b = y->type == SPY_INSTANCE ? y->as.map.base : NULL;
+    if (!b || subclass(value_class(c, y), value_class(c, x))) return 0;
+    return (is_set(x) && is_set(b)) || (is_dict(x) && is_dict(b)) ||
+           (x->type == SPY_BYTEARRAY && (b->type == SPY_BYTES || b->type == SPY_BYTEARRAY));
+}
 /* The Python special method that operator step ins calls first on x and
  * y, owned, with its env, to enter on m (CALL_OPERATOR), x, y and the
  * phase on the stack under it (operator_push): instance x's __getitem__,
@@ -38664,8 +38679,9 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
          * declines an operator or comparison with a plain instance, as
          * does a builtin's subclass instance by the builtin's comparison
          * (based_declines), whose reflected method is the last call; a number takes a narrower
-         * number's subclass instance itself (number_takes). */
-        if (!reflected || number_takes(c, o, rich, x, y) ||
+         * number's subclass instance itself (number_takes), a builtin another
+         * builtin's subclass instance it compares (base_compared). */
+        if (!reflected || number_takes(c, o, rich, x, y) || base_compared(c, x, y) ||
             !(function = o ? item_special(c, y, reflected) : rich_special(c, y, rich_reflected[rich], &negated))) return NULL;
         self = y; other = x; phase = OPERATOR_LAST;
     } else {

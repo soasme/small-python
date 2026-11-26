@@ -43,7 +43,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
           "store_keeps_key", "seq_nested", "in_seq_calls", "in_builtin_calls", "in_value_calls", "in_iter_calls", "in_list_iterator_calls", "in_mixed_calls", "seq_subclass_calls", "in_reflected_truth_calls", "in_iter_truth_calls", "in_values_calls", "in_reversed_calls", "result_truth_calls", "seq_reflected_calls", "seq_truth_calls", "seq_order_calls", "seq_order_chain", "seq_sub_reflected_order", "seq_sub_declined", "seq_dict_pair", "seq_set_pair", "seq_scalar_order", "sort_reflected_items", "map_builtin_calls", "view_calls", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq", "metaclass_eq_hash", "builtin_sub_reflected",
-          "builtin_sub_unordered", "builtin_sub_declines", "builtin_sub_sibling", "in_chain_calls",
+          "builtin_sub_unordered", "builtin_sub_declines", "builtin_sub_sibling", "builtin_takes_sibling", "in_chain_calls",
           "object_value_reflected"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
@@ -234,6 +234,10 @@ Case(c) ==
       [] c = "object_value_reflected" -> <<"(True, False, 'lt', True)", <<"'R=='", "'R!='", "'R<'", "'R=='">>>>
       [] c = "builtin_sub_sibling" -> <<"(False, True, False, False, 0, True)", <<"'I<'">>>>
       [] c = "builtin_sub_reflected" -> <<"('own', True, False, 'ge')", <<"'set=='", "'list=='", "'tuple>'", "'list>='">>>>
+      \* a set's value compared with an instance of a frozenset's subclass, a
+      \* dict's with a frozendict's, a bytearray's with a bytes subclass's, by
+      \* its own method: the instance's reflected one is not called
+      [] c = "builtin_takes_sibling" -> <<"(True, True, True, True, [True])", <<>>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 

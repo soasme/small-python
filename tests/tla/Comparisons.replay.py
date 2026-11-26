@@ -189,6 +189,10 @@ SOURCES = {
                              "    def __ge__(s, o): t('list>='); return 'ge'\n"
                              "class T(tuple):\n    def __gt__(s, o): t('tuple>'); return NotImplemented\n"
                              "result = ({1} == S({1}), [1] == L([1]), (2,) < T((1,)), [0] <= L([1]))",
+    "builtin_takes_sibling": "class F(frozenset):\n    def __ge__(s, o):\n        for _ in (): pass\n        t('F>='); return 'ge'\n"
+                             "class D(frozendict):\n    def __eq__(s, o): t('D=='); return 'eq'\n    __hash__ = frozendict.__hash__\n"
+                             "class B(bytes):\n    def __gt__(s, o): t('B>'); return 'gt'\n"
+                             "result = (set() <= F({1}), {} == D(), bytearray(b'a') < B(b'b'), set() == F(), [x <= F() for x in [set()]])",
     "dict_key_eq": "class E:\n    def __init__(s, n, v=''): s.n, s.v = n, v\n    def __hash__(s): return 1\n"
                    "    def __eq__(s, o): t(s.n + '==' + o.n); return s.v == o.v\n"
                    "result = ({E('a'): 1, E('b', 'x'): 2} == {E('c'): 1, E('d', 'x'): 2}, {E('e'): 1} != {E('f', 'y'): 1})",
