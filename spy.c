@@ -6802,7 +6802,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
                 cmp->op = op; p->pos += (size_t)width;
                 size_t at = chain ? program_len(p->emitting) : 0;
                 cmp->a = expression(p, 4);
-                if (!cmp->a) return NULL;
+                if (!cmp->a || parse_children(p, cmp)) return NULL;
                 *tail = cmp; tail = &cmp->next;
                 op = operator_info(p, &width, &prec);
                 if (chain && (prec == 3 || cmp != n->args) && !(chain = chain_parsed(p, n, cmp, at, prec == 3)) && p->ctx->error_type[0]) return NULL;
@@ -9117,7 +9117,9 @@ static Node *child_next(Children *k) {
  * children: their recorded events, which together run from the first's
  * to the end of the parse's, put in the order the walk visits them,
  * then n's own node counted. A child without them leaves n to the walk. */
+static int assign_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
+    if (n->kind == N_ASSIGN) return assign_recorded(p, n);
     static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
                                           N_TUPLE, N_SET, N_DICT, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_COND,
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
@@ -9151,6 +9153,63 @@ static int parse_children(Parser *p, Node *n) {
     }
     n->events_at = (uint32_t)at;
     return parse_recorded(p, n, NULL, 1);
+}
+/* Whether target t's analysis can be built from its parts' recorded
+ * events (scope_target): not one that reaches __debug__ or a self
+ * attribute, whose checks and class statics stay with the walk. */
+static int target_recorded(Node *t) {
+    if (t->kind == N_STAR) return target_recorded(t->a);
+    if (t->kind == N_LIST || t->kind == N_TUPLE) {
+        for (Node *item = t->args; item; item = item->next) if (!target_recorded(item)) return 0;
+        return 1;
+    }
+    if (!(t->flags & F_EVENTS) || (t->flags & F_ANALYSED)) return 0;
+    if (t->kind == N_NAME) return strcmp(t->name.text, "__debug__") != 0;
+    if (t->kind == N_ATTR) return strcmp(t->b->name.text, "__debug__") && !(t->a->kind == N_NAME && !strcmp(t->a->name.text, "self"));
+    return t->kind == N_INDEX;
+}
+/* Append node t's recorded events to the log. */
+static int events_again(Parser *p, Node *t) {
+    Events *e = &p->events;
+    size_t count = t->events_end - t->events_at;
+    if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + count, sizeof(Event))) return -1;
+    memcpy(e->items + e->len, e->items + t->events_at, count * sizeof(Event));
+    e->len += count;
+    return 0;
+}
+/* Append the analysis of target t, a name bound in scope; a list's,
+ * tuple's or starred item's its items', uncounted. */
+static int target_events(Parser *p, Scope *scope, Node *t) {
+    if (t->kind == N_STAR) return target_events(p, scope, t->a);
+    if (t->kind == N_LIST || t->kind == N_TUPLE) {
+        for (Node *item = t->args; item; item = item->next) if (target_events(p, scope, item)) return -1;
+        return 0;
+    }
+    return t->kind == N_NAME ? event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t) : events_again(p, t);
+}
+/* Record assignment n's analysis (scope_visit): its targets bound, then
+ * its value, the targets' symbols moved after the value's; built after
+ * the log's end, then moved to where its parts' events began. */
+static int assign_recorded(Parser *p, Node *n) {
+    Events *e = &p->events;
+    if (!(n->b->flags & F_EVENTS) || (n->b->flags & F_ANALYSED) || n->b->events_end != e->len || !target_recorded(n->a)) return 0;
+    for (Node *t = n->args; t; t = t->next) if (!target_recorded(t)) return 0;
+    Scope *scope = parse_scope(p);
+    if (!scope) return -1;
+    /* Where the first target's events began: its first name's or part's. */
+    Node *first = n->a;
+    while (first->kind == N_STAR || ((first->kind == N_LIST || first->kind == N_TUPLE) && first->args))
+        first = first->kind == N_STAR ? first->a : first->args;
+    size_t at = (first->flags & F_EVENTS) ? first->events_at : n->b->events_at, end = e->len;
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, n->a)) return -1;
+    for (Node *t = n->args; t; t = t->next) if (target_events(p, scope, t)) return -1;
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || events_again(p, n->b) ||
+        event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
+    size_t count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
 }
 /* Replay the symbol steps that analysis recorded, as far as the first
  * error. */
