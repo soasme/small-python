@@ -8237,6 +8237,7 @@ static Node *statement(Parser *p) {
          n->kind == N_DELETE || (n->kind == N_ASSIGN && n->op == '=' && n->args))) n->flags |= F_NAMESPACE;
     if (n && misplaced) p->deferred_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
     if (n && !n->spanned) span_block(p, n, (size_t)(first - p->tokens));
+    if (n && !p->ctx->error_type[0] && parse_children(p, n)) return NULL;
     if (!p->statement_level) {
         if (!future && !(!p->top_statements && n && n->kind == N_EXPR && n->a && n->a->kind == N_STRING)) p->future_closed = 1;
         p->top_statements++;
@@ -9089,8 +9090,11 @@ static int parse_recorded(Parser *p, Node *n, Scope *scope, unsigned nodes) {
 static int parse_children(Parser *p, Node *n) {
     static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
                                           N_TUPLE, N_SET, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_STAR, N_SLICE,
-                                          N_CALL, N_KEYWORD, N_MAPPING};
+                                          N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE, N_ASSERT, N_PASS,
+                                          N_BREAK, N_CONTINUE};
+    /* A docstring is left to the walk: it may become a pass (docstring_pass). */
     if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
+        (n->kind == N_EXPR && n->a->kind == N_STRING) ||
         (n->kind == N_KEYWORD && !strcmp(n->name.text, "__debug__"))) return 0;
     /* An attribute's object; a keyword's value; a call's function, its
      * positional arguments, then its keyword ones (scope_arguments);
