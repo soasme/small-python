@@ -5583,7 +5583,7 @@ static Node *subscript(Parser *p) {
         size_t at = p->pos++;
         if (!star) return NULL;
         if (!(star->a = expression(p, 4))) { star_expression_error(p, at); return NULL; }
-        return star;
+        return parse_children(p, star) ? NULL : star;
     }
     if (!at(p, ':')) first = expression(p, 0);
     if (!at(p, ':')) return first;
@@ -5604,7 +5604,8 @@ static Node *subscript(Parser *p) {
         if (stream && !(stream = slice_lay(p, n, 2, &steps)) && p->ctx->error_type[0]) return NULL;
         if (!(n->c = plain_expression(p, 0))) return NULL;
     }
-    return stream && slice_lay(p, n, 3, &steps) ? slice_end(p, n, steps.start) : n;
+    if (stream && slice_lay(p, n, 3, &steps)) n = slice_end(p, n, steps.start);
+    return n && !parse_children(p, n) ? n : NULL;
 }
 static int parameter_list(Parser *p, Node *n, int close) {
     Node **tail = &n->args;
@@ -7337,7 +7338,7 @@ static Node *if_statement(Parser *p, int emits) {
     n->a = expression(p, 0);
     if (emits) header_kept(p, n->a, from);
     if (n->a && at(p, '=')) return condition_equals_error(p, condition);
-    if (!n->a || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
+    if (!n->a || parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
     if (emits) branch = branch_parsed(p->ctx, p->body.program, n->a, n);
     if (!(n->b = suite_of(p, what, line, emits))) return NULL;
     if (emits) end = if_else(p->ctx, p->body.program, branch);
@@ -8422,7 +8423,7 @@ static Node *statement_body(Parser *p, int emits) {
         Program *program = p->body.program;
         Try t = emits ? try_shape(p) : (Try){0};
         n = node(p, N_TRY);
-        if (!n || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
+        if (!n || parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits) try_begin(p->ctx, program, n, &t);
         p->body.tries++;
         if (!(n->a = suite_of(p, "'try' statement", line, emits))) return NULL;
@@ -8548,7 +8549,7 @@ static Node *statement_body(Parser *p, int emits) {
         if (!n->a) return NULL;
         if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
         /* With emits compiled in place, as compile_statement does (loop_begin). */
-        if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
+        if (parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits && !is_for) branch = branch_parsed(p->ctx, p->body.program, n->a, n);
         else if (emits) branch = loop_begin(p, p->body.program, n, &loop);
         p->loops++; n->b = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
@@ -9117,14 +9118,15 @@ static Node *child_next(Children *k) {
  * children: their recorded events, which together run from the first's
  * to the end of the parse's, put in the order the walk visits them,
  * then n's own node counted. A child without them leaves n to the walk. */
-static int assign_recorded(Parser *, Node *);
+static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
 static int parse_children(Parser *p, Node *n) {
-    if (n->kind == N_ASSIGN) return assign_recorded(p, n);
+    if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
+    if (n->kind == N_FOR) return bound_recorded(p, n, n->args, NULL, n->a);
     static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
                                           N_TUPLE, N_SET, N_DICT, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_COND,
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
                                           N_ASSERT, N_PASS, N_BREAK, N_CONTINUE, N_JOINED, N_FORMAT, N_TEMPLATE,
-                                          N_INTERPOLATION};
+                                          N_INTERPOLATION, N_IF, N_WHILE, N_TRY};
     /* A docstring is left to the walk: it may become a pass (docstring_pass). */
     if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
         (n->kind == N_EXPR && n->a->kind == N_STRING) ||
@@ -9187,23 +9189,24 @@ static int target_events(Parser *p, Scope *scope, Node *t) {
     }
     return t->kind == N_NAME ? event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t) : events_again(p, t);
 }
-/* Record assignment n's analysis (scope_visit): its targets bound, then
- * its value, the targets' symbols moved after the value's; built after
- * the log's end, then moved to where its parts' events began. */
-static int assign_recorded(Parser *p, Node *n) {
+/* Record n's analysis, an assignment's or a for statement's header's
+ * (scope_visit): target and the targets after it, rest, bound, then
+ * value, the targets' symbols moved after the value's; built after the
+ * log's end, then moved to where its parts' events began. */
+static int bound_recorded(Parser *p, Node *n, Node *target, Node *rest, Node *value) {
     Events *e = &p->events;
-    if (!(n->b->flags & F_EVENTS) || (n->b->flags & F_ANALYSED) || n->b->events_end != e->len || !target_recorded(n->a)) return 0;
-    for (Node *t = n->args; t; t = t->next) if (!target_recorded(t)) return 0;
+    if (!(value->flags & F_EVENTS) || (value->flags & F_ANALYSED) || value->events_end != e->len || !target_recorded(target)) return 0;
+    for (Node *t = rest; t; t = t->next) if (!target_recorded(t)) return 0;
     Scope *scope = parse_scope(p);
     if (!scope) return -1;
     /* Where the first target's events began: its first name's or part's. */
-    Node *first = n->a;
+    Node *first = target;
     while (first->kind == N_STAR || ((first->kind == N_LIST || first->kind == N_TUPLE) && first->args))
         first = first->kind == N_STAR ? first->a : first->args;
-    size_t at = (first->flags & F_EVENTS) ? first->events_at : n->b->events_at, end = e->len;
-    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, n->a)) return -1;
-    for (Node *t = n->args; t; t = t->next) if (target_events(p, scope, t)) return -1;
-    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || events_again(p, n->b) ||
+    size_t at = (first->flags & F_EVENTS) ? first->events_at : value->events_at, end = e->len;
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, target)) return -1;
+    for (Node *t = rest; t; t = t->next) if (target_events(p, scope, t)) return -1;
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || events_again(p, value) ||
         event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     size_t count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
