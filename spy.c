@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE };
 /* An EV_ERROR's SyntaxError, reported at its node. */
 static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
@@ -6705,7 +6705,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         lambda_kept(p, left, from);
         p->emitting = emitting; p->definition = definition;
         p->functions--; p->async_function = async_function;
-        if (!left->b->a || !(left = finished(p, left))) return NULL;
+        if (!left->b->a || parse_children(p, left->b) || !(left = finished(p, left))) return NULL;
         goto assignment_expression;
     } else if (at(p, '+') || at(p, '-') || at(p, '~') || keyword(p, "not")) {
         if (keyword(p, "not") && min > 3) return not_operand_error(p);
@@ -9121,8 +9121,10 @@ static Node *child_next(Children *k) {
 static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
 static int header_recorded(Parser *, Node *);
 static int definition_recorded(Parser *, Node *);
+static int lambda_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
+    if (n->kind == N_LAMBDA) return lambda_recorded(p, n);
     if (n->kind == N_DEF || n->kind == N_CLASS) return definition_recorded(p, n);
     if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
     if (n->kind == N_FOR) return bound_recorded(p, n, n->args, NULL, n->a);
@@ -9270,6 +9272,36 @@ static int definition_recorded(Parser *p, Node *n) {
             if (event_into(p->ctx, e, EV_BIND, S_PARAM, n->scope, param, param)) return -1;
     if (event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
+}
+/* Record lambda n's analysis (scope_visit): its defaults; its scope made
+ * and entered, its parameters bound and its body there. Its parts'
+ * events are put in that order after the log's end, then moved to
+ * where they began. It binds no name, so it moves no symbol. */
+static int lambda_recorded(Parser *p, Node *n) {
+    Events *e = &p->events;
+    Node *body = n->b;
+    if (!(body->flags & F_EVENTS) || (body->flags & F_ANALYSED)) return 0;
+    size_t at = body->events_at, total = body->events_end - body->events_at;
+    for (Node *param = n->args; param; param = param->next) {
+        Node *o = param->a;
+        if (!o) continue;
+        if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) return 0;
+        if (o->events_at < at) at = o->events_at;
+        total += o->events_end - o->events_at;
+    }
+    if (total != e->len - at) return 0;
+    size_t end = e->len;
+    for (Node *param = n->args; param; param = param->next) if (param->a && events_again(p, param->a)) return -1;
+    if (event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
+    for (Node *param = n->args; param; param = param->next)
+        if (event_into(p->ctx, e, EV_BIND, S_PARAM, NULL, param, param)) return -1;
+    if (events_again(p, body) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ||
+        event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL)) return -1;
+    size_t count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
     e->len = at + count;
     n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
@@ -9605,14 +9637,26 @@ static int event(SPYContext *c, int kind, unsigned flags, Scope *scope, Node *n,
 /* The walk takes construct n's recorded events, counting its nodes in scope. */
 static int events_take(SPYContext *c, Scope *scope, Node *n) {
     Events *from = c->events->parsed;
-    for (uint32_t i = n->events_at; i < n->events_end; i++) {
+    /* An event of no scope is the innermost entered one's, the walk's
+     * outside them: a definition's scope is made where the walk would
+     * make it, in the scope around it, and entered. */
+    Scope **entered = NULL;
+    size_t depth = 0, cap = 0;
+    int status = 0;
+    for (uint32_t i = n->events_at; i < n->events_end && !status; i++) {
         Event *v = &from->items[i];
-        if (v->kind == EV_NODES) scope->nodes += v->flags;
-        /* A name used, in the scope the walk takes it in, its node counted. */
-        else if (v->kind == EV_USE) { scope->nodes++; if (event_into(c, c->events, EV_BIND, S_USE, scope, v->n, v->n)) return -1; }
-        else if (event_into(c, c->events, v->kind, v->flags, v->scope, v->n, v->at)) return -1;
+        Scope *in = v->scope ? v->scope : depth ? entered[depth - 1] : scope;
+        if (v->kind == EV_ENTER) {
+            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
+                status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
+        } else if (v->kind == EV_LEAVE) depth--;
+        else if (v->kind == EV_NODES) in->nodes += v->flags;
+        /* A name used, its node counted. */
+        else if (v->kind == EV_USE) { in->nodes++; status = event_into(c, c->events, EV_BIND, S_USE, in, v->n, v->n); }
+        else status = event_into(c, c->events, v->kind, v->flags, in, v->n, v->at);
     }
-    return 0;
+    mem_free(entered);
+    return status;
 }
 /* The number of scope's symbols, *at, for a later move (symbols_later). */
 static int symbols_mark(SPYContext *c, Scope *scope, size_t *at) {
