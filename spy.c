@@ -9122,8 +9122,10 @@ static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
 static int header_recorded(Parser *, Node *);
 static int definition_recorded(Parser *, Node *);
 static int lambda_recorded(Parser *, Node *);
+static int comprehension_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
+    if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_LAMBDA) return lambda_recorded(p, n);
     if (n->kind == N_DEF || n->kind == N_CLASS) return definition_recorded(p, n);
     if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
@@ -9300,6 +9302,51 @@ static int lambda_recorded(Parser *p, Node *n) {
     for (Node *param = n->args; param; param = param->next)
         if (event_into(p->ctx, e, EV_BIND, S_PARAM, NULL, param, param)) return -1;
     if (events_again(p, body) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ||
+        event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL)) return -1;
+    size_t count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
+}
+/* Record comprehension n's analysis (scope_visit) when no clause is
+ * asynchronous: its first iterable; its scope made and entered, each
+ * clause's target bound and its iterable or condition but the first,
+ * then its element, a dictionary's value before its key. Its parts'
+ * events are put in that order after the log's end, then moved to
+ * where they began. */
+static int comprehension_recorded(Parser *p, Node *n) {
+    Events *e = &p->events;
+    Node *element = n->op == N_DICT ? n->args->b : n->args, *key = n->op == N_DICT ? n->args->a : NULL;
+    Node *parts[2] = {element, key};
+    size_t at = e->len, total = 0;
+    for (int i = 0; i < 2; i++) {
+        Node *o = parts[i];
+        if (!o) continue;
+        if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) return 0;
+        if (o->events_at < at) at = o->events_at;
+        total += o->events_end - o->events_at;
+    }
+    for (Node *clause = n->a; clause; clause = clause->b) {
+        Node *t = clause->kind == N_FOR ? clause->args : NULL;
+        if (clause->kind == N_FOR && clause->op) return 0;
+        if (t && (!(t->flags & F_EVENTS) || !target_recorded(t))) return 0;
+        for (int i = 0; i < 2; i++) {
+            Node *o = i ? t : clause->a;
+            if (!o) continue;
+            if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) return 0;
+            if (o->events_at < at) at = o->events_at;
+            total += o->events_end - o->events_at;
+        }
+    }
+    if (total != e->len - at) return 0;
+    size_t end = e->len;
+    if ((n->a->a && events_again(p, n->a->a)) || event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
+    for (Node *clause = n->a; clause; clause = clause->b) {
+        if (clause->kind == N_FOR && target_events(p, NULL, clause->args)) return -1;
+        if (clause != n->a && clause->a && events_again(p, clause->a)) return -1;
+    }
+    if ((element && events_again(p, element)) || (key && events_again(p, key)) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ||
         event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL)) return -1;
     size_t count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
