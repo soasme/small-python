@@ -426,10 +426,11 @@ symbol table visits in another order than the source (targets before
 values, a conditional's test before its branches, a dictionary's keys
 before its values, a definition's name after its defaults), and a move
 of a range of events to another scope, as a comprehension's element
-moves to the comprehension's program. A name records no event when it
-completes: its parent records a use when it consumes the name as a
-value, and an assignment, `for`, `with`, `except`, `import`, pattern or
-`del` a binding when it consumes it as a target.
+moves to the comprehension's program. A name records a use when it
+completes, in no particular scope: the scope that takes it, the walk's
+or a later construct's, is where it is used. A construct that consumes
+the name as a target (an assignment, `for`, `with`, `except`, `import`,
+pattern or `del`) ignores that use and binds it.
 
 The move is made in two steps, each checked by dumping every scope's
 symbols, flags and order with the first analysis error over the
@@ -453,6 +454,15 @@ specification tests the dumps of every scope's symbols, flags and order
 and the tests' output are the same before and after but for those
 failing compiles, and so are the 2,060 files of CPython's `Lib`
 compiled with `compile`.
+
+The second step has begun. A `global` or `nonlocal` declaration and an
+`import` record their events as they are parsed, an import's errors
+among them; so do a name, a number, `None`, `True`, `False`, `...`, and
+an operator, attribute or subscription whose operands recorded theirs
+in order. The parser keeps each recorded node's range of the log, and
+the walk takes a range in the place it would have visited the node.
+Since the walk no longer descends a long run of prefix operators, the
+parser counts the run toward its depth limit, as CPython's does.
 
 Each stage must preserve Python 3.15 semantics and report its own measured
 cost. Compiling every operation in the existing pausing mode is not an

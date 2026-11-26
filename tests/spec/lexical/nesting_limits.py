@@ -25,7 +25,7 @@ def stack_message(text):
     count, _, rest = tail.partition(" kB) during compilation")
     return head == "" and count.isdigit() and rest == ""
 
-for source in ("-" * 100000 + "1", "not " * 100000 + "1"):
+for source in ("-" * 10000 + "1", "-" * 100000 + "1", "not " * 100000 + "1"):
     try:
         compile(source, "m", "eval")
         fail("compiled")

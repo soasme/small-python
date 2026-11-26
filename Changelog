@@ -839,6 +839,7 @@ Unreleased (0.10.0):
 - the dictionary view classes hold `mapping`, and the keys and items classes `isdisjoint`; `dict_values` has no `__contains__`;
   `staticmethod` and `classmethod` hold a `__dict__` descriptor
 - a class's `__text_signature__` is the signature its creation docstring gives, or None
+- about 6,000 prefix operators in a row raise MemoryError "Parser stack overflowed - Python source too complex to parse"
 - an import calls a Python `__contains__` of `__lazy_modules__`, the lazy-import filter and its verdict's `__bool__`
   without nesting on the C stack, so it can pause
 - a generic class is made in a frame named `<generic parameters of C>`, which its bases, keywords and body run in and tracebacks show

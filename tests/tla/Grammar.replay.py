@@ -102,6 +102,7 @@ SNIPPETS = {
     "default_after_star": "def f(*, a=1, b): pass",
     "kwargs_then_param": "def f(**k, a): pass",
     "indentation_too_deep": "".join(" " * i + "if 1:\n" for i in range(100)) + " " * 100 + "pass",
+    "prefix_too_deep": "x = " + "-" * 10000 + "1",
     "fstrings_too_deep": "x = " + "".join("f" + q + "{" for q in QUOTES) + "1" + "".join("}" + q for q in reversed(QUOTES)),
     "literal_limit_then_error": "x = 1" + "0" * 5000 + " + (",
     "yield_target_then_error": "def f():\n    x = yield = 1 +",
@@ -120,6 +121,8 @@ def outcome(p):
         return repr(namespace["log"])
     except SyntaxError as error:
         return "%s: %s" % (type(error).__name__, error.msg)
+    except MemoryError as error:
+        return "MemoryError: %s" % error
 
 
 check_programs(outcome)

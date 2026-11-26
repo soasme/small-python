@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE };
 /* An EV_ERROR's SyntaxError, reported at its node. */
 static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
@@ -4766,6 +4766,8 @@ static Scope *parse_scope(Parser *);
 static void parse_record(Parser *, Node *);
 static int parse_recorded(Parser *, Node *, Scope *, unsigned);
 static int import_recorded(Parser *, Node *);
+static int parse_operands(Parser *, Node *, Node *const *, size_t);
+static Node *too_complex(Parser *);
 static Node *finished(Parser *, Node *);
 static Node *leaf(Parser *, Node *);
 static int call_stream(Parser *, Node *, Node *, Mark, int, Mark *);
@@ -6108,6 +6110,8 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
                     .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
     /* A field parsed for its value emits into its statement's program. */
     if (!failed) { inner.emitting = p->emitting; inner.emitted = p->emitted; inner.emitted_len = p->emitted_len; inner.emitted_cap = p->emitted_cap; }
+    /* Its analysis is the statement's. */
+    inner.events = p->events;
     Node *result = NULL;
     const char *copy = text.data + 1, *copy_end = copy + (end - start);
     if (lex(&inner, text.data)) p->ctx->line += line - 1;
@@ -6156,6 +6160,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
     }
     if (!failed) { p->emitted = inner.emitted; p->emitted_len = inner.emitted_len; p->emitted_cap = inner.emitted_cap; }
+    p->events = inner.events;
     mem_free(inner.tokens); mem_free(inner.literal_error); mem_free(text.data);
     return result;
 }
@@ -6331,7 +6336,7 @@ static Node *finished(Parser *, Node *);
 static Node *atom_node(Parser *p) {
     Node *n;
     if (at(p, T_STRING)) return string_node(p);
-    if (at(p, T_ELLIPSIS)) { n = node(p, N_ELLIPSIS); p->pos++; return n; }
+    if (at(p, T_ELLIPSIS)) { n = node(p, N_ELLIPSIS); p->pos++; return n && !parse_operands(p, n, NULL, 0) ? n : NULL; }
     if (at(p, T_INT) || at(p, T_FLOAT) || at(p, T_IMAG)) {
         n = node(p, at(p, T_INT) ? N_INT : at(p, T_IMAG) ? N_IMAG : N_FLOAT);
         if (!n) return NULL;
@@ -6347,16 +6352,22 @@ static Node *atom_node(Parser *p) {
             const char *message = c->error_text ? c->error_text : c->error_message;
             p->literal_error = copy_text(c, message, strlen(message)); p->literal_line = t->line;
         }
-        return n->constant ? n : NULL;
+        return n->constant && !parse_operands(p, n, NULL, 0) ? n : NULL;
     }
     if (keyword(p, "None") || keyword(p, "True") || keyword(p, "False")) {
         n = node(p, keyword(p, "None") ? N_NONE : N_BOOL);
         if (!n) return NULL;
-        n->op = keyword(p, "True"); p->pos++; return n;
+        n->op = keyword(p, "True"); p->pos++; return parse_operands(p, n, NULL, 0) ? NULL : n;
     }
     if (at(p, T_NAME)) {
         n = identifier(p);
-        if (n && p->ctx->optimize && !strcmp(n->name.text, "__debug__")) { n->kind = N_BOOL; n->op = 0; }
+        if (n && p->ctx->optimize && !strcmp(n->name.text, "__debug__")) { n->kind = N_BOOL; n->op = 0; if (parse_operands(p, n, NULL, 0)) return NULL; }
+        /* Its use, unless it is a target (scope_target). */
+        else if (n) {
+            parse_record(p, n);
+            if (event_into(p->ctx, &p->events, EV_USE, 0, NULL, n, NULL)) return NULL;
+            n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
+        }
         return n;
     }
     int open = peek(p)->kind;
@@ -6604,7 +6615,8 @@ static int call_arguments(Parser *p, Node *n) {
                 p->pos++;
                 if (at(p, ',') || at(p, ')')) { syntax_span(p, start, p->pos, "expected argument value expression"); return -1; }
                 if (arg->original) { mem_free(arg->name.text); arg->name.text = arg->original; arg->original = NULL; }
-                arg->kind = N_KEYWORD;
+                /* A keyword is no use of its name. */
+                arg->kind = N_KEYWORD; arg->flags &= ~F_EVENTS;
                 for (Node *a = n->args; a; a = a->next)
                     if (a->kind == N_KEYWORD && !strcmp(a->name.text, arg->name.text)) {
                         char message[256];
@@ -6697,7 +6709,9 @@ static Node *expression_inner(Parser *p, int min, int named) {
         /* A run of prefix operators of one precedence nests without recursion. */
         int negation = keyword(p, "not");
         Node *outer = NULL, *inner = NULL;
+        size_t run = 3 * p->depth;
         do {
+            if (++run >= 6000) return too_complex(p);
             Node *n = node(p, N_UNARY);
             if (!n) return NULL;
             n->op = negation ? O_NOT : peek(p)->kind;
@@ -6849,13 +6863,15 @@ assignment_expression:
     }
     return left;
 }
+static Node *too_complex(Parser *p) {
+    spy_clear_error(p->ctx);
+    spy_error(p->ctx, "MemoryError", "Parser stack overflowed - Python source too complex to parse");
+    return NULL;
+}
 static Node *expression_mode(Parser *p, int min, int named) {
-    /* CPython's parser fails past MAXSTACK rule invocations. */
-    if (p->depth >= 2000 || deeper(p->ctx, "")) {
-        spy_clear_error(p->ctx);
-        spy_error(p->ctx, "MemoryError", "Parser stack overflowed - Python source too complex to parse");
-        return NULL;
-    }
+    /* CPython's parser fails past MAXSTACK (6000) rule invocations, about
+     * three for each nested expression and one for each prefix operator. */
+    if (p->depth >= 2000 || deeper(p->ctx, "")) return too_complex(p);
     p->depth++;
     size_t start = p->pos;
     Node *n = span(p, expression_inner(p, min, named), start);
@@ -9064,6 +9080,23 @@ static int parse_recorded(Parser *p, Node *n, Scope *scope, unsigned nodes) {
     n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
     return 0;
 }
+/* Construct n's analysis, when the walk would visit just its operands,
+ * count of them, in that order: their recorded events, one after
+ * another up to the end of the parse's, then n's own node counted. An
+ * operand without them leaves n to the walk. */
+static int parse_operands(Parser *p, Node *n, Node *const *operands, size_t count) {
+    uint32_t at = (uint32_t)p->events.len, next = UINT32_MAX;
+    for (size_t i = 0; i < count; i++) {
+        Node *o = operands[i];
+        if (!o) continue;
+        if (!(o->flags & F_EVENTS) || (next != UINT32_MAX && o->events_at != next)) return 0;
+        if (next == UINT32_MAX) at = o->events_at;
+        next = o->events_end;
+    }
+    if (next != UINT32_MAX && next != p->events.len) return 0;
+    n->events_at = at;
+    return parse_recorded(p, n, NULL, 1);
+}
 /* Replay the symbol steps that analysis recorded, as far as the first
  * error. */
 static void scope_later(Scope *, size_t, size_t);
@@ -9376,6 +9409,8 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
     for (uint32_t i = n->events_at; i < n->events_end; i++) {
         Event *v = &from->items[i];
         if (v->kind == EV_NODES) scope->nodes += v->flags;
+        /* A name used, in the scope the walk takes it in, its node counted. */
+        else if (v->kind == EV_USE) { scope->nodes++; if (event_into(c, c->events, EV_BIND, S_USE, scope, v->n, v->n)) return -1; }
         else if (event_into(c, c->events, v->kind, v->flags, v->scope, v->n, v->at)) return -1;
     }
     return 0;
@@ -9688,7 +9723,8 @@ static int scope_arguments(SPYContext *c, Scope *scope, Node *args) {
 /* Analyse n in scope, as deep as the stack allows. */
 static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     if (!n || c->error_type[0]) return c->error_type[0] ? -1 : 0;
-    if (n->flags & F_EVENTS) return events_take(c, scope, n);
+    /* While the walk records; a replayed step walks (annotated_target). */
+    if ((n->flags & F_EVENTS) && c->events) return events_take(c, scope, n);
     if (deeper(c, " during compilation")) return -1;
     int status = scope_visit(c, scope, n);
     c->depth--;
@@ -18876,6 +18912,9 @@ static Node *finished(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     if (n && n->kind == N_UNARY && n->op == '-' && !n->constant && n->a->constant && (n->a->kind <= N_IMAG || n->a->kind == N_UNARY) &&
         !(n->constant = unary(c, '-', n->a->constant))) return NULL;
+    /* An operator's, attribute's or item's analysis is its operands'. */
+    if (n && !c->error_type[0] && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_INDEX || n->kind == N_ATTR) &&
+        parse_operands(p, n, (Node *[]){n->a, n->kind == N_ATTR ? NULL : n->b}, 2)) return NULL;
     if (!n || !p->emitting || c->error_type[0] || (n->flags & F_EMITTED)) return n;
     Program *program = p->emitting;
     Node *fixed[3] = {n->a}, *list = NULL;
