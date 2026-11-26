@@ -727,6 +727,14 @@ int main(int argc, char **argv) {
     assert(!spy_call(c, host_close, 0, NULL) && !strcmp(spy_error_type(c), "ValueError"));
     spy_clear_error(c);
     spy_release(z); spy_release(parts_keywords); spy_release(complex_ok); spy_release(host_complex); spy_release(host_close);
+    /* Calling a module from the host: its Python __getattr__, asked for
+     * the module's own name, runs in C for the suggestion. */
+    execute(c, "host_pp = type(__builtins__)('pp')\nhost_pp.__getattr__ = lambda n: print if n == 'pp' else 1 / 0\n");
+    SPYValue *host_pp = spy_get_global(c, "host_pp");
+    assert(!spy_call(c, host_pp, 0, NULL) && !strcmp(spy_error_type(c), "TypeError") &&
+           !strcmp(spy_error_message(c), "'module' object is not callable. Did you mean: 'pp.pp(...)'?"));
+    spy_clear_error(c);
+    spy_release(host_pp);
     /* close() of a coroutine awaiting anext() with a default, whose
      * __anext__ answers GeneratorExit with StopAsyncIteration, from the
      * host: the await takes the default and the coroutine returns it. */
