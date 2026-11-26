@@ -6335,6 +6335,13 @@ static Node *leaf(Parser *p, Node *n) {
     return emit_parsed(p, n, program_len(p->emitting));
 }
 static Node *finished(Parser *, Node *);
+/* Record name n's use. */
+static int name_used(Parser *p, Node *n) {
+    parse_record(p, n);
+    if (event_into(p->ctx, &p->events, EV_USE, 0, NULL, n, NULL)) return -1;
+    n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
+    return 0;
+}
 static Node *atom_node(Parser *p) {
     Node *n;
     if (at(p, T_STRING)) return string_node(p);
@@ -6365,11 +6372,7 @@ static Node *atom_node(Parser *p) {
         n = identifier(p);
         if (n && p->ctx->optimize && !strcmp(n->name.text, "__debug__")) { n->kind = N_BOOL; n->op = 0; if (parse_children(p, n)) return NULL; }
         /* Its use, unless it is a target (scope_target). */
-        else if (n) {
-            parse_record(p, n);
-            if (event_into(p->ctx, &p->events, EV_USE, 0, NULL, n, NULL)) return NULL;
-            n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
-        }
+        else if (n && name_used(p, n)) return NULL;
         return n;
     }
     int open = peek(p)->kind;
@@ -6415,6 +6418,7 @@ static Node *atom_node(Parser *p) {
                 item = node(p, N_STAR);
                 if (!item || !(item->a = expression(p, 4))) return NULL;
                 span(p, item, item_at);
+                if (parse_children(p, item)) return NULL;
                 if (p->pos > p->expr_end || (p->pos == p->expr_end && operand < p->expr_start)) {
                     p->expr_start = operand; p->expr_end = p->pos;
                 }
@@ -6904,6 +6908,7 @@ static Node *expression_items(Parser *p, int min, int named) {
         first = node(p, N_STAR);
         if (!first || !(first->a = expression(p, 4))) return NULL;
         span(p, first, start);
+        if (parse_children(p, first)) return NULL;
     } else first = expression_mode(p, min, named);
     if (!first || !take(p, ',')) return first;
     Node *tuple = node(p, N_TUPLE);
@@ -6919,6 +6924,7 @@ static Node *expression_items(Parser *p, int min, int named) {
             item = node(p, N_STAR);
             if (!item || !(item->a = expression(p, 4))) return NULL;
             span(p, item, item_start);
+            if (parse_children(p, item)) return NULL;
         } else item = expression_mode(p, min, named);
         if (!item) return NULL;
         *tail = item; tail = &item->next;
@@ -7538,7 +7544,18 @@ static Node *annotation_string(Parser *p, Node *annotation) {
     Program *emitting;
     EmitMark from = apart_begin(p, &emitting, NULL);
     Node *kept = p->emitting ? emit_parsed(p, n, 0) : NULL;
-    return apart_end(p, kept, emitting, from) ? NULL : n;
+    if (apart_end(p, kept, emitting, from)) return NULL;
+    /* Its expression analysed in its own scope, made where the walk takes it. */
+    Events *e = &p->events;
+    if (!(annotation->flags & F_EVENTS) || (annotation->flags & F_ANALYSED) || annotation->events_end != e->len) return n;
+    size_t at = annotation->events_at;
+    if (event_into(p->ctx, e, EV_ENTER, 2, NULL, n, NULL)) return NULL;
+    Event enter = e->items[--e->len];
+    memmove(e->items + at + 1, e->items + at, (e->len - at) * sizeof(Event));
+    e->items[at] = enter; e->len++;
+    if (event_into(p->ctx, e, EV_LEAVE, 0, NULL, n, NULL)) return NULL;
+    n->events_at = (uint32_t)at;
+    return parse_recorded(p, n, NULL, 1) ? NULL : n;
 }
 /* An expression parse parses, with min, apart (apart_begin). */
 static Node *apart_expression(Parser *p, Node *(*parse)(Parser *, int), int min) {
@@ -7787,7 +7804,7 @@ static Node *keyword_pattern(Parser *p) {
 /* A value pattern of a name and its attributes. */
 static Node *dotted_pattern(Parser *p) {
     Node *n = pattern_node(p, PT_VALUE), *value = n ? identifier(p) : NULL;
-    if (!value || !(value = leaf(p, value))) return NULL;
+    if (!value || !(value = leaf(p, value)) || name_used(p, value)) return NULL;
     while (take(p, '.')) {
         Node *attr = node(p, N_ATTR);
         if (!attr) return NULL;
@@ -9131,6 +9148,7 @@ static int definition_recorded(Parser *, Node *);
 static int self_attribute(Node *);
 static int scope_static(SPYContext *, Scope *, Node *);
 static int scope_check(SPYContext *, Scope *, Node *);
+static Scope *string_scope(SPYContext *, Node *);
 static int scope_named(SPYContext *, Scope *, Node *, int);
 static Scope *annotation_scope(SPYContext *, Scope *, size_t);
 static int scope_annotation_error(SPYContext *, Scope *, Node *);
@@ -9850,17 +9868,24 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
     for (uint32_t i = n->events_at; i < n->events_end && !status; i++) {
         Event *v = &from->items[i];
         Scope *in = v->scope ? v->scope : depth ? entered[depth - 1] : scope;
-        if (v->kind == EV_ENTER) {
+        if (v->kind == EV_ENTER && v->flags != 2) {
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
                 status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
             /* An annotation function's (scope_annotations). */
             if (!status && v->flags) v->n->scope->within = "an annotation";
+        } else if (v->kind == EV_ENTER) {
+            /* A string annotation's (scope_string_annotation). */
+            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
+                status = string_scope(c, v->n) ? (entered[depth++] = v->n->scope, 0) : -1;
         } else if (v->kind == EV_ANNOTATE) {
             /* The __annotate__ scope of the scope taken in. */
             Scope *annotate = NULL;
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
                 status = (annotate = annotation_scope(c, in, v->flags)) ? (entered[depth++] = annotate, 0) : -1;
-        } else if (v->kind == EV_LEAVE) depth--;
+        } else if (v->kind == EV_LEAVE) {
+            depth--;
+            if (v->n) scope_define(v->n);
+        }
         /* An annotation analysed where it is, its nodes not counted. */
         else if (v->kind == EV_WITHIN) { within = in->within; nodes = in->nodes; in->within = "an annotation"; }
         else if (v->kind == EV_UNWITHIN) { in->within = within; in->nodes = nodes; }
@@ -10090,10 +10115,14 @@ static Scope *scope_named_owner(SPYContext *c, Scope *scope, Node *n) {
 /* An annotation stored as a string (16.6.4) is analysed in an annotation
  * scope of its own that never runs: it encloses no names of the scope that
  * holds it, and is not asynchronous. */
-static int scope_string_annotation(SPYContext *c, Node *n) {
-    if (!(n->scope = scope_new(c, NULL, S_FUNCTION))) return -1;
+/* String annotation n's scope, apart from the scopes around it. */
+static Scope *string_scope(SPYContext *c, Node *n) {
+    if (!(n->scope = scope_new(c, NULL, S_FUNCTION))) return NULL;
     n->scope->owner = n; n->scope->within = "an annotation";
-    if (scope_node(c, n->scope, n->annotate)) return -1;
+    return n->scope;
+}
+static int scope_string_annotation(SPYContext *c, Node *n) {
+    if (!string_scope(c, n) || scope_node(c, n->scope, n->annotate)) return -1;
     scope_define(n);
     return 0;
 }
