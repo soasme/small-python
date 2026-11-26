@@ -6096,7 +6096,7 @@ static int flush_literal(Parser *p, Node ***tail, Buffer *out) {
     n->name.text = out->data; n->op = (int)out->len;
     out->data = NULL; out->len = out->cap = 0;
     **tail = n; *tail = &n->next;
-    return leaf(p, n) ? 0 : -1;
+    return leaf(p, n) && !parse_children(p, n) ? 0 : -1;
 }
 static void invalid_expression_error(Parser *);
 static size_t probe_expression(Parser *, size_t, int);
@@ -9121,7 +9121,8 @@ static int parse_children(Parser *p, Node *n) {
     static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
                                           N_TUPLE, N_SET, N_DICT, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_COND,
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
-                                          N_ASSERT, N_PASS, N_BREAK, N_CONTINUE};
+                                          N_ASSERT, N_PASS, N_BREAK, N_CONTINUE, N_JOINED, N_FORMAT, N_TEMPLATE,
+                                          N_INTERPOLATION};
     /* A docstring is left to the walk: it may become a pass (docstring_pass). */
     if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
         (n->kind == N_EXPR && n->a->kind == N_STRING) ||
