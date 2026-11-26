@@ -8345,7 +8345,7 @@ static Node *statement_body(Parser *p, int emits) {
         } while (!grouped || !at(p, ')'));
         if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
         if (emits) { p->emitting = NULL; p->emitted_len = 0; }
-        if (analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
+        if (parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (!(n->b = suite_of(p, "'with' statement", n->line, emits))) return NULL;
         if (emits) { with_end(p->ctx, p->body.program, last, n->op); n->flags |= F_EMITTED; }
         return n;
@@ -8499,7 +8499,7 @@ static Node *statement_body(Parser *p, int emits) {
             if (emits) header_kept(p, handler->a, from);
             int saved = p->star;
             size_t match = 0, final = 0;
-            if (analyse_statements(p, handler) || (emits && header_ready(p, before))) return NULL;
+            if (parse_children(p, handler) || analyse_statements(p, handler) || (emits && header_ready(p, before))) return NULL;
             if (emits) match = except_begin(p->ctx, program, handler, &t, &final);
             if (is_star) p->star = p->loops + 1;
             handler->b = suite_of(p, is_star ? "'except*' statement" : "'except' statement", except_line, emits);
@@ -9119,9 +9119,11 @@ static Node *child_next(Children *k) {
  * to the end of the parse's, put in the order the walk visits them,
  * then n's own node counted. A child without them leaves n to the walk. */
 static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
+static int header_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
     if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
     if (n->kind == N_FOR) return bound_recorded(p, n, n->args, NULL, n->a);
+    if (n->kind == N_WITH || n->kind == N_EXCEPT) return header_recorded(p, n);
     static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
                                           N_TUPLE, N_SET, N_DICT, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_COND,
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
@@ -9188,6 +9190,34 @@ static int target_events(Parser *p, Scope *scope, Node *t) {
         return 0;
     }
     return t->kind == N_NAME ? event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t) : events_again(p, t);
+}
+/* Record a with or except statement's header's analysis (scope_visit):
+ * a with item's expression, then its target bound; an except clause's
+ * types, then its name bound at the clause. Built after the log's end,
+ * then moved to where its parts' events began. */
+static int header_recorded(Parser *p, Node *n) {
+    Events *e = &p->events;
+    Node *first = n->kind == N_WITH ? n->args : n;
+    for (Node *item = first; item; item = n->kind == N_WITH ? item->next : NULL) {
+        Node *a = item->a, *b = n->kind == N_WITH ? item->b : item->c;
+        if ((a && (!(a->flags & F_EVENTS) || (a->flags & F_ANALYSED))) || (b && !target_recorded(b))) return 0;
+    }
+    if (!first) return 0;
+    Scope *scope = parse_scope(p);
+    if (!scope) return -1;
+    size_t at = first->a ? first->a->events_at : e->len, end = e->len;
+    for (Node *item = first; item; item = n->kind == N_WITH ? item->next : NULL) {
+        Node *b = n->kind == N_WITH ? item->b : item->c;
+        if (item->a && events_again(p, item->a)) return -1;
+        if (b && (b->kind == N_NAME && n->kind == N_EXCEPT ? event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, b, n) : target_events(p, scope, b)))
+            return -1;
+    }
+    if (event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
+    size_t count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
 }
 /* Record n's analysis, an assignment's or a for statement's header's
  * (scope_visit): target and the targets after it, rest, bound, then
