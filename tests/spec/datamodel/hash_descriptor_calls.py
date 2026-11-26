@@ -4,7 +4,7 @@
 # called with no arguments, wherever a key is hashed: hash(), a set or
 # dict display, a lookup, a store, set.add and a tuple holding the key.
 # An AttributeError from __get__ makes the key unhashable; any other
-# exception propagates.
+# exception propagates. The same holds for a __get__ that does not loop.
 from harness import *
 
 log = []
@@ -41,3 +41,11 @@ expected = [(5, one), (1, one), (False, one), (1, one * 2), (1, one), (True, one
             (("TypeError", "cannot use 'tuple' as a dict key (unhashable type: 'Key')"), one), (("KeyError", "'get'"), one)]
 assert_eq(cases(), expected)
 assert_eq(cases(), expected)
+
+class Plain:
+    def __get__(self, obj, owner): raise AttributeError("gone")
+class Bare:
+    __hash__ = Plain()
+assert_eq([run(lambda: hash(Bare()))[0], run(lambda: {Bare()})[0], run(lambda: frozenset([Bare()]))[0]],
+          [("TypeError", "unhashable type: 'Bare'"), ("TypeError", "cannot use 'Bare' as a set element (unhashable type: 'Bare')"),
+           ("TypeError", "cannot use 'Bare' as a set element (unhashable type: 'Bare')")])

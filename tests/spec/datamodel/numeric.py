@@ -113,3 +113,6 @@ for method in (float.__trunc__, float.__floor__, float.__ceil__):
     assert_raises(ValueError, method, float("nan"), message="cannot convert float NaN to integer")
     assert_raises(OverflowError, method, float("-inf"), message="cannot convert float infinity to integer")
 assert_eq((float.__trunc__(-2.5), float.__floor__(-2.5), float.__ceil__(-2.5)), (-2, -3, -2))
+# int's give the int itself, an int subclass's an exact int.
+class Sub(int): pass
+assert_eq([(5).__trunc__(), int.__floor__(-3), True.__ceil__(), type(Sub(7).__floor__()), Sub(7).__trunc__()], [5, -3, 1, int, 7])

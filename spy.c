@@ -13559,11 +13559,9 @@ static SPYValue *attribute_callk(SPYContext *, Machine *, SPYValue *, const char
 /* The error of a property, named by a, its name's repr, or NULL, that has
  * no accessor for object (property_missing). */
 static SPYValue *property_failed(SPYContext *c, SPYValue *a, SPYValue *object, const char *accessor) {
-    SPYValue *qualname = object ? name_text(value_class(c, object), "__qualname__") : NULL;
-    SPYValue *b = qualname && !c->error_type[0] ? spy_repr(c, qualname) : NULL;
+    SPYValue *b = spy_repr(c, name_text(value_class(c, object), "__qualname__"));
     if (a && b) errorf(c, "AttributeError", "property %s of %s object has no %s", a->as.string.data, b->as.string.data, accessor);
     else if (b) errorf(c, "AttributeError", "property of %s object has no %s", b->as.string.data, accessor);
-    else errorf(c, "AttributeError", "property has no %s", accessor);
     spy_release(b);
     return NULL;
 }
@@ -13589,7 +13587,7 @@ static SPYValue *property_repred(SPYContext *c, Machine *m, SPYValue *state, SPY
         a = buffer_text(&b, SPY_STRING, append_conversion(&b, items[2], text, "__repr__"));
         spy_release(text);
     }
-    if (!c->error_type[0]) property_failed(c, a, items[0] == c->none ? NULL : items[0], property_accessors[items[1]->as.integer_data.small]);
+    if (!c->error_type[0]) property_failed(c, a, items[0], property_accessors[items[1]->as.integer_data.small]);
     spy_release(a); spy_release(state);
     return NULL;
 }
