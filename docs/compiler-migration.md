@@ -474,16 +474,24 @@ Statements record theirs too: an assignment, `for`, `with`, `except`
 and `del` bind their targets (a name's recorded use becomes its
 binding), around the marks that move the targets' symbols after the
 value's; a header records as soon as it is parsed, before its body. A
-def or class without type parameters or annotations records its name,
-defaults, decorators and bases, and the parser makes its scope where
-the walk would have. A range may enter a scope: `EV_ENTER` makes a
-lambda's or comprehension's scope in the scope it is taken in, at the
-point the walk would, and an event of no scope belongs to the
-innermost entered scope. Effects the walk has on scopes as it goes are
-events run at take time, in the walk's order: a class's static
-attribute stored through `self` (`EV_STATIC`) and the checks of an
-`await` or `yield` (`EV_CHECK`). Each check is one function the walk
-calls too.
+def or class records its name, defaults, decorators and bases, and the
+parser makes its scope, and the hidden scope of its type parameters,
+where the walk would have; a type alias records likewise. A range may
+enter a scope: `EV_ENTER` makes a lambda's, comprehension's,
+annotation function's or string annotation's scope in the scope it is
+taken in, at the point the walk would, or enters a scope the parser
+made, and an event of no scope belongs to the innermost entered scope.
+Effects the walk has on scopes as it goes are events run at take time,
+in the walk's order: a class's static attribute stored through `self`
+(`EV_STATIC`), the checks of an `await`, `yield`, asynchronous
+comprehension clause or mapping pattern (`EV_CHECK`), a named
+expression's checks and binding (`EV_NAMED`), where a comprehension's
+iterables and clauses are (`EV_ITERABLE`, `EV_CLAUSE`), an annotated
+assignment's annotation (`EV_WITHIN`, `EV_ANNOTATE`), and a generic's
+table of type parameters, once their bounds' scopes exist
+(`EV_GENERIC`). Each is one function the walk calls too. Over a
+quarter of CPython's `Lib`, the walk now visits no node; it remains for
+sources the parser does not record, until it can be deleted.
 
 Each stage must preserve Python 3.15 semantics and report its own measured
 cost. Compiling every operation in the existing pausing mode is not an

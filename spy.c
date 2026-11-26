@@ -137,7 +137,11 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE, EV_NAMED, EV_ITERABLE, EV_CLAUSE };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE, EV_NAMED, EV_ITERABLE, EV_CLAUSE, EV_GENERIC };
+/* What an annotation function entered (EV_ENTER) is within, by its flags;
+ * 2 enters a string annotation's scope. */
+static const char *const enter_within[] = {NULL, "an annotation", NULL, "a TypeVar bound", "a TypeVar constraint",
+                                           "a TypeVar default", "a TypeVarTuple default", "a ParamSpec default", "a type alias"};
 /* An EV_ERROR's SyntaxError, reported at its node. */
 static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
@@ -4797,6 +4801,7 @@ static Node *format_parsed(Parser *, Node *);
 static Node *starred_parsed(Parser *, Node *);
 static Node *yield_unmade(Parser *, Node *);
 static void debug_text(Parser *, Node *, Node *);
+static int events_before(Parser *, Node *, Node *);
 static void target_parsed(Parser *, Node *);
 static int assignment_parsed(Parser *, Node *);
 static int deletion_parsed(Parser *, Node *);
@@ -5643,7 +5648,7 @@ static int parameter_list(Parser *p, Node *n, int close) {
                     Node *star = node(p, N_STAR);
                     p->pos++;
                     if (!star) return -1;
-                    if (!(star->a = annotation_expression(p, expression, 0))) return -1;
+                    if (!(star->a = annotation_expression(p, expression, 0)) || parse_children(p, star)) return -1;
                     arg->b = star;
                 } else {
                     if (!(arg->b = annotation_expression(p, plain_expression, 0))) return -1;
@@ -6231,6 +6236,7 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
             if (flush_literal(p, tail, literal)) return -1;
             /* A debug field's text, flushed after its value, goes before it. */
             if (debug && *text && p->emitting) debug_text(p, *text, field->a);
+            if (debug && *text && events_before(p, *text, field->a)) return -1;
             if (*s == ':') {
                 s++;
                 field->b = node(p, N_JOINED);
@@ -7544,18 +7550,7 @@ static Node *annotation_string(Parser *p, Node *annotation) {
     Program *emitting;
     EmitMark from = apart_begin(p, &emitting, NULL);
     Node *kept = p->emitting ? emit_parsed(p, n, 0) : NULL;
-    if (apart_end(p, kept, emitting, from)) return NULL;
-    /* Its expression analysed in its own scope, made where the walk takes it. */
-    Events *e = &p->events;
-    if (!(annotation->flags & F_EVENTS) || (annotation->flags & F_ANALYSED) || annotation->events_end != e->len) return n;
-    size_t at = annotation->events_at;
-    if (event_into(p->ctx, e, EV_ENTER, 2, NULL, n, NULL)) return NULL;
-    Event enter = e->items[--e->len];
-    memmove(e->items + at + 1, e->items + at, (e->len - at) * sizeof(Event));
-    e->items[at] = enter; e->len++;
-    if (event_into(p->ctx, e, EV_LEAVE, 0, NULL, n, NULL)) return NULL;
-    n->events_at = (uint32_t)at;
-    return parse_recorded(p, n, NULL, 1) ? NULL : n;
+    return apart_end(p, kept, emitting, from) ? NULL : n;
 }
 /* An expression parse parses, with min, apart (apart_begin). */
 static Node *apart_expression(Parser *p, Node *(*parse)(Parser *, int), int min) {
@@ -8165,7 +8160,7 @@ static Node *type_params(Parser *p) {
                 value = node(p, N_STAR);
                 p->pos++;
                 if (value) value->a = apart_expression(p, expression, 4);
-                if (value && !value->a) value = NULL;
+                if (value && (!value->a || parse_children(p, value))) value = NULL;
             } else value = apart_expression(p, expression, 0);
             if (!value) return NULL;
             if (!(param->c = lazy_function(p, param->name.text, value))) return NULL;
@@ -9145,10 +9140,12 @@ static Node *child_next(Children *k) {
 static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
 static int header_recorded(Parser *, Node *);
 static int definition_recorded(Parser *, Node *);
+static int alias_recorded(Parser *, Node *);
 static int self_attribute(Node *);
 static int scope_static(SPYContext *, Scope *, Node *);
 static int scope_check(SPYContext *, Scope *, Node *);
 static Scope *string_scope(SPYContext *, Node *);
+static int generic_table(SPYContext *, Node *);
 static int scope_named(SPYContext *, Scope *, Node *, int);
 static Scope *annotation_scope(SPYContext *, Scope *, size_t);
 static int scope_annotation_error(SPYContext *, Scope *, Node *);
@@ -9194,6 +9191,7 @@ static int parse_children(Parser *p, Node *n) {
         return parse_recorded(p, n, NULL, 1);
     }
     if (n->kind == N_DEF || n->kind == N_CLASS) return definition_recorded(p, n);
+    if (n->kind == N_TYPEALIAS) return alias_recorded(p, n);
     if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
     if (n->kind == N_FOR) return bound_recorded(p, n, n->args, NULL, n->a);
     if (n->kind == N_WITH || n->kind == N_EXCEPT || n->kind == N_DELETE) return header_recorded(p, n);
@@ -9243,9 +9241,31 @@ static int target_recorded(Node *t) {
     if (t->kind == N_ATTR) return strcmp(t->b->name.text, "__debug__") != 0;
     return t->kind == N_INDEX;
 }
-/* Append node t's recorded events to the log. */
+/* Move node t's events, the log's last, before node n's, just before
+ * them, as the walk takes t first. */
+static int events_before(Parser *p, Node *t, Node *n) {
+    Events *e = &p->events;
+    if (!(t->flags & F_EVENTS) || !(n->flags & F_EVENTS) || t->events_end != e->len || n->events_end != t->events_at) return 0;
+    size_t count = t->events_end - t->events_at, at = n->events_at;
+    if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + count, sizeof(Event))) return -1;
+    memcpy(e->items + e->len, e->items + t->events_at, count * sizeof(Event));
+    memmove(e->items + at + count, e->items + at, (t->events_at - at) * sizeof(Event));
+    memcpy(e->items + at, e->items + e->len, count * sizeof(Event));
+    t->events_at = (uint32_t)at; t->events_end = (uint32_t)(at + count);
+    n->events_at += (uint32_t)count; n->events_end += (uint32_t)count;
+    return 0;
+}
+/* The node holding n's recorded events: a string annotation's
+ * expression's (annotation_string). */
+static Node *events_of(Node *n) { return n->kind == N_STRING && n->annotate ? n->annotate : n; }
+/* Append node t's recorded events to the log; a string annotation's
+ * count, then its expression's in a scope of its own, made where the walk takes it
+ * (scope_string_annotation). */
 static int events_again(Parser *p, Node *t) {
     Events *e = &p->events;
+    if (t != events_of(t))
+        return event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL) || event_into(p->ctx, e, EV_ENTER, 2, NULL, t, NULL) || events_again(p, t->annotate) ||
+               event_into(p->ctx, e, EV_LEAVE, 0, NULL, t, NULL) ? -1 : 0;
     size_t count = t->events_end - t->events_at;
     if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + count, sizeof(Event))) return -1;
     memcpy(e->items + e->len, e->items + t->events_at, count * sizeof(Event));
@@ -9302,57 +9322,135 @@ static int header_recorded(Parser *p, Node *n) {
     n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
     return 0;
 }
-/* Record definition n's header's analysis (scope_visit) when it has no
- * type parameters: its name bound, then a function's defaults and
- * decorators or a class's decorators and bases, positional then
- * keyword; its scope made, as the walk would make it next; a function's
+/* What type parameter param's bound is within (enter_within). */
+static int bound_within(Node *param) { return param->flags & F_CONSTRAINTS ? 4 : 3; }
+static Scope *scope_of(SPYContext *, Node *, Scope *);
+static Scope *generic_scope(SPYContext *, Node *, Scope *);
+static int generic_class_scope(SPYContext *, Scope *, Node *);
+/* Put in parts from *len the nodes whose events generic's type
+ * parameters' bounds and defaults hold, or when record is set, record
+ * their analysis (scope_generic) from parts' *len: its
+ * scope entered, its parameters bound, each bound and default in its
+ * annotation function's scope, its table made; the scope left after
+ * the rest of the definition's events in it. */
+static int generic_events(Parser *p, Node *generic, Node **parts, size_t *len, int record) {
+    Events *e = &p->events;
+    if (record) {
+        for (Node *param = generic->args; param; param = param->next)
+            if (event_into(p->ctx, e, EV_TYPEPARAM, 0, generic->scope, param, NULL)) return -1;
+    }
+    for (Node *param = generic->args; param; param = param->next)
+        for (int k = 0; k < 2; k++) {
+            Node *fn = k ? param->c : param->b;
+            if (!fn) continue;
+            if (!record) { parts[(*len)++] = fn->b->args->a; continue; }
+            if (event_into(p->ctx, e, EV_ENTER, k ? 5 + (unsigned)param->op : (unsigned)bound_within(param), generic->scope, fn, NULL) ||
+                event_into(p->ctx, e, EV_BIND, S_PARAM, NULL, fn->args, fn->args) || events_again(p, parts[(*len)++]) ||
+                event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL)) return -1;
+        }
+    return record ? event_into(p->ctx, e, EV_GENERIC, 0, generic->scope, generic, NULL) : 0;
+}
+/* Whether parts' len nodes' events tile the log's end from their first
+ * event, at *at. */
+static int parts_tile(Parser *p, Node **parts, size_t len, size_t *at) {
+    size_t total = 0;
+    *at = p->events.len;
+    for (size_t i = 0; i < len; i++) {
+        Node *o = events_of(parts[i]);
+        if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) return 0;
+        if (o->events_at < *at) *at = o->events_at;
+        total += o->events_end - o->events_at;
+    }
+    return total == p->events.len - *at;
+}
+/* Record definition n's header's analysis (scope_visit): its name
+ * bound, then a function's defaults and decorators or a class's
+ * decorators; its type parameters' scope, made as the walk would make
+ * it next, holding them and a class's bases, positional then keyword,
+ * which are otherwise in its own scope; its scope made; a function's
  * parameters bound in that scope; its annotations in their function's
  * scope (scope_annotations); the name's symbol moved after the rest.
  * Its parts' events are put in that order after the log's end, then
  * moved to where they began. */
-static Scope *scope_of(SPYContext *, Node *, Scope *);
 static int definition_recorded(Parser *p, Node *n) {
     Events *e = &p->events;
-    Node *fn = n->annotate;
-    if (n->params || p->symbols.message) return 0;
-    size_t count = 0, at = e->len, total = 0, outer;
+    Node *fn = n->annotate, *generic = n->params;
+    if (p->symbols.message) return 0;
+    size_t count = 0, at, len = 0, outer, based;
     for (Node *o = n->decorators; o; o = o->next) count++;
     for (Node *o = n->args; o; o = o->next) count++;
     for (Node *o = fn ? fn->b->args : NULL; o; o = o->next) count++;
+    for (Node *o = generic ? generic->args : NULL; o; o = o->next) count += 2;
     Node **parts = count ? allocate(p->ctx, count * sizeof(*parts)) : NULL;
     if (count && !parts) return -1;
-    size_t len = 0;
     if (n->kind == N_DEF) for (Node *o = n->args; o; o = o->next) if (o->a) parts[len++] = o->a;
     for (Node *o = n->decorators; o; o = o->next) parts[len++] = o;
+    outer = len;
+    if (generic) generic_events(p, generic, parts, &len, 0);
     if (n->kind == N_CLASS)
         for (int pass = 0; pass < 2; pass++) for (Node *o = n->args; o; o = o->next)
             if ((o->kind == N_KEYWORD || o->kind == N_MAPPING) == pass) parts[len++] = o;
-    outer = len;
+    based = len;
     for (Node *o = fn ? fn->b->args : NULL; o; o = o->next) if (o->a) parts[len++] = o->a;
-    int status = 0;
-    for (size_t i = 0; i < len && status == 0; i++) {
-        Node *o = parts[i];
-        if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) status = 1;
-        else { if (o->events_at < at) at = o->events_at; total += o->events_end - o->events_at; }
+    int tiles = parts_tile(p, parts, len, &at);
+    Scope *scope = tiles ? parse_scope(p) : NULL;
+    if (!scope) { mem_free(parts); return tiles ? -1 : 0; }
+    size_t end = e->len, i = 0;
+    int status = event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, n->a, n) ||
+                 event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL);
+    for (; i < outer && !status; i++) status = events_again(p, parts[i]);
+    Scope *inner = scope;
+    if (generic && !status) {
+        status = !(inner = generic_scope(p->ctx, generic, scope)) || event_into(p->ctx, e, EV_ENTER, 0, inner, NULL, NULL) ||
+                 generic_events(p, generic, parts, &i, 1);
     }
-    Scope *scope = status ? NULL : parse_scope(p);
-    if (status || total != e->len - at || !scope) { mem_free(parts); return status || total != e->len - at ? 0 : -1; }
-    size_t end = e->len;
-    status = event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, n->a, n) ||
-             event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL);
-    for (size_t i = 0; i < outer && !status; i++) status = events_again(p, parts[i]);
-    if (status || !scope_of(p->ctx, n, scope)) { mem_free(parts); return -1; }
+    for (; i < based && !status; i++) status = events_again(p, parts[i]);
+    if (generic && !status) status = event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
+    if (!status) status = !scope_of(p->ctx, n, inner) || (n->kind == N_CLASS && generic && generic_class_scope(p->ctx, inner, n));
     if (n->kind == N_DEF)
         for (Node *param = n->args; param && !status; param = param->next)
             status = event_into(p->ctx, e, EV_BIND, S_PARAM, n->scope, param, param);
     if (fn && !status) {
-        status = event_into(p->ctx, e, EV_ENTER, 1, scope, fn, NULL) || event_into(p->ctx, e, EV_BIND, S_PARAM, NULL, fn->args, fn->args);
-        for (size_t i = outer; i < len && !status; i++) status = events_again(p, parts[i]);
+        status = event_into(p->ctx, e, EV_ENTER, 1, inner, fn, NULL) || event_into(p->ctx, e, EV_BIND, S_PARAM, NULL, fn->args, fn->args);
+        for (; i < len && !status; i++) status = events_again(p, parts[i]);
         if (!status) status = event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
     }
     mem_free(parts);
     if (status) return -1;
     if (event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
+    count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
+}
+/* Record type alias n's analysis (scope_visit): its name bound; its
+ * type parameters' scope (generic_events) holding its value's function
+ * scope, else the value's in the alias's scope. */
+static int alias_recorded(Parser *p, Node *n) {
+    Events *e = &p->events;
+    Node *generic = n->params, *value = n->b;
+    size_t count = 1, at, len = 0, i = 0;
+    if (p->symbols.message) return 0;
+    for (Node *o = generic ? generic->args : NULL; o; o = o->next) count += 2;
+    Node **parts = allocate(p->ctx, count * sizeof(*parts));
+    if (!parts) return -1;
+    if (generic) generic_events(p, generic, parts, &len, 0);
+    parts[len++] = value->b->args->a;
+    int tiles = parts_tile(p, parts, len, &at);
+    Scope *scope = tiles ? parse_scope(p) : NULL;
+    if (!scope) { mem_free(parts); return tiles ? -1 : 0; }
+    size_t end = e->len;
+    Scope *inner = scope;
+    int status = event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, n->a, n->a);
+    if (generic && !status)
+        status = !(inner = generic_scope(p->ctx, generic, scope)) || event_into(p->ctx, e, EV_ENTER, 0, inner, NULL, NULL) ||
+                 generic_events(p, generic, parts, &i, 1);
+    if (!status) status = event_into(p->ctx, e, EV_ENTER, 8, inner, value, NULL) || event_into(p->ctx, e, EV_BIND, S_PARAM, NULL, value->args, value->args) ||
+                          events_again(p, parts[i]) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
+    mem_free(parts);
+    if (generic && !status) status = event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
+    if (status || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
     e->len = at + count;
@@ -9389,10 +9487,10 @@ static int lambda_recorded(Parser *p, Node *n) {
     n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
     return 0;
 }
-/* Record comprehension n's analysis (scope_visit) when no clause is
- * asynchronous: its first iterable; its scope made and entered, each
- * clause's target bound and its iterable or condition but the first,
- * then its element, a dictionary's value before its key. Its parts'
+/* Record comprehension n's analysis (scope_visit): its first iterable;
+ * its scope made and entered, each clause checked if asynchronous, its
+ * target bound and its iterable or condition but the first, then its
+ * element, a dictionary's value before its key. Its parts'
  * events are put in that order after the log's end, then moved to
  * where they began. */
 static int comprehension_recorded(Parser *p, Node *n) {
@@ -9409,7 +9507,6 @@ static int comprehension_recorded(Parser *p, Node *n) {
     }
     for (Node *clause = n->a; clause; clause = clause->b) {
         Node *t = clause->kind == N_FOR ? clause->args : NULL;
-        if (clause->kind == N_FOR && clause->op) return 0;
         if (t && (!(t->flags & F_EVENTS) || !target_recorded(t))) return 0;
         for (int i = 0; i < 2; i++) {
             Node *o = i ? t : clause->a;
@@ -9425,7 +9522,8 @@ static int comprehension_recorded(Parser *p, Node *n) {
         event_into(p->ctx, e, EV_ITERABLE, 0, NULL, NULL, NULL) || event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
     for (Node *clause = n->a; clause; clause = clause->b) {
         int loop = clause->kind == N_FOR;
-        if (event_into(p->ctx, e, EV_CLAUSE, 0, NULL, clause, NULL) || (loop && target_events(p, NULL, clause->args, 1))) return -1;
+        if (event_into(p->ctx, e, EV_CLAUSE, 0, NULL, clause, NULL) || (loop && clause->op && event_into(p->ctx, e, EV_CHECK, 0, NULL, clause, NULL)) ||
+            (loop && target_events(p, NULL, clause->args, 1))) return -1;
         if (loop && event_into(p->ctx, e, EV_ITERABLE, 1, NULL, NULL, NULL)) return -1;
         if (clause != n->a && clause->a && events_again(p, clause->a)) return -1;
         if (loop && event_into(p->ctx, e, EV_ITERABLE, 0, NULL, NULL, NULL)) return -1;
@@ -9450,7 +9548,7 @@ static int pattern_recorded(Node *o) {
     case PT_AS: return pattern_recorded(o->a);
     case PT_MAPPING:
         for (Node *entry = o->args; entry; entry = entry->next) if (!pattern_recorded(entry->a) || !pattern_recorded(entry->b)) return 0;
-        return !o->c || target_recorded(o->c);
+        return !o->c || o->c->kind == N_NAME || target_recorded(o->c);
     case PT_CLASS:
         if (!pattern_recorded(o->a)) return 0;
         for (Node *item = o->args; item; item = item->next) if (!pattern_recorded(item)) return 0;
@@ -9477,6 +9575,7 @@ static int pattern_events(Parser *p, Scope *scope, Node *o) {
         if (event_into(p->ctx, e, EV_CHECK, 0, NULL, o, NULL)) return -1;
         for (Node *entry = o->args; entry; entry = entry->next)
             if (pattern_events(p, scope, entry->a) || pattern_events(p, scope, entry->b)) return -1;
+        if (o->c && o->c->kind == N_NAME) return event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, o->c, o->c);
         return o->c ? target_events(p, scope, o->c, 1) : 0;
     case PT_CLASS:
         if (pattern_events(p, scope, o->a)) return -1;
@@ -9504,19 +9603,22 @@ static int case_recorded(Parser *p, Node *n, size_t at) {
     return 0;
 }
 /* Record annotated assignment n's analysis (scope_visit): its target,
- * checked and bound as replayed; its annotation, where it is or in the
+ * a name checked and bound as replayed; its annotation, where it is or in the
  * scope's __annotate__ scope; its value; the target's symbols moved
  * after the rest. */
 static int annotated_recorded(Parser *p, Node *n) {
     Events *e = &p->events;
-    Node *b = n->b, *v = n->c;
+    Node *b = events_of(n->b), *v = n->c;
     if (!(b->flags & F_EVENTS) || (b->flags & F_ANALYSED) || (v && (!(v->flags & F_EVENTS) || (v->flags & F_ANALYSED)))) return 0;
     Scope *scope = parse_scope(p);
     if (!scope) return -1;
     size_t at = target_at(n->a, b->events_at), end = e->len;
     if (at > b->events_at) at = b->events_at;
+    b = n->b;
     int here = !(n->flags & F_SIMPLE) || scope->kind == S_FUNCTION || (n->flags & F_FUTURE);
-    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_ANNOTATED, 0, scope, n, NULL) ||
+    int part = n->a->kind != N_NAME && target_recorded(n->a);
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) ||
+        (part ? target_events(p, scope, n->a, n->c != NULL) : event_into(p->ctx, e, EV_ANNOTATED, 0, scope, n, NULL)) ||
         event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) ||
         event_into(p->ctx, e, here ? EV_WITHIN : EV_ANNOTATE, here ? 0 : (unsigned)n->line, scope, NULL, NULL) ||
         events_again(p, b) || event_into(p->ctx, e, here ? EV_UNWITHIN : EV_LEAVE, 0, scope, NULL, NULL) ||
@@ -9868,11 +9970,14 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
     for (uint32_t i = n->events_at; i < n->events_end && !status; i++) {
         Event *v = &from->items[i];
         Scope *in = v->scope ? v->scope : depth ? entered[depth - 1] : scope;
-        if (v->kind == EV_ENTER && v->flags != 2) {
+        if (v->kind == EV_ENTER && !v->n) {
+            /* A scope the parser made. */
+            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered)))) entered[depth++] = in;
+        } else if (v->kind == EV_ENTER && v->flags != 2) {
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
                 status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
             /* An annotation function's (scope_annotations). */
-            if (!status && v->flags) v->n->scope->within = "an annotation";
+            if (!status && v->flags) v->n->scope->within = enter_within[v->flags];
         } else if (v->kind == EV_ENTER) {
             /* A string annotation's (scope_string_annotation). */
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
@@ -9895,6 +10000,7 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
         /* A comprehension's iterable, where no named expression may be; its clause. */
         else if (v->kind == EV_ITERABLE) in->iterables += v->flags ? 1 : -1;
         else if (v->kind == EV_CLAUSE) in->clause = v->n;
+        else if (v->kind == EV_GENERIC) status = generic_table(c, v->n);
         else if (v->kind == EV_NODES) in->nodes += v->flags;
         /* A name used, its node counted. */
         else if (v->kind == EV_USE) { in->nodes++; status = event_into(c, c->events, EV_BIND, S_USE, in, v->n, v->n); }
@@ -10006,6 +10112,8 @@ static int scope_named(SPYContext *c, Scope *scope, Node *n, int after) {
 static int scope_mapping_keys(SPYContext *, Node *);
 static int scope_check(SPYContext *c, Scope *scope, Node *n) {
     if (n->kind == N_PATTERN) return scope_mapping_keys(c, n);
+    /* An asynchronous comprehension clause. */
+    if (n->kind == N_FOR) return scope_await(c, scope, n);
     if (scope_annotation_error(c, scope, n)) return -1;
     if (n->kind == N_AWAIT) return scope_await(c, scope, n);
     if (scope->kind == S_COMPREHENSION) {
@@ -10148,26 +10256,36 @@ static int type_parameter(SPYContext *c, Scope *scope, Node *param) {
 }
 /* The annotation scope binding a definition's type parameters. */
 static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
-    if (!scope_of(c, generic, parent)) return NULL;
-    generic->scope->within = "the definition of a generic";
+    if (!generic_scope(c, generic, parent)) return NULL;
     for (Node *param = generic->args; param; param = param->next)
         if (c->events ? event(c, EV_TYPEPARAM, 0, generic->scope, param, NULL) : type_parameter(c, generic->scope, param)) return NULL;
-    static const char *const defaults[] = {"a TypeVar default", "a TypeVarTuple default", "a ParamSpec default"};
+    for (Node *param = generic->args; param; param = param->next)
+        if (scope_annotations(c, generic->scope, param->b, enter_within[bound_within(param)]) ||
+            scope_annotations(c, generic->scope, param->c, enter_within[5 + param->op])) return NULL;
+    return generic_table(c, generic) ? NULL : generic->scope;
+}
+/* Generic's hidden scope (PEP 695), in parent. */
+static Scope *generic_scope(SPYContext *c, Node *generic, Scope *parent) {
+    if (!scope_of(c, generic, parent)) return NULL;
+    generic->scope->within = "the definition of a generic";
+    return generic->scope;
+}
+/* Generic's table of type parameters, once their bounds' and defaults'
+ * scopes are made. */
+static int generic_table(SPYContext *c, Node *generic) {
     size_t count = 0;
     for (Node *param = generic->args; param; param = param->next) count++;
     TypeParameter *made = generic->scope->type_params = allocate(c, (count + 1) * sizeof(*made));
-    if (!made) return NULL;
+    if (!made) return -1;
     for (Node *param = generic->args; param; param = param->next, made++) {
-        if (scope_annotations(c, generic->scope, param->b, param->flags & F_CONSTRAINTS ? "a TypeVar constraint" : "a TypeVar bound") ||
-            scope_annotations(c, generic->scope, param->c, defaults[param->op])) return NULL;
         const char *name = scope_text(c, generic->scope, param->name.text);
         const char *spelling = name ? scope_text(c, generic->scope, source_name(param)) : NULL;
-        if (!spelling) return NULL;
+        if (!spelling) return -1;
         *made = (TypeParameter){name, spelling, (int)param->op, (param->flags & F_CONSTRAINTS) != 0,
                                 param->b ? param->b->scope : NULL, param->c ? param->c->scope : NULL};
     }
     *made = (TypeParameter){0};
-    return generic->scope;
+    return 0;
 }
 static SPYValue *unary(SPYContext *, int, SPYValue *);
 static SPYValue *binary(SPYContext *, int, SPYValue *, SPYValue *);
@@ -10363,7 +10481,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         if (status || !scope_of(c, n, scope)) return -1;
         for (Node *clause = n->a; clause; clause = clause->b) {
             n->scope->clause = clause;
-            if (clause->kind == N_FOR && clause->op && scope_await(c, n->scope, clause)) return -1;
+            if (clause->kind == N_FOR && clause->op && scope_check(c, n->scope, clause)) return -1;
             /* A for clause's target, then its iterable, but the first's. */
             if (clause->kind == N_FOR && scope_target(c, n->scope, clause->args, 1)) return -1;
             n->scope->iterables += clause->kind == N_FOR;
