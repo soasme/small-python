@@ -4765,6 +4765,7 @@ static int event_into(SPYContext *, Events *, int, unsigned, Scope *, Node *, No
 static Scope *parse_scope(Parser *);
 static void parse_record(Parser *, Node *);
 static int parse_recorded(Parser *, Node *, Scope *, unsigned);
+static int case_recorded(Parser *, Node *, size_t);
 static int import_recorded(Parser *, Node *);
 static int parse_children(Parser *, Node *);
 static Node *too_complex(Parser *);
@@ -8053,7 +8054,7 @@ static Node *match_statement(Parser *p) {
     if (emits && header_emit(p, &from)) return NULL;
     n->a = expression_items(p, 0, 1);
     if (emits) header_kept(p, n->a, from);
-    if (!n->a || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
+    if (!n->a || parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
     if (emits) compile_expr(p->ctx, p->body.program, n->a);
     if (!expect(p, ':', at(p, T_NL) ? "expected ':'" : "invalid syntax") || !expect(p, T_NL, "invalid syntax")) return NULL;
     while (take(p, T_NL)) {}
@@ -8067,9 +8068,10 @@ static Node *match_statement(Parser *p) {
         Case k = {{0}, 0, NULL};
         Program *guard = NULL;
         p->matching = emits;
+        size_t recorded = p->events.len;
         Node *before = p->unit->as.unit.nodes, *item = case_header(p, emits ? &guard : NULL);
         p->matching = 0;
-        if (!item || analyse_statements(p, item) || (emits && header_ready(p, before))) { free_program(guard); return NULL; }
+        if (!item || case_recorded(p, item, recorded) || analyse_statements(p, item) || (emits && header_ready(p, before))) { free_program(guard); return NULL; }
         if (emits) case_begin(p, p->body.program, item, &k, guard);
         if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); return NULL; }
         if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
@@ -9094,7 +9096,8 @@ static int parse_recorded(Parser *p, Node *n, Scope *scope, unsigned nodes) {
 typedef struct { Node *n, *o; int slot; } Children;
 static Node *child_next(Children *k) {
     Node *n = k->n;
-    int kind = n->kind, attr = kind == N_ATTR || kind == N_KEYWORD;
+    /* A match header's subject, its cases still to come. */
+    int kind = n->kind, attr = kind == N_ATTR || kind == N_KEYWORD || kind == N_MATCH;
     for (;;) {
         if (k->o) {
             Node *o = k->o;
@@ -9156,7 +9159,7 @@ static int parse_children(Parser *p, Node *n) {
                                           N_TUPLE, N_SET, N_DICT, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_COND,
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
                                           N_ASSERT, N_PASS, N_BREAK, N_CONTINUE, N_JOINED, N_FORMAT, N_TEMPLATE,
-                                          N_INTERPOLATION, N_IF, N_WHILE, N_TRY};
+                                          N_INTERPOLATION, N_IF, N_WHILE, N_TRY, N_MATCH};
     if (!memchr(kinds, n->kind, sizeof(kinds)) || (n->kind == N_STRING && n->annotate) ||
         (n->kind == N_KEYWORD && !strcmp(n->name.text, "__debug__"))) return 0;
     Events *e = &p->events;
@@ -9236,7 +9239,9 @@ static int header_recorded(Parser *p, Node *n) {
     Node *first = with ? n->args : n;
     for (Node *item = first; item; item = with ? item->next : NULL) {
         Node *a = del ? NULL : item->a, *b = with ? item->b : del ? item->a : item->c;
-        if ((a && (!(a->flags & F_EVENTS) || (a->flags & F_ANALYSED))) || (b && !target_recorded(b))) return 0;
+        /* An except clause's name binds as replayed (scope_bind). */
+        int named = b && b->kind == N_NAME && n->kind == N_EXCEPT;
+        if ((a && (!(a->flags & F_EVENTS) || (a->flags & F_ANALYSED))) || (b && !named && !target_recorded(b))) return 0;
     }
     if (!first) return 0;
     Scope *scope = parse_scope(p);
@@ -9370,6 +9375,70 @@ static int comprehension_recorded(Parser *p, Node *n) {
     }
     if ((element && events_again(p, element)) || (key && events_again(p, key)) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ||
         event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL)) return -1;
+    size_t count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
+}
+/* Whether pattern or expression o's analysis can be built from recorded
+ * events (pattern_events). */
+static int pattern_recorded(Node *o) {
+    if (!o) return 1;
+    if (o->kind != N_PATTERN) return (o->flags & F_EVENTS) && !(o->flags & F_ANALYSED);
+    switch (o->op) {
+    case PT_CAPTURE: case PT_STAR: return !o->a || o->a->kind == N_NAME || target_recorded(o->a);
+    case PT_VALUE: case PT_LITERAL: return pattern_recorded(o->a);
+    case PT_AS: return pattern_recorded(o->a);
+    case PT_MAPPING:
+        for (Node *entry = o->args; entry; entry = entry->next) if (!pattern_recorded(entry->a) || !pattern_recorded(entry->b)) return 0;
+        return !o->c || target_recorded(o->c);
+    case PT_CLASS:
+        if (!pattern_recorded(o->a)) return 0;
+        for (Node *item = o->args; item; item = item->next) if (!pattern_recorded(item)) return 0;
+        for (Node *entry = o->c; entry; entry = entry->next) if (!pattern_recorded(entry->b)) return 0;
+        return 1;
+    default:
+        for (Node *item = o->args; item; item = item->next) if (!pattern_recorded(item)) return 0;
+        return 1;
+    }
+}
+/* Append pattern or expression o's analysis, as the walk visits it. */
+static int pattern_events(Parser *p, Scope *scope, Node *o) {
+    Events *e = &p->events;
+    if (!o) return 0;
+    if (o->kind != N_PATTERN) return events_again(p, o);
+    if (event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL)) return -1;
+    switch (o->op) {
+    case PT_CAPTURE: case PT_STAR:
+        if (o->a && o->a->kind == N_NAME) return event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, o->a, o);
+        return o->a ? target_events(p, scope, o->a, 1) : 0;
+    case PT_VALUE: case PT_LITERAL: return pattern_events(p, scope, o->a);
+    case PT_AS: return pattern_events(p, scope, o->a) || event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, o->b, o) ? -1 : 0;
+    case PT_MAPPING:
+        if (event_into(p->ctx, e, EV_CHECK, 0, NULL, o, NULL)) return -1;
+        for (Node *entry = o->args; entry; entry = entry->next)
+            if (pattern_events(p, scope, entry->a) || pattern_events(p, scope, entry->b)) return -1;
+        return o->c ? target_events(p, scope, o->c, 1) : 0;
+    case PT_CLASS:
+        if (pattern_events(p, scope, o->a)) return -1;
+        for (Node *item = o->args; item; item = item->next) if (pattern_events(p, scope, item)) return -1;
+        for (Node *entry = o->c; entry; entry = entry->next) if (pattern_events(p, scope, entry->b)) return -1;
+        return 0;
+    default:
+        for (Node *item = o->args; item; item = item->next) if (pattern_events(p, scope, item)) return -1;
+        return 0;
+    }
+}
+/* Record case clause n's header's analysis (scope_visit, an except
+ * node's): its pattern, then its guard; its events began at at. */
+static int case_recorded(Parser *p, Node *n, size_t at) {
+    Events *e = &p->events;
+    if (!pattern_recorded(n->a) || !pattern_recorded(n->b)) return 0;
+    Scope *scope = parse_scope(p);
+    if (!scope) return -1;
+    size_t end = e->len;
+    if (pattern_events(p, scope, n->a) || (n->b && events_again(p, n->b)) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     size_t count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
     e->len = at + count;
@@ -9809,7 +9878,9 @@ static int scope_static(SPYContext *c, Scope *scope, Node *n) {
 }
 /* Check await or yield n in scope, where it may not be or makes its
  * function asynchronous or a generator. */
+static int scope_mapping_keys(SPYContext *, Node *);
 static int scope_check(SPYContext *c, Scope *scope, Node *n) {
+    if (n->kind == N_PATTERN) return scope_mapping_keys(c, n);
     if (scope_annotation_error(c, scope, n)) return -1;
     if (n->kind == N_AWAIT) return scope_await(c, scope, n);
     if (scope->kind == S_COMPREHENSION) {
@@ -10225,7 +10296,7 @@ static int scope_visit(SPYContext *c, Scope *scope, Node *n) {
         case PT_VALUE: case PT_LITERAL: return scope_node(c, scope, n->a);
         case PT_AS: return scope_node(c, scope, n->a) || scope_bind(c, scope, n->b, S_LOCAL, n) ? -1 : 0;
         case PT_MAPPING:
-            if (scope_mapping_keys(c, n)) return -1;
+            if (scope_check(c, scope, n)) return -1;
             for (Node *entry = n->args; entry; entry = entry->next)
                 if (scope_node(c, scope, entry->a) || scope_node(c, scope, entry->b)) return -1;
             return n->c ? scope_target(c, scope, n->c, 1) : 0;
