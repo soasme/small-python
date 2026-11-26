@@ -18522,7 +18522,9 @@ static Node *parsed_steps(Parser *p, Node *n, size_t at) {
     n->steps_at = (uint32_t)at; n->steps_end = (uint32_t)p->emitting->len;
     n->flags |= F_EMITTED;
     p->emitted[p->emitted_len++] = n;
-    /* Its summary in its program's mode, while its operands are whole (expands). */
+    /* Its analysis and its summary in its program's mode, while its
+     * operands are whole (parse_children, expands). */
+    if (!c->error_type[0] && parse_children(p, n)) return NULL;
     expands(n, modes(p->emitting));
     return c->error_type[0] ? NULL : n;
 }
