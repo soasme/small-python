@@ -7006,7 +7006,7 @@ static Node *invalid_target(Node *n, int type) {
 /* RAISE_SYNTAX_ERROR_KNOWN_LOCATION: the error covers node n. */
 static Node *syntax_at(Parser *p, Node *n, const char *message) {
     syntax(p, message); p->ctx->line = n->line;
-    p->error_start = n->start; p->error_end = n->end;
+    p->error_start = n->start; p->error_end = n->end; p->error_end_zero = 0;
     return NULL;
 }
 static Node *target_error(Parser *p, Node *n, int type) {
@@ -7767,13 +7767,16 @@ static Node *star_or_pattern(Parser *p) {
     if (strcmp(name->name.text, "_")) star->a = name;
     return span(p, star, start);
 }
-static int check_sequence_stars(Parser *p, Node *items) {
+/* A sequence pattern of items, from token first to the last read, has
+ * one starred name at most. */
+static int check_sequence_stars(Parser *p, Node *items, size_t first) {
     int stars = 0;
     for (Node *item = items; item; item = item->next) stars += item->kind == N_PATTERN && item->op == PT_STAR;
-    if (stars > 1) { syntax(p, "multiple starred names in sequence pattern"); return -1; }
+    if (stars > 1) { syntax_span(p, first, p->pos, "multiple starred names in sequence pattern"); return -1; }
     return 0;
 }
 static Node *sequence_pattern(Parser *p, int close) {
+    size_t first = p->pos - 1;
     Node *n = pattern_node(p, PT_SEQUENCE);
     if (!n) return NULL;
     Node **tail = &n->args;
@@ -7783,7 +7786,7 @@ static Node *sequence_pattern(Parser *p, int close) {
         *tail = item; tail = &item->next;
         if (!take(p, ',')) break;
     }
-    if (!expect(p, close, "invalid syntax") || check_sequence_stars(p, n->args)) return NULL;
+    if (!expect(p, close, "invalid syntax") || check_sequence_stars(p, n->args, first)) return NULL;
     return n;
 }
 static Node *closed_pattern_body(Parser *);
@@ -7813,6 +7816,7 @@ static Node *dotted_pattern(Parser *p) {
 }
 static Node *closed_pattern_body(Parser *p) {
     if (take(p, '(')) {
+        size_t open = p->pos - 1;
         if (take(p, ')')) return pattern_node(p, PT_SEQUENCE);
         Node *first = star_or_pattern(p);
         if (!first) return NULL;
@@ -7829,7 +7833,7 @@ static Node *closed_pattern_body(Parser *p) {
             if (!item) return NULL;
             *tail = item; tail = &item->next;
         }
-        if (!expect(p, ')', "invalid syntax") || check_sequence_stars(p, n->args)) return NULL;
+        if (!expect(p, ')', "invalid syntax") || check_sequence_stars(p, n->args, open)) return NULL;
         return n;
     }
     if (take(p, '[')) return sequence_pattern(p, ']');
@@ -7959,27 +7963,33 @@ static Node *pattern_body(Parser *p) {
     }
     return first;
 }
+/* Add name, bound by pattern n, to names. -1 for too many names, -2 for
+ * a repeated one, *bad and *where naming it and n. */
+static int pattern_name(Node *n, Node *name, const char **names, size_t *count, size_t limit, const char **bad, Node **where) {
+    for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], name->name.text)) { *bad = source_name(name); *where = n; return -2; }
+    if (*count == limit) return -1;
+    names[(*count)++] = name->name.text;
+    return 0;
+}
 /* Names bound by a pattern. Returns -1 for too many names, -2 for a repeated
- * name, and -3 when alternatives differ; *bad names the culprit. */
-static int pattern_names(Node *n, const char **names, size_t *count, size_t limit, const char **bad) {
+ * name, and -3 when alternatives differ; *bad names the culprit, *where
+ * the pattern binding it again or the alternatives. */
+static int pattern_names(Node *n, const char **names, size_t *count, size_t limit, const char **bad, Node **where) {
     if (!n) return 0;
     Node *name = n->op == PT_CAPTURE ? n->a : n->op == PT_STAR ? n->a : n->op == PT_AS ? n->b : NULL;
-    if (n->op == PT_AS) { int s = pattern_names(n->a, names, count, limit, bad); if (s < 0) return s; }
-    if (name) {
-        for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], name->name.text)) { *bad = source_name(name); return -2; }
-        if (*count == limit) return -1;
-        names[(*count)++] = name->name.text;
-    }
+    if (n->op == PT_AS) { int s = pattern_names(n->a, names, count, limit, bad, where); if (s < 0) return s; }
+    if (name) { int s = pattern_name(n, name, names, count, limit, bad, where); if (s < 0) return s; }
     if (n->op == PT_OR) {
         size_t start = *count;
-        int status = pattern_names(n->args, names, count, limit, bad);
+        int status = pattern_names(n->args, names, count, limit, bad, where);
         if (status < 0) return status;
         /* Every other alternative binds the same set of names as the first. */
         for (Node *item = n->args->next; item; item = item->next) {
             const char *other[256];
             size_t other_count = start;
             memcpy(other, names, start * sizeof(*names));
-            if ((status = pattern_names(item, other, &other_count, limit < 256 ? limit : 256, bad)) < 0) return status;
+            if ((status = pattern_names(item, other, &other_count, limit < 256 ? limit : 256, bad, where)) < 0) return status;
+            *where = n;
             if (other_count != *count) return -3;
             for (size_t i = start; i < other_count; i++) {
                 size_t j;
@@ -7990,17 +8000,13 @@ static int pattern_names(Node *n, const char **names, size_t *count, size_t limi
         return 0;
     }
     if (n->op == PT_SEQUENCE || n->op == PT_CLASS)
-        for (Node *item = n->args; item; item = item->next) { int s = pattern_names(item, names, count, limit, bad); if (s < 0) return s; }
+        for (Node *item = n->args; item; item = item->next) { int s = pattern_names(item, names, count, limit, bad, where); if (s < 0) return s; }
     if (n->op == PT_MAPPING) {
-        for (Node *entry = n->args; entry; entry = entry->next) { int s = pattern_names(entry->b, names, count, limit, bad); if (s < 0) return s; }
-        if (n->c) {
-            for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], n->c->name.text)) { *bad = source_name(n->c); return -2; }
-            if (*count == limit) return -1;
-            names[(*count)++] = n->c->name.text;
-        }
+        for (Node *entry = n->args; entry; entry = entry->next) { int s = pattern_names(entry->b, names, count, limit, bad, where); if (s < 0) return s; }
+        if (n->c) { int s = pattern_name(n, n->c, names, count, limit, bad, where); if (s < 0) return s; }
     }
     if (n->op == PT_CLASS)
-        for (Node *entry = n->c; entry; entry = entry->next) { int s = pattern_names(entry->b, names, count, limit, bad); if (s < 0) return s; }
+        for (Node *entry = n->c; entry; entry = entry->next) { int s = pattern_names(entry->b, names, count, limit, bad, where); if (s < 0) return s; }
     return 0;
 }
 /* Irrefutable patterns may appear only last, as CPython's compiler checks:
@@ -8029,6 +8035,7 @@ static Program *guard_program(Parser *);
 static Node *case_header(Parser *p, Program **guard) {
     Node *item = node(p, N_EXCEPT);
     if (!item) return NULL;
+    size_t start = p->pos;
     Node *first = star_or_pattern(p);
     if (!first) return NULL;
     if (at(p, ',')) {
@@ -8041,7 +8048,7 @@ static Node *case_header(Parser *p, Program **guard) {
             if (!element) return NULL;
             *items = element; items = &element->next;
         }
-        if (check_sequence_stars(p, sequence->args)) return NULL;
+        if (check_sequence_stars(p, sequence->args, start)) return NULL;
         first = sequence;
     } else if (first->op == PT_STAR) return syntax(p, "invalid syntax");
     item->a = first;
@@ -8095,13 +8102,14 @@ static Node *match_statement(Parser *p) {
     for (Node *item = n->args; item; item = item->next) {
         const char *names[256], *bad = "";
         size_t count = 0;
+        Node *where = item->a;
         if (!pattern_reachable(p, item->a, item->b || !item->next)) return NULL;
-        int status = pattern_names(item->a, names, &count, 256, &bad);
+        int status = pattern_names(item->a, names, &count, 256, &bad, &where);
         char message[300];
         if (status == -2) snprintf(message, sizeof(message), "multiple assignments to name '%s' in pattern", bad);
         if (status == -3) snprintf(message, sizeof(message), "alternative patterns bind different names");
         if (status == -1) snprintf(message, sizeof(message), "too many names in pattern");
-        if (status < 0) return syntax_at(p, item->a, message);
+        if (status < 0) return syntax_at(p, status == -1 ? item->a : where, message);
     }
     return expect(p, T_DEDENT, "invalid syntax") ? n : NULL;
 }
@@ -9599,7 +9607,7 @@ static int pattern_events(Parser *p, Scope *scope, Node *o) {
         if (event_into(p->ctx, e, EV_CHECK, 0, NULL, o, NULL)) return -1;
         for (Node *entry = o->args; entry; entry = entry->next)
             if (pattern_events(p, scope, entry->a) || pattern_events(p, scope, entry->b)) return -1;
-        if (o->c && o->c->kind == N_NAME) return event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, o->c, o->c);
+        if (o->c && o->c->kind == N_NAME) return event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, o->c, o);
         return o->c ? target_events(p, scope, o->c, 1) : 0;
     case PT_CLASS:
         if (pattern_events(p, scope, o->a)) return -1;
@@ -19880,9 +19888,10 @@ static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, Pa
 static void case_begin(Parser *parser, Program *p, Node *item, Case *k, Program *guard) {
     SPYContext *c = parser->ctx;
     const char *bad;
+    Node *where;
     size_t count = 0;
     if (!(k->names = allocate(c, 256 * sizeof(*k->names)))) { free_program(guard); return; }
-    pattern_names(item->a, k->names, &count, 256, &bad);
+    pattern_names(item->a, k->names, &count, 256, &bad, &where);
     k->fail.names = k->names; k->fail.count = count; k->fail.parser = parser;
     emit_pattern(c, p, item, P_BEGIN, count);
     compile_pattern(c, p, item->a, 1, &k->fail);
