@@ -9123,7 +9123,7 @@ static int header_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
     if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
     if (n->kind == N_FOR) return bound_recorded(p, n, n->args, NULL, n->a);
-    if (n->kind == N_WITH || n->kind == N_EXCEPT) return header_recorded(p, n);
+    if (n->kind == N_WITH || n->kind == N_EXCEPT || n->kind == N_DELETE) return header_recorded(p, n);
     static const unsigned char kinds[] = {N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NONE, N_BOOL, N_ELLIPSIS, N_LIST,
                                           N_TUPLE, N_SET, N_DICT, N_UNARY, N_BINARY, N_COMPARE, N_INDEX, N_ATTR, N_COND,
                                           N_STAR, N_SLICE, N_CALL, N_KEYWORD, N_MAPPING, N_EXPR, N_RETURN, N_RAISE,
@@ -9191,24 +9191,31 @@ static int target_events(Parser *p, Scope *scope, Node *t) {
     }
     return t->kind == N_NAME ? event_into(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t) : events_again(p, t);
 }
-/* Record a with or except statement's header's analysis (scope_visit):
- * a with item's expression, then its target bound; an except clause's
- * types, then its name bound at the clause. Built after the log's end,
- * then moved to where its parts' events began. */
+/* Where target t's recorded events begin: its first name's or part's. */
+static size_t target_at(Node *t, size_t otherwise) {
+    while (t->kind == N_STAR || ((t->kind == N_LIST || t->kind == N_TUPLE) && t->args)) t = t->kind == N_STAR ? t->a : t->args;
+    return (t->flags & F_EVENTS) ? t->events_at : otherwise;
+}
+/* Record a with, except or del statement's (header's) analysis
+ * (scope_visit): a with item's expression, then its target bound; an
+ * except clause's types, then its name bound at the clause; a del's
+ * targets bound. Built after the log's end, then moved to where its
+ * parts' events began. */
 static int header_recorded(Parser *p, Node *n) {
     Events *e = &p->events;
-    Node *first = n->kind == N_WITH ? n->args : n;
-    for (Node *item = first; item; item = n->kind == N_WITH ? item->next : NULL) {
-        Node *a = item->a, *b = n->kind == N_WITH ? item->b : item->c;
+    int with = n->kind == N_WITH, del = n->kind == N_DELETE;
+    Node *first = with ? n->args : n;
+    for (Node *item = first; item; item = with ? item->next : NULL) {
+        Node *a = del ? NULL : item->a, *b = with ? item->b : del ? item->a : item->c;
         if ((a && (!(a->flags & F_EVENTS) || (a->flags & F_ANALYSED))) || (b && !target_recorded(b))) return 0;
     }
     if (!first) return 0;
     Scope *scope = parse_scope(p);
     if (!scope) return -1;
-    size_t at = first->a ? first->a->events_at : e->len, end = e->len;
-    for (Node *item = first; item; item = n->kind == N_WITH ? item->next : NULL) {
-        Node *b = n->kind == N_WITH ? item->b : item->c;
-        if (item->a && events_again(p, item->a)) return -1;
+    size_t at = del ? target_at(n->a, e->len) : first->a ? first->a->events_at : e->len, end = e->len;
+    for (Node *item = first; item; item = with ? item->next : NULL) {
+        Node *b = with ? item->b : del ? item->a : item->c;
+        if (!del && item->a && events_again(p, item->a)) return -1;
         if (b && (b->kind == N_NAME && n->kind == N_EXCEPT ? event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, b, n) : target_events(p, scope, b)))
             return -1;
     }
@@ -9229,11 +9236,7 @@ static int bound_recorded(Parser *p, Node *n, Node *target, Node *rest, Node *va
     for (Node *t = rest; t; t = t->next) if (!target_recorded(t)) return 0;
     Scope *scope = parse_scope(p);
     if (!scope) return -1;
-    /* Where the first target's events began: its first name's or part's. */
-    Node *first = target;
-    while (first->kind == N_STAR || ((first->kind == N_LIST || first->kind == N_TUPLE) && first->args))
-        first = first->kind == N_STAR ? first->a : first->args;
-    size_t at = (first->flags & F_EVENTS) ? first->events_at : value->events_at, end = e->len;
+    size_t at = target_at(target, value->events_at), end = e->len;
     if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, target)) return -1;
     for (Node *t = rest; t; t = t->next) if (target_events(p, scope, t)) return -1;
     if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || events_again(p, value) ||
