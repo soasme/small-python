@@ -4,8 +4,9 @@
 # element of the iterable, a list, a generator, a map or one of a Python
 # __iter__, which must return an iterator, by the instance's
 # Python __setitem__, each before the next element is taken; a frozendict
-# subclass is called with a frozendict of the keys. Keys of a dict or set
-# keep their hashes, and one with a Python __eq__ compares an earlier one.
+# subclass is called with a frozendict of the keys, also when a builtin
+# such as map calls fromkeys. Keys of a dict or set keep their hashes,
+# and one with a Python __eq__ compares an earlier one.
 # Each of these Python calls may loop, and errors from any of them propagate.
 from harness import *
 
@@ -64,6 +65,7 @@ def main():
     check(lambda: F.fromkeys(gen(1, 2)), [(1, None), (2, None)], [("new", 0), ("yield", 1), ("yield", 2), ("new", 1)], F)
     check(lambda: D.fromkeys(Iterable(9)), [(9, None)], [("init", ()), "iter", ("set", 9, None)], D)
     check(lambda: F.fromkeys(Iterable(3)), [(3, None)], [("new", 0), "iter", ("new", 1)], F)
+    check(lambda: next(map(F.fromkeys, ["ab"])), [("a", None), ("b", None)], [("new", 0), ("new", 1)], F)
     check(lambda: frozendict.fromkeys(gen(4), 0), [(4, 0)], [("yield", 4)], frozendict)
     check(lambda: dict.fromkeys(gen(6)), [(6, None)], [("yield", 6)], dict)
     # A dict's keys keep their hashes; the second compares the first.

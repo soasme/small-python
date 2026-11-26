@@ -1,5 +1,7 @@
 # spec: PLS-315 19.3.21, 7.1.3
-# description: isinstance() with tuples, unions, and __instancecheck__.
+# description: isinstance() with tuples, unions, and __instancecheck__; an
+# AttributeError from an instance's __class__ means False, another error
+# propagates.
 from harness import *
 class Regular:
     pass
@@ -82,3 +84,15 @@ class NoClass:
     def __class__(self):
         raise AttributeError("no")
 assert_eq(isinstance(NoClass(), int), False)
+
+# Another error from __class__ propagates, also from type.__instancecheck__.
+class BadClass:
+    @property
+    def __class__(self):
+        raise KeyError("bad")
+class MCDefault(type):
+    def __instancecheck__(cls, instance): return type.__instancecheck__(cls, instance)
+class Default(metaclass=MCDefault): pass
+assert_raises(KeyError, lambda: isinstance(BadClass(), int))
+assert_raises(KeyError, lambda: isinstance(BadClass(), Default))
+assert_eq(isinstance(NoClass(), Default), False)

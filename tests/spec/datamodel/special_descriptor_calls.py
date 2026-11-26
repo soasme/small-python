@@ -137,13 +137,14 @@ class PropertyBool:
 class NarrowSized:
     __len__ = NarrowGet()
     __iter__ = NarrowGet()
+    __contains__ = NarrowGet()
 narrow_errors = []
 for make in (lambda: bool(NarrowBool()), lambda: bool(PropertyBool()), lambda: len(NarrowSized()), lambda: iter(NarrowSized()),
-             lambda: [x for x in NarrowSized()]):
+             lambda: [x for x in NarrowSized()], lambda: 1 in NarrowSized()):
     try: make()
     except TypeError as e: narrow_errors.append(str(e))
 narrow = "NarrowGet.__get__() takes 1 positional argument but 3 were given"
-assert_eq(narrow_errors, [narrow, "PropertyBool.<lambda>() takes 0 positional arguments but 1 was given", narrow, narrow, narrow])
+assert_eq(narrow_errors, [narrow, "PropertyBool.<lambda>() takes 0 positional arguments but 1 was given", narrow, narrow, narrow, narrow])
 
 # A __hash__ descriptor raising AttributeError leaves the instance
 # unhashable; a metaclass's __repr__ descriptor raising it gives the

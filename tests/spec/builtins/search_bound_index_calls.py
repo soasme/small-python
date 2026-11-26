@@ -25,6 +25,8 @@ class Bad:
         log.append("bad")
         return "x"
 
+class Plain: pass
+
 def run():
     out = []
     for name in ("find", "rfind", "index", "rindex", "count", "startswith", "endswith"):
@@ -36,6 +38,7 @@ def run():
     out.append([1, 2, 1, 2].index(1, I(1)))
     out.append((1, 2, 1, 2).index(2, I(2), I(4)))
     for call in (lambda: "abc".find(1, I(7)), lambda: "abc".startswith(1, I(8)), lambda: b"abc".count("x", I(9)),
+                 lambda: b"abc".find(Plain(), I(12)),
                  lambda: "abc".find("a", Bad(), I(10)), lambda: [1].index(1, None, I(11)), lambda: "abc".find(),
                  lambda: b"abc".startswith()):
         try: call()
@@ -45,9 +48,10 @@ def run():
 expected = [1, 1, 4, 4, 1, 1, 4, 4, 2, 2, True, False, True, True, 5, 2, 2, 3,
             "find() argument 1 must be str, not int", "startswith first arg must be str or a tuple of str, not int",
             "argument should be integer or bytes-like object, not 'str'",
+            "argument should be integer or bytes-like object, not 'Plain'",
             "Bad.__index__() must return an int, not str", "slice indices must be integers or have an __index__ method",
             "find expected at least 1 argument, got 0", "startswith expected at least 1 argument, got 0"]
-expected_log = [1, 5, -1] * 7 + [3, 0, 4, 1, 2, 4, 8, 9, "bad"]
+expected_log = [1, 5, -1] * 7 + [3, 0, 4, 1, 2, 4, 8, 9, 12, "bad"]
 assert_eq(run(), expected)
 assert_eq(log, expected_log)
 log.clear()

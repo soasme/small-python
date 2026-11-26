@@ -36,3 +36,18 @@ assert_eq(ns["r"], 0.5)
 namespace = {}
 exec("from __future__ import annotations\nx: ...\ny: f(...)\n", namespace)
 assert_eq(namespace["__annotations__"], {"x": "...", "y": "f(...)"})
+
+# A future statement is an import too: what the __import__ hook gives for
+# __future__ is the module its names are bound from.
+import builtins
+class FakeFuture:
+    annotations = "fake"
+real_import = builtins.__import__
+def future_hook(name, *args):
+    return FakeFuture() if name == "__future__" else real_import(name, *args)
+builtins.__import__ = future_hook
+try:
+    hooked = run("from __future__ import annotations\n")
+finally:
+    builtins.__import__ = real_import
+assert_eq(hooked["annotations"], "fake")

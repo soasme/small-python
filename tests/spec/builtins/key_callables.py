@@ -6,8 +6,9 @@
 # as it was, and a key whose class changes its call while sorting is
 # called as it now is. min and max compare instance keys with the best
 # one's by the key's Python method, then on NotImplemented by the best
-# key's reflected one, raising TypeError when both decline. So do calls
-# passing their arguments by * and **, a str subclass naming the keyword.
+# key's reflected one, a builtin's too, raising TypeError when both decline.
+# So do calls passing their arguments by * and **, a str subclass naming
+# the keyword.
 from harness import *
 
 log = []
@@ -87,7 +88,8 @@ def results():
     out += [error(lambda: sorted([1, 2], key=Bad)), error(lambda: ys.sort(key=Failing)), ys,
             error(lambda: sorted([2, 1, 3], key=Changing)), sorted([-3, 2, -1], key=Switch()),
             max([3, 1, 2], key=Picky), min([2, 1], key=Picky), error(lambda: max([1, 0], key=Picky)),
-            error(lambda: min([1, 9], key=Picky)), error(lambda: min([1, 0], key=Lazy))]
+            error(lambda: min([1, 9], key=Picky)), error(lambda: min([1, 0], key=Lazy)),
+            error(lambda: max([5, Lazy(1)], key=lambda v: v))]
     zs = [2, 3, 1]
     zs.sort(*(), **{"key": w.weigh})
     out += [zs, sorted(*[[5, 3]], **{Name("key"): Rank}), max(*[[1, 3]], **{"key": w})]
@@ -98,7 +100,8 @@ expected = [[3, 4, 5], [3, 2, 1], [3, 2, 1], [2, 4, 9], 1, 3, 1, 7,
             ("TypeError", "__init__() should return None, not 'int'"), ("KeyError", "2"), [3, 2, 1],
             ("TypeError", "Changing() takes no arguments"), [-3, -1, 2], 3, 1,
             ("TypeError", "'>' not supported between instances of 'Picky' and 'Picky'"), ("KeyError", "9"),
-            ("TypeError", "'<' not supported between instances of 'Lazy' and 'Lazy'"), [3, 2, 1], [3, 5], 1,
+            ("TypeError", "'<' not supported between instances of 'Lazy' and 'Lazy'"),
+            ("TypeError", "'>' not supported between instances of 'Lazy' and 'int'"), [3, 2, 1], [3, 5], 1,
             [("init", 5), ("init", 3), ("init", 4), ("weigh", 1), ("weigh", 3), ("weigh", 2), ("call", 1), ("call", 3),
              ("call", 2), ("init", 4), ("init", 2), ("init", 9), ("weigh", 1), ("weigh", 3), ("weigh", 2), ("call", 1),
              ("call", 3), ("call", 2), ("call", 1), ("call", 3), ("call", 2), ("init", 7), ("changing", 2), ("switch", -3),

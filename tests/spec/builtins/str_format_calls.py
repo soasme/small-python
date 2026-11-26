@@ -7,7 +7,7 @@
 # well, a str subclass result is its text, and a result that is not a str
 # raises TypeError, as does a method's exception, propagate; markup after
 # a field is parsed after its call. So does str.format called on the
-# class or held, and str.format_map, whose fields are its mapping's: a
+# class or held, again and again, and str.format_map, whose fields are its mapping's: a
 # positional field raises ValueError, a missing key KeyError, unless a
 # dict subclass's __missing__ answers. Inside functions as at module
 # level.
@@ -58,6 +58,8 @@ def results():
     shown, method = {"k": a, "n": [b]}, str.format
     out += [str.format("{}|{k}", a, k=b), method("<{}>", b), "{k}{n[0]}".format_map(shown), str.format_map("{k}", shown),
             error(lambda: "{}".format_map(shown)), error(lambda: "{x}".format_map(shown)), "{k}".format_map(Missing(k=a)), "{k}".format_map({"k": 1})]
+    held, pair = "{0[1]}", [1, a]
+    out += [held.format(pair) for _ in range(2)]
     out.append(list(log))
     return out
 
@@ -66,11 +68,11 @@ expected = ["<a>", "x<a>y<b>3>z{}", "<a><b><a>", "Shown(a)|<b>", "<aw>", "<attr>
             ("ValueError", "Single '{' encountered in format string"),
             ("IndexError", "Replacement index 1 out of range for positional args tuple"), "<a<b>>-<c>", "<a><b>",
             "<x><a><a<b>>", "<attr>", "<a<b>q>|", "  7|", "<a>|<b>", "<<b>>", "<a><b>", "<a>",
-            ("ValueError", "Format string contains positional fields"), ("KeyError", "'x'"), "<a>", "1",
+            ("ValueError", "Format string contains positional fields"), ("KeyError", "'x'"), "<a>", "1", "<a>", "<a>",
             [("a", ""), ("a", ""), ("b", ">3"), ("a", ""), ("b", ""), ("a", ""), ("b", ""), ("a", "w"), ("attr", ""),
              ("a", "sub"), ("a", ""), ("a", "int"), ("a", "bad"), ("a", ""), ("a", ""), ("b", ""), ("a", "<b>"), ("c", ""),
              ("a", ""), ("b", ""), ("x", ""), ("a", ""), ("b", ""), ("a", "<b>"), ("attr", ""), ("b", ""), ("a", "<b>q"),
-             ("a", ""), ("b", ""), ("b", ""), ("a", ""), ("b", ""), ("a", ""), ("a", "")]]
+             ("a", ""), ("b", ""), ("b", ""), ("a", ""), ("b", ""), ("a", ""), ("a", ""), ("a", ""), ("a", "")]]
 
 def main():
     return results()

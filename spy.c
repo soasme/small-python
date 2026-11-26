@@ -39008,15 +39008,13 @@ static SPYValue *equal_tested(SPYContext *c, Machine *m, SPYValue *held, SPYValu
     int truth = result && truth_result(c, held->as.seq.items[0], held->as.seq.items[1] == c->booleans[1], result);
     return k_resume(c, m, held, c->error_type[0] ? NULL : spy_bool(c, truth));
 }
-/* a == b as a bool for continuation k with ctx, which it takes, calling
- * a Python __eq__ on m (callk): a's, or b's when b's class is a subclass
- * of a's, or a has none; else in C. */
+/* a == b as a bool for continuation k with ctx, which it takes, two
+ * values a Python __eq__ compares (map_scan, unknown_from), called on m
+ * (callk): a's, or b's when b's class is a subclass of a's, or a has none. */
 static SPYValue *equalk(SPYContext *c, Machine *m, SPYValue *a, SPYValue *b, Continuation k, SPYValue *ctx) {
-    SPYValue *left = a, *function = a == b ? NULL : rich_function(c, a, b, R_EQ);
-    if (!function && a != b && (function = rich_reflection(c, b, a, R_EQ))) left = b;
-    if (function) return equal_callk(c, m, function, left, left == a ? b : a, 0, k, ctx);
-    int truth = a == b || equal(a, b);
-    return k(c, m, ctx, c->error_type[0] ? NULL : spy_bool(c, truth));
+    SPYValue *function = rich_function(c, a, b, R_EQ);
+    if (function) return equal_callk(c, m, function, a, b, 0, k, ctx);
+    return equal_callk(c, m, rich_reflection(c, b, a, R_EQ), b, a, 0, k, ctx);
 }
 static SPYValue *map_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* The search of map for key, of hash, from the entries *cursor yields on,
@@ -45927,13 +45925,10 @@ static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const
 static SPYValue *frame_locals_apply(SPYContext *c, int op, SPYValue *proxy, SPYValue *const *args) {
     SPYValue *frame = proxy->as.bound.self;
     switch (op) {
-    case FL_GETITEM: {
-        SPYValue *value = frame_local_get(c, frame, args[0]);
-        return value || c->error_type[0] ? value : frame_absent(c, op, args[0], NULL);
-    }
     case FL_SETITEM: case FL_DELITEM: return frame_local_set(c, frame, args[0], op == FL_SETITEM ? args[1] : NULL) ? NULL : spy_none(c);
-    case FL_CONTAINS: {
+    case FL_GETITEM: case FL_CONTAINS: {
         SPYValue *value = frame_local_get(c, frame, args[0]);
+        if (op == FL_GETITEM) return value || c->error_type[0] ? value : frame_absent(c, op, args[0], NULL);
         spy_release(value);
         return c->error_type[0] ? NULL : spy_bool(c, value != NULL);
     }
