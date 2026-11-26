@@ -8395,7 +8395,7 @@ static Node *statement_body(Parser *p, int emits) {
         Node *start = p->unit->as.unit.nodes;
         Scope *scope = p->scope;
         p->definition = definition;
-        if (analyse_statements(p, n)) return NULL;
+        if (parse_children(p, n) || analyse_statements(p, n)) return NULL;
         p->definition = n;
         Body enclosing = body_begin(p, n, p->depth + 1);
         p->scope = n->scope;
@@ -8577,7 +8577,7 @@ static Node *statement_body(Parser *p, int emits) {
         if (parameters(p, n, ')')) return NULL;
         int kept = emits && def_header(p, n, from);
         if (take(p, T_ARROW) && !(n->c = annotation_expression(p, expression, 0))) return NULL;
-        if (function_annotations(p, n) || analyse_statements(p, n)) return NULL;
+        if (function_annotations(p, n) || parse_children(p, n) || analyse_statements(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
         Site returned = p->returned;
@@ -9120,7 +9120,10 @@ static Node *child_next(Children *k) {
  * then n's own node counted. A child without them leaves n to the walk. */
 static int bound_recorded(Parser *, Node *, Node *, Node *, Node *);
 static int header_recorded(Parser *, Node *);
+static int definition_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
+    if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
+    if (n->kind == N_DEF || n->kind == N_CLASS) return definition_recorded(p, n);
     if (n->kind == N_ASSIGN) return bound_recorded(p, n, n->a, n->args, n->b);
     if (n->kind == N_FOR) return bound_recorded(p, n, n->args, NULL, n->a);
     if (n->kind == N_WITH || n->kind == N_EXCEPT || n->kind == N_DELETE) return header_recorded(p, n);
@@ -9221,6 +9224,52 @@ static int header_recorded(Parser *p, Node *n) {
     }
     if (event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     size_t count = e->len - end;
+    memmove(e->items + at, e->items + end, count * sizeof(Event));
+    e->len = at + count;
+    n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
+    return 0;
+}
+/* Record definition n's header's analysis (scope_visit) when it has no
+ * type parameters or annotations: its name bound, then a function's
+ * defaults and decorators or a class's decorators and bases, positional
+ * then keyword; its scope made, as the walk would make it next; a
+ * function's parameters bound in that scope; the name's symbol moved
+ * after the rest. Its parts' events are put in that order after the
+ * log's end, then moved to where they began. */
+static Scope *scope_of(SPYContext *, Node *, Scope *);
+static int definition_recorded(Parser *p, Node *n) {
+    Events *e = &p->events;
+    if (n->params || n->annotate || p->symbols.message) return 0;
+    size_t count = 0, at = e->len, total = 0;
+    for (Node *o = n->decorators; o; o = o->next) count++;
+    for (Node *o = n->args; o; o = o->next) count++;
+    Node **parts = count ? allocate(p->ctx, count * sizeof(*parts)) : NULL;
+    if (count && !parts) return -1;
+    size_t len = 0;
+    if (n->kind == N_DEF) for (Node *o = n->args; o; o = o->next) if (o->a) parts[len++] = o->a;
+    for (Node *o = n->decorators; o; o = o->next) parts[len++] = o;
+    if (n->kind == N_CLASS)
+        for (int pass = 0; pass < 2; pass++) for (Node *o = n->args; o; o = o->next)
+            if ((o->kind == N_KEYWORD || o->kind == N_MAPPING) == pass) parts[len++] = o;
+    int status = 0;
+    for (size_t i = 0; i < len && status == 0; i++) {
+        Node *o = parts[i];
+        if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) status = 1;
+        else { if (o->events_at < at) at = o->events_at; total += o->events_end - o->events_at; }
+    }
+    Scope *scope = status ? NULL : parse_scope(p);
+    if (status || total != e->len - at || !scope) { mem_free(parts); return status || total != e->len - at ? 0 : -1; }
+    size_t end = e->len;
+    status = event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_BIND, S_LOCAL, scope, n->a, n) ||
+             event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL);
+    for (size_t i = 0; i < len && !status; i++) status = events_again(p, parts[i]);
+    mem_free(parts);
+    if (status || !scope_of(p->ctx, n, scope)) return -1;
+    if (n->kind == N_DEF)
+        for (Node *param = n->args; param; param = param->next)
+            if (event_into(p->ctx, e, EV_BIND, S_PARAM, n->scope, param, param)) return -1;
+    if (event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
+    count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
     e->len = at + count;
     n->events_at = (uint32_t)at; n->events_end = (uint32_t)e->len; n->flags |= F_EVENTS;
