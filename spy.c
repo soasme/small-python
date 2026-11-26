@@ -243,6 +243,10 @@ typedef struct {
  * classes_changed was epoch, or for a builtin type (method_of); all
  * borrowed. */
 typedef struct { NameOperand *name; SPYValue *cls, *method; size_t epoch; int kind, line; } AttributeOperand;
+/* The shape of an operand at hand (item_at_hand), as its plain steps take
+ * it: a literal, a name, an item of those, or a name's attribute; a left
+ * operand not at hand is atop the stack (compile_stacked). */
+enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -254,6 +258,10 @@ struct Node {
      * each mode, whether expands is known and its answer; and loads_name,
      * plus one. Expressions are whole when they compile. */
     unsigned char expands_known, expands_value, loads;
+    /* Its shapes, plus one, set before it compiles (operand_shapes): as an
+     * operand at hand, and as an operator fused on its left and right
+     * operands'; and whether it is arithmetic on operands at hand. */
+    unsigned char hand, left, right, ops;
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
@@ -9052,7 +9060,7 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
     return body;
 }
 static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
-static Node *operator_right(Node *);
+static int operator_right(Node *);
 static SPYValue *unary(SPYContext *, int, SPYValue *);
 /* Optimization level 2 keeps no docstrings: each becomes pass, so __doc__ is None. */
 static void drop_docstring(Node *body) {
@@ -10478,16 +10486,9 @@ static int at_hand(Node *n) {
     return n->kind == N_NAME || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING ||
            n->kind == N_BYTES || n->kind == N_BOOL || n->kind == N_NONE || n->kind == N_ELLIPSIS;
 }
-static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)) || (n->kind == N_ATTR && n->a->kind == N_NAME && at_hand(n->a)); }
+static int item_at_hand(Node *n) { return n->hand; }
 /* Whether n is an operand at hand, or arithmetic or a comparison of such. */
-static int operands_at_hand(Node *n) {
-    if (n->kind == N_COMPARE) {
-        for (Node *cmp = n->args; cmp; cmp = cmp->next) if (!operands_at_hand(cmp->a)) return 0;
-        return operands_at_hand(n->a);
-    }
-    return item_at_hand(n) || (n->kind == N_UNARY && operands_at_hand(n->a)) ||
-           (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR && operands_at_hand(n->a) && operands_at_hand(n->b));
-}
+static int operands_at_hand(Node *n) { return n->ops; }
 /* Whether n is a list or tuple display of items none starred. */
 static int packed(Node *n) {
     if ((n->kind != N_LIST && n->kind != N_TUPLE) || !n->args) return 0;
@@ -10495,15 +10496,10 @@ static int packed(Node *n) {
     for (Node *a = n->args; a; a = a->next) if (a->kind == N_STAR || ++count > 1 << 20) return 0;
     return 1;
 }
-/* The right operand of n when n is an index whose operands are literals or
- * names, or arithmetic or a single comparison whose operands are those, an
- * index of those, or an attribute of a name, else NULL. */
-static Node *operator_right(Node *n) {
-    if (n->kind == N_INDEX) return at_hand(n->a) && at_hand(n->b) ? n->b : NULL;
-    Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a :
-        n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
-    return right && item_at_hand(n->a) && item_at_hand(right) ? right : NULL;
-}
+/* Whether n is an operator fused on operands at hand: an index of literals
+ * or names, or arithmetic or a single comparison of those, an index of
+ * those, or an attribute of a name. */
+static int operator_right(Node *n) { return n->right && n->left != SHAPE_STACK + 1; }
 /* Whether each argument of call n is a leaf or an operator at hand, as
  * its fused call takes them (call_operands). */
 static int fused_arguments(Node *n) {
@@ -18292,16 +18288,6 @@ static void patch(Program *p, size_t pc, size_t target) {
     p->items[pc].target = target;
     if (p->items[pc].op == BC_FALSE && p->items[pc].other) p->items[p->items[pc].other - 1].target = target;
 }
-/* The shape of an operand at hand (item_at_hand), as its plain steps take
- * it: a literal, a name, an item of those, or a name's attribute; a left
- * operand not at hand is atop the stack (compile_stacked). */
-enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED };
-static int operand_shape(SPYContext *c, Node *n) {
-    if (n->kind == N_INDEX) { operand_shape(c, n->a); operand_shape(c, n->b); return SHAPE_ITEM; }
-    if (n->kind == N_ATTR || n->kind == N_NAME) return n->kind == N_ATTR ? SHAPE_ATTR : SHAPE_NAME;
-    literal_value(c, n);
-    return SHAPE_LOAD;
-}
 /* An operator at hand's operation of operator node n: its kind and, from bit 2, its operator. */
 enum { FUSED_INDEX, FUSED_BINARY, FUSED_COMPARE };
 static int fused_operation(Node *n) {
@@ -18316,8 +18302,30 @@ static void compile_operation(SPYContext *, Program *, Node *);
  * it a BC_TEST. Its arg holds truth, the operands' shapes, from bit 6
  * the right one's first step after it: 1, 2 or 3 past an operand at
  * hand's, at once past the stack's, and from bit 8 n's operation. */
-static void fuse_steps(SPYContext *c, Program *p, Node *n, int left, Node *right, int truth, size_t start) {
-    int shape = operand_shape(c, right), steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
+/* n's shapes (Node.hand), from its operands'; a literal at hand's value is made. */
+static void operand_shapes(SPYContext *c, Node *n) {
+    int kind = n->kind;
+    Node *right = kind == N_INDEX ? n->b : kind == N_COMPARE && !n->args->next ? n->args->a :
+        kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
+    n->hand = kind == N_NAME ? SHAPE_NAME + 1 : at_hand(n) ? SHAPE_LOAD + 1 :
+        kind == N_INDEX && n->a->hand && n->a->hand <= SHAPE_NAME + 1 && n->b->hand && n->b->hand <= SHAPE_NAME + 1 ? SHAPE_ITEM + 1 :
+        kind == N_ATTR && n->a->kind == N_NAME ? SHAPE_ATTR + 1 : 0;
+    if (n->hand == SHAPE_LOAD + 1) literal_value(c, n);
+    n->left = n->right = 0;
+    if (right && right->hand && (kind != N_INDEX || n->hand)) {
+        n->right = right->hand;
+        n->left = n->a->hand ? n->a->hand : kind == N_INDEX ? 0 : SHAPE_STACK + 1;
+        if (!n->left) n->right = 0;
+    }
+    n->ops = n->hand;
+    if (kind == N_COMPARE) {
+        n->ops = n->a->ops;
+        for (Node *cmp = n->args; cmp && n->ops; cmp = cmp->next) n->ops = cmp->a->ops;
+    } else if (kind == N_UNARY) n->ops = n->a->ops;
+    else if (kind == N_BINARY && n->op != O_AND && n->op != O_OR) n->ops = n->a->ops && n->b->ops;
+}
+static void fuse_steps(SPYContext *c, Program *p, Node *n, int truth, size_t start) {
+    int left = n->left - 1, shape = n->right - 1, steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
     /* An item operand is its plain steps alone. */
     for (size_t i = start; i < p->len; i++) if (p->items[i].op == BC_OPERATE) emit_drop(p, i--);
     size_t fused = c->error_type[0] ? SIZE_MAX :
@@ -18325,12 +18333,9 @@ static void fuse_steps(SPYContext *c, Program *p, Node *n, int left, Node *right
     patch(p, fused, p->len);
     if (truth && fused != SIZE_MAX) p->tested = fused + 1;
 }
-/* The right operand of n when n is arithmetic or a single comparison whose
- * right operand is at hand and left one not, else NULL. */
-static Node *stacked_right(Node *n) {
-    Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a : n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
-    return right && item_at_hand(right) && !item_at_hand(n->a) ? right : NULL;
-}
+/* Whether n is arithmetic or a single comparison whose right operand is
+ * at hand and left one not. */
+static int stacked_right(Node *n) { return n->left == SHAPE_STACK + 1; }
 static void retest(SPYContext *, Program *, Node *, size_t);
 /* Make the value of n, whose steps from start on compiled it, a test:
  * its fused step tests it, or it takes one now; a constant folded from
@@ -18338,11 +18343,11 @@ static void retest(SPYContext *, Program *, Node *, size_t);
 static int loads_name(Node *);
 static void retest(SPYContext *c, Program *p, Node *n, size_t start) {
     if (c->error_type[0] || !n || at_hand(n) || expands(n, modes(p))) return;
-    Node *right = operator_right(n), *stacked = right ? NULL : stacked_right(n);
+    int right = operator_right(n), stacked = stacked_right(n);
     if (!right && (!stacked || n->constant)) return;
     size_t at = right ? start : p->split;
     int fused = !n->constant && (n->kind != N_COMPARE || right) && !(p->calls == PAUSING && loads_name(n));
-    if (!fused) { fuse_steps(c, p, n, right ? operand_shape(c, n->a) : SHAPE_STACK, right ? right : stacked, 1, at); return; }
+    if (!fused) { fuse_steps(c, p, n, 1, at); return; }
     p->items[at].arg |= 1;
     p->tested = at + 1;
 }
@@ -18436,9 +18441,9 @@ static void compile_node(SPYContext *c, Program *p, Node *n) {
     /* Arithmetic on arithmetic takes its steps; an operator on operands at
      * hand, or on one at hand right of another's value, is fused once its
      * steps are compiled. */
-    Node *right = NULL, *stacked = NULL;
+    int right = 0, stacked = 0;
     if (!expands(n, modes(p)) && (n->kind != N_COMPARE || operator_right(n)) && !(p->calls == PAUSING && loads_name(n)))
-        stacked = (right = operator_right(n)) ? NULL : stacked_right(n);
+        right = operator_right(n), stacked = stacked_right(n);
     /* Operands emitted as they were parsed are its first steps (finished). */
     size_t parts, start = n->a ? n->a->steps_at : p->len;
     switch (n->kind) {
@@ -18507,11 +18512,13 @@ static void compile_node(SPYContext *c, Program *p, Node *n) {
         if (n->op != N_TUPLE && n->asynchronous) emit(c, p, BC_DELEGATE, n, DELEGATE_COMPREHENSION);
         break;
     }
-    if (right || stacked) fuse_steps(c, p, n, right ? operand_shape(c, n->a) : SHAPE_STACK, right ? right : stacked, 0, right ? start : p->split);
+    if (right || stacked) fuse_steps(c, p, n, 0, right ? start : p->split);
 }
 /* Compile n now, its steps from at on: its operands' already, the rest
  * its own (compile_node); a folded negation's are its operand's. */
+static void operand_shapes(SPYContext *, Node *);
 static Node *emit_parsed(Parser *p, Node *n, size_t at) {
+    operand_shapes(p->ctx, n);
     if (!n->constant || n->kind != N_UNARY) compile_node(p->ctx, p->emitting, n);
     return parsed_steps(p, n, at);
 }
@@ -18525,6 +18532,7 @@ static Node *parsed_steps(Parser *p, Node *n, size_t at) {
     /* Its analysis and its summary in its program's mode, while its
      * operands are whole (parse_children, expands). */
     if (!c->error_type[0] && parse_children(p, n)) return NULL;
+    operand_shapes(c, n);
     expands(n, modes(p->emitting));
     return c->error_type[0] ? NULL : n;
 }
@@ -19532,8 +19540,7 @@ static void compile_assignment(SPYContext *c, Program *p, Node *n) {
 static void assignment_fused(SPYContext *c, Program *p, Node *n, size_t at) {
     Node *t = n->a;
     int item = t->kind == N_INDEX, augmented = n->op != '=';
-    if (item) { operand_shape(c, t->a); operand_shape(c, t->b); }
-    int shape = operator_right(n->b) ? SHAPE_FUSED : operand_shape(c, n->b);
+    int shape = operator_right(n->b) ? SHAPE_FUSED : n->b->hand - 1;
     size_t fused = c->error_type[0] ? SIZE_MAX : emit_before(c, p, at, BC_ASSIGN, n, item | augmented << 1 | shape << 2 | (augmented ? item ? 3 : 1 : 0) << 5);
     if (fused != SIZE_MAX && augmented) p->items[fused].other = (uint32_t)operators[n->op - T_ADDEQ].token;
     patch(p, fused, p->len);
