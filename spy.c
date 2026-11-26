@@ -11087,18 +11087,6 @@ static SPYValue *zip_unequal(SPYContext *c, SPYValue *v, size_t i, const char *w
     return errorf(c, "ValueError", "%s() argument %zu is %s than argument%s%zu", v->as.iterator.kind == I_MAP ? "map" : "zip", k + 1, which,
                   k == 1 ? " " : "s 1-", k);
 }
-/* The items zip_fill left pending in zip or map v, taken; none when the
- * generator they wait for has ended since, which dropped them. */
-static NO_INLINE SPYValue *zip_pending(SPYValue *v) {
-    SPYValue *source = v->as.iterator.source, *pending = v->as.iterator.counter, *next;
-    size_t at = (v->as.iterator.kind == I_MAP) + pending->as.seq.len;
-    v->as.iterator.counter = NULL;
-    if (at < source->as.seq.len && (next = source->as.seq.items[at])->type == SPY_GENERATOR && next->as.generator.done) {
-        spy_release(pending);
-        return NULL;
-    }
-    return pending;
-}
 /* The next items of zip or map iterator v's iterables, as a tuple, after
  * those pending in its counter (zip_fill); NULL at their end or on an
  * error. */
@@ -11112,7 +11100,9 @@ static void zip_rest(SPYContext *c, SPYValue *v, size_t from) {
     }
 }
 static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
-    SPYValue *source = v->as.iterator.source, *result = v->as.iterator.counter ? zip_pending(v) : NULL;
+    /* The items zip_fill left pending come first. */
+    SPYValue *source = v->as.iterator.source, *result = v->as.iterator.counter;
+    v->as.iterator.counter = NULL;
     size_t first = v->as.iterator.kind == I_MAP, checking = v->as.iterator.size ? v->as.iterator.index : 0;
     v->as.iterator.index = 0;
     /* A check under way on the machine goes on (zip_checked). */
@@ -41968,11 +41958,11 @@ static int zip_ended(SPYContext *c, SPYValue *v, size_t i) {
  * iterators before it taken, those that make no call on the machine
  * (adapted_source): 1 then; else 0, for zip_items or adapted_call to go
  * on; -1 on an error or a strict one's end. */
+static void adapter_ended(SPYValue *);
 static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     SPYValue *source = v->as.iterator.source, *item;
     size_t first = v->as.iterator.kind == I_MAP;
     if (v->as.iterator.index && v->as.iterator.size) return zip_checked(c, v, g);
-    if (v->as.iterator.counter) v->as.iterator.counter = zip_pending(v);
     for (size_t i = first + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0); i < source->as.seq.len; i++) {
         SPYValue *s = source->as.seq.items[i];
         if (resumable(s)) { *g = s; return 1; }
@@ -41981,7 +41971,8 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
             item = iterator_next(c, s);
         }
         if (!item && !c->error_type[0] && v->as.iterator.size) return zip_ended(c, v, i) ? -1 : zip_checked(c, v, g);
-        if (!item) return c->error_type[0] ? -1 : 0;
+        /* An ended iterable ends the call, dropping the items taken for it. */
+        if (!item) { adapter_ended(v); return -1; }
         int failed = (!v->as.iterator.counter && !(v->as.iterator.counter = value_new(c, SPY_TUPLE))) ||
                      sequence_append(c, v->as.iterator.counter, item);
         spy_release(item);

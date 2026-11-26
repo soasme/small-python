@@ -4,7 +4,8 @@
 # theirs, in loops, comprehensions and consumers, inside functions as at
 # module level; the first iterable to end ends the zip, the items before
 # it taken and dropped, and the next call starts again from the first
-# iterable, as each call of enumerate, filter, map and zip asks their
+# iterable, also when the iterable that ended is a generator that ended
+# before, as each call of enumerate, filter, map and zip asks their
 # iterables again once they ended; an error in a generator ends the loop,
 # and a StopIteration from map's function ends the map.
 from harness import *
@@ -58,6 +59,9 @@ def zips():
             sorted(zip(gen("k", 2, 1), "ab")), list(zip(gen("l"))), list(zip()),
             error(lambda: list(zip(failing(), [1, 2]))), error(lambda: list(zip([1], gen("m", 1), strict=True)) and
                                                                   list(zip([1, 2], gen("n", 1), strict=True)))]
+    del log[:]
+    z, m = zip(gen("o", 1, 2, 3), gen("p")), map(pow, gen("q", 1, 2, 3), gen("r"))
+    out += [list(z), list(z), list(m), list(m), list(log)]
     return out
 
 expected = [[(1, 4), (2, 5)], [("a", 1), ("b", 4), ("a", 2), ("b", 5), ("a", 3)],
@@ -65,7 +69,8 @@ expected = [[(1, 4), (2, 5)], [("a", 1), ("b", 4), ("a", 2), ("b", 5), ("a", 3)]
             (7, 1, 9), ("StopIteration", ""), [("d", 1)], [], [5], (7, 1), [], [5],
             [(1, 3)], [("e", 1), ("e", 2)],
             [2, 4], ["3"], 3, [8, 9], [1], [(1, "b"), (2, "a")], [], [],
-            ("KeyError", "'gen'"), ("ValueError", "zip() argument 2 is shorter than argument 1")]
+            ("KeyError", "'gen'"), ("ValueError", "zip() argument 2 is shorter than argument 1"),
+            [], [], [], [], [("o", 1), ("o", 2), ("q", 1), ("q", 2)]]
 assert_eq(zips(), expected)
 del log[:]
 assert_eq(list(zip(gen("x", 1, 2), gen("y", 3))), [(1, 3)])

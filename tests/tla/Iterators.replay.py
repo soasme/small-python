@@ -168,6 +168,9 @@ SOURCES = {
                                  "    for _ in it: pass\n    result.append('exhausted')",
     "adapters_ask_again": "result = []\nfor make in (lambda r: map(abs, r), lambda r: filter(None, r), enumerate, zip):\n"
                           "    it = make(Revival())\n    result.append((list(it), next(it)))",
+    "zip_ended_generator": "log = []\ndef gen(tag, *xs):\n    for x in xs:\n        log.append((tag, x)); yield x\n"
+                           "z, m = zip(gen('a', 1, 2, 3), gen('e')), map(pow, gen('b', 1, 2, 3), gen('f'))\n"
+                           "result = [list(z), list(z), list(m), list(m), log]",
     "hint_after_iter": "result = []\nclass S:\n    def __iter__(self): result.append('iter'); return iter((1, 2))\n"
                        "    def __len__(self): result.append('len'); return 2\n"
                        "l = list(S()); l.extend(S()); l += S(); [*S()]; sorted(S()); bytes(S())",
