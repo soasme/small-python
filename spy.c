@@ -4867,7 +4867,7 @@ typedef struct { size_t start, at; int done; } SliceSteps;
 static int slice_lay(Parser *, Node *, int, SliceSteps *);
 static Node *slice_end(Parser *, Node *, size_t);
 static int chain_parsed(Parser *, Node *, Node *, size_t, int);
-static int pair_parsed(Parser *, Node *);
+static int stand_parsed(Parser *, Node *);
 static Node *chain_end(Parser *, Node *);
 static int emit_default(Parser *, Node *);
 static Node *lambda_parsed(Parser *, Node *);
@@ -6989,7 +6989,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
                 cmp->op = op; p->pos += (size_t)width;
                 size_t at = chain ? program_len(p->emitting) : 0;
                 cmp->a = expression(p, 4);
-                if (!cmp->a || parse_children(p, cmp) || pair_parsed(p, cmp)) return NULL;
+                if (!cmp->a || parse_children(p, cmp) || stand_parsed(p, cmp)) return NULL;
                 *tail = cmp; tail = &cmp->next;
                 op = operator_info(p, &width, &prec);
                 if (chain && (prec == 3 || cmp != n->args) && !(chain = chain_parsed(p, n, cmp, at, prec == 3)) && p->ctx->error_type[0]) return NULL;
@@ -9602,6 +9602,7 @@ static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
 static int operation_of(Node *);
 static int parse_children(Parser *p, Node *n) {
+    if ((n->kind == N_STAR || n->kind == N_MAPPING || n->kind == N_KEYWORD) && n->a && stand_parsed(p, n)) return -1;
     if ((n->kind == N_INDEX || n->kind == N_BINARY || (n->kind == N_COMPARE && n->args)) && !n->operation) n->operation = operation_of(n) + 1;
     /* A negated number's value, its constant once its statement ends (nodes_finish). */
     if (n->kind == N_UNARY && n->op == '-' && !n->folded) {
@@ -18960,10 +18961,7 @@ static SPYValue *keyword_names(SPYContext *c, Program *p, Node *n) {
 /* Whether the arguments of call n are literals, which its plain steps
  * take after its method's object (compile_stack_call). */
 static int literal_arguments(Node *n) {
-    for (Node *a = n->args; a; a = a->next) {
-        Node *value = a->kind == N_KEYWORD ? a->a : a;
-        if (!at_hand(value) || value->kind == N_NAME) return 0;
-    }
+    for (Node *a = n->args; a; a = a->next) if (!at_hand(a) || a->kind == N_NAME) return 0;
     return 1;
 }
 /* How fused call step fused of plain call n, whose plain steps end the
@@ -18989,7 +18987,7 @@ static void call_operands(Program *p, size_t fused, Node *n) {
  * (CALL_OBJECT), unless the method must be found before arguments that
  * run code or raise, any but literals. */
 static void compile_stack_call(SPYContext *c, Program *p, Node *n) {
-    int argc = 0, plain = plain_call(n) && !sort_call(n), method = n->a->kind == N_ATTR && plain, literals = literal_arguments(n);
+    int argc = 0, plain = plain_call(n) && !sort_call(n), method = n->a->kind == N_ATTR && plain, literals = method && literal_arguments(n);
     AttributeOperand *attribute = NULL;
     if (method) {
         /* The method's attribute, emitted as it was parsed, ends its
@@ -19154,14 +19152,14 @@ static int call_stream(Parser *p, Node *n, Node *arg, Mark start, int state, Mar
     SPYContext *c = p->ctx;
     Program *program = p->emitting;
     int keyword = arg->kind == N_KEYWORD || arg->kind == N_MAPPING;
-    Node *value = keyword || arg->kind == N_STAR ? arg->a : arg, *args[8];
+    Node *args[8];
     size_t count = 0, positional = 0;
     /* A plain call has at most 8 arguments before arg. */
     for (Node *a = n->args; a != arg && state == CALL_PLAIN; a = a->next) {
         positional += a->kind != N_KEYWORD;
         args[count++] = a;
     }
-    if (!(value->flags & F_EMITTED) || value->steps_at != start.at || value->steps_end != program->len) return 0;
+    if (!(arg->flags & F_EMITTED) || arg->steps_at != start.at || arg->steps_end != program->len) return 0;
     if (keyword && keywords->at == SIZE_MAX) *keywords = start;
     if (state == CALL_PLAIN) {
         if (arg->kind != N_STAR && arg->kind != N_MAPPING && count < 8) return CALL_PLAIN;
@@ -19169,7 +19167,7 @@ static int call_stream(Parser *p, Node *n, Node *arg, Mark start, int state, Mar
         /* The earlier arguments' steps, then the callee's, each moving
          * those after it on. */
         for (size_t i = count; i-- > 0;)
-            if (emit_before(c, program, (args[i]->kind == N_KEYWORD ? args[i]->a : args[i])->steps_end, BC_ARG, args[i], args[i]->kind) == SIZE_MAX) return 0;
+            if (emit_before(c, program, args[i]->steps_end, BC_ARG, args[i], args[i]->kind) == SIZE_MAX) return 0;
         if (emit_before(c, program, n->a->steps_end, BC_ARGS, n, 0) == SIZE_MAX) return 0;
         /* A plain call's positional arguments come before its keywords. */
         start.at += count + 1;
@@ -19565,16 +19563,17 @@ static Node *slice_end(Parser *p, Node *n, size_t start) {
  * operands and comparisons before it, cmp's comparison, more saying
  * whether one follows. Whether its steps still are its own; at its end,
  * the comparisons' exits. */
-/* A comparison's operator and operand cmp, parsed, stands for its
- * operand: its shapes, and, as it was emitted, its steps. */
-static int pair_parsed(Parser *p, Node *cmp) {
-    Node *operand = cmp->a;
-    cmp->hand = operand->hand; cmp->ops = operand->ops; cmp->arith = operand->arith;
-    if (!(operand->flags & F_EMITTED)) return 0;
+/* A node holding one value, parsed: a starred item, a keyword or a
+ * mapping unpacked stands for its value as it was emitted, its steps; a
+ * comparison's operator and operand, for its shapes too. */
+static int stand_parsed(Parser *p, Node *n) {
+    Node *value = n->a;
+    if (n->kind == N_BINARY) n->hand = value->hand, n->ops = value->ops, n->arith = value->arith;
+    if (!(value->flags & F_EMITTED)) return 0;
     if (grow(p->ctx, (void **)&p->emitted, &p->emitted_cap, p->emitted_len + 1, sizeof(*p->emitted))) return -1;
-    cmp->steps_at = operand->steps_at; cmp->steps_end = operand->steps_end;
-    cmp->flags |= F_EMITTED;
-    p->emitted[p->emitted_len++] = cmp;
+    n->steps_at = value->steps_at; n->steps_end = value->steps_end;
+    n->flags |= F_EMITTED;
+    p->emitted[p->emitted_len++] = n;
     return 0;
 }
 static int chain_parsed(Parser *p, Node *n, Node *cmp, size_t at, int more) {
@@ -19691,11 +19690,9 @@ static Node *starred_parsed(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     Program *program = p->emitting;
     if (!emitted_operands(program, (Node *[3]){NULL}, n->args)) return n;
-    Node *first = n->args->kind == N_STAR ? n->args->a : n->args;
-    size_t added = 0, start = first->steps_at;
+    size_t added = 0, start = n->args->steps_at;
     for (Node *a = n->args; a; a = a->next, added++) {
-        Node *value = a->kind == N_STAR ? a->a : a;
-        if (emit_before(c, program, value->steps_end + added, a->kind == N_STAR ? BC_EXTEND : BC_ADD, a, n->kind == N_TUPLE && !a->next) == SIZE_MAX) return NULL;
+        if (emit_before(c, program, a->steps_end + added, a->kind == N_STAR ? BC_EXTEND : BC_ADD, a, n->kind == N_TUPLE && !a->next) == SIZE_MAX) return NULL;
     }
     if (emit_before(c, program, start, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : SPY_TUPLE) == SIZE_MAX) return NULL;
     /* A tuple's count of items after its last starred one, as compile_node's. */
@@ -20026,9 +20023,8 @@ static int emitted_operands(Program *p, Node *fixed[3], Node *list) {
         last = fixed[i];
     }
     for (Node *a = list; a; a = a->next) {
-        Node *value = a->kind == N_KEYWORD || a->kind == N_STAR || a->kind == N_MAPPING ? a->a : a;
-        if (!(value->flags & F_EMITTED) || (last && last->steps_end != value->steps_at)) return 0;
-        last = value;
+        if (!(a->flags & F_EMITTED) || (last && last->steps_end != a->steps_at)) return 0;
+        last = a;
     }
     return !last || last->steps_end == p->len;
 }
