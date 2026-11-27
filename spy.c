@@ -5644,6 +5644,7 @@ static Node *comprehension_items_error(Parser *, Node *, Token *);
 static int clause_ahead(Parser *);
 static int word_at(Parser *, size_t, const char *);
 static Program *comprehension_apart(Parser *, Node *);
+static int comprehension_ahead(Parser *);
 static Mark mark(Program *);
 static void comprehension_apart_undo(Parser *, Node *, EmitMark, Program *);
 static Program *comprehension_begin(Parser *, Node *, EmitMark);
@@ -6664,7 +6665,9 @@ static int call_arguments(Parser *p, Node *n) {
         Node *arg;
         size_t first = p->pos;
         int awaits = p->awaits;
-        EmitMark before = emit_mark(p);
+        EmitMark before = emit_mark(p), element = before;
+        Node *generator = NULL;
+        Program *apart = NULL;
         if (at(p, '*') || at(p, T_POW)) {
             size_t star = p->pos;
             int unpack_mapping = take(p, T_POW);
@@ -6714,6 +6717,14 @@ static int call_arguments(Parser *p, Node *n) {
             /* A keyword's name, NAME '=', is read as no expression: it
              * emits nothing and is no use of the name. */
             int named = at(p, T_NAME) && !reserved(peek(p)) && start + 1 < p->len && p->tokens[start + 1].kind == '=';
+            /* A generator expression's element whose program loads names
+             * unlike its own emits into its own (comprehension_apart). */
+            if (!named && !n->args && n->kind != N_CLASS && p->emitting && comprehension_ahead(p)) {
+                if (!(generator = node(p, N_TUPLE))) return -1;
+                apart = comprehension_apart(p, generator);
+                if (p->ctx->error_type[0]) return -1;
+                if (apart) element = emit_mark(p);
+            }
             arg = named ? identifier(p) : expression_mode(p, 0, 2);
             if (arg && !named && at(p, '=')) {
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {
@@ -6751,6 +6762,7 @@ static int call_arguments(Parser *p, Node *n) {
             }
         }
         if (!arg) return -1;
+        if (apart && !keyword(p, "for") && !keyword(p, "async")) { comprehension_apart_undo(p, generator, element, apart); apart = NULL; }
         if (keyword(p, "for") || keyword(p, "async")) {
             if (arg->kind == N_MAPPING) { syntax_at(p, arg, "cannot use dict unpacking in generator expression"); return -1; }
             if (arg->kind == N_KEYWORD) {
@@ -6769,10 +6781,9 @@ static int call_arguments(Parser *p, Node *n) {
                 spy_clear_error(p->ctx);
                 syntax_span(p, first, genexp, "Generator expression must be parenthesized"); return -1;
             }
-            Node *generator = node(p, N_TUPLE);
-            if (!generator) return -1;
+            if (!generator && !(generator = node(p, N_TUPLE))) return -1;
             generator->args = arg;
-            if (!comprehension(p, generator, awaits, before, NULL)) return -1;
+            if (!comprehension(p, generator, awaits, element, apart)) return -1;
             if (at(p, ',')) {
                 /* CPython's invalid_arguments reads the arguments after the comma. */
                 p->pos++; peek(p); p->pos--;

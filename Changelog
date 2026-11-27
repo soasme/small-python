@@ -859,6 +859,7 @@ Unreleased (0.10.0):
 - a future statement's undefined feature, or a misplaced one on the line that ends the future statements, is reported before any scope error
 - a name an import binds may be declared global or nonlocal after the import
 - a starred-target error is reported after scope errors and invalid targets, and after the value or iterable's own errors
+- a class body's generator expression passed as a call's only argument no longer crashes
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 
