@@ -19744,21 +19744,55 @@ static Part part_of(Node *n, size_t item_line, int starred) {
                   (n->flags & F_EVENTS) && !(n->flags & F_ANALYSED), n->self_attribute,
                   n->steps_end - n->steps_at, (uint32_t)n->line, (uint32_t)item_line, 1, 0, UINT32_MAX, 0, 0, 0};
 }
+/* Item value's parts, a target list's item on item_line, starred or
+ * not, at at: its own, then a list's or tuple's items', their events
+ * from its events' offset from first; whether they are recorded, or -1. */
+static int value_parts(Parser *p, Part *at, Node *value, size_t item_line, int starred, size_t first) {
+    SPYContext *c = p->ctx;
+    Part own = part_of(value, item_line, starred);
+    uint32_t from = (value->flags & F_EVENTS) && value->events_at >= first ? (uint32_t)(value->events_at - first) : 0;
+    own.events_at = from; own.events_end = from + (value->events_end - value->events_at);
+    if (value->parts) {
+        memcpy(at, value->parts, value->parts->size * sizeof(Part));
+        own.size = at->size; own.count = at->count; own.star = at->star; own.recorded = at->recorded;
+        for (Part *inner = at + 1; inner < at + at->size; inner++) inner->events_at += from, inner->events_end += from;
+    } else if (own.self && own.recorded) {
+        const char *name = source_name(value);
+        size_t len = strlen(name) + 1;
+        if (p->events.texts_len + len + 1 > UINT32_MAX) { spy_error(c, "MemoryError", "too many names"); return -1; }
+        if (grow(c, (void **)&p->events.texts, &p->events.texts_cap, p->events.texts_len + len + 1, 1)) return -1;
+        memcpy(p->events.texts + p->events.texts_len, name, len); p->events.texts[p->events.texts_len + len] = 0;
+        own.text = (uint32_t)p->events.texts_len; p->events.texts_len += len + 1;
+    }
+    own.recorded &= value->kind == N_NAME || value->kind == N_ATTR || value->kind == N_INDEX || value->parts;
+    *at = own;
+    return own.recorded;
+}
+/* The size of value's parts as a target list's item, or 0 when they
+ * cannot be made: each a name, attribute, item, or such a list or tuple. */
+static size_t parts_size(Node *value) {
+    if (value->kind == N_TUPLE || value->kind == N_LIST) return value->parts ? value->parts->size : 0;
+    return value->kind == N_NAME || value->kind == N_ATTR || value->kind == N_INDEX;
+}
 /* List or tuple n's parts when each item is a name, attribute, item, or
  * such a list or tuple, maybe starred, from their own: whether they
- * could not be made. */
+ * could not be made. A starred item's are its value's, made as it
+ * completed, their events from its own. */
 static int list_parts(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
+    if (n->kind == N_STAR) {
+        size_t size = n->parts ? 0 : parts_size(n->a);
+        if (!size) return 0;
+        if (!(n->parts = allocate(c, size * sizeof(Part)))) return -1;
+        return value_parts(p, n->parts, n->a, n->line, 1, n->a->events_at) < 0 ? -1 : 0;
+    }
     if ((n->kind != N_TUPLE && n->kind != N_LIST) || n->parts) return 0;
     size_t size = 1, count = 0, star = UINT32_MAX;
     for (Node *item = n->args; item; item = item->next, count++) {
-        Node *value = item->kind == N_STAR ? item->a : item;
+        size_t own = item->kind == N_STAR ? item->parts ? item->parts->size : 0 : parts_size(item);
         if (item->kind == N_STAR) star = count;
-        if (value->kind == N_TUPLE || value->kind == N_LIST) {
-            if (!value->parts) return 0;
-            size += value->parts->size;
-        } else if (value->kind == N_NAME || value->kind == N_ATTR || value->kind == N_INDEX) size++;
-        else return 0;
+        if (!own) return 0;
+        size += own;
         if (size >= UINT32_MAX / 2) return 0;
     }
     Part *parts = allocate(c, size * sizeof(Part));
@@ -19768,25 +19802,15 @@ static int list_parts(Parser *p, Node *n) {
     parts[0] = (Part){(unsigned char)n->kind, 0, 0, 0, 1, 0, 0, (uint32_t)n->line, (uint32_t)n->line, (uint32_t)size, (uint32_t)count, (uint32_t)star, 0, 0, 0};
     Part *at = parts + 1;
     for (Node *item = n->args; item; item = item->next) {
-        Node *value = item->kind == N_STAR ? item->a : item;
-        Part own = part_of(value, item->line, item->kind == N_STAR);
-        uint32_t from = (value->flags & F_EVENTS) && value->events_at >= first ? (uint32_t)(value->events_at - first) : 0;
-        own.events_at = from; own.events_end = from + (value->events_end - value->events_at);
-        if (value->parts) {
-            memcpy(at, value->parts, value->parts->size * sizeof(Part));
-            own.size = at->size; own.count = at->count; own.star = at->star; own.recorded = at->recorded;
-            for (Part *inner = at + 1; inner < at + at->size; inner++) inner->events_at += from, inner->events_end += from;
-        } else if (own.self && own.recorded) {
-            const char *name = source_name(value);
-            size_t len = strlen(name) + 1;
-            if (p->events.texts_len + len + 1 > UINT32_MAX) { mem_free(parts); spy_error(c, "MemoryError", "too many names"); return -1; }
-            if (grow(c, (void **)&p->events.texts, &p->events.texts_cap, p->events.texts_len + len + 1, 1)) { mem_free(parts); return -1; }
-            memcpy(p->events.texts + p->events.texts_len, name, len); p->events.texts[p->events.texts_len + len] = 0;
-            own.text = (uint32_t)p->events.texts_len; p->events.texts_len += len + 1;
-        }
-        own.recorded &= value->kind == N_NAME || value->kind == N_ATTR || value->kind == N_INDEX || value->parts;
-        parts[0].recorded &= own.recorded;
-        *at = own; at += at->size;
+        int recorded;
+        if (item->kind == N_STAR) {
+            uint32_t from = (item->flags & F_EVENTS) && item->events_at >= first ? (uint32_t)(item->events_at - first) : 0;
+            memcpy(at, item->parts, item->parts->size * sizeof(Part));
+            for (Part *x = at; x < at + item->parts->size; x++) x->events_at += from, x->events_end += from;
+            recorded = at->recorded;
+        } else if ((recorded = value_parts(p, at, item, item->line, 0, first)) < 0) { mem_free(parts); return -1; }
+        parts[0].recorded &= recorded;
+        at += at->size;
     }
     n->parts = parts;
     return 0;
@@ -19874,12 +19898,13 @@ static size_t part_steps(SPYContext *c, Program *p, const Part *t, size_t at, in
  * them, the value popped at popped when set. */
 static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int mode) {
     Part own = part_of(t, t->line, 0);
-    if (t->kind == N_TUPLE || t->kind == N_LIST) {
+    int list = t->kind == N_TUPLE || t->kind == N_LIST;
+    if (list) {
         if (!t->parts) return 0;
         own.size = t->parts->size; own.count = t->parts->count; own.star = t->parts->star;
         *t->parts = own;
     }
-    return part_steps(c, p, t->parts ? t->parts : &own, at, popped != NULL, popped ? popped->line : 0, stores_at, mode);
+    return part_steps(c, p, list ? t->parts : &own, at, popped != NULL, popped ? popped->line : 0, stores_at, mode);
 }
 /* Assert statement n, its test emitted as it was parsed from the
  * statement's start: its branch and the jump over its message after it,
