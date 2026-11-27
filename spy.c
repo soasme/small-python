@@ -137,7 +137,7 @@ typedef struct { char type[64]; char *message; size_t line; const char *start, *
  * symbols so far and the move of those since the mark before it after
  * those since (scope_later), an annotated assignment n's target and its
  * symbol's annotation, or a type parameter n. */
-enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE, EV_NAMED, EV_ITERABLE, EV_CLAUSE, EV_GENERIC, EV_TARGET };
+enum { EV_BIND, EV_ADD, EV_MARK, EV_LATER, EV_ANNOTATED, EV_ANNOTATION, EV_TYPEPARAM, EV_NODES, EV_ERROR, EV_USE, EV_ENTER, EV_LEAVE, EV_STATIC, EV_CHECK, EV_WITHIN, EV_UNWITHIN, EV_ANNOTATE, EV_NAMED, EV_ITERABLE, EV_CLAUSE, EV_TARGET };
 /* What an annotation function entered (EV_ENTER) is within, by its flags;
  * 2 enters a string annotation's scope. */
 static const char *const enter_within[] = {NULL, "an annotation", NULL, "a TypeVar bound", "a TypeVar constraint",
@@ -152,7 +152,7 @@ static const char *const event_errors[] = {
  * holds no node: its text and spelling, kept in the parse's log from
  * text, its line, and the site its error is at; a named expression's
  * (EV_NAMED) is its target's, its own site at place. */
-typedef struct { int kind; unsigned flags; Scope *scope; Node *n, *at; uint32_t text; size_t line; Site site, place; } Event;
+typedef struct { int kind; unsigned flags; Scope *scope; Node *n, *at; uint32_t text; size_t line; Site site, place; Scope *made; } Event;
 /* A take's events, or the parse's: what each construct the parser
  * analyses records (F_EVENTS), its nodes counted (EV_NODES), which its
  * statement's take runs (events_take). */
@@ -8812,7 +8812,7 @@ static Node *statement_body(Parser *p, int emits) {
                 return syntax(p, "lazy from __future__ import is not allowed");
             }
             if (!n->op && !strcmp(source_name(n->a), "__future__") && at(p, '*')) defer(p, "future feature * is not defined");
-            if (at(p, '*')) { size_t star = p->pos++; n->args = node(p, N_STAR); return n->args && !import_recorded(p, n) ? (span(p, n->args, star), n) : NULL; }
+            if (at(p, '*')) { size_t star = p->pos++; n->args = span(p, node(p, N_STAR), star); return n->args && !import_recorded(p, n) ? n : NULL; }
         }
         int future = from && !n->op && !strcmp(source_name(n->a), "__future__");
         if (at(p, T_NL)) { syntax(p, "Expected one or more names after 'import'"); p->error_end = p->error_start; return NULL; }
@@ -8874,7 +8874,10 @@ static int import_recorded(Parser *p, Node *n) {
         error = where >= 0 ? where + (n->kind == N_FROM) * 3 : n->args->kind == N_STAR ? 6 : -1;
     }
     if (error < 0 && n->args->kind == N_STAR && scope->kind != S_MODULE) error = 7;
-    if (error >= 0 && event_into(p->ctx, &p->events, EV_ERROR, (unsigned)error, scope, n, error == 7 ? n->args : n)) return -1;
+    if (error >= 0) {
+        if (event_into(p->ctx, &p->events, EV_ERROR, (unsigned)error, scope, NULL, NULL)) return -1;
+        p->events.items[p->events.len - 1].site = site_of(error == 7 ? n->args : n);
+    }
     for (Node *item = n->args; error < 0 && item && item->kind != N_STAR; item = item->next) {
         Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
         if (name_event(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, binding, item)) return -1;
@@ -9271,7 +9274,6 @@ static int scope_static(SPYContext *, Scope *, const char *);
 static int scope_check(SPYContext *, Scope *, Event *);
 static Scope *string_scope(SPYContext *, Node *);
 static int generic_table(SPYContext *, Node *);
-static int check_debug_target(SPYContext *, Node *, int);
 static int scope_named(SPYContext *, Scope *, Event *, int);
 static Scope *annotation_scope(SPYContext *, Scope *, size_t);
 static int scope_annotation_error(SPYContext *, Scope *, int, Site *);
@@ -9397,6 +9399,21 @@ static int events_before(Parser *p, Node *t, Node *n) {
     n->events_at += (uint32_t)count; n->events_end += (uint32_t)count;
     return 0;
 }
+static Scope *body_scope(SPYContext *, Node *);
+static Scope *string_scope(SPYContext *, Node *);
+static void scope_define(Node *);
+/* Record entering n's scope, made and defined now; replay places it in
+ * the scope around it, the event's scope if it has one, except a string
+ * annotation's (flags 2), which is within no scope. Flags name what an
+ * annotation function's scope is within (enter_within). */
+static int enter_event(Parser *p, unsigned flags, Scope *scope, Node *n) {
+    Scope *made = flags != 2 ? body_scope(p->ctx, n) : n->scope ? n->scope : string_scope(p->ctx, n);
+    if (!made || event_into(p->ctx, &p->events, EV_ENTER, flags, scope, NULL, NULL)) return -1;
+    p->events.items[p->events.len - 1].made = made;
+    scope_define(n);
+    if (flags && flags != 2) made->within = enter_within[flags];
+    return 0;
+}
 /* The node holding n's recorded events: a string annotation's
  * expression's (annotation_string). */
 static Node *events_of(Node *n) { return n->kind == N_STRING && n->annotate ? n->annotate : n; }
@@ -9406,8 +9423,8 @@ static Node *events_of(Node *n) { return n->kind == N_STRING && n->annotate ? n-
 static int events_again(Parser *p, Node *t) {
     Events *e = &p->events;
     if (t != events_of(t))
-        return event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL) || event_into(p->ctx, e, EV_ENTER, 2, NULL, t, NULL) || events_again(p, t->annotate) ||
-               event_into(p->ctx, e, EV_LEAVE, 0, NULL, t, NULL) ? -1 : 0;
+        return event_into(p->ctx, e, EV_NODES, 1, NULL, NULL, NULL) || enter_event(p, 2, NULL, t) || events_again(p, t->annotate) ||
+               event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ? -1 : 0;
     size_t count = t->events_end - t->events_at;
     if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + count, sizeof(Event))) return -1;
     memcpy(e->items + e->len, e->items + t->events_at, count * sizeof(Event));
@@ -9504,6 +9521,7 @@ static int bound_within(Node *param) { return param->flags & F_CONSTRAINTS ? 4 :
 static Scope *scope_of(SPYContext *, Node *, Scope *);
 static Scope *generic_scope(SPYContext *, Node *, Scope *);
 static int generic_class_scope(SPYContext *, Scope *, Node *);
+static int generic_table(SPYContext *, Node *);
 /* Put in parts from *len the nodes whose events generic's type
  * parameters' bounds and defaults hold, or when record is set, record
  * their analysis (scope_generic) from parts' *len: its
@@ -9514,18 +9532,18 @@ static int generic_events(Parser *p, Node *generic, Node **parts, size_t *len, i
     Events *e = &p->events;
     if (record) {
         for (Node *param = generic->args; param; param = param->next)
-            if (event_into(p->ctx, e, EV_TYPEPARAM, 0, generic->scope, param, NULL)) return -1;
+            if (name_event(p->ctx, e, EV_TYPEPARAM, 0, generic->scope, param, param)) return -1;
     }
     for (Node *param = generic->args; param; param = param->next)
         for (int k = 0; k < 2; k++) {
             Node *fn = k ? param->c : param->b;
             if (!fn) continue;
             if (!record) { parts[(*len)++] = fn->b->args->a; continue; }
-            if (event_into(p->ctx, e, EV_ENTER, k ? 5 + (unsigned)param->op : (unsigned)bound_within(param), generic->scope, fn, NULL) ||
+            if (enter_event(p, k ? 5 + (unsigned)param->op : (unsigned)bound_within(param), generic->scope, fn) ||
                 name_event(p->ctx, e, EV_BIND, S_PARAM, NULL, fn->args, fn->args) || events_again(p, parts[(*len)++]) ||
                 event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL)) return -1;
         }
-    return record ? event_into(p->ctx, e, EV_GENERIC, 0, generic->scope, generic, NULL) : 0;
+    return record ? generic_table(p->ctx, generic) : 0;
 }
 /* Whether parts' len nodes' events tile the log's end from their first
  * event, at *at. */
@@ -9587,7 +9605,7 @@ static int definition_recorded(Parser *p, Node *n) {
         for (Node *param = n->args; param && !status; param = param->next)
             status = name_event(p->ctx, e, EV_BIND, S_PARAM, n->scope, param, param);
     if (fn && !status) {
-        status = event_into(p->ctx, e, EV_ENTER, 1, inner, fn, NULL) || name_event(p->ctx, e, EV_BIND, S_PARAM, NULL, fn->args, fn->args);
+        status = enter_event(p, 1, inner, fn) || name_event(p->ctx, e, EV_BIND, S_PARAM, NULL, fn->args, fn->args);
         for (; i < len && !status; i++) status = events_again(p, parts[i]);
         if (!status) status = event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
     }
@@ -9622,7 +9640,7 @@ static int alias_recorded(Parser *p, Node *n) {
     if (generic && !status)
         status = !(inner = generic_scope(p->ctx, generic, scope)) || event_into(p->ctx, e, EV_ENTER, 0, inner, NULL, NULL) ||
                  generic_events(p, generic, parts, &i, 1);
-    if (!status) status = event_into(p->ctx, e, EV_ENTER, 8, inner, value, NULL) || name_event(p->ctx, e, EV_BIND, S_PARAM, NULL, value->args, value->args) ||
+    if (!status) status = enter_event(p, 8, inner, value) || name_event(p->ctx, e, EV_BIND, S_PARAM, NULL, value->args, value->args) ||
                           events_again(p, parts[i]) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
     mem_free(parts);
     if (generic && !status) status = event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL);
@@ -9652,7 +9670,7 @@ static int lambda_recorded(Parser *p, Node *n) {
     if (total != e->len - at) return 0;
     size_t end = e->len;
     for (Node *param = n->args; param; param = param->next) if (param->a && events_again(p, param->a)) return -1;
-    if (event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
+    if (enter_event(p, 0, NULL, n)) return -1;
     for (Node *param = n->args; param; param = param->next)
         if (name_event(p->ctx, e, EV_BIND, S_PARAM, NULL, param, param)) return -1;
     if (events_again(p, body) || event_into(p->ctx, e, EV_LEAVE, 0, NULL, NULL, NULL) ||
@@ -9711,7 +9729,7 @@ static int comprehension_recorded(Parser *p, Node *n) {
     if (total != e->len - at) return 0;
     size_t end = e->len;
     if (event_into(p->ctx, e, EV_ITERABLE, 1, NULL, NULL, NULL) || (n->a->a && events_again(p, n->a->a)) ||
-        event_into(p->ctx, e, EV_ITERABLE, 0, NULL, NULL, NULL) || event_into(p->ctx, e, EV_ENTER, 0, NULL, n, NULL)) return -1;
+        event_into(p->ctx, e, EV_ITERABLE, 0, NULL, NULL, NULL) || enter_event(p, 0, NULL, n)) return -1;
     size_t index = 0;
     for (Node *clause = n->a; clause; clause = clause->b) {
         int loop = clause->kind == N_FOR;
@@ -9754,6 +9772,16 @@ static int pattern_recorded(Node *o) {
     }
 }
 /* Append pattern or expression o's analysis, in visiting order. */
+static SPYValue *mapping_duplicate(SPYContext *, Node *, size_t *);
+/* Record mapping pattern o's first repeated key, by its text and line,
+ * found now; analysis reports it in order (scope_check). */
+static int mapping_events(Parser *p, Node *o) {
+    size_t line = 0;
+    SPYValue *key = mapping_duplicate(p->ctx, o, &line);
+    int status = p->ctx->error_type[0] || (key && text_event(p->ctx, &p->events, EV_CHECK, N_PATTERN, NULL, key->as.string.data, line, NULL)) ? -1 : 0;
+    spy_release(key);
+    return status;
+}
 static int pattern_events(Parser *p, Scope *scope, Node *o) {
     Events *e = &p->events;
     if (!o) return 0;
@@ -9766,7 +9794,7 @@ static int pattern_events(Parser *p, Scope *scope, Node *o) {
     case PT_VALUE: case PT_LITERAL: return pattern_events(p, scope, o->a);
     case PT_AS: return pattern_events(p, scope, o->a) || name_event(p->ctx, e, EV_BIND, S_LOCAL, scope, o->b, o) ? -1 : 0;
     case PT_MAPPING:
-        if (event_into(p->ctx, e, EV_CHECK, N_PATTERN, NULL, o, NULL)) return -1;
+        if (mapping_events(p, o)) return -1;
         for (Node *entry = o->args; entry; entry = entry->next)
             if (pattern_events(p, scope, entry->a) || pattern_events(p, scope, entry->b)) return -1;
         if (o->c && o->c->kind == N_NAME) return name_event(p->ctx, e, EV_BIND, S_LOCAL, scope, o->c, o);
@@ -9800,6 +9828,14 @@ static int case_recorded(Parser *p, Node *n, size_t at) {
  * a name checked and bound as replayed; its annotation, where it is or in the
  * scope's __annotate__ scope; its value; the target's symbols moved
  * after the rest. */
+/* Annotated assignment n's name target's event of kind: its name, at
+ * the statement, its place the name's (or where __debug__ is). */
+static int annotated_event(Parser *p, Scope *scope, int kind, unsigned facts, Node *n) {
+    Events *e = &p->events;
+    if (name_event(p->ctx, e, kind, facts, scope, n->a, n)) return -1;
+    e->items[e->len - 1].place = facts & 4 ? place_site(n->a, PLACE_DEBUG) : site_of(n->a);
+    return 0;
+}
 static int annotated_recorded(Parser *p, Node *n) {
     Events *e = &p->events;
     Node *b = events_of(n->b), *v = n->c;
@@ -9811,13 +9847,15 @@ static int annotated_recorded(Parser *p, Node *n) {
     b = n->b;
     int here = !(n->flags & F_SIMPLE) || scope->kind == S_FUNCTION || (n->flags & F_FUTURE);
     int part = n->a->kind != N_NAME && target_recorded(n->a);
+    /* A name target's facts: simple, with a value, naming __debug__. */
+    unsigned facts = (n->flags & F_SIMPLE ? 1 : 0) | (n->c ? 2 : 0) | (debug_named(n->a) ? 4 : 0);
     if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) ||
-        (part ? target_events(p, scope, n->a, n->c ? 1 : -1) : event_into(p->ctx, e, EV_ANNOTATED, 0, scope, n, NULL)) ||
+        (part ? target_events(p, scope, n->a, n->c ? 1 : -1) : annotated_event(p, scope, EV_ANNOTATED, facts, n)) ||
         event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) ||
         event_into(p->ctx, e, here ? EV_WITHIN : EV_ANNOTATE, here ? 0 : (unsigned)n->line, scope, NULL, NULL) ||
         events_again(p, b) || event_into(p->ctx, e, here ? EV_UNWITHIN : EV_LEAVE, 0, scope, NULL, NULL) ||
         (v && events_again(p, v)) || event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) ||
-        event_into(p->ctx, e, EV_ANNOTATION, 0, scope, n, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
+        (!part && (facts & 1) && annotated_event(p, scope, EV_ANNOTATION, facts, n)) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
     size_t count = e->len - end;
     memmove(e->items + at, e->items + end, count * sizeof(Event));
     e->len = at + count;
@@ -9850,10 +9888,12 @@ static int bound_recorded(Parser *p, Node *n, Node *target, Node *rest, Node *va
 static void scope_later(Scope *, size_t, size_t);
 static int scope_bind(SPYContext *, Scope *, const char *, size_t, unsigned, Site *);
 static int scope_global(SPYContext *, Scope *, const char *, size_t);
-static int annotated_target(SPYContext *, Scope *, Node *);
-static int annotated_symbol(Scope *, Node *);
-static int type_parameter(SPYContext *, Scope *, Node *);
+static int annotated_target(SPYContext *, Scope *, const char *, Event *);
+static int annotated_symbol(Scope *, const char *);
+static int type_parameter(SPYContext *, Scope *, Events *, Event *);
+static const char *event_spelling(Events *, Event *);
 static void node_error(SPYContext *, Node *);
+static void site_error(SPYContext *, Site *);
 static int events_replay(SPYContext *c, Events *e) {
     size_t *marks = NULL, len = 0, cap = 0;
     int status = 0;
@@ -9866,10 +9906,10 @@ static int events_replay(SPYContext *c, Events *e) {
             if ((status = grow(c, (void **)&marks, &cap, len + 1, sizeof(*marks)))) break;
             marks[len++] = v->scope->len; break;
         case EV_LATER: scope_later(v->scope, marks[len - 2], marks[len - 1]); len -= 2; break;
-        case EV_ANNOTATED: status = annotated_target(c, v->scope, v->n); break;
-        case EV_ANNOTATION: status = annotated_symbol(v->scope, v->n); break;
-        case EV_ERROR: node_error(c, v->at); spy_error(c, "SyntaxError", event_errors[v->flags]); status = -1; break;
-        default: status = type_parameter(c, v->scope, v->n); break;
+        case EV_ANNOTATED: status = annotated_target(c, v->scope, event_text(e, v), v); break;
+        case EV_ANNOTATION: status = annotated_symbol(v->scope, event_text(e, v)); break;
+        case EV_ERROR: site_error(c, &v->site); spy_error(c, "SyntaxError", event_errors[v->flags]); status = -1; break;
+        default: status = type_parameter(c, v->scope, e, v); break;
         }
     }
     mem_free(marks);
@@ -10133,7 +10173,7 @@ static int scope_unhold(SPYContext *c, Scope *scope) {
 }
 static int event_into(SPYContext *c, Events *e, int kind, unsigned flags, Scope *scope, Node *n, Node *at) {
     if (grow(c, (void **)&e->items, &e->cap, e->len + 1, sizeof(*e->items))) return -1;
-    e->items[e->len++] = (Event){kind, flags, scope, n, at, 0, 0, {0}, {0}};
+    e->items[e->len++] = (Event){kind, flags, scope, n, at, 0, 0, {0}, {0}, NULL};
     return 0;
 }
 static int expression_kind(int);
@@ -10155,7 +10195,7 @@ static int spelled_event(SPYContext *c, Events *e, int kind, unsigned flags, Sco
     memcpy(log->texts + text, name, len);
     if (spelled) memcpy(log->texts + text + len, spelling, spelled);
     log->texts[text + len + spelled] = 0; log->texts_len += len + spelled + 1;
-    e->items[e->len++] = (Event){kind, flags, scope, NULL, NULL, (uint32_t)text, line, at ? site_of(at) : (Site){0}, {0}};
+    e->items[e->len++] = (Event){kind, flags, scope, NULL, NULL, (uint32_t)text, line, at ? site_of(at) : (Site){0}, {0}, NULL};
     return 0;
 }
 /* Record a name event of kind on name n, reported at at. */
@@ -10195,27 +10235,18 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
     for (uint32_t i = n->events_at; i < n->events_end && !status; i++) {
         Event *v = &from->items[i];
         Scope *in = v->scope ? v->scope : depth ? entered[depth - 1] : scope;
-        if (v->kind == EV_ENTER && !v->n) {
-            /* A scope the parser made. */
-            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered)))) entered[depth++] = in;
-        } else if (v->kind == EV_ENTER && v->flags != 2) {
-            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
-                status = scope_of(c, v->n, in) ? (entered[depth++] = v->n->scope, 0) : -1;
-            /* An annotation function's (scope_annotations). */
-            if (!status && v->flags) v->n->scope->within = enter_within[v->flags];
-        } else if (v->kind == EV_ENTER) {
-            /* A string annotation's (scope_string_annotation). */
-            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
-                status = string_scope(c, v->n) ? (entered[depth++] = v->n->scope, 0) : -1;
+        if (v->kind == EV_ENTER) {
+            /* A scope the parser made, or one recorded (enter_event). */
+            if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered)))) {
+                if (v->made && v->flags != 2) scope_adopt(in, v->made);
+                entered[depth++] = v->made ? v->made : in;
+            }
         } else if (v->kind == EV_ANNOTATE) {
             /* The __annotate__ scope of the scope taken in. */
             Scope *annotate = NULL;
             if (!(status = grow(c, (void **)&entered, &cap, depth + 1, sizeof(*entered))))
                 status = (annotate = annotation_scope(c, in, v->flags)) ? (entered[depth++] = annotate, 0) : -1;
-        } else if (v->kind == EV_LEAVE) {
-            depth--;
-            if (v->n) scope_define(v->n);
-        }
+        } else if (v->kind == EV_LEAVE) depth--;
         /* An annotation analysed where it is, its nodes not counted. */
         else if (v->kind == EV_WITHIN) { within = in->within; nodes = in->nodes; in->within = "an annotation"; }
         else if (v->kind == EV_UNWITHIN) { in->within = within; in->nodes = nodes; }
@@ -10225,7 +10256,6 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
         /* A comprehension's iterable, where no named expression may be; its clause. */
         else if (v->kind == EV_ITERABLE) in->iterables += v->flags ? 1 : -1;
         else if (v->kind == EV_CLAUSE) in->clause = v->flags;
-        else if (v->kind == EV_GENERIC) status = generic_table(c, v->n);
         else if (v->kind == EV_TARGET) status = debug_error(c, &v->site, (int)v->flags);
         else if (v->kind == EV_NODES) in->nodes += v->flags;
         /* A name used, its node counted. */
@@ -10277,12 +10307,6 @@ static int scope_bind(SPYContext *c, Scope *scope, const char *name, size_t line
     }
     return 0;
 }
-/* Bind name n in scope with flags, or record it while statements are taken. */
-static int scope_record(SPYContext *c, Scope *scope, Node *n, unsigned flags) {
-    if (c->events) return name_event(c, c->events, EV_BIND, flags, scope, n, n);
-    Site at = site_of(n);
-    return scope_bind(c, scope, n->name.text, n->line, flags, &at);
-}
 /* Name n is global in scope, with no check. */
 static int scope_global(SPYContext *c, Scope *scope, const char *name, size_t line) {
     Symbol *global = scope_add(c, scope, name, line);
@@ -10293,12 +10317,6 @@ static int scope_global(SPYContext *c, Scope *scope, const char *name, size_t li
 static int debug_error(SPYContext *c, Site *at, int deleting) {
     site_error(c, at); errorf(c, "SyntaxError", "cannot %s __debug__", deleting ? "delete" : "assign to");
     return -1;
-}
-/* Whether target n names __debug__ where it may not: its error. */
-static int check_debug_target(SPYContext *c, Node *n, int deleting) {
-    if (!n || !debug_named(n)) return 0;
-    Site at = place_site(n, PLACE_DEBUG);
-    return debug_error(c, &at, deleting);
 }
 /* Whether n is an attribute of self. */
 static int self_attribute(Node *n) { return n->self_attribute; }
@@ -10323,7 +10341,7 @@ static Scope *scope_named_owner(SPYContext *, Scope *, Event *);
 static int named_take(SPYContext *c, Scope *scope, Event *v, int global) {
     Events *e = c->events;
     if (grow(c, (void **)&e->items, &e->cap, e->len + 1, sizeof(Event))) return -1;
-    e->items[e->len++] = (Event){global ? EV_ADD : EV_BIND, global ? S_GLOBAL : S_LOCAL, scope, NULL, NULL, v->text, v->line, global ? (Site){0} : v->site, {0}};
+    e->items[e->len++] = (Event){global ? EV_ADD : EV_BIND, global ? S_GLOBAL : S_LOCAL, scope, NULL, NULL, v->text, v->line, global ? (Site){0} : v->site, {0}, NULL};
     return 0;
 }
 static int scope_named(SPYContext *c, Scope *scope, Event *v, int after) {
@@ -10344,10 +10362,13 @@ static int scope_named(SPYContext *c, Scope *scope, Event *v, int after) {
 }
 /* Check await or yield n in scope, where it may not be or makes its
  * function asynchronous or a generator. */
-static int scope_mapping_keys(SPYContext *, Node *);
 static int scope_check(SPYContext *c, Scope *scope, Event *v) {
     int kind = (int)v->flags;
-    if (kind == N_PATTERN) return scope_mapping_keys(c, v->n);
+    if (kind == N_PATTERN) {
+        c->line = v->line;
+        errorf(c, "SyntaxError", "mapping pattern checks duplicate key (%s)", event_text(c->events, v));
+        return -1;
+    }
     /* An asynchronous comprehension clause. */
     if (kind == N_FOR) return scope_await(c, scope, &v->site);
     if (scope_annotation_error(c, scope, kind, &v->site)) return -1;
@@ -10450,16 +10471,15 @@ static int generic_class_scope(SPYContext *c, Scope *generic, Node *n) {
     memcpy(generic->name, "<generic parameters of ", 23); memcpy(generic->name + 23, name, len); generic->name[23 + len] = '>';
     return 0;
 }
-/* Type parameter param, bound in scope; another of its name is an error. */
-static int type_parameter(SPYContext *c, Scope *scope, Node *param) {
-    if (scope_symbol(scope, param->name.text)) {
-        c->line = param->line;
-        errorf(c, "SyntaxError", "duplicate type parameter '%s'", source_name(param));
+/* Type parameter v, bound in scope; another of its name is an error. */
+static int type_parameter(SPYContext *c, Scope *scope, Events *e, Event *v) {
+    if (scope_symbol(scope, event_text(e, v))) {
+        c->line = v->line;
+        errorf(c, "SyntaxError", "duplicate type parameter '%s'", event_spelling(e, v));
         return -1;
     }
-    return scope_record(c, scope, param, S_LOCAL);
-}
-/* Generic's hidden scope (PEP 695), in parent. */
+    return scope_bind(c, scope, event_text(e, v), v->line, S_LOCAL, &v->site);
+}/* Generic's hidden scope (PEP 695), in parent. */
 static Scope *generic_scope(SPYContext *c, Node *generic, Scope *parent) {
     if (!scope_of(c, generic, parent)) return NULL;
     generic->scope->within = "the definition of a generic";
@@ -10468,6 +10488,7 @@ static Scope *generic_scope(SPYContext *c, Node *generic, Scope *parent) {
 /* Generic's table of type parameters, once their bounds' and defaults'
  * scopes are made. */
 static int generic_table(SPYContext *c, Node *generic) {
+    if (generic->scope->type_params) return 0;
     size_t count = 0;
     for (Node *param = generic->args; param; param = param->next) count++;
     TypeParameter *made = generic->scope->type_params = allocate(c, (count + 1) * sizeof(*made));
@@ -10505,54 +10526,47 @@ static SPYValue *pattern_constant(SPYContext *c, Node *n) {
     }
 }
 /* Literal mapping keys must be distinct; CPython rejects duplicates at compile time. */
-static int scope_mapping_keys(SPYContext *c, Node *n) {
-    SPYValue *seen = value_new(c, SPY_LIST);
-    if (!seen) return -1;
-    for (Node *entry = n->args; entry && !c->error_type[0]; entry = entry->next) {
+static SPYValue *mapping_duplicate(SPYContext *c, Node *n, size_t *line) {
+    SPYValue *seen = value_new(c, SPY_LIST), *text = NULL;
+    if (!seen) return NULL;
+    for (Node *entry = n->args; entry && !text && !c->error_type[0]; entry = entry->next) {
         SPYValue *key = pattern_constant(c, entry->a);
         if (!key) continue;
-        for (size_t i = 0; i < seen->as.seq.len && !c->error_type[0]; i++)
-            if (equal(seen->as.seq.items[i], key)) {
-                SPYValue *text = spy_repr(c, key);
-                c->line = entry->a->line;
-                if (text) errorf(c, "SyntaxError", "mapping pattern checks duplicate key (%s)", text->as.string.data);
-                spy_release(text);
-            }
-        if (!c->error_type[0]) sequence_append(c, seen, key);
+        for (size_t i = 0; i < seen->as.seq.len && !text && !c->error_type[0]; i++)
+            if (equal(seen->as.seq.items[i], key)) { text = spy_repr(c, key); *line = entry->a->line; }
+        if (!text && !c->error_type[0]) sequence_append(c, seen, key);
         spy_release(key);
     }
     spy_release(seen);
-    return c->error_type[0] ? -1 : 0;
-}
-/* Annotated assignment n's name target: an annotated global or nonlocal is
+    return text;
+}/* Annotated assignment n's name target: an annotated global or nonlocal is
  * an error; a parenthesized name without a value is neither bound nor
  * used, and a function's local only annotated is no code's local until
  * it is used (held). */
-static int annotated_target(SPYContext *c, Scope *scope, Node *n) {
-    Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->name.text) : NULL;
+static int annotated_target(SPYContext *c, Scope *scope, const char *name, Event *v) {
+    Symbol *symbol = v->flags & 1 ? scope_symbol(scope, name) : NULL;
     if (symbol && scope->kind != S_MODULE && (symbol->flags & (S_GLOBAL | S_NONLOCAL))) {
-        node_error(c, n);
-        errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->name.text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
+        site_error(c, &v->site);
+        errorf(c, "SyntaxError", "annotated name '%s' can't be %s", name, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
         return -1;
     }
-    int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
-    int held = !n->c && n->a->kind == N_NAME && !bare && scope->kind == S_FUNCTION && !symbol;
+    int bare = !(v->flags & 2) && !(v->flags & 1);
+    int held = !(v->flags & 2) && !bare && scope->kind == S_FUNCTION && !symbol;
     size_t i = 0;
-    while (held && i < scope->held_len && strcmp(scope->held[i], n->a->name.text)) i++;
+    while (held && i < scope->held_len && strcmp(scope->held[i], name)) i++;
+    if (!bare && (!held || i == scope->held_len) && (v->flags & 4)) return debug_error(c, &v->place, 0);
     if (held && i == scope->held_len) {
-        const char *name = scope_text(c, scope, n->a->name.text);
-        if (check_debug_target(c, n->a, 0) || !name || grow(c, (void **)&scope->held, &scope->held_cap, scope->held_len + 1, sizeof(*scope->held))) return -1;
-        scope->held[scope->held_len++] = name;
-    } else if (!held && !bare && (check_debug_target(c, n->a, 0) || scope_record(c, scope, n->a, S_LOCAL))) return -1;
+        const char *copy = scope_text(c, scope, name);
+        if (!copy || grow(c, (void **)&scope->held, &scope->held_cap, scope->held_len + 1, sizeof(*scope->held))) return -1;
+        scope->held[scope->held_len++] = copy;
+    } else if (!held && !bare && scope_bind(c, scope, name, v->line, S_LOCAL, &v->place)) return -1;
     return 0;
-}
-/* Annotated assignment n's simple name target is annotated. */
-static int annotated_symbol(Scope *scope, Node *n) {
-    Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->name.text) : NULL;
+}/* Annotated assignment n's simple name target is annotated. */
+static int annotated_symbol(Scope *scope, const char *name) {
+    Symbol *symbol = scope_symbol(scope, name);
     if (symbol) symbol->flags |= S_ANNOT;
     return 0;
-}
-static void scope_reverse(Symbol *s, size_t i, size_t j) { for (; i + 1 < j; i++, j--) { Symbol t = s[i]; s[i] = s[j - 1]; s[j - 1] = t; } }
+}static void scope_reverse(Symbol *s, size_t i, size_t j) { for (; i + 1 < j; i++, j--) { Symbol t = s[i]; s[i] = s[j - 1]; s[j - 1] = t; } }
 /* Move the symbols scope added from from to mid after those added since:
  * a target checked before the value it stores is numbered after it, as
  * the value is evaluated first (co_varnames). */
