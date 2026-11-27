@@ -861,6 +861,8 @@ Unreleased (0.10.0):
 - a starred-target error is reported after scope errors and invalid targets, and after the value or iterable's own errors
 - a class body's generator expression passed as a call's only argument no longer crashes
 - an augmented assignment to an attribute of self, and a class body's own list, set or dict comprehension, no longer add to `__static_attributes__`
+- a starred value is reported after scope errors, in order with the compiler's other errors; `x: int = *a` and `for x in *a` are errors
+- an unparenthesized annotated tuple target is reported at its first item
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 

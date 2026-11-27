@@ -12,18 +12,20 @@
 (*     [a function whose global declaration follows an assignment]         *)
 (*                                                                         *)
 (* whose target is a name, a starred name alone, two starred names in a    *)
-(* tuple, or a starred call. The outcome names the error reported, or      *)
-(* "ok".                                                                   *)
+(* tuple, or a starred call; or a name assigned a starred name alone       *)
+(* (13.15), the compiler's error at the value. The outcome names the error *)
+(* reported, or "ok".                                                      *)
 (***************************************************************************)
 EXTENDS Naturals
 
 Programs == [target : {"name", "alone", "two", "call"}, other : {"none", "scope", "before", "after", "value"}]
+            \cup [target : {"valuestar"}, other : {"none", "scope", "before", "after"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
 \* The target's own error, the compiler's, or none.
-Starred(p) == CASE p.target = "alone" -> "alone" [] p.target = "two" -> "two" [] OTHER -> "none"
+Starred(p) == CASE p.target = "alone" -> "alone" [] p.target = "two" -> "two" [] p.target = "valuestar" -> "valuestar" [] OTHER -> "none"
 
 Reported(p) == CASE p.target = "call" -> "call"
                  [] p.other = "scope" -> "scope"

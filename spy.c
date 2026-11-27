@@ -6237,7 +6237,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         /* annotated_rhs, inside the added parentheses. */
         inner.pos = 1;
         result = keyword(&inner, "yield") ? yield_expression(&inner) : expression_list(&inner, 0);
-        if (result && result->kind == N_STAR) result = syntax_at(&inner, result, "can't use starred expression here");
+        if (result && result->kind == N_STAR) defer_node(&inner, result, "can't use starred expression here");
         if (result && !take(&inner, ')')) result = syntax(&inner, "invalid syntax");
         take(&inner, T_NL);
         if (!result) invalid_expression_error(&inner);
@@ -6418,7 +6418,7 @@ static Node *yield_expression(Parser *p) {
         if (p->async_function) return syntax_at(p, span(p, n, start), "'yield from' inside async function");
     } else if (!at(p, T_NL) && !at(p, ';') && !at(p, ')') && !at(p, T_END) && !at(p, '=')) {
         if (!(n->a = expression_list(p, 0))) return NULL;
-        if (n->a->kind == N_STAR) return syntax_at(p, n->a, "can't use starred expression here");
+        if (n->a->kind == N_STAR) defer_node(p, n->a, "can't use starred expression here");
     }
     return finished(p, span(p, n, start));
 }
@@ -8809,6 +8809,7 @@ static Node *statement_body(Parser *p, int emits) {
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
         if (emits) header_kept(p, n->a, from);
         if (!n->a) return NULL;
+        if (is_for && n->a->kind == N_STAR) defer_node(p, n->a, "can't use starred expression here");
         /* The compiler visits the iterable first. */
         if (is_for) target(p, n->args, TARGETS_FOR);
         if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
@@ -9121,7 +9122,10 @@ static Node *raise_statement(Parser *p, Node *n) {
 }
 /* The value of return statement n. */
 static Node *return_statement(Parser *p, Node *n) {
-    if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
+    if (!at(p, T_NL) && !at(p, ';')) {
+        if (!(n->a = expression_list(p, 0))) return NULL;
+        if (n->a->kind == N_STAR) defer_node(p, n->a, "can't use starred expression here");
+    }
     if (keyword(p, "for")) return syntax(p, "invalid syntax");
     if (n->a && !p->returned.node && !p->returned.line) p->returned.node = n;
     return n;
@@ -9147,8 +9151,11 @@ static Node *expression_statement(Parser *p, Node *n) {
     }
     if (op == ':') {
         Node *target = n->a;
-        if (target->kind == N_TUPLE) return syntax_at(p, target, "only single target (not tuple) can be annotated");
+        /* An unparenthesized tuple's error is at its first item (invalid_ann_assign_target). */
+        if (target->kind == N_TUPLE) return syntax_at(p, single_group(p, start, p->pos) ? target : target->args, "only single target (not tuple) can be annotated");
         if (target->kind == N_LIST) return syntax_at(p, target, "only single target (not list) can be annotated");
+        /* A starred target ends the expression statement it began. */
+        if (target->kind == N_STAR) return syntax(p, "invalid syntax");
         if (target->kind != N_NAME && target->kind != N_ATTR && target->kind != N_INDEX) return syntax_at(p, target, "illegal target for annotation");
         p->pos++;
         n->kind = N_ANNASSIGN;
@@ -9169,6 +9176,7 @@ static Node *expression_statement(Parser *p, Node *n) {
         if (take(p, '=')) {
             n->c = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->c) return NULL;
+            if (n->c->kind == N_STAR) defer_node(p, n->c, "can't use starred expression here");
         }
         return annotated(p, n) ? NULL : n;
     }
@@ -9192,14 +9200,15 @@ static Node *expression_statement(Parser *p, Node *n) {
             n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->b) return NULL;
         }
-        if (n->b->kind == N_STAR) return syntax_at(p, n->b, "can't use starred expression here");
+        if (n->b->kind == N_STAR) defer_node(p, n->b, "can't use starred expression here");
         /* The compiler visits the value, then the targets in order. */
         if (op == '=') {
             target(p, n->a, TARGETS_STAR);
             for (Node *t = n->args; t; t = t->next) target(p, t, TARGETS_STAR);
         }
     }
-    if (n->kind != N_ASSIGN && n->a->kind == N_STAR) return syntax_at(p, n->a, "can't use starred expression here");
+    /* A starred value is the compiler's error, found in order. */
+    if (n->kind != N_ASSIGN && n->a->kind == N_STAR) defer_node(p, n->a, "can't use starred expression here");
     if (n->kind == N_EXPR && n->a->kind == N_NAMED && !n->a->op) return syntax(p, "invalid syntax");
     return n;
 }
