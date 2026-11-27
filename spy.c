@@ -4771,6 +4771,7 @@ typedef struct Parser {
     size_t expr_start, expr_end;
     size_t far; /* The furthest token examined. */
     size_t error_pos; /* The token a syntax() error points at. */
+    int not_after; /* Whether the operand next parsed follows an arithmetic operator. */
     const char *unclosed; /* The innermost bracket still open at the end. */
     size_t unclosed_line;
     int tokenizing; /* The source decoded, the lexer is reading tokens. */
@@ -6665,13 +6666,16 @@ static void star_expression_error(Parser *p, size_t star) {
  * "Invalid star expression" for an operand that fails at its first token. */
 static Node *group_star_error(Parser *p, size_t star, int failed) {
     if (failed && !error_is(p->ctx, "SyntaxError")) return NULL;
+    size_t reached = failed ? star + 1 : p->pos;
     spy_clear_error(p->ctx);
     Program *emitting = p->emitting;
     p->emitting = NULL; p->pos = star + 1;
-    if (plain_expression(p, 0) && at(p, ')')) {
-        p->emitting = emitting;
-        return syntax_span(p, star, p->pos, "cannot use starred expression here");
-    }
+    Node *operand = plain_expression(p, 0);
+    p->emitting = emitting;
+    if (operand && at(p, ')')) return syntax_span(p, star, p->pos, "cannot use starred expression here");
+    /* A generator expression's starred element reads the whole expression. */
+    if (operand && p->pos > reached) return syntax(p, "invalid syntax");
+    p->emitting = NULL;
     spy_clear_error(p->ctx); p->pos = star + 1;
     /* invalid_starred_expression: an operand that fails at its first token. */
     if (!expression(p, 4)) { if (p->error_pos == star + 1) star_expression_error(p, star); }
@@ -6830,6 +6834,8 @@ static int call_arguments(Parser *p, Node *n) {
 }
 static Node *expression_inner(Parser *p, int min, int named) {
     Node *left;
+    int not_after = p->not_after;
+    p->not_after = 0;
     int target = 0; /* Whether left is a named expression's target. */
     /* Operations begin where their first operand does, parentheses included. */
     size_t first = p->pos;
@@ -6857,7 +6863,10 @@ static Node *expression_inner(Parser *p, int min, int named) {
         if (!left->b->a || parse_children(p, left->b) || !(left = finished(p, left))) return NULL;
         goto assignment_expression;
     } else if (at(p, '+') || at(p, '-') || at(p, '~') || keyword(p, "not")) {
-        if (keyword(p, "not") && min > 3) return not_operand_error(p);
+        /* invalid_arithmetic and invalid_factor: 'not' after an arithmetic
+         * operator, or a unary one that begins a term; else no operand. */
+        if (keyword(p, "not") && min > 3) return not_after ? not_operand_error(p) : syntax(p, "invalid syntax");
+        int term = min <= 9 && !keyword(p, "not") && p->pos + 1 < p->len && word_at(p, p->pos + 1, "not");
         /* A run of prefix operators of one precedence nests without recursion. */
         int negation = keyword(p, "not");
         Node *outer = NULL, *inner = NULL;
@@ -6871,6 +6880,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
             if (inner) inner->a = n; else outer = n;
             inner = n;
         } while (negation ? keyword(p, "not") : at(p, '+') || at(p, '-') || at(p, '~'));
+        p->not_after = term && inner == outer;
         inner->a = expression(p, negation ? 3 : 10);
         if (!inner->a) return NULL;
         for (Node *n = outer; n != inner->a; n = n->a) extend(p, n, n);
@@ -6968,6 +6978,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         } else {
             n->op = op; p->pos += (size_t)width;
             size_t branch = op == O_AND || op == O_OR ? short_begin(p, n) : SIZE_MAX;
+            p->not_after = op == '+' || op == '-' || op == '*' || op == '/' || op == '%' || op == T_FLOORDIV || op == '@';
             n->b = expression(p, op == T_POW ? 10 : prec + 1);
             if (!n->b) return NULL;
             if (branch != SIZE_MAX && !short_end(p, n, branch)) return NULL;

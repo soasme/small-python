@@ -193,7 +193,7 @@ Contents | - navigation
 13 Expressions > 13.9 Binary bitwise operations | IntArith
 13 Expressions > 13.10 Comparisons | Comparisons
 13 Expressions > 13.10 Comparisons > 13.10.1 Runtime Semantics: Evaluation | Comparisons, Evaluation
-13 Expressions > 13.11 Boolean operations | Truth, Evaluation
+13 Expressions > 13.11 Boolean operations | Truth, Evaluation, StarredOperands
 13 Expressions > 13.12 Assignment expressions | Comprehensions, SimpleStatements
 13 Expressions > 13.13 Conditional expressions | Conditionals
 13 Expressions > 13.14 Lambdas | FunctionDefs

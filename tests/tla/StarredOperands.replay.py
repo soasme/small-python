@@ -1,6 +1,6 @@
 # Replays StarredOperands.tla: each case compiles a del statement, a
-# parenthesized starred item or a comprehension, and gives its SyntaxError's
-# message, or "ok".
+# parenthesized starred item, a comprehension or a starred not, and gives
+# its SyntaxError's message, or "ok".
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -12,7 +12,9 @@ def source(p):
         return "del " + {"name": "x", "call": "f()"}[p["before"]] + ", *" + OPERANDS[p["operand"]]
     if p["part"] == "group":
         return "(*" + OPERANDS[p["operand"]] + ")"
-    return ("(%s)" if p["display"] == "generator" else "[%s]") % "*a or b for x in y"
+    if p["part"] == "element":
+        return ("(%s)" if p["display"] == "generator" else "[%s]") % "*a or b for x in y"
+    return {"list": "[*not a]", "call": "f(*not a)", "subscript": "x[*not a]", "comparison": "a < not b", "sum": "a + not b"}[p["place"]]
 
 
 def outcome(p):
