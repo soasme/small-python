@@ -8993,6 +8993,8 @@ static Node *statement_body(Parser *p, int emits) {
         int kept = emits && def_header(p, n, from);
         if (take(p, T_ARROW) && !(n->c = annotation_expression(p, expression, 0))) return NULL;
         if (function_annotations(p, n) || parse_children(p, n) || analyse_statements(p, n)) return NULL;
+        /* Its header kept, its making and store follow it: its body is a program of its own. */
+        if (kept) { compile_statement(p->ctx, p->body.program, n); n->flags |= F_EMITTED; }
         int loops = p->loops, async_function = p->async_function, star = p->star;
         Node *definition = p->definition;
         Site returned = p->returned;
@@ -9016,8 +9018,6 @@ static Node *statement_body(Parser *p, int emits) {
         if (asynchronous && (n->flags & F_YIELDS)) n->op = 2;
         scope_define(n);
         if (scope_unhold(p->ctx, n->scope)) return NULL;
-        /* Its header kept, its making and store follow it. */
-        if (kept) { compile_statement(p->ctx, p->body.program, n); n->flags |= F_EMITTED; }
         return p->ctx->error_type[0] ? NULL : n;
     }
     if (keyword(p, "global") || keyword(p, "nonlocal")) {
