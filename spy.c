@@ -19081,9 +19081,10 @@ static int comprehension_ahead(Parser *p) {
     /* The tokens end with T_END. */
     for (size_t i = p->pos;; i++) {
         int kind = p->tokens[i].kind;
+        if (kind == T_END) return 0;
         if (kind == '(' || kind == '[' || kind == '{') depth++;
         else if ((kind == ')' || kind == ']' || kind == '}') && !depth--) return 0;
-        else if (!depth && (word_at(p, i, "for") || kind == T_NL || kind == T_END)) return kind == T_NAME;
+        else if (!depth && (word_at(p, i, "for") || kind == T_NL)) return kind == T_NAME;
     }
 }
 /* At display n's first item, a comprehension's for ahead, in a program that loads names unlike a comprehension's: its

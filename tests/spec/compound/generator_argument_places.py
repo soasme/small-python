@@ -37,3 +37,7 @@ class E:
     except NameError as e: v = str(e)
     w = list(b for b in k)
 assert_eq((E.v, E.w), ("name 'x' is not defined", [7]))
+
+# A first argument that never closes ends the search for its for.
+for source in ["f(x(", "f(x[", "f(x, (y", "f(x for x in (y"]:
+    assert_eq(assert_syntax_error(source).msg[-16:], "was never closed", source)
