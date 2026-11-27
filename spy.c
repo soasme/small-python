@@ -5680,7 +5680,7 @@ static void match_end(SPYContext *, Program *, Node *, uint32_t);
 static void try_begin(SPYContext *, Program *, Node *, Try *);
 static void try_handlers(SPYContext *, Program *, Node *, Try *);
 static size_t except_begin(SPYContext *, Program *, Node *, Try *, size_t *);
-static void except_end(SPYContext *, Program *, Node *, Try *, size_t, size_t);
+static void except_end(SPYContext *, Program *, Node *, Node *, Try *, size_t, size_t);
 static void try_else(SPYContext *, Program *, Node *, Try *);
 static void try_finally(SPYContext *, Program *, Try *);
 static void try_end(SPYContext *, Program *, Try *);
@@ -8819,14 +8819,14 @@ static Node *statement_body(Parser *p, int emits) {
         if (!n || parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits) try_begin(p->ctx, program, n, &t);
         p->body.tries++;
-        if (!(n->a = suite_of(p, "'try' statement", line, emits))) return NULL;
+        /* Its suites and handlers, compiled as they are parsed, are not kept. */
+        if (!suite_of(p, "'try' statement", line, emits)) return NULL;
         if (emits) try_handlers(p->ctx, program, n, &t);
         /* Bindings still follow source order. For return diagnostics the
          * compiler visits else and finally before exception handlers. */
         Site body_return = p->returned;
         p->returned = (Site){0};
-        Node **tail = &n->args;
-        int bare = 0, star = -1;
+        int handlers = 0, bare = 0, star = -1;
         size_t bare_at = 0;
         while (take_word(p, "except")) {
             size_t except_line = keyword_line(p), except_at = p->pos - 1;
@@ -8895,25 +8895,26 @@ static Node *statement_body(Parser *p, int emits) {
             if (parse_children(p, handler) || analyse_statements(p, handler) || (emits && header_ready(p, before))) return NULL;
             if (emits) match = except_begin(p->ctx, program, handler, &t, &final);
             if (is_star) p->star = p->loops + 1;
-            handler->b = suite_of(p, is_star ? "'except*' statement" : "'except' statement", except_line, emits);
+            Node *name = handler->c, *body = suite_of(p, is_star ? "'except*' statement" : "'except' statement", except_line, emits);
             p->star = saved;
-            if (!handler->b) return NULL;
-            if (emits) except_end(p->ctx, program, handler, &t, match, final);
+            if (!body) return NULL;
+            if (emits) except_end(p->ctx, program, handler, name, &t, match, final);
             span_block(p, handler, except_at);
-            *tail = handler; tail = &handler->next;
+            handlers++;
         }
         Site handler_return = p->returned;
         p->returned = body_return;
         if (star == 1) n->flags |= F_STAR;
         if (emits) try_else(p->ctx, program, n, &t);
         if (take_word(p, "else")) {
-            if (!n->args) { p->pos--; return syntax(p, "expected 'except' or 'finally' block"); }
-            if (!(n->b = suite_of(p, "'else' statement", keyword_line(p), emits))) return NULL;
+            if (!handlers) { p->pos--; return syntax(p, "expected 'except' or 'finally' block"); }
+            if (!suite_of(p, "'else' statement", keyword_line(p), emits)) return NULL;
         }
         if (emits) try_finally(p->ctx, program, &t);
-        if (take_word(p, "finally") && !(n->c = suite_of(p, "'finally' statement", keyword_line(p), emits))) return NULL;
+        int finally = take_word(p, "finally");
+        if (finally && !suite_of(p, "'finally' statement", keyword_line(p), emits)) return NULL;
         if (!p->returned.node && !p->returned.line) p->returned = handler_return;
-        if (!n->args && !n->c) return syntax(p, "expected 'except' or 'finally' block");
+        if (!handlers && !finally) return syntax(p, "expected 'except' or 'finally' block");
         p->body.tries--;
         if (emits) { try_end(p->ctx, program, &t); n->flags |= F_EMITTED; }
         return n;
@@ -8958,10 +8959,11 @@ static Node *statement_body(Parser *p, int emits) {
         if (parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
         if (emits && !is_for) branch = branch_parsed(p->ctx, p->body.program, n->a, n);
         else if (emits) branch = loop_begin(p, p->body.program, n, &loop);
-        p->loops++; n->b = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
-        if (!n->b) return NULL;
+        /* Its suites, compiled as they are parsed, are not kept. */
+        p->loops++; Node *body = suite_of(p, is_for ? "'for' statement" : "'while' statement", line, emits); p->loops--;
+        if (!body) return NULL;
         if (emits) loop_else(p->ctx, p->body.program, n, loop, branch);
-        if (take_word(p, "else")) { n->c = suite_of(p, "'else' statement", keyword_line(p), emits); if (!n->c) return NULL; }
+        if (take_word(p, "else") && !suite_of(p, "'else' statement", keyword_line(p), emits)) return NULL;
         if (emits) { patch(p->body.program, loop, program_len(p->body.program)); n->flags |= F_EMITTED; }
         return n;
     }
@@ -20112,10 +20114,10 @@ static size_t handler_begin(SPYContext *c, Program *p, Node *h, int unbinds, int
     if (final != SIZE_MAX) p->items[final].other = 1 + (unsigned)star;
     return final;
 }
-static void handler_end(SPYContext *c, Program *p, Node *h, int unbinds, size_t final) {
+static void handler_end(SPYContext *c, Program *p, Node *name, int unbinds, size_t final) {
     if (!unbinds) return;
     emit(c, p, BC_LEAVE, NULL, 0); patch(p, final, p->len);
-    emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_STORE, h->c, 1); emit(c, p, BC_DELETE, h->c, 3); emit(c, p, BC_POP, NULL, 0);
+    emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_STORE, name, 1); emit(c, p, BC_DELETE, name, 3); emit(c, p, BC_POP, NULL, 0);
     emit(c, p, BC_END_FINALLY, NULL, 0);
 }
 /* The steps of entry of an annotation function's body, at, around its
@@ -20580,9 +20582,9 @@ static size_t except_begin(SPYContext *c, Program *p, Node *h, Try *t, size_t *f
     *final = handler_begin(c, p, h, unbinds, t->star);
     return match;
 }
-static void except_end(SPYContext *c, Program *p, Node *h, Try *t, size_t match, size_t final) {
-    int unbinds = p->unbinds && h->c;
-    handler_end(c, p, h, unbinds, final);
+static void except_end(SPYContext *c, Program *p, Node *h, Node *name, Try *t, size_t match, size_t final) {
+    int unbinds = p->unbinds && name;
+    handler_end(c, p, name, unbinds, final);
     if (!t->star) {
         emit(c, p, BC_POP_BLOCK, NULL, 0);
         emit(c, p, BC_JUMP, NULL, 1); patch(p, match, p->len);
