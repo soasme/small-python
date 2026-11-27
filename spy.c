@@ -254,7 +254,8 @@ enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED 
 /* An error's place: none, its node, the current token, or a part's span
  * and name (Spot). */
 enum { SPOT_NONE, SPOT_SELF, SPOT_HERE, SPOT_AT };
-typedef struct { const char *name, *start, *end; size_t line; } Spot;
+enum { PLACE_DEBUG = 4, PLACES };
+typedef struct { const char *name, *start, *end; size_t line; int spanned; } Spot;
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -266,6 +267,8 @@ struct Node {
      * each mode, whether expands is known and its answer; and loads_name,
      * plus one. Expressions are whole when they compile. */
     unsigned char expands_known, expands_value, loads;
+    /* An attribute's object's expands summaries, as its own (receiver_expands). */
+    unsigned char receiver_known, receiver_value;
     /* Its shapes, plus one, set before it compiles (operand_shapes): as an
      * operand at hand, and as an operator fused on its left and right
      * operands'; whether it is arithmetic on operands at hand, and
@@ -274,9 +277,10 @@ struct Node {
     /* As an assignment target, from its parts' as it completes
      * (target_facts): TARGET_OK, TARGET_NOT or its error, whether it is a
      * star target, and the places (SPOT_*) of that error and of its first
-     * part each kind of target (TARGETS_*) cannot assign; those copied from
-     * a part are in spots. */
-    unsigned char targets, star_ok, places[4];
+     * part each kind of target (TARGETS_*) cannot assign, and of its part
+     * naming __debug__ (PLACE_DEBUG); those copied from a part are in
+     * spots. Whether it is an attribute of self. */
+    unsigned char targets, star_ok, places[5], unstarred, self_attribute;
     Spot *spots;
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
@@ -4789,6 +4793,9 @@ typedef struct Parser {
 static Node *emit_parsed(Parser *, Node *, size_t);
 static int event_into(SPYContext *, Events *, int, unsigned, Scope *, Node *, Node *);
 static int name_event(SPYContext *, Events *, int, unsigned, Scope *, Node *, Node *);
+static int text_event(SPYContext *, Events *, int, unsigned, Scope *, const char *, size_t, Node *);
+static Site place_site(Node *, int);
+static int debug_error(SPYContext *, Site *, int);
 static const char *event_text(Events *, Event *);
 static Scope *parse_scope(Parser *);
 static void parse_record(Parser *, Node *);
@@ -5503,6 +5510,12 @@ static void future_feature(Parser *p, size_t name) {
     else snprintf(message, sizeof(message), "future feature %.*s is not defined", (int)t->len, t->start);
     size_t pos = p->pos;
     p->pos = name; defer(p, message); p->pos = pos;
+}
+/* Attribute n's name, its identifier b's, moved onto n, which owns it. */
+static void attribute_takes_name(Node *n) {
+    n->name = n->b->name; n->original = n->b->original;
+    n->b->name = (NameOperand){0}; n->b->original = NULL;
+    n->attribute.name = &n->name; n->attribute.line = n->line;
 }
 static Node *identifier(Parser *p) {
     if (!at(p, T_NAME) || reserved(peek(p))) return syntax(p, "invalid syntax");
@@ -6789,7 +6802,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
             if (kind == '.') {
                 n->b = identifier(p);
                 if (!n->b) return NULL;
-                n->attribute.name = &n->b->name; n->attribute.line = n->line;
+                attribute_takes_name(n);
             } else if (kind == '[') {
                 n->b = subscript(p);
                 if (n->b && (at(p, ',') || n->b->kind == N_STAR)) {
@@ -7039,8 +7052,8 @@ static Node *target_error(Parser *p, Node *n, int type) {
 /* Place i of n, that of place j of its part o (o itself when SELF); -1 on an error. */
 static int place_from(SPYContext *c, Node *n, int i, Node *o, int j) {
     int where = o->places[j];
-    if ((where == SPOT_SELF || where == SPOT_AT) && !n->spots && !(n->spots = allocate(c, 4 * sizeof(Spot)))) return -1;
-    if (where == SPOT_SELF || where == SPOT_AT) n->spots[i] = where == SPOT_AT ? o->spots[j] : (Spot){j ? expression_name(o) : NULL, o->start, o->end, o->line};
+    if ((where == SPOT_SELF || where == SPOT_AT) && !n->spots && !(n->spots = allocate(c, PLACES * sizeof(Spot)))) return -1;
+    if (where == SPOT_SELF || where == SPOT_AT) n->spots[i] = where == SPOT_AT ? o->spots[j] : (Spot){j && j < PLACE_DEBUG ? expression_name(o) : NULL, o->start, o->end, o->line, o->spanned};
     n->places[i] = (unsigned char)(where == SPOT_SELF ? SPOT_AT : where);
     return 0;
 }
@@ -7054,26 +7067,31 @@ static int target_facts(SPYContext *c, Node *n) {
 static int target_parts(SPYContext *c, Node *n) {
     int kind = n->kind, simple = kind == N_NAME || kind == N_INDEX || kind == N_ATTR;
     n->star_ok = (unsigned char)simple; n->targets = simple ? TARGET_OK : TARGET_NOT; n->places[0] = SPOT_NONE;
-    for (int t = 1; t < 4; t++) n->places[t] = simple ? SPOT_NONE : SPOT_SELF;
+    for (int t = 1; t < PLACE_DEBUG; t++) n->places[t] = simple ? SPOT_NONE : SPOT_SELF;
+    n->places[PLACE_DEBUG] = (simple || kind == N_KEYWORD) && kind != N_INDEX && !strcmp(n->name.text, "__debug__") ? SPOT_SELF : SPOT_NONE;
+    n->self_attribute = kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self");
     if (kind == N_STAR) {
         /* An item: its operand's facts, but a deletion's error is the star (target reports a star alone). */
         Node *o = n->a;
         if (target_facts(c, o)) return -1;
         n->star_ok = o->star_ok; n->targets = o->targets;
-        for (int t = 0; t < 4; t++) if (t != 1 + TARGETS_DEL && place_from(c, n, t, o, t)) return -1;
+        for (int t = 0; t < PLACES; t++) if (t != 1 + TARGETS_DEL && place_from(c, n, t, o, t)) return -1;
     } else if (kind == N_COMPREHENSION && n->op == N_TUPLE) n->targets = TARGET_GENERATOR, n->places[0] = SPOT_SELF;
     else if (kind == N_COMPARE) {
         /* A for target's in comparison is its left operand's. */
         n->places[1 + TARGETS_FOR] = SPOT_NONE;
         if (n->args->op == O_IN && (target_facts(c, n->a) || place_from(c, n, 1 + TARGETS_FOR, n->a, 1 + TARGETS_FOR))) return -1;
     } else if (kind == N_TUPLE || kind == N_LIST) {
+        int count = 0;
+        n->unstarred = n->args != NULL;
+        for (Node *item = n->args; item && n->unstarred; item = item->next) n->unstarred = item->kind != N_STAR && ++count <= 1 << 20;
         n->star_ok = 1; n->targets = TARGET_OK;
-        for (int t = 1; t < 4; t++) n->places[t] = SPOT_NONE;
+        for (int t = 1; t < PLACES; t++) n->places[t] = SPOT_NONE;
         size_t stars = 0, before = 0;
         for (Node *item = n->args; item; item = item->next) {
             if (target_facts(c, item)) return -1;
             n->star_ok &= item->star_ok;
-            for (int t = 1; t < 4; t++) if (!n->places[t] && item->places[t] && place_from(c, n, t, item, t)) return -1;
+            for (int t = 1; t < PLACES; t++) if (!n->places[t] && item->places[t] && place_from(c, n, t, item, t)) return -1;
             if (n->targets != TARGET_OK) continue;
             if (item->kind == N_STAR && ++stars > 1) n->targets = TARGET_STARS, n->places[0] = SPOT_SELF;
             else if (item->kind == N_STAR && before > 255) n->targets = TARGET_MANY, n->places[0] = SPOT_HERE;
@@ -7577,7 +7595,7 @@ static int unparse(Buffer *b, Node *n, int level) {
         }
         return level > PR_CMP && puts_buffer(b, ")");
     case N_ATTR:
-        return unparse(b, n->a, PR_ATOM) || puts_buffer(b, n->a->kind == N_INT ? " ." : ".") || puts_buffer(b, source_name(n->b));
+        return unparse(b, n->a, PR_ATOM) || puts_buffer(b, n->a->kind == N_INT ? " ." : ".") || puts_buffer(b, source_name(n));
     case N_CALL:
         if (unparse(b, n->a, PR_ATOM) || puts_buffer(b, "(")) return -1;
         if (n->args && !n->args->next && n->args->kind == N_COMPREHENSION && n->args->op == N_TUPLE) {
@@ -7869,7 +7887,7 @@ static Node *dotted_pattern(Parser *p) {
         if (!attr) return NULL;
         attr->a = value;
         if (!(attr->b = identifier(p))) return NULL;
-        attr->attribute.name = &attr->b->name; attr->attribute.line = attr->line;
+        attribute_takes_name(attr);
         if (!(value = finished(p, attr))) return NULL;
     }
     n->a = value;
@@ -9202,7 +9220,7 @@ static int alias_recorded(Parser *, Node *);
 static int events_first(Parser *, Node *, int, unsigned);
 static int debug_named(Node *);
 static int self_attribute(Node *);
-static int scope_static(SPYContext *, Scope *, Node *);
+static int scope_static(SPYContext *, Scope *, const char *);
 static int scope_check(SPYContext *, Scope *, Node *);
 static Scope *string_scope(SPYContext *, Node *);
 static int generic_table(SPYContext *, Node *);
@@ -9278,7 +9296,10 @@ static int parse_children(Parser *p, Node *n) {
     }
     n->events_at = (uint32_t)at;
     /* A keyword __debug__ is checked first, in visiting order. */
-    if (n->kind == N_KEYWORD && debug_named(n) && events_first(p, n, EV_TARGET, 0)) return -1;
+    if (n->kind == N_KEYWORD && debug_named(n)) {
+        if (events_first(p, n, EV_TARGET, 0)) return -1;
+        p->events.items[n->events_at].n = NULL; p->events.items[n->events_at].site = place_site(n, PLACE_DEBUG);
+    }
     return parse_recorded(p, n, NULL, 1);
 }
 /* Put an event of kind and flags on n first in the log's last range,
@@ -9294,15 +9315,7 @@ static int events_first(Parser *p, Node *n, int kind, unsigned flags) {
 }
 /* Whether target or keyword n names __debug__, itself, as an attribute
  * or among its items (check_debug_target). */
-static int debug_named(Node *n) {
-    if (n->kind == N_STAR) return debug_named(n->a);
-    if (n->kind == N_LIST || n->kind == N_TUPLE) {
-        for (Node *item = n->args; item; item = item->next) if (debug_named(item)) return 1;
-        return 0;
-    }
-    Node *name = n->kind == N_NAME || n->kind == N_KEYWORD ? n : n->kind == N_ATTR ? n->b : NULL;
-    return name && !strcmp(name->name.text, "__debug__");
-}
+static int debug_named(Node *n) { return n->places[PLACE_DEBUG] != SPOT_NONE; }
 /* Whether target t's analysis can be built from its parts' recorded
  * events (scope_target). */
 static int target_recorded(Node *t) {
@@ -9351,14 +9364,18 @@ static int events_again(Parser *p, Node *t) {
  * items', uncounted; a stored attribute of self a class's static
  * first. */
 static int target_events(Parser *p, Scope *scope, Node *t, int store) {
-    if (debug_named(t)) return event_into(p->ctx, &p->events, EV_TARGET, store == 0, NULL, t, NULL);
+    if (debug_named(t)) {
+        if (event_into(p->ctx, &p->events, EV_TARGET, store == 0, NULL, NULL, NULL)) return -1;
+        p->events.items[p->events.len - 1].site = place_site(t, PLACE_DEBUG);
+        return 0;
+    }
     if (t->kind == N_STAR) return target_events(p, scope, t->a, store);
     if (t->kind == N_LIST || t->kind == N_TUPLE) {
         for (Node *item = t->args; item; item = item->next) if (target_events(p, scope, item, store)) return -1;
         return 0;
     }
     if (t->kind == N_NAME) return name_event(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t);
-    if (store > 0 && self_attribute(t) && event_into(p->ctx, &p->events, EV_STATIC, 0, scope, t, NULL)) return -1;
+    if (store > 0 && self_attribute(t) && text_event(p->ctx, &p->events, EV_STATIC, 0, scope, source_name(t), t->line, NULL)) return -1;
     return events_again(p, t);
 }
 /* Where target t's recorded events begin: its first name's or part's. */
@@ -10033,18 +10050,28 @@ static int expression_kind(int);
 static Site site_of(Node *n) {
     return (Site){!n->spanned && !expression_kind(n->kind) ? n : NULL, n->line, n->spanned ? n->start : NULL, n->spanned ? n->end : NULL};
 }
-/* Record a name event of kind on name n, reported at at: n's text in the parse's log. */
-static int name_event(SPYContext *c, Events *e, int kind, unsigned flags, Scope *scope, Node *n, Node *at) {
+/* Record an event of kind with text from line, reported at at: the text in the parse's log. */
+static int text_event(SPYContext *c, Events *e, int kind, unsigned flags, Scope *scope, const char *name, size_t line, Node *at) {
     Events *log = e->parsed ? e->parsed : e;
-    size_t len = strlen(n->name.text) + 1, text = log->texts_len;
+    size_t len = strlen(name) + 1, text = log->texts_len;
     if (text + len > UINT32_MAX) { spy_error(c, "MemoryError", "too many names"); return -1; }
     if (grow(c, (void **)&log->texts, &log->texts_cap, text + len, 1) || grow(c, (void **)&e->items, &e->cap, e->len + 1, sizeof(*e->items))) return -1;
-    memcpy(log->texts + text, n->name.text, len); log->texts_len += len;
-    e->items[e->len++] = (Event){kind, flags, scope, NULL, NULL, (uint32_t)text, n->line, at ? site_of(at) : (Site){0}};
+    memcpy(log->texts + text, name, len); log->texts_len += len;
+    e->items[e->len++] = (Event){kind, flags, scope, NULL, NULL, (uint32_t)text, line, at ? site_of(at) : (Site){0}};
     return 0;
+}
+/* Record a name event of kind on name n, reported at at. */
+static int name_event(SPYContext *c, Events *e, int kind, unsigned flags, Scope *scope, Node *n, Node *at) {
+    return text_event(c, e, kind, flags, scope, n->name.text, n->line, at);
 }
 /* Name event v's text, in e's log. */
 static const char *event_text(Events *e, Event *v) { return (e->parsed ? e->parsed : e)->texts + v->text; }
+/* Where place i of n reports its error, as site_of its part would. */
+static Site place_site(Node *n, int i) {
+    if (n->places[i] == SPOT_SELF) return site_of(n);
+    Spot *at = &n->spots[i];
+    return (Site){NULL, at->line, at->spanned ? at->start : NULL, at->spanned ? at->end : NULL};
+}
 /* Report an error at site s: its node's place while the node lives (node_error). */
 static void site_error(SPYContext *c, Site *s) {
     if (s->node) { node_error(c, s->node); return; }
@@ -10089,14 +10116,14 @@ static int events_take(SPYContext *c, Scope *scope, Node *n) {
         /* An annotation analysed where it is, its nodes not counted. */
         else if (v->kind == EV_WITHIN) { within = in->within; nodes = in->nodes; in->within = "an annotation"; }
         else if (v->kind == EV_UNWITHIN) { in->within = within; in->nodes = nodes; }
-        else if (v->kind == EV_STATIC) status = scope_static(c, in, v->n);
+        else if (v->kind == EV_STATIC) status = scope_static(c, in, event_text(c->events, v));
         else if (v->kind == EV_CHECK) status = scope_check(c, in, v->n);
         else if (v->kind == EV_NAMED) status = scope_named(c, in, v->n, (int)v->flags);
         /* A comprehension's iterable, where no named expression may be; its clause. */
         else if (v->kind == EV_ITERABLE) in->iterables += v->flags ? 1 : -1;
         else if (v->kind == EV_CLAUSE) in->clause = v->n;
         else if (v->kind == EV_GENERIC) status = generic_table(c, v->n);
-        else if (v->kind == EV_TARGET) status = check_debug_target(c, v->n, (int)v->flags);
+        else if (v->kind == EV_TARGET) status = debug_error(c, &v->site, (int)v->flags);
         else if (v->kind == EV_NODES) in->nodes += v->flags;
         /* A name used, its node counted. */
         else if (!(status = grow(c, (void **)&c->events->items, &c->events->cap, c->events->len + 1, sizeof(Event)))) {
@@ -10159,25 +10186,26 @@ static int scope_global(SPYContext *c, Scope *scope, const char *name, size_t li
     if (global) global->flags |= S_GLOBAL;
     return global ? 0 : -1;
 }
+/* The error of a target naming __debug__, at at. */
+static int debug_error(SPYContext *c, Site *at, int deleting) {
+    site_error(c, at); errorf(c, "SyntaxError", "cannot %s __debug__", deleting ? "delete" : "assign to");
+    return -1;
+}
+/* Whether target n names __debug__ where it may not: its error. */
 static int check_debug_target(SPYContext *c, Node *n, int deleting) {
-    if (!n) return 0;
-    Node *name = n->kind == N_NAME || n->kind == N_KEYWORD ? n : n->kind == N_ATTR ? n->b : NULL;
-    if (name && !strcmp(name->name.text, "__debug__")) {
-        node_error(c, n); errorf(c, "SyntaxError", "cannot %s __debug__", deleting ? "delete" : "assign to"); return -1;
-    }
-    if (n->kind == N_STAR) return check_debug_target(c, n->a, deleting);
-    if (n->kind == N_LIST || n->kind == N_TUPLE)
-        for (Node *item = n->args; item; item = item->next) if (check_debug_target(c, item, deleting)) return -1;
-    return 0;
+    if (!n || !debug_named(n)) return 0;
+    Site at = place_site(n, PLACE_DEBUG);
+    return debug_error(c, &at, deleting);
 }
 /* Whether n is an attribute of self. */
-static int self_attribute(Node *n) { return n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self"); }
+static int self_attribute(Node *n) { return n->self_attribute; }
 /* Stored attribute n of self is a static attribute of the class nearest
  * around scope. */
-static int scope_static(SPYContext *c, Scope *scope, Node *n) {
+/* Name, a stored attribute of self, is a static attribute of the class nearest around scope. */
+static int scope_static(SPYContext *c, Scope *scope, const char *attribute) {
     for (Scope *outer = scope->parent; outer; outer = outer->parent) {
         if (outer->kind != S_CLASS) continue;
-        const char *name = scope_text(c, outer, source_name(n->b));
+        const char *name = scope_text(c, outer, attribute);
         if (!name || grow(c, (void **)&outer->statics, &outer->statics_cap, outer->statics_len + 1, sizeof(*outer->statics))) return -1;
         outer->statics[outer->statics_len++] = name;
         break;
@@ -10569,12 +10597,7 @@ static int item_at_hand(Node *n) { return n->hand; }
 /* Whether n is an operand at hand, or arithmetic or a comparison of such. */
 static int operands_at_hand(Node *n) { return n->ops; }
 /* Whether n is a list or tuple display of items none starred. */
-static int packed(Node *n) {
-    if ((n->kind != N_LIST && n->kind != N_TUPLE) || !n->args) return 0;
-    int count = 0;
-    for (Node *a = n->args; a; a = a->next) if (a->kind == N_STAR || ++count > 1 << 20) return 0;
-    return 1;
-}
+static int packed(Node *n) { return n->unstarred; }
 /* Whether n is an operator fused on operands at hand: an index of literals
  * or names, or arithmetic or a single comparison of those, an index of
  * those, or an attribute of a name. */
@@ -10595,7 +10618,7 @@ static int plain_call(Node *n) {
 /* Whether plain call n names sorted or a sort method, which may compare
  * by Python on the machine: BC_CALLK's step finds out (key_consumer). */
 static int sort_call(Node *n) {
-    return n->a->kind == N_NAME ? !strcmp(n->a->name.text, "sorted") : n->a->kind == N_ATTR && !strcmp(n->a->b->name.text, "sort");
+    return n->a->kind == N_NAME ? !strcmp(n->a->name.text, "sorted") : n->a->kind == N_ATTR && !strcmp(n->a->name.text, "sort");
 }
 /* Whether plain call n names print, or repr, ascii, str or format of one
  * argument, whose arguments' Python __str__, or a list's or tuple's items'
@@ -10620,7 +10643,7 @@ static int comparing_call(Node *n) {
     for (Node *a = n->args; a; a = a->next, argc++) if (a->kind == N_STAR || a->kind == N_KEYWORD || a->kind == N_MAPPING) return 0;
     if (n->a->kind == N_NAME) return !strcmp(n->a->name.text, "min") || !strcmp(n->a->name.text, "max");
     if (n->a->kind != N_ATTR) return 0;
-    const char *name = n->a->b->name.text;
+    const char *name = n->a->name.text;
     return argc == 1 ? !strcmp(name, "index") || !strcmp(name, "count") || !strcmp(name, "remove") : argc <= 3 && !strcmp(name, "index");
 }
 /* A call of at most 8 positional and keyword arguments, with a keyword. */
@@ -18163,6 +18186,11 @@ static int list_expands(Node *n, int calls) {
  * arithmetic of those. */
 static int arithmetic(Node *n) { return n->arith; }
 static int expanding(Node *, int);
+static int expands(Node *, int);
+/* Whether attribute n's object expands in mode, as summarized when n's steps were emitted. */
+static int receiver_expands(Node *n, int mode) {
+    return n->receiver_known >> mode & 1 ? n->receiver_value >> mode & 1 : expands(n->a, mode);
+}
 /* Whether n's kind is an expression's, whose node is whole once it compiles. */
 static int expression_kind(int kind) {
     return kind <= N_COND || kind == N_STAR || kind == N_COMPREHENSION || kind == N_MAPPING || kind == N_SET ||
@@ -18573,7 +18601,7 @@ static void compile_node(SPYContext *c, Program *p, Node *n) {
         break;
     }
     case N_CALL:
-        if (plain_call(n) && (n->a->kind == N_ATTR || at_hand(n->a)) && !expands(n->a->kind == N_ATTR ? n->a->a : n->a, modes(p)) && !list_expands(n->args, modes(p)) &&
+        if (plain_call(n) && (n->a->kind == N_ATTR || at_hand(n->a)) && !(n->a->kind == N_ATTR ? receiver_expands(n->a, modes(p)) : expands(n->a, modes(p))) && !list_expands(n->args, modes(p)) &&
             !sort_call(n) && fused_arguments(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
             /* The fused call, then its plain steps. */
             compile_stack_call(c, p, n);
@@ -18613,6 +18641,7 @@ static Node *parsed_steps(Parser *p, Node *n, size_t at) {
     if (!c->error_type[0] && parse_children(p, n)) return NULL;
     operand_shapes(c, n);
     expands(n, modes(p->emitting));
+    if (n->kind == N_ATTR) expands(n->a, modes(p->emitting)), n->receiver_known = n->a->expands_known, n->receiver_value = n->a->expands_value;
     return c->error_type[0] ? NULL : n;
 }
 /* An and or or n, compiled as it is parsed: its left operand's test and
