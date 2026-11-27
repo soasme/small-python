@@ -10945,14 +10945,25 @@ static void invalid_expression_error(Parser *p) {
             if (first->kind == T_NAME)
                 for (size_t i = 0; i < sizeof(soft) / sizeof(*soft); i++)
                     if (strlen(soft[i]) == first->len && !memcmp(soft[i], first->start, first->len)) skip = 1;
-            if (!skip && (end = probe_expression(p, f, 0)) && p->tokens[end - 1].level)
+            /* expression_without_invalid: a disjunction when no conditional parses. */
+            if (!skip && ((end = probe_expression(p, f, 0)) || (end = probe_expression(p, f, 1))) && p->tokens[end - 1].level)
                 message = "invalid syntax. Perhaps you forgot a comma?";
         }
-        /* invalid_legacy_expression */
-        if (!message && legacy_name && p->tokens[a + 1].kind != '(') {
+        /* invalid_legacy_expression: a name not called, then expressions,
+         * whose own errors are raised, and the next name begins one; a
+         * print or exec so used is the error. Their first disjunction was
+         * read without invalid rules first (invalid_expression), so an
+         * error inside it is not raised. */
+        for (size_t i = a; !message && p->tokens[i].kind == T_NAME && !reserved(&p->tokens[i]) && p->tokens[i + 1].kind != '('; i++) {
+            if (!probe_expression(p, i + 1, 1)) break;
             size_t saved = p->pos;
-            p->pos = a + 1;
-            if (expression_list(p, 0)) {
+            p->pos = i + 1;
+            Node *items = expression_list(p, 0);
+            if (!items && c->error_type[0] && (!error_is(c, "SyntaxError") || strcmp(c->error_message, "invalid syntax"))) {
+                p->pos = saved;
+                return;
+            }
+            if (items && i == a && legacy_name) {
                 end = p->pos;
                 snprintf(legacy, sizeof(legacy), "Missing parentheses in call to '%.*s'. Did you mean %.*s(...)?",
                          (int)first->len, first->start, (int)first->len, first->start);
@@ -10960,6 +10971,7 @@ static void invalid_expression_error(Parser *p) {
             }
             spy_clear_error(c);
             p->pos = saved;
+            if (!items) break;
         }
     }
     /* A statement fails after its keyword, at the 'if'. */

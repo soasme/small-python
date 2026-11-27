@@ -195,7 +195,7 @@ Contents | - navigation
 13 Expressions > 13.10 Comparisons > 13.10.1 Runtime Semantics: Evaluation | Comparisons, Evaluation
 13 Expressions > 13.11 Boolean operations | Truth, Evaluation, StarredOperands
 13 Expressions > 13.12 Assignment expressions | Comprehensions, SimpleStatements
-13 Expressions > 13.13 Conditional expressions | Conditionals
+13 Expressions > 13.13 Conditional expressions | NamedOperands, Conditionals
 13 Expressions > 13.14 Lambdas | FunctionDefs
 13 Expressions > 13.15 Expression lists | Displays, Unpacking, StarTargetStage, StarredOperands
 13 Expressions > 13.16 Yield expressions | Generators
