@@ -857,6 +857,7 @@ Unreleased (0.10.0):
 - a pattern captures any number of names; more than 256 was "too many names in pattern"
 - a mapping pattern key that is neither a literal nor a dotted name, as in `{x: a}` or `{(1): a}`, is "invalid syntax"; key errors cover the mapping pattern
 - a future statement's undefined feature, or a misplaced one on the line that ends the future statements, is reported before any scope error
+- a name an import binds may be declared global or nonlocal after the import
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 

@@ -179,7 +179,8 @@ typedef struct Call Call;
 typedef struct Pool Pool;
 typedef struct { uint64_t len; int sign; uint32_t digits[]; } BigInt; /* One layout on every target. */
 typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]; } IntView;
-enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32, S_CELL = 64 /* a nested scope reads it (closed_locals) */, S_HELD = 128 /* only annotated: no code reads it */ };
+enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32, S_CELL = 64 /* a nested scope reads it (closed_locals) */, S_HELD = 128 /* only annotated: no code reads it */,
+       S_IMPORT = 256 /* bound by an import */, S_ASSIGNED = 512 /* bound otherwise: a later declaration's error */ };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 /* key: the name's str, made when the name is first bound and traced
  * through the unit that owns the scope. */
@@ -8960,7 +8961,7 @@ static int import_recorded(Parser *p, Node *n) {
     }
     for (Node *item = n->args; error < 0 && item && item->kind != N_STAR; item = item->next) {
         Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
-        if (name_event(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, binding, item)) return -1;
+        if (name_event(p->ctx, &p->events, EV_BIND, S_LOCAL | S_IMPORT, scope, binding, item)) return -1;
     }
     if (misplaced) {
         if (event_into(p->ctx, &p->events, EV_ERROR, 8, scope, NULL, NULL)) return -1;
@@ -9953,7 +9954,9 @@ static int bound_recorded(Parser *p, Node *n, Node *target, Node *rest, Node *va
     Scope *scope = parse_scope(p);
     if (!scope) return -1;
     size_t at = target_at(target, value->events_at), end = e->len;
-    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, target, 1)) return -1;
+    /* An augmented target is loaded, then stored: no static attribute. */
+    int store = n->kind == N_ASSIGN && n->op != '=' ? -1 : 1;
+    if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || target_events(p, scope, target, store)) return -1;
     for (Node *t = rest; t; t = t->next) if (target_events(p, scope, t, 1)) return -1;
     if (event_into(p->ctx, e, EV_MARK, 0, scope, NULL, NULL) || events_again(p, value) ||
         event_into(p->ctx, e, EV_LATER, 0, scope, NULL, NULL) || event_into(p->ctx, e, EV_NODES, 1, scope, NULL, NULL)) return -1;
@@ -10363,7 +10366,7 @@ static int scope_bind(SPYContext *c, Scope *scope, const char *name, size_t line
         if (symbol->flags & S_PARAM) errorf(c, "SyntaxError", "name '%s' is parameter and %s", name, kind);
         else if (symbol->flags & S_USE) errorf(c, "SyntaxError", "name '%s' is used prior to %s declaration", name, kind);
         else if (symbol->flags & S_ANNOT) errorf(c, "SyntaxError", "annotated name '%s' can't be %s", name, kind);
-        else if (symbol->flags & S_LOCAL) errorf(c, "SyntaxError", "name '%s' is assigned to before %s declaration", name, kind);
+        else if (symbol->flags & S_ASSIGNED) errorf(c, "SyntaxError", "name '%s' is assigned to before %s declaration", name, kind);
         if (c->error_type[0]) return -1;
         /* Conflicting declarations are reported at the first one. */
         if (!(symbol->flags & (S_GLOBAL | S_NONLOCAL))) {
@@ -10373,6 +10376,7 @@ static int scope_bind(SPYContext *c, Scope *scope, const char *name, size_t line
             symbol->declared_end = open ? open->end : at->end;
         }
     }
+    if ((flags & S_LOCAL) && !(flags & S_IMPORT)) flags |= S_ASSIGNED;
     symbol->flags |= flags;
     if ((flags & S_GLOBAL) && scope->parent) {
         /* As CPython's symtable_add_def_helper, a global declaration in any

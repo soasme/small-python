@@ -22,7 +22,8 @@
 (*             AFTER                                                       *)
 (*                                                                         *)
 (* where DECL is global or nonlocal; PRIOR is pass, x as a parameter, a    *)
-(* use, an assignment, an annotation, or the other declaration; and AFTER  *)
+(* use, an assignment, an import (which binds without an error), an        *)
+(* annotation, or the other declaration; and AFTER                         *)
 (* is pass, an assignment, or an annotated assignment. A placement program *)
 (* puts the declaration at module level or in a class body inside g; a     *)
 (* binding program declares nonlocal x where x is bound in g, only at      *)
@@ -49,7 +50,7 @@
 EXTENDS Naturals, Sequences
 
 Decls == {"global", "nonlocal"}
-Programs == [part : {"decl"}, decl : Decls, prior : {"none", "param", "use", "assign", "annot", "other"},
+Programs == [part : {"decl"}, decl : Decls, prior : {"none", "param", "use", "assign", "import", "annot", "other"},
              after : {"none", "assign", "annot"}]
             \cup [part : {"place"}, decl : Decls, where : {"module", "class"}]
             \cup [part : {"binding"}, source : {"enclosing", "module", "none"}]
@@ -110,7 +111,7 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* A declaration that comes first, alone, with a plain assignment, is fine.
-CleanDeclarations == Done /\ program.part = "decl" /\ program.prior = "none" /\ program.after # "annot" => outcome = "ok"
+CleanDeclarations == Done /\ program.part = "decl" /\ program.prior \in {"none", "import"} /\ program.after # "annot" => outcome = "ok"
 
 \* A header's binding is analysed before the declaration in its suite.
 HeadersFirst == Done /\ program.part = "headers" => outcome # "ok"

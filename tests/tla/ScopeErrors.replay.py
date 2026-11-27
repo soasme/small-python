@@ -10,7 +10,7 @@ def source(p):
     part = p["part"]
     if part == "decl":
         decl = p["decl"]
-        prior = {"none": "pass", "param": "pass", "use": "print(x)", "assign": "x = 2", "annot": "x: int",
+        prior = {"none": "pass", "param": "pass", "use": "print(x)", "assign": "x = 2", "import": "import x", "annot": "x: int",
                  "other": OTHER[decl] + " x"}[p["prior"]]
         after = {"none": "pass", "assign": "x = 3", "annot": "x: int = 3"}[p["after"]]
         param = "x" if p["prior"] == "param" else ""
