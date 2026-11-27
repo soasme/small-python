@@ -4867,6 +4867,7 @@ typedef struct { size_t start, at; int done; } SliceSteps;
 static int slice_lay(Parser *, Node *, int, SliceSteps *);
 static Node *slice_end(Parser *, Node *, size_t);
 static int chain_parsed(Parser *, Node *, Node *, size_t, int);
+static int pair_parsed(Parser *, Node *);
 static Node *chain_end(Parser *, Node *);
 static int emit_default(Parser *, Node *);
 static Node *lambda_parsed(Parser *, Node *);
@@ -6988,7 +6989,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
                 cmp->op = op; p->pos += (size_t)width;
                 size_t at = chain ? program_len(p->emitting) : 0;
                 cmp->a = expression(p, 4);
-                if (!cmp->a || parse_children(p, cmp)) return NULL;
+                if (!cmp->a || parse_children(p, cmp) || pair_parsed(p, cmp)) return NULL;
                 *tail = cmp; tail = &cmp->next;
                 op = operator_info(p, &width, &prec);
                 if (chain && (prec == 3 || cmp != n->args) && !(chain = chain_parsed(p, n, cmp, at, prec == 3)) && p->ctx->error_type[0]) return NULL;
@@ -18867,7 +18868,7 @@ static void compile_operation(SPYContext *, Program *, Node *);
 /* n's shapes (Node.hand), from its operands'; a literal at hand's value is made. */
 static void operand_shapes(SPYContext *c, Node *n) {
     int kind = n->kind;
-    Node *right = kind == N_INDEX ? n->b : kind == N_COMPARE && !n->args->next ? n->args->a :
+    Node *right = kind == N_INDEX ? n->b : kind == N_COMPARE && !n->args->next ? n->args :
         kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     n->hand = kind == N_NAME ? SHAPE_NAME + 1 : at_hand(n) ? SHAPE_LOAD + 1 :
         kind == N_INDEX && n->a->hand && n->a->hand <= SHAPE_NAME + 1 && n->b->hand && n->b->hand <= SHAPE_NAME + 1 ? SHAPE_ITEM + 1 :
@@ -18882,13 +18883,13 @@ static void operand_shapes(SPYContext *c, Node *n) {
     n->ops = n->hand;
     if (kind == N_COMPARE) {
         n->ops = n->a->ops;
-        for (Node *cmp = n->args; cmp && n->ops; cmp = cmp->next) n->ops = cmp->a->ops;
+        for (Node *cmp = n->args; cmp && n->ops; cmp = cmp->next) n->ops = cmp->ops;
     } else if (kind == N_UNARY) n->ops = n->a->ops;
     else if (kind == N_BINARY && n->op != O_AND && n->op != O_OR) n->ops = n->a->ops && n->b->ops;
     n->arith = at_hand(n) || n->constant;
     if (kind == N_COMPARE) {
         n->arith = n->a->arith;
-        for (Node *cmp = n->args; cmp && n->arith; cmp = cmp->next) n->arith = cmp->a->arith;
+        for (Node *cmp = n->args; cmp && n->arith; cmp = cmp->next) n->arith = cmp->arith;
     } else if (kind == N_UNARY && !n->arith) n->arith = n->a->arith;
     else if (kind == N_BINARY && n->op != O_AND && n->op != O_OR) n->arith = n->a->arith && n->b->arith;
 }
@@ -19066,7 +19067,7 @@ static void compile_node(SPYContext *c, Program *p, Node *n) {
         p->split = n->b->steps_at; compile_operation(c, p, n); break;
     case N_INDEX:
         emit(c, p, BC_INDEX, n, 0); break;
-    case N_COMPARE: p->split = n->args->a->steps_at; compile_operation(c, p, n); break;
+    case N_COMPARE: p->split = n->args->steps_at; compile_operation(c, p, n); break;
     case N_LIST: case N_TUPLE: case N_DICT: {
         /* A packed display or an empty one: BC_NEW takes the items atop
          * the stack, as many as arg's count (other displays add each item
@@ -19564,10 +19565,22 @@ static Node *slice_end(Parser *p, Node *n, size_t start) {
  * operands and comparisons before it, cmp's comparison, more saying
  * whether one follows. Whether its steps still are its own; at its end,
  * the comparisons' exits. */
+/* A comparison's operator and operand cmp, parsed, stands for its
+ * operand: its shapes, and, as it was emitted, its steps. */
+static int pair_parsed(Parser *p, Node *cmp) {
+    Node *operand = cmp->a;
+    cmp->hand = operand->hand; cmp->ops = operand->ops; cmp->arith = operand->arith;
+    if (!(operand->flags & F_EMITTED)) return 0;
+    if (grow(p->ctx, (void **)&p->emitted, &p->emitted_cap, p->emitted_len + 1, sizeof(*p->emitted))) return -1;
+    cmp->steps_at = operand->steps_at; cmp->steps_end = operand->steps_end;
+    cmp->flags |= F_EMITTED;
+    p->emitted[p->emitted_len++] = cmp;
+    return 0;
+}
 static int chain_parsed(Parser *p, Node *n, Node *cmp, size_t at, int more) {
     Program *program = p->emitting;
     if (n->args == cmp ? n->a->steps_end != at : 0) return 0;
-    if (!(cmp->a->flags & F_EMITTED) || cmp->a->steps_at != at || cmp->a->steps_end != program->len) return 0;
+    if (!(cmp->flags & F_EMITTED) || cmp->steps_at != at || cmp->steps_end != program->len) return 0;
     size_t pc = emit(p->ctx, program, BC_COMPARE, cmp, more);
     if (pc == SIZE_MAX) return 0;
     program->items[pc].other = (uint32_t)cmp->op;
@@ -19577,7 +19590,7 @@ static Node *chain_end(Parser *p, Node *n) {
     Program *program = p->emitting;
     for (size_t i = n->a->steps_end; i < program->len; i++)
         if (program->items[i].op == BC_COMPARE && !program->items[i].target) program->items[i].target = (uint32_t)program->len;
-    program->split = n->args->a->steps_at;
+    program->split = n->args->steps_at;
     return parsed_steps(p, n, n->a->steps_at);
 }
 /* A lambda's parameter arg, its default parsed: the default's step, once
@@ -19977,7 +19990,7 @@ static Node *finished(Parser *p, Node *n) {
     Program *program = p->emitting;
     Node *fixed[3] = {n->a}, *list = NULL;
     if (n->kind == N_INDEX || (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR)) fixed[1] = n->b;
-    else if (n->kind == N_COMPARE && !n->args->next) fixed[1] = n->args->a;
+    else if (n->kind == N_COMPARE && !n->args->next) fixed[1] = n->args;
     else if (n->kind == N_CALL && (plain_call(n) || keyword_plain_call(n))) list = n->args;
     else if (n->kind == N_JOINED) { fixed[0] = NULL; list = n->args; }
     else if (n->kind == N_COMPREHENSION) fixed[0] = n->a->a;
