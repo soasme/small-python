@@ -298,6 +298,7 @@ struct Node {
     unsigned char targets, star_ok, places[5], unstarred, self_attribute, stores_fused, named_receiver;
     Spot *spots;
     Part *parts; /* A list or tuple of targets' parts, itself first (list_parts). */
+    SPYValue *folded; /* A negated number's value, until its statement ends (nodes_finish). */
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
@@ -1468,7 +1469,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         VISIT(v->as.unit.owner);
         VISIT(v->as.unit.replaced);
         for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
-            VISIT(node->constant);
+            VISIT(node->constant); VISIT(node->folded);
             VISIT(node->name.global_key);
             if (node_root(v, node->scope)) scope_tree_edges(node->scope, visit, data);
         }
@@ -9157,18 +9158,16 @@ static void drop_docstring(Node *body) {
 static int compile_generator(SPYContext *, Node *);
 static int comprehension_finish(SPYContext *, Node *);
 /* The nodes parsed since start, newest first, but those an inner
- * statement's call finished: a negated number as a constant, as CPython folds it, an inner negation before its
- * outer; then the instructions of the bodies among them, inner ones
- * first. */
+ * statement's call finished: a negated number's value, folded as it
+ * completed, its constant, as CPython folds it; the instructions of the
+ * bodies among them, inner ones first. */
 static int nodes_finish(Parser *p, Node *start) {
     SPYContext *c = p->ctx;
     Node *newest = p->unit->as.unit.nodes;
-    for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated)
-        if (!(n->flags & F_FINISHED) && n->kind == N_UNARY && n->op == '-' && n->a->constant && (n->a->kind <= N_IMAG || n->a->kind == N_UNARY))
-            n->constant = unary(c, '-', n->a->constant);
     for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
         if (n->flags & F_FINISHED) continue;
         n->flags |= F_FINISHED;
+        if (n->folded) { spy_release(n->constant); n->constant = n->folded; n->folded = NULL; }
         if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) compile_generator(c, n);
         if (n->kind == N_COMPREHENSION) comprehension_finish(c, n);
     }
@@ -9260,6 +9259,11 @@ static int annotated_recorded(Parser *, Node *);
 static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
 static int parse_children(Parser *p, Node *n) {
+    /* A negated number's value, its constant once its statement ends (nodes_finish). */
+    if (n->kind == N_UNARY && n->op == '-' && !n->folded) {
+        SPYValue *operand = n->a->kind <= N_IMAG ? n->a->constant : n->a->kind == N_UNARY ? n->a->constant ? n->a->constant : n->a->folded : NULL;
+        if (operand && !(n->folded = unary(p->ctx, '-', operand))) return -1;
+    }
     if (target_facts(p->ctx, n) || list_parts(p, n) || definition_head(p->ctx, n)) return -1;
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
@@ -9917,7 +9921,7 @@ static void free_node(Node *n) {
     /* A lambda's scope, begun as it was parsed, is its node's until analysis adopts it. */
     if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
     else if (n->scope && n->scope->owner == n) n->scope->owner = NULL;
-    spy_release(n->constant); spy_release(n->name.global_key);
+    spy_release(n->constant); spy_release(n->folded); spy_release(n->name.global_key);
     mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n);
 }
 /* After a line of module statements, parsed since start, is compiled
@@ -20422,8 +20426,8 @@ static int definition_head(SPYContext *c, Node *n) {
         return 0;
     }
     if (n->kind != N_CLASS && !n->scope->signature && !(n->scope->signature = definition_signature(c, n))) return -1;
-    Node *name = n->a && n->a->kind == N_NAME ? n->a : NULL;
-    if (name && !n->scope->name && (!(n->scope->name = copy_text(c, name->name.text, strlen(name->name.text))) ||
+    Node *name = !n->scope->name && n->a && n->a->kind == N_NAME ? n->a : NULL;
+    if (name && (!(n->scope->name = copy_text(c, name->name.text, strlen(name->name.text))) ||
                                     (name->original && !(n->scope->spelling = copy_text(c, name->original, strlen(name->original))))))
         return -1;
     return 0;
