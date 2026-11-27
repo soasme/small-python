@@ -4752,7 +4752,7 @@ typedef struct Parser {
     const char *deferred, *deferred_start, *deferred_end;
     Node *deferred_node; /* When set, the deferred error covers this node. */
     const char *constant_name; /* a name spelled to normalize to None, True, or False */
-    char deferred_text[256];
+    char deferred_text[256], *deferred_long; /* a pattern's, of any length (case_checked) */
     size_t deferred_line;
     /* CPython's last_stmt_location: the start of the last compound statement
      * parsed, which a SyntaxError's _metadata records. */
@@ -5643,7 +5643,8 @@ static size_t loop_begin(Parser *, Program *, Node *, size_t *);
 static void loop_else(SPYContext *, Program *, Node *, size_t, size_t);
 static void patch(Program *, size_t, size_t);
 static size_t program_len(Program *);
-static void case_begin(Parser *, Program *, Node *, Case *, Program *);
+typedef struct PatternCheck PatternCheck;
+static void case_begin(Parser *, Program *, Node *, Case *, Program *, PatternCheck *);
 static void case_end(SPYContext *, Program *, Node *, Case *, uint32_t *);
 static void match_end(SPYContext *, Program *, Node *, uint32_t);
 static void try_begin(SPYContext *, Program *, Node *, Try *);
@@ -7861,9 +7862,7 @@ static Node *literal_body(Parser *p) {
     Node *n = pattern_node(p, PT_LITERAL);
     if (!n) return NULL;
     if (at(p, T_STRING)) {
-        if (!(n->a = atom(p))) return NULL;
-        if (n->a->kind != N_STRING && n->a->kind != N_BYTES) return syntax(p, "patterns may only match literals and attribute lookups");
-        return n;
+        return (n->a = atom(p)) ? n : NULL;
     }
     Node *value;
     if (at(p, '-') || at(p, '+')) {
@@ -7897,16 +7896,7 @@ static Node *star_or_pattern(Parser *p) {
     if (strcmp(name->name.text, "_")) star->a = name;
     return span(p, star, start);
 }
-/* A sequence pattern of items, from token first to the last read, has
- * one starred name at most. */
-static int check_sequence_stars(Parser *p, Node *items, size_t first) {
-    int stars = 0;
-    for (Node *item = items; item; item = item->next) stars += item->kind == N_PATTERN && item->op == PT_STAR;
-    if (stars > 1) { syntax_span(p, first, p->pos, "multiple starred names in sequence pattern"); return -1; }
-    return 0;
-}
 static Node *sequence_pattern(Parser *p, int close) {
-    size_t first = p->pos - 1;
     Node *n = pattern_node(p, PT_SEQUENCE);
     if (!n) return NULL;
     Node **tail = &n->args;
@@ -7916,8 +7906,7 @@ static Node *sequence_pattern(Parser *p, int close) {
         *tail = item; tail = &item->next;
         if (!take(p, ',')) break;
     }
-    if (!expect(p, close, "invalid syntax") || check_sequence_stars(p, n->args, first)) return NULL;
-    return n;
+    return expect(p, close, "invalid syntax") ? n : NULL;
 }
 static Node *closed_pattern_body(Parser *);
 static Node *closed_pattern(Parser *p) {
@@ -7946,7 +7935,6 @@ static Node *dotted_pattern(Parser *p) {
 }
 static Node *closed_pattern_body(Parser *p) {
     if (take(p, '(')) {
-        size_t open = p->pos - 1;
         if (take(p, ')')) return pattern_node(p, PT_SEQUENCE);
         Node *first = star_or_pattern(p);
         if (!first) return NULL;
@@ -7963,8 +7951,7 @@ static Node *closed_pattern_body(Parser *p) {
             if (!item) return NULL;
             *tail = item; tail = &item->next;
         }
-        if (!expect(p, ')', "invalid syntax") || check_sequence_stars(p, n->args, open)) return NULL;
-        return n;
+        return expect(p, ')', "invalid syntax") ? n : NULL;
     }
     if (take(p, '[')) return sequence_pattern(p, ']');
     if (take(p, '{')) {
@@ -7987,12 +7974,15 @@ static Node *closed_pattern_body(Parser *p) {
             }
             Node *entry = node(p, N_KEYWORD);
             if (!entry) return NULL;
+            /* A key is a literal or a dotted name: no name alone. */
             if (at(p, T_NAME) && !keyword(p, "None") && !keyword(p, "True") && !keyword(p, "False")) {
-                Node *key = pattern(p);
+                Node *key = pattern_apart(p, dotted_pattern);
                 if (!key) return NULL;
-                if (key->op != PT_VALUE) return syntax(p, "mapping pattern keys may only match literals and attribute lookups");
+                if (key->a->kind == N_NAME) return syntax(p, "invalid syntax");
                 entry->a = key->a;
             } else {
+                if (!at(p, '-') && !at(p, '+') && !at(p, T_INT) && !at(p, T_FLOAT) && !at(p, T_IMAG) && !at(p, T_STRING) &&
+                    !keyword(p, "None") && !keyword(p, "True") && !keyword(p, "False")) return syntax(p, "invalid syntax");
                 Node *key = literal_pattern(p);
                 if (!key) return NULL;
                 entry->a = key->a;
@@ -8019,22 +8009,10 @@ static Node *closed_pattern_body(Parser *p) {
                     Node *entry = node(p, N_KEYWORD);
                     Node *key = entry ? identifier(p) : NULL;
                     if (!key) return NULL;
-                    Node *repeated = NULL;
-                    for (Node *other = n->c; other; other = other->next)
-                        if (!strcmp(other->name.text, key->original ? key->original : key->name.text)) repeated = other;
                     const char *attr = key->original ? key->original : key->name.text;
                     if (!(entry->name.text = copy_text(p->ctx, attr, strlen(attr)))) return NULL;
-                    int debug = !strcmp(attr, "__debug__") && !p->deferred;
-                    if (debug) { p->pos--; defer(p, "cannot assign to __debug__"); p->pos++; }
                     p->pos++;
                     if (!(entry->b = pattern(p))) return NULL;
-                    /* As CPython, these errors cover the keyword's sub-pattern. */
-                    if (debug) p->deferred_node = entry->b;
-                    if (repeated) {
-                        char message[300];
-                        snprintf(message, sizeof(message), "attribute name repeated in class pattern: %s", repeated->name.text);
-                        return syntax_at(p, entry->b, message);
-                    }
                     *keywords = entry; keywords = &entry->next;
                 } else {
                     if (n->c) return syntax(p, "positional patterns follow keyword patterns");
@@ -8093,69 +8071,137 @@ static Node *pattern_body(Parser *p) {
     }
     return first;
 }
-/* Add name, bound by pattern n, to names. -1 for too many names, -2 for
- * a repeated one, *bad and *where naming it and n. */
-static int pattern_name(Node *n, Node *name, const char **names, size_t *count, size_t limit, const char **bad, Node **where) {
-    for (size_t i = 0; i < *count; i++) if (!strcmp(names[i], name->name.text)) { *bad = source_name(name); *where = n; return -2; }
-    if (*count == limit) return -1;
-    names[(*count)++] = name->name.text;
+/* The check of a case's pattern that CPython's compiler makes as it
+ * compiles it, after every symbol table error (15.6.1): its first error,
+ * at the pattern it reports, in message; names holds the capture names
+ * stored so far, those from base on the alternative's being compiled. */
+struct PatternCheck { SPYContext *c; Node **names; size_t len, cap, base; char *message; size_t line; const char *start, *end; };
+static int pattern_fail(PatternCheck *k, Node *at, const char *before, const char *text, const char *after) {
+    size_t a = strlen(before), b = strlen(text), d = strlen(after);
+    if (!(k->message = allocate(k->c, a + b + d + 1))) return -1;
+    memcpy(k->message, before, a); memcpy(k->message + a, text, b); memcpy(k->message + a + b, after, d + 1);
+    k->line = at->line; k->start = at->start; k->end = at->end;
+    return -1;
+}
+/* Store capture name, bound by pattern at. */
+static int pattern_store(PatternCheck *k, Node *at, Node *name) {
+    for (size_t i = k->base; i < k->len; i++)
+        if (!strcmp(k->names[i]->name.text, name->name.text)) return pattern_fail(k, at, "multiple assignments to name '", source_name(name), "' in pattern");
+    if (grow(k->c, (void **)&k->names, &k->cap, k->len + 1, sizeof(*k->names))) return -1;
+    k->names[k->len++] = name;
     return 0;
 }
-/* Names bound by a pattern. Returns -1 for too many names, -2 for a repeated
- * name, and -3 when alternatives differ; *bad names the culprit, *where
- * the pattern binding it again or the alternatives. */
-static int pattern_names(Node *n, const char **names, size_t *count, size_t limit, const char **bad, Node **where) {
-    if (!n) return 0;
-    Node *name = n->op == PT_CAPTURE ? n->a : n->op == PT_STAR ? n->a : n->op == PT_AS ? n->b : NULL;
-    if (n->op == PT_AS) { int s = pattern_names(n->a, names, count, limit, bad, where); if (s < 0) return s; }
-    if (name) { int s = pattern_name(n, name, names, count, limit, bad, where); if (s < 0) return s; }
-    if (n->op == PT_OR) {
-        size_t start = *count;
-        int status = pattern_names(n->args, names, count, limit, bad, where);
-        if (status < 0) return status;
-        /* Every other alternative binds the same set of names as the first. */
-        for (Node *item = n->args->next; item; item = item->next) {
-            const char *other[256];
-            size_t other_count = start;
-            memcpy(other, names, start * sizeof(*names));
-            if ((status = pattern_names(item, other, &other_count, limit < 256 ? limit : 256, bad, where)) < 0) return status;
-            *where = n;
-            if (other_count != *count) return -3;
-            for (size_t i = start; i < other_count; i++) {
-                size_t j;
-                for (j = start; j < *count; j++) if (!strcmp(other[i], names[j])) break;
-                if (j == *count) return -3;
+/* Whether expression n is a literal a pattern may match: a number,
+ * string, bytes, None, True or False, maybe signed or complex. */
+static int literal_kind(Node *n) {
+    int kind = n->kind;
+    return kind == N_INT || kind == N_FLOAT || kind == N_IMAG || kind == N_STRING || kind == N_BYTES || kind == N_NONE ||
+           kind == N_BOOL || kind == N_UNARY || kind == N_BINARY;
+}
+static SPYValue *pattern_constant(SPYContext *, Node *);
+/* Mapping pattern n's keys, in order: each a literal or an attribute,
+ * no literal equal to one before it. */
+static int mapping_keys(PatternCheck *k, Node *n) {
+    SPYValue *seen = value_new(k->c, SPY_LIST);
+    int status = seen ? 0 : -1;
+    for (Node *entry = n->args; entry && !status; entry = entry->next) {
+        if (entry->a->kind == N_ATTR) continue;
+        if (!literal_kind(entry->a)) { status = pattern_fail(k, n, "mapping pattern keys may only match literals and attribute lookups", "", ""); break; }
+        SPYValue *key = pattern_constant(k->c, entry->a), *text = NULL;
+        for (size_t i = 0; key && i < seen->as.seq.len && !text; i++)
+            if (equal(seen->as.seq.items[i], key)) {
+                text = spy_repr(k->c, key);
+                status = text ? pattern_fail(k, n, "mapping pattern checks duplicate key (", text->as.string.data, ")") : -1;
             }
-        }
+        if (!key || (!text && sequence_append(k->c, seen, key))) status = -1;
+        spy_release(key); spy_release(text);
+    }
+    spy_release(seen);
+    return status;
+}
+/* Check pattern n as CPython's compiler compiles it; irrefutable only
+ * when allow is set. */
+static int pattern_walk(PatternCheck *k, Node *n, int allow) {
+    switch (n->op) {
+    case PT_WILDCARD: case PT_CAPTURE:
+        if (!allow && n->op == PT_WILDCARD) return pattern_fail(k, n, "wildcard makes remaining patterns unreachable", "", "");
+        if (!allow) return pattern_fail(k, n, "name capture '", source_name(n->a), "' makes remaining patterns unreachable");
+        return n->op == PT_CAPTURE ? pattern_store(k, n, n->a) : 0;
+    case PT_STAR: return n->a ? pattern_store(k, n, n->a) : 0;
+    case PT_AS: return pattern_walk(k, n->a, allow) || pattern_store(k, n, n->b) ? -1 : 0;
+    case PT_VALUE: return 0;
+    case PT_LITERAL: return literal_kind(n->a) ? 0 : pattern_fail(k, n->a, "patterns may only match literals and attribute lookups", "", "");
+    case PT_SEQUENCE: {
+        int stars = 0;
+        for (Node *item = n->args; item; item = item->next) stars += item->op == PT_STAR;
+        if (stars > 1) return pattern_fail(k, n, "multiple starred names in sequence pattern", "", "");
+        for (Node *item = n->args; item; item = item->next) if (pattern_walk(k, item, 1)) return -1;
         return 0;
     }
-    if (n->op == PT_SEQUENCE || n->op == PT_CLASS)
-        for (Node *item = n->args; item; item = item->next) { int s = pattern_names(item, names, count, limit, bad, where); if (s < 0) return s; }
-    if (n->op == PT_MAPPING) {
-        for (Node *entry = n->args; entry; entry = entry->next) { int s = pattern_names(entry->b, names, count, limit, bad, where); if (s < 0) return s; }
-        if (n->c) { int s = pattern_name(n, n->c, names, count, limit, bad, where); if (s < 0) return s; }
+    case PT_MAPPING:
+        if (mapping_keys(k, n)) return -1;
+        for (Node *entry = n->args; entry; entry = entry->next) if (pattern_walk(k, entry->b, 1)) return -1;
+        return n->c ? pattern_store(k, n, n->c) : 0;
+    case PT_CLASS:
+        for (Node *entry = n->c; entry; entry = entry->next)
+            for (Node *other = entry->next; other; other = other->next)
+                if (!strcmp(entry->name.text, other->name.text)) return pattern_fail(k, other->b, "attribute name repeated in class pattern: ", entry->name.text, "");
+        for (Node *item = n->args; item; item = item->next) if (pattern_walk(k, item, 1)) return -1;
+        for (Node *entry = n->c; entry; entry = entry->next) if (pattern_walk(k, entry->b, 1)) return -1;
+        return 0;
+    default: {
+        /* An or-pattern: each alternative stores names of its own, the
+         * same as the first's, which are then the pattern's; only the
+         * last may be irrefutable. */
+        size_t outer = k->base, start = k->len, control = 0;
+        for (Node *alt = n->args; alt; alt = alt->next) {
+            k->base = k->len = alt == n->args ? start : start + control;
+            if (pattern_walk(k, alt, !alt->next && allow)) return -1;
+            if (alt == n->args) { control = k->len - start; continue; }
+            int same = k->len - (start + control) == control;
+            for (size_t i = start; same && i < start + control; i++) {
+                same = 0;
+                for (size_t j = start + control; j < k->len && !same; j++) same = !strcmp(k->names[i]->name.text, k->names[j]->name.text);
+            }
+            if (!same) return pattern_fail(k, n, "alternative patterns bind different names", "", "");
+        }
+        k->base = outer; k->len = start + control;
+        for (size_t i = start; i < start + control; i++)
+            for (size_t j = outer; j < start; j++)
+                if (!strcmp(k->names[i]->name.text, k->names[j]->name.text))
+                    return pattern_fail(k, n, "multiple assignments to name '", source_name(k->names[i]), "' in pattern");
+        return 0;
     }
-    if (n->op == PT_CLASS)
-        for (Node *entry = n->c; entry; entry = entry->next) { int s = pattern_names(entry->b, names, count, limit, bad, where); if (s < 0) return s; }
+    }
+}
+/* A case's pattern errors, found as its header completes: allowed, when
+ * it may be irrefutable (it is guarded or the match's last case), and
+ * denied, when it may not; whether an earlier error was deferred. */
+typedef struct { PatternCheck allowed, denied; int guarded, before; } CaseCheck;
+/* The allowed check keeps the names the pattern captures, in the order
+ * they are stored (case_begin). */
+static int case_check(Node *item, CaseCheck *k, int before) {
+    k->guarded = item->b != NULL; k->before = before;
+    for (int deny = 0; deny < 2 - k->guarded; deny++) {
+        PatternCheck *w = deny ? &k->denied : &k->allowed;
+        int status = pattern_walk(w, item->a, !deny);
+        if (deny) { mem_free(w->names); w->names = NULL; w->len = w->cap = w->base = 0; }
+        if (status && !w->message) return -1;
+    }
     return 0;
 }
-/* Irrefutable patterns may appear only last, as CPython's compiler checks:
- * the last alternative of an or-pattern inherits the permission. */
-static Node *pattern_reachable(Parser *p, Node *n, int allow) {
-    if (n->op == PT_WILDCARD || n->op == PT_CAPTURE) {
-        if (allow) return n;
-        char message[300];
-        if (n->op == PT_WILDCARD) snprintf(message, sizeof(message), "wildcard makes remaining patterns unreachable");
-        else snprintf(message, sizeof(message), "name capture '%s' makes remaining patterns unreachable", source_name(n->a));
-        return syntax_at(p, n, message);
+/* Case k's error, deferred where CPython's compiler meets it: before
+ * any its guard and suite gave, after any before it. */
+static void case_checked(Parser *p, CaseCheck *k, int last) {
+    PatternCheck *w = last || k->guarded ? &k->allowed : &k->denied;
+    if (w->message && !k->before) {
+        mem_free(p->deferred_long); p->deferred_long = w->message; w->message = NULL;
+        p->deferred = p->deferred_long; p->deferred_line = w->line; p->deferred_node = NULL;
+        p->deferred_start = w->start; p->deferred_end = w->end;
     }
-    if (n->op == PT_AS) return pattern_reachable(p, n->a, allow) ? n : NULL;
-    for (Node *item = n->op == PT_STAR ? NULL : n->args; item; item = item->next)
-        if (!pattern_reachable(p, item, n->op == PT_OR ? !item->next && allow : 1)) return NULL;
-    if (n->op == PT_MAPPING || n->op == PT_CLASS)
-        for (Node *entry = n->op == PT_MAPPING ? n->args : n->c; entry; entry = entry->next)
-            if (!pattern_reachable(p, entry->b, 1)) return NULL;
-    return n;
+    mem_free(k->allowed.message); mem_free(k->denied.message); mem_free(k->allowed.names);
+    k->allowed.message = k->denied.message = NULL; k->allowed.names = NULL;
+    k->allowed.len = k->allowed.cap = k->allowed.base = 0;
 }
 /* A case clause's patterns and guard, after the 'case' keyword. */
 /* A case's pattern and guard; with guard, the guard emits as it is
@@ -8178,8 +8224,7 @@ static Node *case_header(Parser *p, Program **guard) {
             if (!element) return NULL;
             *items = element; items = &element->next;
         }
-        if (check_sequence_stars(p, sequence->args, start)) return NULL;
-        first = sequence;
+        first = span(p, sequence, start);
     } else if (first->op == PT_STAR) return syntax(p, "invalid syntax");
     item->a = first;
     if (!take_word(p, "if")) return item;
@@ -8208,39 +8253,39 @@ static Node *match_statement(Parser *p) {
     while (take(p, T_NL)) {}
     if (!take(p, T_INDENT)) return missing_block(p, "'match' statement", line);
     Node **tail = &n->args;
+    /* The last case's pattern check, until the next case shows it is not
+     * the match's last (case_checked). */
+    CaseCheck checked = {{.c = p->ctx}, {.c = p->ctx}, 0, 0};
+    int pending = 0;
     while (!at(p, T_DEDENT) && !at(p, T_END)) {
         if (take(p, T_NL)) continue;
-        if (!keyword(p, "case")) return syntax(p, "invalid syntax");
+        if (!keyword(p, "case")) { syntax(p, "invalid syntax"); goto failed; }
+        if (pending) case_checked(p, &checked, 0);
+        pending = 0;
         p->pos++;
         size_t case_line = keyword_line(p);
         Case k = {{0}, 0, NULL};
         Program *guard = NULL;
         p->matching = emits;
         size_t recorded = p->events.len;
+        int deferred = p->deferred != NULL;
         Node *before = p->unit->as.unit.nodes, *item = case_header(p, emits ? &guard : NULL);
         p->matching = 0;
-        if (!item || case_recorded(p, item, recorded) || analyse_statements(p, item) || (emits && header_ready(p, before))) { free_program(guard); return NULL; }
-        if (emits) case_begin(p, p->body.program, item, &k, guard);
-        if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); return NULL; }
+        if (!item || case_recorded(p, item, recorded) || analyse_statements(p, item) || (emits && header_ready(p, before)) ||
+            case_check(item, &checked, deferred)) { free_program(guard); goto failed; }
+        pending = 1;
+        if (emits) case_begin(p, p->body.program, item, &k, guard, &checked.allowed);
+        if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); goto failed; }
         if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
         *tail = item; tail = &item->next;
     }
+    if (pending) case_checked(p, &checked, 1);
     if (!n->args) return syntax(p, "expected 'case' block");
     if (emits) { match_end(p->ctx, p->body.program, n, exits); n->flags |= F_EMITTED; }
-    /* Compile-time checks run once all cases are known, like CPython's. */
-    for (Node *item = n->args; item; item = item->next) {
-        const char *names[256], *bad = "";
-        size_t count = 0;
-        Node *where = item->a;
-        if (!pattern_reachable(p, item->a, item->b || !item->next)) return NULL;
-        int status = pattern_names(item->a, names, &count, 256, &bad, &where);
-        char message[300];
-        if (status == -2) snprintf(message, sizeof(message), "multiple assignments to name '%s' in pattern", bad);
-        if (status == -3) snprintf(message, sizeof(message), "alternative patterns bind different names");
-        if (status == -1) snprintf(message, sizeof(message), "too many names in pattern");
-        if (status < 0) return syntax_at(p, status == -1 ? item->a : where, message);
-    }
     return expect(p, T_DEDENT, "invalid syntax") ? n : NULL;
+failed:
+    mem_free(checked.allowed.message); mem_free(checked.denied.message); mem_free(checked.allowed.names); mem_free(checked.denied.names);
+    return NULL;
 }
 
 /* A lazily evaluated type-parameter bound, constraint tuple, default, or
@@ -9778,16 +9823,6 @@ static int pattern_recorded(Node *o) {
     }
 }
 /* Append pattern or expression o's analysis, in visiting order. */
-static SPYValue *mapping_duplicate(SPYContext *, Node *, size_t *);
-/* Record mapping pattern o's first repeated key, by its text and line,
- * found now; analysis reports it in order (scope_check). */
-static int mapping_events(Parser *p, Node *o) {
-    size_t line = 0;
-    SPYValue *key = mapping_duplicate(p->ctx, o, &line);
-    int status = p->ctx->error_type[0] || (key && text_event(p->ctx, &p->events, EV_CHECK, N_PATTERN, NULL, key->as.string.data, line, NULL)) ? -1 : 0;
-    spy_release(key);
-    return status;
-}
 static int pattern_events(Parser *p, Scope *scope, Node *o) {
     Events *e = &p->events;
     if (!o) return 0;
@@ -9800,7 +9835,6 @@ static int pattern_events(Parser *p, Scope *scope, Node *o) {
     case PT_VALUE: case PT_LITERAL: return pattern_events(p, scope, o->a);
     case PT_AS: return pattern_events(p, scope, o->a) || name_event(p->ctx, e, EV_BIND, S_LOCAL, scope, o->b, o) ? -1 : 0;
     case PT_MAPPING:
-        if (mapping_events(p, o)) return -1;
         for (Node *entry = o->args; entry; entry = entry->next)
             if (pattern_events(p, scope, entry->a) || pattern_events(p, scope, entry->b)) return -1;
         if (o->c && o->c->kind == N_NAME) return name_event(p->ctx, e, EV_BIND, S_LOCAL, scope, o->c, o);
@@ -9808,6 +9842,13 @@ static int pattern_events(Parser *p, Scope *scope, Node *o) {
     case PT_CLASS:
         if (pattern_events(p, scope, o->a)) return -1;
         for (Node *item = o->args; item; item = item->next) if (pattern_events(p, scope, item)) return -1;
+        /* A keyword naming __debug__ is an error at its sub-pattern. */
+        for (Node *entry = o->c; entry; entry = entry->next)
+            if (!strcmp(entry->name.text, "__debug__")) {
+                if (event_into(p->ctx, e, EV_TARGET, 0, NULL, NULL, NULL)) return -1;
+                e->items[e->len - 1].site = site_of(entry->b);
+                break;
+            }
         for (Node *entry = o->c; entry; entry = entry->next) if (pattern_events(p, scope, entry->b)) return -1;
         return 0;
     default:
@@ -10370,11 +10411,6 @@ static int scope_named(SPYContext *c, Scope *scope, Event *v, int after) {
  * function asynchronous or a generator. */
 static int scope_check(SPYContext *c, Scope *scope, Event *v) {
     int kind = (int)v->flags;
-    if (kind == N_PATTERN) {
-        c->line = v->line;
-        errorf(c, "SyntaxError", "mapping pattern checks duplicate key (%s)", event_text(c->events, v));
-        return -1;
-    }
     /* An asynchronous comprehension clause. */
     if (kind == N_FOR) return scope_await(c, scope, &v->site);
     if (scope_annotation_error(c, scope, kind, &v->site)) return -1;
@@ -10531,21 +10567,7 @@ static SPYValue *pattern_constant(SPYContext *c, Node *n) {
     default: return NULL;
     }
 }
-/* Literal mapping keys must be distinct; CPython rejects duplicates at compile time. */
-static SPYValue *mapping_duplicate(SPYContext *c, Node *n, size_t *line) {
-    SPYValue *seen = value_new(c, SPY_LIST), *text = NULL;
-    if (!seen) return NULL;
-    for (Node *entry = n->args; entry && !text && !c->error_type[0]; entry = entry->next) {
-        SPYValue *key = pattern_constant(c, entry->a);
-        if (!key) continue;
-        for (size_t i = 0; i < seen->as.seq.len && !text && !c->error_type[0]; i++)
-            if (equal(seen->as.seq.items[i], key)) { text = spy_repr(c, key); *line = entry->a->line; }
-        if (!text && !c->error_type[0]) sequence_append(c, seen, key);
-        spy_release(key);
-    }
-    spy_release(seen);
-    return text;
-}/* Annotated assignment n's name target: an annotated global or nonlocal is
+/* Annotated assignment n's name target: an annotated global or nonlocal is
  * an error; a parenthesized name without a value is neither bound nor
  * used, and a function's local only annotated is no code's local until
  * it is used (held). */
@@ -10926,7 +10948,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
-    mem_free(p.tokens); mem_free(p.literal_error); mem_free(p.emitted); mem_free(p.events.items); mem_free(p.events.texts);
+    mem_free(p.tokens); mem_free(p.deferred_long); mem_free(p.literal_error); mem_free(p.emitted); mem_free(p.events.items); mem_free(p.events.texts);
     for (size_t i = 0; i < p.apart_len; i++) free_program(p.aparts[i].program);
     mem_free(p.aparts);
     if (c->error_type[0]) {
@@ -20161,17 +20183,15 @@ static void compile_pattern(SPYContext *c, Program *p, Node *n, size_t temps, Pa
 /* The cases of a match statement, whose subject stays on the stack until
  * a case is chosen, compiled as the parser parses them (match_statement):
  * a case's pattern matches a copy of the subject above a slot for each
- * name it captures (pattern_names), stored once it matches, before its
+ * name it captures (case_check), stored once it matches, before its
  * guard; after the suite, its jump past the rest, linked to the earlier
  * cases' in exits; then the drops of a failed match, and the next case, where a failed
  * guard goes. After the last, the subject's pop, where those jumps go. */
-static void case_begin(Parser *parser, Program *p, Node *item, Case *k, Program *guard) {
+static void case_begin(Parser *parser, Program *p, Node *item, Case *k, Program *guard, PatternCheck *captured) {
     SPYContext *c = parser->ctx;
-    const char *bad;
-    Node *where;
-    size_t count = 0;
-    if (!(k->names = allocate(c, 256 * sizeof(*k->names)))) { free_program(guard); return; }
-    pattern_names(item->a, k->names, &count, 256, &bad, &where);
+    size_t count = captured->len;
+    if (count && !(k->names = allocate(c, count * sizeof(*k->names)))) { free_program(guard); return; }
+    for (size_t i = 0; i < count; i++) k->names[i] = captured->names[i]->name.text;
     k->fail.names = k->names; k->fail.count = count; k->fail.parser = parser;
     emit_pattern(c, p, item, P_BEGIN, count);
     compile_pattern(c, p, item->a, 1, &k->fail);

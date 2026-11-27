@@ -236,7 +236,7 @@ Contents | - navigation
 15 Compound Statements > 15.5 The `with` statement > 15.5.1 Runtime Semantics: Evaluation | With
 15 Compound Statements > 15.5 The `with` statement > 15.5.2 The `async with` statement | AsyncWith
 15 Compound Statements > 15.6 The `match` statement | = sections
-15 Compound Statements > 15.6 The `match` statement > 15.6.1 Runtime Semantics: Evaluation | Match, MatchErrors, MatchGuards
+15 Compound Statements > 15.6 The `match` statement > 15.6.1 Runtime Semantics: Evaluation | Match, MatchErrors, MatchErrorStage, MatchGuards
 15 Compound Statements > 15.6 The `match` statement > 15.6.2 Patterns | Match
 15 Compound Statements > 15.6 The `match` statement > 15.6.3 Sequence patterns | Match
 15 Compound Statements > 15.6 The `match` statement > 15.6.4 Mapping patterns | Match, MatchLookups
