@@ -7737,12 +7737,14 @@ static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
     if (owner && owner->kind == N_DEF) body->line = owner->line;
     return fn;
 }
-/* Mark n and the nodes within it, and the nodes after it, F_KEEP. */
-static void keep_tree(Node *n) {
-    for (; n && !(n->flags & F_KEEP); n = n->next) {
-        n->flags |= F_KEEP;
-        keep_tree(n->a); keep_tree(n->b); keep_tree(n->c); keep_tree(n->args); keep_tree(n->decorators); keep_tree(n->params);
-    }
+/* Mark annotation entry's nodes that the body's __annotate__ reads as
+ * it ends (annotate_program) F_KEEP: the entry, its annotation, and a
+ * starred one's value or a string one's expression. */
+static void keep_entry(Node *entry) {
+    Node *a = entry->a;
+    entry->flags |= F_KEEP; a->flags |= F_KEEP;
+    if (a->kind == N_STAR) a->a->flags |= F_KEEP;
+    if (a->kind == N_STRING && a->annotate) a->annotate->flags |= F_KEEP;
 }
 /* Simple annotated assignment n of the body being parsed, if it collects
  * them: PEP 563 stores each string in __annotations__ as it runs; else its
@@ -7755,7 +7757,7 @@ static int annotated(Parser *p, Node *n) {
     Node *entry = annotation_entry(p, n->a->name.text, n->b, p->annotation_index, p->conditional ? F_CONDITIONAL : 0);
     if (!entry) return -1;
     /* A body's annotations are compiled when it ends (collect_end). */
-    keep_tree(entry);
+    keep_entry(entry);
     n->op = p->annotation_index++;
     if (p->conditional) n->flags |= F_CONDITIONAL;
     *p->annotations_tail = entry; p->annotations_tail = &entry->next;
