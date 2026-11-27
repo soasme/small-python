@@ -230,6 +230,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_HEADER = 32768 /* A class whose header's steps were emitted as it was parsed (class_header). */,
        F_UNEVALUATED = 65536 /* A lambda or comprehension in an annotation no code evaluates (Parser.unevaluated). */,
        F_NAMESPACE = 131072 /* A class or module body's def, class, annotated or chained assignment, or del: a binding through its namespace. */,
+       F_STRING = 262144 /* An expression statement of a string literal. */,
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */,
        F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */,
        F_ANALYSED = 2097152 /* A statement, or a compound statement's header, analysed as it was parsed. */,
@@ -8659,7 +8660,7 @@ static Node *statement(Parser *p) {
     if (n && !n->spanned) span_block(p, n, (size_t)(first - p->tokens));
     if (n && !p->ctx->error_type[0] && parse_children(p, n)) return NULL;
     if (!p->statement_level) {
-        if (!future && !(!p->top_statements && n && n->kind == N_EXPR && n->a && n->a->kind == N_STRING) && !p->future_closed) {
+        if (!future && !(!p->top_statements && n && n->kind == N_EXPR && (n->flags & F_STRING)) && !p->future_closed) {
             p->future_closed = 1; p->future_closed_line = first->line;
         }
         p->top_statements++;
@@ -9217,13 +9218,13 @@ static Node *yield_statement(Parser *p, Node *n) {
  * statements compile when they end, their emitted steps undone. */
 /* Whether statement n, as it ends, is its body's docstring. */
 static int docstring_at(Parser *p, Node *n) {
-    return n && n->kind == N_EXPR && n->a->kind == N_STRING && p->body.docs && !p->body.begun;
+    return n && n->kind == N_EXPR && (n->flags & F_STRING) && p->body.docs && !p->body.begun;
 }
 /* Whether docstring n compiles no statement: under -OO, or in a
  * function, whose docstring CPython never compiles. Then it is a pass
  * until another statement follows it (statement). */
 static int docstring_passes(Parser *p, Node *n) {
-    return n && n->kind == N_EXPR && n->a->kind == N_STRING && p->body.docs && (p->ctx->optimize > 1 || p->body.first_line);
+    return n && n->kind == N_EXPR && (n->flags & F_STRING) && p->body.docs && (p->ctx->optimize > 1 || p->body.first_line);
 }
 /* Docstring n that passes: a pass, a function's on its first line, where
  * an empty body returns, but under -OO, its __doc__ read first; -1 on an
@@ -9359,6 +9360,7 @@ static Node *expression_statement(Parser *p, Node *n) {
     int parenthesized = at(p, '(');
     size_t start = p->pos;
     if (!(n->a = expression_list(p, 0))) return NULL;
+    if (n->a->kind == N_STRING) n->flags |= F_STRING;
     int op = peek(p)->kind;
     /* invalid_assignment reaches invalid_named_expression through its first
      * star_named_expression: a single expression other than a name. */
@@ -9537,7 +9539,7 @@ static int operator_right(Node *);
 static SPYValue *unary(SPYContext *, int, SPYValue *);
 /* Optimization level 2 keeps no docstrings: each becomes pass, so __doc__ is None. */
 static void drop_docstring(Node *body) {
-    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) {
+    if (body && body->kind == N_EXPR && (body->flags & F_STRING)) {
         body->kind = N_PASS; body->a = NULL;
         /* Its analysis is its own node's, the last of its events. */
         if (body->flags & F_EVENTS) body->events_at = body->events_end - 1;
@@ -9745,8 +9747,7 @@ static int debug_named(Node *n) { return n->places[PLACE_DEBUG] != SPOT_NONE; }
 /* Whether target t's analysis can be built from its parts' recorded
  * events (scope_target). */
 static int target_recorded(Node *t) {
-    if (t->kind == N_STAR) return target_recorded(t->a);
-    if (t->kind == N_LIST || t->kind == N_TUPLE) return t->parts && t->parts->recorded && (t->flags & F_EVENTS);
+    if (t->kind == N_STAR || t->kind == N_LIST || t->kind == N_TUPLE) return t->parts && t->parts->recorded && (t->flags & F_EVENTS);
     if (!(t->flags & F_EVENTS) || (t->flags & F_ANALYSED)) return 0;
     return t->kind == N_NAME || t->kind == N_ATTR || t->kind == N_INDEX;
 }/* Move node t's events, the log's last, before node n's, just before
@@ -9800,13 +9801,13 @@ static int events_again(Parser *p, Node *t) {
  * first; a name bound in scope; a list's, tuple's or starred item's its
  * items', uncounted; a stored attribute of self a class's static
  * first. */
-/* Append the analysis of a recorded target list's parts, its events
- * from first on, as target_events's: a name's use bound, an attribute
- * or item's events again, a stored attribute of self a class's static
- * first. */
-static int parts_events(Parser *p, Scope *scope, const Part *parts, size_t first, int store) {
+/* Append the analysis of a recorded target's parts from parts to end,
+ * their events from first on, as target_events's: a name's use bound,
+ * an attribute or item's events again, a stored attribute of self a
+ * class's static first. */
+static int parts_events(Parser *p, Scope *scope, const Part *parts, const Part *end, size_t first, int store) {
     Events *e = &p->events;
-    for (const Part *t = parts + 1; t < parts + parts->size; t++) {
+    for (const Part *t = parts; t < end; t++) {
         if (t->kind == N_TUPLE || t->kind == N_LIST) continue;
         size_t at = first + t->events_at, count = t->events_end - t->events_at;
         if (t->kind == N_NAME) {
@@ -9832,17 +9833,18 @@ static int target_events(Parser *p, Scope *scope, Node *t, int store) {
         p->events.items[p->events.len - 1].site = place_site(t, PLACE_DEBUG);
         return 0;
     }
-    if (t->kind == N_STAR) return target_events(p, scope, t->a, store);
-    if (t->kind == N_LIST || t->kind == N_TUPLE) return parts_events(p, scope, t->parts, t->events_at, store);
+    /* A starred target's parts are its value's, its own first. */
+    if (t->kind == N_STAR) return parts_events(p, scope, t->parts, t->parts + t->parts->size, t->events_at, store);
+    if (t->kind == N_LIST || t->kind == N_TUPLE) return parts_events(p, scope, t->parts + 1, t->parts + t->parts->size, t->events_at, store);
     if (t->kind == N_NAME) return name_event(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t);
     if (store > 0 && self_attribute(t) && text_event(p->ctx, &p->events, EV_STATIC, 0, scope, source_name(t), t->line, NULL)) return -1;
     return events_again(p, t);
 }
 /* Where target t's recorded events begin: its first name's or part's. */
 static size_t target_at(Node *t, size_t otherwise) {
-    if (t->kind == N_STAR) return target_at(t->a, otherwise);
-    if ((t->kind == N_LIST || t->kind == N_TUPLE) && t->parts && t->parts->count) {
-        const Part *leaf = t->parts + 1;
+    const Part *list = t->kind == N_STAR || t->kind == N_LIST || t->kind == N_TUPLE ? t->parts : NULL;
+    if (list && (list->kind == N_LIST || list->kind == N_TUPLE) && list->count) {
+        const Part *leaf = list + 1;
         while ((leaf->kind == N_LIST || leaf->kind == N_TUPLE) && leaf->count) leaf++;
         return leaf->recorded ? t->events_at + leaf->events_at : otherwise;
     }
@@ -15350,7 +15352,7 @@ static SPYValue *builtin_slot_before(SPYContext *, SPYValue *, const char *);
  * expanded, the first line's leading spaces and the other lines' common
  * indentation removed. NULL without a docstring or with an error set. */
 static SPYValue *docstring(SPYContext *c, Node *body) {
-    if (!body || body->kind != N_EXPR || body->a->kind != N_STRING) return NULL;
+    if (!body || body->kind != N_EXPR || !(body->flags & F_STRING)) return NULL;
     const char *text = body->a->name.text;
     size_t len = (size_t)body->a->op, column = 0;
     Buffer doc = {.ctx = c};
