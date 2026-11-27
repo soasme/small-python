@@ -6526,7 +6526,11 @@ static Node *atom_node(Parser *p) {
                 size_t operand = p->pos;
                 item = node(p, N_STAR);
                 if (!item) return NULL;
-                if (!(item->a = expression(p, 4))) return open == '(' && !n->args ? group_star_error(p, item_at, 1) : NULL;
+                /* A generator expression's element is a starred_expression,
+                 * a list's or set's a star_named_expression. */
+                int generator = open == '(' && !n->args && comprehension_ahead(p);
+                if (!(item->a = generator ? plain_expression(p, 0) : expression(p, 4)))
+                    return open == '(' && !n->args ? group_star_error(p, item_at, 1) : NULL;
                 span(p, item, item_at);
                 if (parse_children(p, item)) return NULL;
                 if (p->pos > p->expr_end || (p->pos == p->expr_end && operand < p->expr_start)) {
