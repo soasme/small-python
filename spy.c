@@ -318,6 +318,7 @@ struct Node {
     int operation; /* An operator's fused operation plus one, as it completes (fused_operation). */
     unsigned char leaf_yield; /* Whether a yield, compiled, yields a leaf in its own step (yields_leaf). */
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
+    uint32_t object_end; /* An attribute's or item's object's steps' end plus one, once emitted, as it completes. */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
     char *original;
@@ -9379,12 +9380,12 @@ static Node *expression_statement(Parser *p, Node *n) {
         }
     }
     if (op == ':') {
-        Node *target = n->a;
+        /* An unparenthesized tuple's error is at its first item (invalid_ann_assign_target). */
+        Node *target = n->a, *place = target->kind == N_TUPLE && !single_group(p, start, p->pos) ? target->args : target;
         /* invalid_assignment's annotation errors need an expression after the ':'. */
         int invalid = target->kind != N_NAME && target->kind != N_ATTR && target->kind != N_INDEX;
         if (invalid && target->kind != N_STAR && !probe_expression(p, p->pos + 1, 0)) return syntax(p, "invalid syntax");
-        /* An unparenthesized tuple's error is at its first item (invalid_ann_assign_target). */
-        if (target->kind == N_TUPLE) return syntax_at(p, single_group(p, start, p->pos) ? target : target->args, "only single target (not tuple) can be annotated");
+        if (target->kind == N_TUPLE) return syntax_at(p, place, "only single target (not tuple) can be annotated");
         if (target->kind == N_LIST) return syntax_at(p, target, "only single target (not list) can be annotated");
         /* A starred target ends the expression statement it began. */
         if (target->kind == N_STAR) return syntax(p, "invalid syntax");
@@ -9660,6 +9661,7 @@ static int parse_children(Parser *p, Node *n) {
         SPYValue *operand = n->a->kind <= N_IMAG ? n->a->constant : n->a->kind == N_UNARY ? n->a->constant ? n->a->constant : n->a->folded : NULL;
         if (operand && !(n->folded = unary(p->ctx, '-', operand))) return -1;
     }
+    if (n->kind == N_ATTR || n->kind == N_INDEX) n->object_end = n->a->flags & F_EMITTED ? n->a->steps_end + 1 : 0;
     if (target_facts(p->ctx, n) || list_parts(p, n) || definition_head(p->ctx, n)) return -1;
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
@@ -20032,13 +20034,13 @@ static int annotated_parsed(Parser *p, Node *n) {
     else {
         /* Its read goes, and its fused read before it; a subscript's
          * primary is popped before its key is evaluated. */
-        if (!(t->a->flags & F_EMITTED)) return 0;
+        if (!t->object_end) return 0;
         int fused = program->items[at].op == BC_OPERATE && program->items[at].target == end;
         if (fused) emit_drop(program, at);
         if (t->kind == N_ATTR) operand_drop(program, program->items[end - 1 - fused].attribute);
         emit_drop(program, end - 1 - fused);
         /* The primary's steps were recorded before the fused read went before them. */
-        if (t->kind == N_INDEX && emit_before(c, program, t->a->steps_end, BC_POP, n, 0) == SIZE_MAX) return 0;
+        if (t->kind == N_INDEX && emit_before(c, program, t->object_end - 1, BC_POP, n, 0) == SIZE_MAX) return 0;
         emit(c, program, BC_POP, n, 0);
     }
     if (n->flags & (F_FUTURE | F_CONDITIONAL)) { emit_annotation(c, program, n); emit(c, program, BC_POP, n, 0); }
