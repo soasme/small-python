@@ -256,6 +256,13 @@ enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED 
 enum { SPOT_NONE, SPOT_SELF, SPOT_HERE, SPOT_AT };
 enum { PLACE_DEBUG = 4, PLACES };
 typedef struct { const char *name, *start, *end; size_t line; int spanned; } Spot;
+/* A part of a target list, its items' in order after it, as its steps
+ * become a target's (target_steps): its kind, whether it is a starred
+ * item, emitted, and an item or attribute a fused step may store
+ * (stores_fused), its steps' count, its line and its item's (a starred
+ * item's star), its count of parts, and a list's or tuple's count of
+ * items and its starred item's index, or UINT32_MAX. */
+typedef struct { unsigned char kind, starred, emitted, fused; uint32_t length, line, item_line, size, count, star; } Part;
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -279,9 +286,11 @@ struct Node {
      * star target, and the places (SPOT_*) of that error and of its first
      * part each kind of target (TARGETS_*) cannot assign, and of its part
      * naming __debug__ (PLACE_DEBUG); those copied from a part are in
-     * spots. Whether it is an attribute of self. */
-    unsigned char targets, star_ok, places[5], unstarred, self_attribute;
+     * spots. Whether it is an attribute of self, and an item or attribute
+     * of literals and names a fused step may store (stores_fused). */
+    unsigned char targets, star_ok, places[5], unstarred, self_attribute, stores_fused;
     Spot *spots;
+    Part *parts; /* A list or tuple of targets' parts, itself first (list_parts). */
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
@@ -1719,7 +1728,7 @@ static void free_value(SPYValue *v) {
         while (n) {
             Node *next = n->allocated;
             free_scope_tree(c, n->scope, 1);
-            mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n); n = next;
+            mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n); n = next;
         }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
@@ -7027,6 +7036,7 @@ static Node *place_error(Parser *p, Node *n, int i, const char *message) {
     return NULL;
 }
 static int target_facts(SPYContext *, Node *);
+static int at_hand(Node *);
 static int target_parts(SPYContext *, Node *);
 /* Whether n is an assignment target; if not, its error, unless it is
  * simply not one. */
@@ -7070,6 +7080,7 @@ static int target_parts(SPYContext *c, Node *n) {
     for (int t = 1; t < PLACE_DEBUG; t++) n->places[t] = simple ? SPOT_NONE : SPOT_SELF;
     n->places[PLACE_DEBUG] = (simple || kind == N_KEYWORD) && kind != N_INDEX && !strcmp(n->name.text, "__debug__") ? SPOT_SELF : SPOT_NONE;
     n->self_attribute = kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self");
+    n->stores_fused = (kind == N_ATTR || (kind == N_INDEX && at_hand(n->b))) && at_hand(n->a);
     if (kind == N_STAR) {
         /* An item: its operand's facts, but a deletion's error is the star (target reports a star alone). */
         Node *o = n->a;
@@ -9232,8 +9243,9 @@ static int scope_await(SPYContext *, Scope *, Node *);
 static int lambda_recorded(Parser *, Node *);
 static int comprehension_recorded(Parser *, Node *);
 static int annotated_recorded(Parser *, Node *);
+static int list_parts(SPYContext *, Node *);
 static int parse_children(Parser *p, Node *n) {
-    if (target_facts(p->ctx, n)) return -1;
+    if (target_facts(p->ctx, n) || list_parts(p->ctx, n)) return -1;
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_ANNASSIGN) return annotated_recorded(p, n);
@@ -9867,7 +9879,7 @@ static void free_node(Node *n) {
     if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
     else if (n->scope && n->scope->owner == n) n->scope->owner = NULL;
     spy_release(n->constant); spy_release(n->name.global_key);
-    mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n);
+    mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n);
 }
 /* After a line of module statements, parsed since start, is compiled
  * and analysed, free the nodes of the line before it, now compiled too,
@@ -18324,8 +18336,16 @@ static void docstring_unpass(Parser *p) {
 /* Emit op as emit does, but at at, before the steps of the expression
  * from there on, which jump only among themselves; its index, or
  * SIZE_MAX with an error. */
+static size_t step_before(Program *p, size_t at);
 static size_t emit_before(SPYContext *c, Program *p, size_t at, int op, Node *n, int arg) {
-    if (emit(c, p, op, n, arg) == SIZE_MAX) return SIZE_MAX;
+    return emit(c, p, op, n, arg) == SIZE_MAX ? SIZE_MAX : step_before(p, at);
+}
+/* A step of op, needing no node, on line, put at at. */
+static size_t emit_line_before(SPYContext *c, Program *p, size_t at, int op, size_t line, int arg) {
+    return emit_line(c, p, op, NULL, line, arg) == SIZE_MAX ? SIZE_MAX : step_before(p, at);
+}
+/* The program's last step moved to at. */
+static size_t step_before(Program *p, size_t at) {
     Instruction inserted = p->items[p->len - 1];
     memmove(p->items + at + 1, p->items + at, (p->len - 1 - at) * sizeof(*p->items));
     p->items[at] = inserted;
@@ -19226,31 +19246,74 @@ static void debug_text(Parser *p, Node *text, Node *value) {
     value->steps_at += length; value->steps_end += length;
     text->steps_at = at; text->steps_end = at + length;
 }
-static int store_at_hand(Program *, Node *);
-static size_t target_count(Node *, size_t *);
 static int assigns_at_hand(Program *, Node *);
 static void assignment_fused(SPYContext *, Program *, Node *, size_t);
 /* Target t's steps from at on, emitted as it was parsed, made those
  * storing the value atop the stack into it, the value
  * popped at popped when set, an item or attribute of literals and names
- * stored by a fused step first with stores_at (store_at_hand); or with
+ * stored by a fused step first with stores_at (stores_fused); or with
  * deletes, deleting it, a class or module body's name through its
  * namespace (name_delete), its None popped: their length, or 0 when its
  * steps are not a target's or on an error. With check, only whether
  * they are. */
 /* Whether t is an empty target list, which deletes in no steps. */
 static int empty_target(Node *t) { return (t->kind == N_TUPLE || t->kind == N_LIST) && !t->args; }
-static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int mode) {
-    size_t length = t->steps_end - t->steps_at;
+/* Part n of target t, as t's steps are now. */
+static Part part_of(Node *n, size_t item_line, int starred) {
+    return (Part){(unsigned char)n->kind, (unsigned char)starred, !!(n->flags & F_EMITTED), n->stores_fused,
+                  n->steps_end - n->steps_at, (uint32_t)n->line, (uint32_t)item_line, 1, 0, UINT32_MAX};
+}
+/* List or tuple n's parts when each item is a name, attribute, item, or
+ * such a list or tuple, maybe starred, from their own: whether they
+ * could not be made. */
+static int list_parts(SPYContext *c, Node *n) {
+    if ((n->kind != N_TUPLE && n->kind != N_LIST) || n->parts) return 0;
+    size_t size = 1, count = 0, star = UINT32_MAX;
+    for (Node *item = n->args; item; item = item->next, count++) {
+        Node *value = item->kind == N_STAR ? item->a : item;
+        if (item->kind == N_STAR) star = count;
+        if (value->kind == N_TUPLE || value->kind == N_LIST) {
+            if (!value->parts) return 0;
+            size += value->parts->size;
+        } else if (value->kind == N_NAME || value->kind == N_ATTR || value->kind == N_INDEX) size++;
+        else return 0;
+        if (size >= UINT32_MAX / 2) return 0;
+    }
+    Part *parts = allocate(c, size * sizeof(Part));
+    if (!parts) return -1;
+    parts[0] = (Part){(unsigned char)n->kind, 0, 0, 0, 0, (uint32_t)n->line, (uint32_t)n->line, (uint32_t)size, (uint32_t)count, (uint32_t)star};
+    Part *at = parts + 1;
+    for (Node *item = n->args; item; item = item->next) {
+        Node *value = item->kind == N_STAR ? item->a : item;
+        Part own = part_of(value, item->line, item->kind == N_STAR);
+        if (value->parts) {
+            memcpy(at, value->parts, value->parts->size * sizeof(Part));
+            own.size = at->size; own.count = at->count; own.star = at->star;
+        }
+        *at = own; at += at->size;
+    }
+    n->parts = parts;
+    return 0;
+}
+/* The steps of target part t from at on, emitted as it was parsed, made
+ * those storing the value atop the stack into it, the value popped on
+ * pop_line with pops, an item or attribute of literals and names
+ * stored by a fused step first with stores_at (stores_fused); or with
+ * deletes, deleting it, a class or module body's name through its
+ * namespace (name_delete), its None popped: their length, or 0 when its
+ * steps are not a target's or on an error. With check, only whether
+ * they are. */
+static size_t part_steps(SPYContext *c, Program *p, const Part *t, size_t at, int pops, size_t pop_line, int stores_at, int mode) {
+    size_t length = t->length;
     int check = mode == TARGET_CHECK, deletes = mode == TARGET_DELETE;
-    if (!(t->flags & F_EMITTED) || !length || at + length > p->len) return 0;
+    if (!t->emitted || !length || at + length > p->len) return 0;
     Instruction *x = &p->items[at];
     if (t->kind == N_NAME) {
         if (length != 1 || x->op != BC_NAME || check) return length == 1 && x->op == BC_NAME;
         /* A namespace deletes through its mapping, its None popped. */
         int op = deletes ? BC_DELETE : BC_STORE;
-        x->op = op; x->step = c->steps ? c->steps[op] : NULL; x->arg = deletes ? 3 * p->unbinds : popped != NULL;
-        return deletes && p->unbinds ? emit_before(c, p, at + 1, BC_POP, t, 0) == SIZE_MAX ? 0 : 2 : 1;
+        x->op = op; x->step = c->steps ? c->steps[op] : NULL; x->arg = deletes ? 3 * p->unbinds : pops;
+        return deletes && p->unbinds ? emit_line_before(c, p, at + 1, BC_POP, t->line, 0) == SIZE_MAX ? 0 : 2 : 1;
     }
     if (t->kind == N_ATTR || t->kind == N_INDEX) {
         if (p->items[at + length - 1].op != (t->kind == N_ATTR ? BC_ATTR : BC_INDEX)) return 0;
@@ -19262,9 +19325,9 @@ static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *
         int op = deletes && p->calls != PAUSING ? BC_DELETE : BC_SET_TARGET;
         x->op = op; x->step = c->steps ? c->steps[op] : NULL; x->arg = !deletes ? 0 : op == BC_SET_TARGET ? 1 : t->kind == N_INDEX ? 2 : 1;
         if (deletes) return length;
-        if (popped && emit_before(c, p, at + length++, BC_POP, popped, 0) == SIZE_MAX) return 0;
-        if (stores_at && store_at_hand(p, t)) {
-            size_t fused = emit_before(c, p, at, BC_STORE_AT, t, popped != NULL);
+        if (pops && emit_line_before(c, p, at + length++, BC_POP, pop_line, 0) == SIZE_MAX) return 0;
+        if (stores_at && t->fused && !p->loads && p->calls != PAUSING) {
+            size_t fused = emit_line_before(c, p, at, BC_STORE_AT, t->line, pops);
             if (fused == SIZE_MAX) return 0;
             patch(p, fused, at + ++length);
         }
@@ -19273,43 +19336,54 @@ static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *
     if (t->kind != N_TUPLE && t->kind != N_LIST) return 0;
     /* An empty target list's one step makes it: it unpacks to no items,
      * and deletes nothing (no steps, as empty_target tells). */
-    if (!t->args) {
+    if (!t->count) {
         if (length != 1 || check) return length == 1;
         emit_drop(p, at);
         if (deletes) return 0;
-        if (emit_before(c, p, at, BC_UNPACK, t, 0) == SIZE_MAX) return 0;
+        if (emit_line_before(c, p, at, BC_UNPACK, t->line, 0) == SIZE_MAX) return 0;
         p->items[at].other = NO_STEP;
-        return popped && emit_before(c, p, at + 1, BC_POP, popped, 0) == SIZE_MAX ? 0 : 1 + (popped != NULL);
+        return pops && emit_line_before(c, p, at + 1, BC_POP, pop_line, 0) == SIZE_MAX ? 0 : 1 + pops;
     }
     /* A display's own steps make it: one before its items and one after
      * each (starred_parsed), or one after them all. */
-    int starred = !packed(t);
+    int starred = t->star != UINT32_MAX || t->count > 1 << 20;
     size_t pos = at + starred;
     if (starred ? x->op != BC_NEW : p->items[at + length - 1].op != BC_NEW) return 0;
-    for (Node *item = t->args; item; item = item->next) {
-        Node *value = item->kind == N_STAR ? item->a : item;
-        if (!target_steps(c, p, value, pos, item, stores_at, TARGET_CHECK)) return 0;
-        pos += value->steps_end - value->steps_at;
-        if (starred && (pos >= p->len || p->items[pos].op != (item->kind == N_STAR ? BC_EXTEND : BC_ADD))) return 0;
+    const Part *item = t + 1;
+    for (size_t i = 0; i < t->count; i++, item += item->size) {
+        if (!part_steps(c, p, item, pos, 1, item->item_line, stores_at, TARGET_CHECK)) return 0;
+        pos += item->length;
+        if (starred && (pos >= p->len || p->items[pos].op != (item->starred ? BC_EXTEND : BC_ADD))) return 0;
         pos += starred;
     }
     if (pos + !starred != at + length) return 0;
     if (check) return length;
     emit_drop(p, starred ? at : at + length - 1);
-    pos = at;
-    for (Node *item = t->args; item; item = item->next) {
-        size_t steps = target_steps(c, p, item->kind == N_STAR ? item->a : item, pos, item, stores_at, mode);
-        if (!steps && !empty_target(item)) return 0;
+    pos = at; item = t + 1;
+    for (size_t i = 0; i < t->count; i++, item += item->size) {
+        size_t steps = part_steps(c, p, item, pos, 1, item->item_line, stores_at, mode);
+        if (!steps && (item->starred || (item->kind != N_TUPLE && item->kind != N_LIST) || item->count)) return 0;
         pos += steps;
         if (starred) emit_drop(p, pos);
     }
     if (deletes) return pos - at;
-    size_t star, unpack = emit_before(c, p, at, BC_UNPACK, t, (int)target_count(t, &star));
+    size_t unpack = emit_line_before(c, p, at, BC_UNPACK, t->line, (int)t->count);
     if (unpack == SIZE_MAX) return 0;
-    p->items[unpack].other = star == SIZE_MAX ? NO_STEP : (uint32_t)star;
+    p->items[unpack].other = t->star == UINT32_MAX ? NO_STEP : t->star;
     pos++;
-    if (popped && emit_before(c, p, pos++, BC_POP, popped, 0) == SIZE_MAX) return 0;
+    if (pops && emit_line_before(c, p, pos++, BC_POP, pop_line, 0) == SIZE_MAX) return 0;
     return pos - at;
+}
+/* Target t's steps from at on made a target's, as part_steps makes
+ * them, the value popped at popped when set. */
+static size_t target_steps(SPYContext *c, Program *p, Node *t, size_t at, Node *popped, int stores_at, int mode) {
+    Part own = part_of(t, t->line, 0);
+    if (t->kind == N_TUPLE || t->kind == N_LIST) {
+        if (!t->parts) return 0;
+        own.size = t->parts->size; own.count = t->parts->count; own.star = t->parts->star;
+        *t->parts = own;
+    }
+    return part_steps(c, p, t->parts ? t->parts : &own, at, popped != NULL, popped ? popped->line : 0, stores_at, mode);
 }
 /* Assert statement n, its test emitted as it was parsed from the
  * statement's start: its branch and the jump over its message after it,
@@ -19466,9 +19540,6 @@ static int emitted_operands(Program *p, Node *fixed[3], Node *list) {
 }
 /* Whether attribute or item target n of literals or names is stored at
  * hand (store_operands), outside a class body and while calls cannot pause. */
-static int store_at_hand(Program *p, Node *n) {
-    return (n->kind == N_ATTR || (n->kind == N_INDEX && at_hand(n->b))) && at_hand(n->a) && !p->loads && p->calls != PAUSING;
-}
 /* The step taking loop n's next item into target: a name on the loop's
  * line, outside a class body, is stored by the step itself (other 1),
  * which skips the name's BC_STORE after it unless that store calls Python. */
@@ -24576,15 +24647,6 @@ static SPYValue *unpack_settle(SPYContext *c, SPYValue *value, SPYValue *items, 
 }
 /* Target list n's count of targets, and the index of its star in star
  * (SIZE_MAX for none). */
-static size_t target_count(Node *n, size_t *star) {
-    size_t count = 0;
-    *star = SIZE_MAX;
-    for (Node *item = n->args; item; item = item->next) {
-        if (item->kind == N_STAR) *star = count;
-        count++;
-    }
-    return count;
-}
 static int store_slow(SPYContext *c, Frame *f, size_t line, NameOperand *name, SPYValue *value, int calls);
 /* A name stored in its remembered slot cannot fail, so it skips the step
  * bookkeeping unless a trace function watches, as eval's names do. */
@@ -24684,7 +24746,7 @@ static int store_slow(SPYContext *c, Frame *f, size_t line, NameOperand *name, S
     return 0;
 }
 static SPYValue *machine_pop(Machine *);
-/* BC_STORE_AT ins, of an attribute or item of literals or names (store_at_hand),
+/* BC_STORE_AT ins, of an attribute or item of literals or names (stores_fused),
  * the value atop m's stack: 1 when it stored it at hand, the operands its
  * plain steps after it load held across the store, and popped it with
  * arg 1; else 0 with an error, or for those steps, then BC_SET_TARGET's,
