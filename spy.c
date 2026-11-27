@@ -305,6 +305,8 @@ struct Node {
     Part *parts; /* A list or tuple of targets' parts, itself first (list_parts). */
     SPYValue *folded; /* A negated number's value, until its statement ends (nodes_finish). */
     TestPlan *tested; /* A not's, emitted, as its operand's test (branch_parsed). */
+    int operation; /* An operator's fused operation plus one, as it completes (fused_operation). */
+    unsigned char leaf_yield; /* Whether a yield, compiled, yields a leaf in its own step (yields_leaf). */
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
@@ -9264,7 +9266,9 @@ static int comprehension_recorded(Parser *, Node *);
 static int annotated_recorded(Parser *, Node *);
 static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
+static int operation_of(Node *);
 static int parse_children(Parser *p, Node *n) {
+    if ((n->kind == N_INDEX || n->kind == N_BINARY || (n->kind == N_COMPARE && n->args)) && !n->operation) n->operation = operation_of(n) + 1;
     /* A negated number's value, its constant once its statement ends (nodes_finish). */
     if (n->kind == N_UNARY && n->op == '-' && !n->folded) {
         SPYValue *operand = n->a->kind <= N_IMAG ? n->a->constant : n->a->kind == N_UNARY ? n->a->constant ? n->a->constant : n->a->folded : NULL;
@@ -18461,9 +18465,10 @@ static void patch(Program *p, size_t pc, size_t target) {
 }
 /* An operator at hand's operation of operator node n: its kind and, from bit 2, its operator. */
 enum { FUSED_INDEX, FUSED_BINARY, FUSED_COMPARE };
-static int fused_operation(Node *n) {
+static int operation_of(Node *n) {
     return n->kind == N_INDEX ? FUSED_INDEX : n->kind == N_BINARY ? FUSED_BINARY | n->op << 2 : FUSED_COMPARE | n->args->op << 2;
 }
+static int fused_operation(Node *n) { return n->operation ? n->operation - 1 : operation_of(n); }
 static void compile_operation(SPYContext *, Program *, Node *);
 /* The fused step of operator n, whose left operand, of shape left, is at
  * hand or atop the stack, and its plain steps: those after the left's
@@ -18662,7 +18667,7 @@ static void compile_node(SPYContext *c, Program *p, Node *n) {
         /* A yield of a name or literal yields it in its own step (arg 1),
          * past the plain steps that run when the name is not at hand; while
          * calls can pause, a name takes those alone. */
-        if (n->kind == N_YIELD && yields_leaf(p, n)) {
+        if (n->kind == N_YIELD && (n->leaf_yield = (unsigned char)yields_leaf(p, n))) {
             size_t start = n->a->steps_at;
             emit(c, p, BC_YIELD, n, 0);
             patch(p, c->error_type[0] ? SIZE_MAX : emit_before(c, p, start, BC_YIELD, n, 1), p->len); break;
@@ -19305,7 +19310,7 @@ static int yield_kept(Parser *p, Node *n) {
     Program *program = p->emitting;
     if (!(n->flags & F_EMITTED) || n->steps_at != p->emitting_from.steps.mark.at || n->steps_end != program->len) return 0;
     program->items[program->len - 1].arg = 2;
-    if (yields_leaf(program, n)) program->items[n->steps_at].arg = 3;
+    if (n->leaf_yield) program->items[n->steps_at].arg = 3;
     return 1;
 }
 /* The steps of text, a literal emitted after those of value up to the
