@@ -9244,8 +9244,9 @@ static int lambda_recorded(Parser *, Node *);
 static int comprehension_recorded(Parser *, Node *);
 static int annotated_recorded(Parser *, Node *);
 static int list_parts(SPYContext *, Node *);
+static int definition_head(SPYContext *, Node *);
 static int parse_children(Parser *p, Node *n) {
-    if (target_facts(p->ctx, n) || list_parts(p->ctx, n)) return -1;
+    if (target_facts(p->ctx, n) || list_parts(p->ctx, n) || definition_head(p->ctx, n)) return -1;
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_ANNASSIGN) return annotated_recorded(p, n);
@@ -19575,11 +19576,7 @@ static void compile_comprehension_item(SPYContext *c, Program *p, Node *n) {
 /* Comprehension n's scope, defined before or after this (scope_of),
  * asynchronous with an async first clause; its program was compiled as it
  * was parsed (comprehension_close), or none runs. */
-static int comprehension_finish(SPYContext *c, Node *n) {
-    if (!body_scope(c, n)) return -1;
-    if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
-    return 0;
-}
+static int comprehension_finish(SPYContext *c, Node *n) { return body_scope(c, n) ? 0 : -1; }
 /* After a with statement's suite, each item's exit in reverse order,
  * from last, the last item's entry (with_item), back along their links. */
 static void with_end(SPYContext *c, Program *p, uint32_t last, int asynchronous) {
@@ -20360,16 +20357,28 @@ static Parameter *definition_signature(SPYContext *c, Node *n) {
     signature[count] = (Parameter){0};
     return signature;
 }
-static int compile_generator(SPYContext *c, Node *n) {
+/* Definition or comprehension n's scope, as it completes: a def's or
+ * lambda's signature, a def's or class's name, as bound and as spelled,
+ * and a comprehension's being asynchronous. */
+static int definition_head(SPYContext *c, Node *n) {
+    if (n->kind != N_DEF && n->kind != N_LAMBDA && n->kind != N_CLASS && n->kind != N_COMPREHENSION) return 0;
     if (!body_scope(c, n)) return -1;
-    if (n->kind != N_CLASS && n->kind != N_COMPREHENSION && !n->scope->signature && !(n->scope->signature = definition_signature(c, n))) return -1;
-    /* A parsed def's or class's docstring was read with its first statement (body_statements). */
-    if (n->kind != N_LAMBDA && !n->scope->flat && !n->scope->doc && !(n->scope->doc = docstring(c, n->b)) && c->error_type[0]) return -1;
-    /* A def or class keeps its name, as bound and as spelled. */
+    if (n->kind == N_COMPREHENSION) {
+        if (n->a->op) { n->flags |= F_AITER; n->scope->flags |= F_AITER; }
+        return 0;
+    }
+    if (n->kind != N_CLASS && !n->scope->signature && !(n->scope->signature = definition_signature(c, n))) return -1;
     Node *name = n->a && n->a->kind == N_NAME ? n->a : NULL;
     if (name && !n->scope->name && (!(n->scope->name = copy_text(c, name->name.text, strlen(name->name.text))) ||
                                     (name->original && !(n->scope->spelling = copy_text(c, name->original, strlen(name->original))))))
         return -1;
+    return 0;
+}
+static int compile_generator(SPYContext *c, Node *n) {
+    /* A made __annotate__ function did not complete as parsed (annotation_function). */
+    if (definition_head(c, n)) return -1;
+    /* A parsed def's or class's docstring was read with its first statement (body_statements). */
+    if (n->kind != N_LAMBDA && !n->scope->flat && !n->scope->doc && !(n->scope->doc = docstring(c, n->b)) && c->error_type[0]) return -1;
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS));
     /* Its statements were compiled as they were parsed (body_begin,
      * lambda_kept); one without them is unevaluated, and none runs. */
