@@ -8787,6 +8787,8 @@ static Node *statement_body(Parser *p, int emits) {
         Scope *scope = p->scope;
         p->definition = definition;
         if (parse_children(p, n) || analyse_statements(p, n)) return NULL;
+        /* Its header kept, its body's call and store follow it: its body is a program of its own. */
+        if (emits && (n->flags & F_HEADER)) { compile_statement(p->ctx, p->body.program, n); n->flags |= F_EMITTED; }
         p->definition = n;
         Body enclosing = body_begin(p, n, p->depth + 1);
         p->scope = n->scope;
@@ -8797,8 +8799,6 @@ static Node *statement_body(Parser *p, int emits) {
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
         if (!n->b) return NULL;
-        /* Its header kept, its body's call and store follow it. */
-        if (emits && (n->flags & F_HEADER)) { compile_statement(p->ctx, p->body.program, n); n->flags |= F_EMITTED; }
         return p->ctx->error_type[0] ? NULL : n;
     }
     if (take_word(p, "raise")) {
