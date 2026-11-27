@@ -863,6 +863,7 @@ Unreleased (0.10.0):
 - an augmented assignment to an attribute of self, and a class body's own list, set or dict comprehension, no longer add to `__static_attributes__`
 - a starred value is reported after scope errors, in order with the compiler's other errors; `x: int = *a` and `for x in *a` are errors
 - an unparenthesized annotated tuple target is reported at its first item
+- a with item's starred target that is not a target is invalid syntax where CPython stops, not "cannot assign to"
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 

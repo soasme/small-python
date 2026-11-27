@@ -8594,8 +8594,19 @@ static Node *statement_body(Parser *p, int emits) {
                 spy_clear_error(p->ctx); p->pos = as; p->expr_start = expr_start; p->expr_end = expr_end;
                 before = emit_mark(p);
                 if (take(p, '*')) {
+                    /* star_target: the star takes a target, or no with item
+                     * matches: an error where the parser stopped, at a token
+                     * that cannot begin a primary or else past the primary. */
+                    size_t operand = p->pos;
+                    if (at(p, '+') || at(p, '-') || at(p, '~') || keyword(p, "not") || keyword(p, "await") || keyword(p, "lambda"))
+                        return syntax(p, "invalid syntax");
                     if (!(item->b = node(p, N_STAR)) || !(item->b->a = expression(p, 4))) return NULL;
                     span(p, item->b, as);
+                    if (!target_of(p, item->b->a, TARGETS_STAR, 0)) {
+                        spy_clear_error(p->ctx);
+                        p->pos = probe_expression(p, operand, 12);
+                        return syntax(p, "invalid syntax");
+                    }
                 } else if (!(item->b = expression(p, 4))) return NULL;
                 if (!target(p, item->b, TARGETS_STAR)) return p->ctx->error_type[0] ? NULL : target_error(p, item->b, TARGETS_STAR);
                 if (emits && with_target(p, item, before)) return NULL;

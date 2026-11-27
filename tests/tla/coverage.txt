@@ -232,7 +232,7 @@ Contents | - navigation
 15 Compound Statements > 15.4 The `try` statement > 15.4.1 Runtime Semantics: Evaluation of `try` … `except` | Exceptions
 15 Compound Statements > 15.4 The `try` statement > 15.4.2 FinallyBlock ( *r* ) | Exceptions
 15 Compound Statements > 15.4 The `try` statement > 15.4.3 `except*` | ExceptStar
-15 Compound Statements > 15.5 The `with` statement | = sections
+15 Compound Statements > 15.5 The `with` statement | WithStarTargets
 15 Compound Statements > 15.5 The `with` statement > 15.5.1 Runtime Semantics: Evaluation | With
 15 Compound Statements > 15.5 The `with` statement > 15.5.2 The `async with` statement | AsyncWith
 15 Compound Statements > 15.6 The `match` statement | = sections
