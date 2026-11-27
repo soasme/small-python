@@ -8056,6 +8056,8 @@ static int line_ends_block(Parser *p) {
     return 0;
 }
 static Node *literal_body(Parser *);
+static int literal_kind(Node *);
+static SPYValue *pattern_constant(SPYContext *, Node *);
 /* A pattern by parse whose value, its a, is parsed apart in a case whose
  * patterns compile as they are parsed (case_begin). */
 static Node *pattern_apart(Parser *p, Node *(*parse)(Parser *)) {
@@ -8194,6 +8196,8 @@ static Node *closed_pattern_body(Parser *p) {
                 Node *key = literal_pattern(p);
                 if (!key) return NULL;
                 entry->a = key->a;
+                /* Its value, compared with the keys before it (mapping_keys). */
+                if (literal_kind(entry->a) && !(entry->constant = pattern_constant(p->ctx, entry->a))) return NULL;
             }
             if (!expect(p, ':', "invalid syntax") || !(entry->b = pattern(p))) return NULL;
             *tail = entry; tail = &entry->next;
@@ -8306,7 +8310,6 @@ static int literal_kind(Node *n) {
     return kind == N_INT || kind == N_FLOAT || kind == N_IMAG || kind == N_STRING || kind == N_BYTES || kind == N_NONE ||
            kind == N_BOOL || kind == N_UNARY || kind == N_BINARY;
 }
-static SPYValue *pattern_constant(SPYContext *, Node *);
 /* Mapping pattern n's keys, in order: each a literal or an attribute,
  * no literal equal to one before it. */
 static int mapping_keys(PatternCheck *k, Node *n) {
@@ -8315,14 +8318,14 @@ static int mapping_keys(PatternCheck *k, Node *n) {
     for (Node *entry = n->args; entry && !status; entry = entry->next) {
         if (entry->a->kind == N_ATTR) continue;
         if (!literal_kind(entry->a)) { status = pattern_fail(k, n, "mapping pattern keys may only match literals and attribute lookups", "", ""); break; }
-        SPYValue *key = pattern_constant(k->c, entry->a), *text = NULL;
+        SPYValue *key = entry->constant, *text = NULL;
         for (size_t i = 0; key && i < seen->as.seq.len && !text; i++)
             if (equal(seen->as.seq.items[i], key)) {
                 text = spy_repr(k->c, key);
                 status = text ? pattern_fail(k, n, "mapping pattern checks duplicate key (", text->as.string.data, ")") : -1;
             }
-        if (!key || (!text && sequence_append(k->c, seen, key))) status = -1;
-        spy_release(key); spy_release(text);
+        if (!text && sequence_append(k->c, seen, key)) status = -1;
+        spy_release(text);
     }
     spy_release(seen);
     return status;
