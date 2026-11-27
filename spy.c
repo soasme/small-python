@@ -19579,6 +19579,8 @@ static int stand_parsed(Parser *p, Node *n) {
     n->steps_at = value->steps_at; n->steps_end = value->steps_end;
     n->flags |= F_EMITTED;
     p->emitted[p->emitted_len++] = n;
+    /* Its summary in its program's mode, as an emitted node's (parsed_steps). */
+    if (p->emitting) expands(n, modes(p->emitting));
     return 0;
 }
 static int chain_parsed(Parser *p, Node *n, Node *cmp, size_t at, int more) {
