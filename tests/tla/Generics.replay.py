@@ -48,8 +48,13 @@ def visible(p):
 
 
 def syntax(p):
-    source = {"duplicate": "def g[T, T](): pass", "order": "def g[T = int, U](): pass", "ok": "def g[T, U = int](): pass"}
-    compile(source[p["case"]], "<generic>", "exec")
+    source = {"duplicate": "def g[T, T](): pass", "starred": "def g[T, *T](): pass", "bounded": "def g[T, T: int](): pass",
+              "order": "def g[T = int, U](): pass", "ok": "def g[T, U = int](): pass"}
+    try:
+        compile(source[p["case"]], "<generic>", "exec")
+    except SyntaxError as e:
+        if p["case"] == "order": raise
+        return "%d-%d" % (e.offset, e.end_offset)
     return "ok"
 
 

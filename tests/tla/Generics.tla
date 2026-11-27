@@ -21,22 +21,22 @@
 (* A parameter program defines a function, class, or type alias with one   *)
 (* parameter: T, T: int, T: (str, bytes), T = int, *T, or **T; and reads   *)
 (* its type, __bound__, __constraints__, __default__, or                   *)
-(* __infer_variance__, or __module__. A lazy program declares T: X,        *)
-(* T: (X, X), or T = X                                                     *)
-(* with X bound after the definition or never, and reads the attribute.    *)
-(* A visibility program reads T from an annotation, the body, a method,    *)
-(* a class annotation after the body binds T = 5, or outside the           *)
-(* definition. A syntax program compiles a duplicate, misordered, or valid *)
-(* list. A class program reads a generic class's __bases__ or              *)
-(* __orig_bases__ or subscripts it with int. An alias program defines      *)
-(* type g[T] at module level, in a function f, or in a class C, and reads  *)
-(* its repr, __name__, or __type_params__. A construct program calls one   *)
-(* of the four classes from module m's code, at its top level or in a      *)
-(* function, and reads __module__. A frame program defines class g[T] at   *)
-(* module level, in a function f, or in a class C, raises in its base, a   *)
-(* keyword, or its body, and reads the qualified name of the frame the     *)
-(* traceback passes through between the definer and the raise. The        *)
-(* outcome is the result or the exception.                                 *)
+(* __infer_variance__, or __module__. A lazy program declares T: X, T:     *)
+(* (X, X), or T = X with X bound after the definition or never, and reads  *)
+(* the attribute. A visibility program reads T from an annotation, the     *)
+(* body, a method, a class annotation after the body binds T = 5, or       *)
+(* outside the definition. A syntax program compiles a misordered or valid *)
+(* list, or one repeating T plainly, starred, or with a bound, whose       *)
+(* outcome is the columns the error covers. A class program reads a        *)
+(* generic class's __bases__ or __orig_bases__ or subscripts it with int.  *)
+(* An alias program defines type g[T] at module level, in a function f, or *)
+(* in a class C, and reads its repr, __name__, or __type_params__. A       *)
+(* construct program calls one of the four classes from module m's code,   *)
+(* at its top level or in a function, and reads __module__. A frame        *)
+(* program defines class g[T] at module level, in a function f, or in a    *)
+(* class C, raises in its base, a keyword, or its body, and reads the      *)
+(* qualified name of the frame the traceback passes through between the    *)
+(* definer and the raise. The outcome is the result or the exception.      *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -45,7 +45,7 @@ Programs == [part : {"param"}, kind : {"function", "class", "alias"}, param : Pa
              query : {"type", "bound", "constraints", "default", "infer", "module"}]
             \cup [part : {"lazy"}, what : {"bound", "constraints", "default"}, defined : BOOLEAN]
             \cup [part : {"visible"}, where : {"annotation", "body", "method", "shadow", "outside"}]
-            \cup [part : {"syntax"}, case : {"duplicate", "order", "ok"}]
+            \cup [part : {"syntax"}, case : {"duplicate", "starred", "bounded", "order", "ok"}]
             \cup [part : {"class"}, query : {"bases", "orig", "subscript"}]
             \cup [part : {"alias"}, where : {"module", "function", "class"}, query : {"repr", "name", "params"}]
             \cup [part : {"construct"}, cls : {"TypeVar", "TypeVarTuple", "ParamSpec", "TypeAliasType"}, where : {"module", "function"}]
@@ -81,10 +81,15 @@ Frame(where) == CASE where = "function" -> "f.<locals>.<generic parameters of g>
 
 Alias(p) == CASE p.query = "repr" -> Qualified(p.where) [] p.query = "name" -> "g" [] p.query = "params" -> "(T,)"
 
+\* def g[T, T](): pass and its variants: a duplicate covers the whole
+\* repeated parameter, its star and bound included.
+Syntax(case) == CASE case = "ok" -> "ok" [] case = "order" -> "SyntaxError"
+                  [] case = "duplicate" -> "10-11" [] case = "starred" -> "10-12" [] case = "bounded" -> "10-16"
+
 Run(p) == CASE p.part = "param" -> Param(p)
             [] p.part = "lazy" -> Lazy(p)
             [] p.part = "visible" -> Visible(p)
-            [] p.part = "syntax" -> IF p.case = "ok" THEN "ok" ELSE "SyntaxError"
+            [] p.part = "syntax" -> Syntax(p.case)
             [] p.part = "class" -> Class(p)
             [] p.part = "alias" -> Alias(p)
             [] p.part = "construct" -> "m"
@@ -103,6 +108,10 @@ KindIndependent == Done /\ program.part = "param" => outcome = Param([program EX
 \* Where an alias is defined qualifies its repr, never its name or parameters.
 AliasQualified == Done /\ program.part = "alias" /\ program.query # "repr" =>
                       outcome = Alias([program EXCEPT !.where = "module"])
+
+\* A duplicate is reported where the repeated parameter begins, at its star.
+DuplicateAtParameter == Done /\ program.part = "syntax" /\ program.case \in {"duplicate", "starred", "bounded"} =>
+                            outcome \in {"10-11", "10-12", "10-16"}
 
 \* Bases, keywords and body all run in the class's type parameters' frame.
 OneFrame == Done /\ program.part = "frame" => outcome = Frame(program.where)

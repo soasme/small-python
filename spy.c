@@ -8277,6 +8277,7 @@ static Node *type_params(Parser *p) {
     Node **tail = &generic->args;
     int defaults = 0;
     while (!at(p, ']')) {
+        size_t first = p->pos;
         int kind = take(p, T_POW) ? 2 : take(p, '*') ? 1 : 0;
         Node *param = identifier(p);
         if (!param) return NULL;
@@ -8305,6 +8306,9 @@ static Node *type_params(Parser *p) {
             errorf(p->ctx, "SyntaxError", "non-default type parameter '%s' follows default type parameter", source_name(param));
             return NULL;
         }
+        /* A parameter covers its star, bound and default. */
+        Token *last = &p->tokens[p->pos - 1];
+        param->start = p->tokens[first].start; param->end = last->start + last->len;
         *tail = param; tail = &param->next;
         if (!take(p, ',')) break;
     }
@@ -10474,7 +10478,7 @@ static int generic_class_scope(SPYContext *c, Scope *generic, Node *n) {
 /* Type parameter v, bound in scope; another of its name is an error. */
 static int type_parameter(SPYContext *c, Scope *scope, Events *e, Event *v) {
     if (scope_symbol(scope, event_text(e, v))) {
-        c->line = v->line;
+        site_error(c, &v->site);
         errorf(c, "SyntaxError", "duplicate type parameter '%s'", event_spelling(e, v));
         return -1;
     }
