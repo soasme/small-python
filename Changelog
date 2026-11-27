@@ -872,6 +872,7 @@ Unreleased (0.10.0):
 - `a < not b` and `2 ** not x` are invalid syntax at the `not`, as in CPython
 - a starred item's `not` operand is invalid syntax at the `not`, and `(*a or b, c)` at the comma, as in CPython
 - a subscript's starred item takes any expression, as `x[*a or b]`
+- `f():` and `a, b:` without an annotation are invalid syntax at the colon, as in CPython
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 

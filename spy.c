@@ -9296,12 +9296,15 @@ static Node *expression_statement(Parser *p, Node *n) {
     }
     if (op == ':') {
         Node *target = n->a;
+        /* invalid_assignment's annotation errors need an expression after the ':'. */
+        int invalid = target->kind != N_NAME && target->kind != N_ATTR && target->kind != N_INDEX;
+        if (invalid && target->kind != N_STAR && !probe_expression(p, p->pos + 1, 0)) return syntax(p, "invalid syntax");
         /* An unparenthesized tuple's error is at its first item (invalid_ann_assign_target). */
         if (target->kind == N_TUPLE) return syntax_at(p, single_group(p, start, p->pos) ? target : target->args, "only single target (not tuple) can be annotated");
         if (target->kind == N_LIST) return syntax_at(p, target, "only single target (not list) can be annotated");
         /* A starred target ends the expression statement it began. */
         if (target->kind == N_STAR) return syntax(p, "invalid syntax");
-        if (target->kind != N_NAME && target->kind != N_ATTR && target->kind != N_INDEX) return syntax_at(p, target, "illegal target for annotation");
+        if (invalid) return syntax_at(p, target, "illegal target for annotation");
         p->pos++;
         n->kind = N_ANNASSIGN;
         if (target->kind == N_NAME && !parenthesized) n->flags |= F_SIMPLE;
