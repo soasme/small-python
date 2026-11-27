@@ -320,6 +320,12 @@ struct Node {
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
     char *original;
+    /* Under PEP 563, an annotation's expression's text, made as it
+     * completes, and its precedence: the level it is parenthesized above
+     * (unparsed). */
+    char *unparsed;
+    size_t unparsed_len;
+    unsigned char precedence;
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
@@ -1753,7 +1759,7 @@ static void free_value(SPYValue *v) {
         while (n) {
             Node *next = n->allocated;
             free_scope_tree(c, n->scope, 1);
-            mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n); n = next;
+            mem_free(n->name.text); mem_free(n->original); mem_free(n->unparsed); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n); n = next;
         }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
@@ -7665,8 +7671,49 @@ static Node *if_statement(Parser *p, int emits) {
 /* PEP 563 annotation strings, as CPython's ast_unparse.c writes them. */
 enum { PR_TUPLE, PR_TEST, PR_OR, PR_AND, PR_NOT, PR_CMP, PR_BOR, PR_BXOR, PR_BAND, PR_SHIFT, PR_ARITH, PR_TERM,
        PR_FACTOR, PR_POWER, PR_AWAIT, PR_ATOM };
+static const struct { int op, pr; const char *text; } binary_texts[] = {
+    {O_OR, PR_OR, " or "}, {O_AND, PR_AND, " and "}, {'|', PR_BOR, " | "}, {'^', PR_BXOR, " ^ "}, {'&', PR_BAND, " & "},
+    {T_LSHIFT, PR_SHIFT, " << "}, {T_RSHIFT, PR_SHIFT, " >> "}, {'+', PR_ARITH, " + "}, {'-', PR_ARITH, " - "},
+    {'*', PR_TERM, " * "}, {'/', PR_TERM, " / "}, {'%', PR_TERM, " % "}, {'@', PR_TERM, " @ "}, {T_FLOORDIV, PR_TERM, " // "},
+    {T_POW, PR_POWER, " ** "}};
+/* Binary operator op's entry in binary_texts. */
+static size_t binary_text(int op) {
+    size_t i = 0;
+    while (i + 1 < sizeof(binary_texts) / sizeof(*binary_texts) && binary_texts[i].op != op) i++;
+    return i;
+}
+/* The level above which n is parenthesized; a comparison's pair, its
+ * operand unparsed as the comparison's, never is. */
+static int precedence(Node *n) {
+    switch (n->kind) {
+    case N_TUPLE: return n->args ? PR_TUPLE : PR_ATOM;
+    case N_NAMED: return PR_TUPLE;
+    case N_LAMBDA: case N_COND: return PR_TEST;
+    case N_UNARY: return n->op == O_NOT ? PR_NOT : PR_FACTOR;
+    case N_BINARY: return n->b ? binary_texts[binary_text(n->op)].pr : PR_ATOM;
+    case N_COMPARE: return PR_CMP;
+    case N_AWAIT: return PR_AWAIT;
+    default: return PR_ATOM;
+    }
+}
 static SPYValue *number_literal(SPYContext *, Node *);
-static int unparse(Buffer *b, Node *n, int level);
+static int unparse_node(Buffer *b, Node *n, int level);
+/* Expression n at level: its text, once made (unparsed), parenthesized
+ * above its precedence. */
+static int unparse(Buffer *b, Node *n, int level) {
+    if (!n->unparsed) return unparse_node(b, n, level);
+    int wrap = level > n->precedence;
+    return (wrap && puts_buffer(b, "(")) || append(b, n->unparsed, n->unparsed_len) || (wrap && puts_buffer(b, ")")) ? -1 : 0;
+}
+/* Annotation expression n's text and precedence, made as it completes
+ * from its parts' own, which it takes whole. */
+static int unparsed(Parser *p, Node *n) {
+    Buffer text = {.ctx = p->ctx};
+    if (unparse_node(&text, n, PR_TUPLE) || (!text.data && puts_buffer(&text, ""))) { mem_free(text.data); return -1; }
+    mem_free(n->unparsed);
+    n->unparsed = text.data; n->unparsed_len = text.len; n->precedence = (unsigned char)precedence(n);
+    return 0;
+}
 static int unparse_list(Buffer *b, Node *items, int level) {
     for (Node *item = items; item; item = item->next)
         if ((item != items && puts_buffer(b, ", ")) || unparse(b, item, level)) return -1;
@@ -7721,7 +7768,7 @@ static int unparse_lambda_arguments(Buffer *b, Node *args) {
     }
     return 0;
 }
-static int unparse(Buffer *b, Node *n, int level) {
+static int unparse_node(Buffer *b, Node *n, int level) {
     switch (n->kind) {
     case N_NAME: return puts_buffer(b, source_name(n));
     case N_NONE: return puts_buffer(b, "None");
@@ -7753,7 +7800,7 @@ static int unparse(Buffer *b, Node *n, int level) {
         if (puts_buffer(b, "{")) return -1;
         for (Node *item = n->args; item; item = item->next) {
             if (item != n->args && puts_buffer(b, ", ")) return -1;
-            if (item->kind == N_MAPPING ? puts_buffer(b, "**") || unparse(b, item->a, PR_BOR) :
+            if (item->kind == N_MAPPING ? unparse(b, item, PR_TUPLE) :
                 unparse(b, item->a, PR_TEST) || puts_buffer(b, ": ") || unparse(b, item->b, PR_TEST)) return -1;
         }
         return puts_buffer(b, "}");
@@ -7792,15 +7839,10 @@ static int unparse(Buffer *b, Node *n, int level) {
         return (level > pr && puts_buffer(b, "(")) || puts_buffer(b, text) || unparse(b, n->a, pr) || (level > pr && puts_buffer(b, ")"));
     }
     case N_BINARY: {
-        static const struct { int op, pr; const char *text; } ops[] = {
-            {O_OR, PR_OR, " or "}, {O_AND, PR_AND, " and "}, {'|', PR_BOR, " | "}, {'^', PR_BXOR, " ^ "}, {'&', PR_BAND, " & "},
-            {T_LSHIFT, PR_SHIFT, " << "}, {T_RSHIFT, PR_SHIFT, " >> "}, {'+', PR_ARITH, " + "}, {'-', PR_ARITH, " - "},
-            {'*', PR_TERM, " * "}, {'/', PR_TERM, " / "}, {'%', PR_TERM, " % "}, {'@', PR_TERM, " @ "}, {T_FLOORDIV, PR_TERM, " // "},
-            {T_POW, PR_POWER, " ** "}};
-        size_t i = 0;
-        while (i + 1 < sizeof(ops) / sizeof(*ops) && ops[i].op != n->op) i++;
-        int pr = ops[i].pr, power = n->op == T_POW;
-        return (level > pr && puts_buffer(b, "(")) || unparse(b, n->a, power ? pr + 1 : pr) || puts_buffer(b, ops[i].text) ||
+        if (!n->b) return unparse(b, n->a, PR_CMP + 1);
+        size_t i = binary_text(n->op);
+        int pr = binary_texts[i].pr, power = n->op == T_POW;
+        return (level > pr && puts_buffer(b, "(")) || unparse(b, n->a, power ? pr + 1 : pr) || puts_buffer(b, binary_texts[i].text) ||
                unparse(b, n->b, power ? pr : pr + 1) || (level > pr && puts_buffer(b, ")"));
     }
     case N_COMPARE:
@@ -7809,7 +7851,7 @@ static int unparse(Buffer *b, Node *n, int level) {
             const char *text = cmp->op == T_EQ ? " == " : cmp->op == T_NE ? " != " : cmp->op == '<' ? " < " : cmp->op == '>' ? " > " :
                 cmp->op == T_LE ? " <= " : cmp->op == T_GE ? " >= " : cmp->op == O_IN ? " in " : cmp->op == O_NOTIN ? " not in " :
                 cmp->op == O_IS ? " is " : " is not ";
-            if (puts_buffer(b, text) || unparse(b, cmp->a, PR_CMP + 1)) return -1;
+            if (puts_buffer(b, text) || unparse(b, cmp, PR_CMP + 1)) return -1;
         }
         return level > PR_CMP && puts_buffer(b, ")");
     case N_ATTR:
@@ -7817,15 +7859,12 @@ static int unparse(Buffer *b, Node *n, int level) {
     case N_CALL:
         if (unparse(b, n->a, PR_ATOM) || puts_buffer(b, "(")) return -1;
         if (n->args && !n->args->next && n->args->kind == N_COMPREHENSION && n->args->op == N_TUPLE) {
-            if (unparse_comprehension(b, n->args)) return -1;
+            Node *generator = n->args;
+            if (generator->unparsed ? append(b, generator->unparsed + 1, generator->unparsed_len - 2) : unparse_comprehension(b, generator)) return -1;
         } else if (unparse_list(b, n->args, PR_TEST)) return -1;
         return puts_buffer(b, ")");
     case N_INDEX:
-        if (unparse(b, n->a, PR_ATOM) || puts_buffer(b, "[")) return -1;
-        if (n->b->kind == N_TUPLE && n->b->args) {
-            if (unparse_list(b, n->b->args, PR_TEST) || (!n->b->args->next && puts_buffer(b, ","))) return -1;
-        } else if (unparse(b, n->b, PR_TUPLE)) return -1;
-        return puts_buffer(b, "]");
+        return unparse(b, n->a, PR_ATOM) || puts_buffer(b, "[") || unparse(b, n->b, PR_TUPLE) || puts_buffer(b, "]");
     default: /* N_SLICE, the last kind of expression */
         return (n->a && unparse(b, n->a, PR_TEST)) || puts_buffer(b, ":") || (n->b && unparse(b, n->b, PR_TEST)) ||
                (n->c && (puts_buffer(b, ":") || unparse(b, n->c, PR_TEST)));
@@ -9608,6 +9647,7 @@ static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
 static int operation_of(Node *);
 static int parse_children(Parser *p, Node *n) {
+    if (p->future_annotations && p->unevaluated && (n->a || n->b || n->c || n->args) && unparsed(p, n)) return -1;
     if ((n->kind == N_STAR || n->kind == N_MAPPING || n->kind == N_KEYWORD) && n->a && stand_parsed(p, n)) return -1;
     if ((n->kind == N_INDEX || n->kind == N_BINARY || (n->kind == N_COMPARE && n->args)) && !n->operation) n->operation = operation_of(n) + 1;
     /* A negated number's value, its constant once its statement ends (nodes_finish). */
@@ -10330,7 +10370,7 @@ static void free_node(Node *n) {
     /* A lambda's scope, begun as it was parsed, is its node's until analysis adopts it. */
     if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
     spy_release(n->constant); spy_release(n->folded); spy_release(n->name.global_key);
-    mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n);
+    mem_free(n->name.text); mem_free(n->original); mem_free(n->unparsed); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n);
 }
 /* After a line of module statements, parsed since start, is compiled
  * and analysed, free the nodes of the line before it, now compiled too,
