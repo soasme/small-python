@@ -4843,6 +4843,7 @@ typedef struct Parser {
      * PEP 563 makes a string; its lambdas and comprehensions get no
      * program (F_UNEVALUATED). */
     int unevaluated;
+    Node *completed; /* The node completed last, its links still its own (release_links). */
 } Parser;
 static Node *emit_parsed(Parser *, Node *, size_t);
 static int event_into(SPYContext *, Events *, int, unsigned, Scope *, Node *, Node *);
@@ -5642,6 +5643,14 @@ static Node *loop_target(Parser *, int);
 static Node *annotation_expression(Parser *, Node *(*)(Parser *, int), int);
 static void apart_drop(Parser *, size_t);
 static int apart_took(Parser *, Program *, Node *);
+/* A starred value, parsed apart whole: a variadic parameter's
+ * annotation or a TypeVarTuple's default (PEP 646). */
+static Node *starred_value(Parser *p, int min) {
+    Node *star = node(p, N_STAR);
+    if (!star) return NULL;
+    p->pos++;
+    return (star->a = expression(p, min)) && !parse_children(p, star) ? star : NULL;
+}
 static void apart_detach(Parser *, Program *);
 static Node *expression_mode(Parser *, int, int);
 static Node *syntax_at(Parser *, Node *, const char *);
@@ -5761,11 +5770,7 @@ static int parameter_list(Parser *p, Node *n, int close) {
             arg->op = kind;
             if (close == ')' && take(p, ':')) {
                 if (kind == P_VARARGS && at(p, '*')) {
-                    Node *star = node(p, N_STAR);
-                    p->pos++;
-                    if (!star) return -1;
-                    if (!(star->a = annotation_expression(p, expression, 0)) || parse_children(p, star)) return -1;
-                    arg->b = star;
+                    if (!(arg->b = annotation_expression(p, starred_value, 0))) return -1;
                 } else {
                     if (!(arg->b = annotation_expression(p, plain_expression, 0))) return -1;
                 }
@@ -6230,7 +6235,8 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         mem_free(text.data); return NULL;
     }
     Parser inner = {.ctx = p->ctx, .unit = p->unit, .definition = p->definition, .private_name = p->private_name,
-                    .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
+                    .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1,
+                    .future_annotations = p->future_annotations, .unevaluated = p->unevaluated, .completed = p->completed};
     /* A field parsed for its value emits into its statement's program. */
     if (!failed) { inner.emitting = p->emitting; inner.emitted = p->emitted; inner.emitted_len = p->emitted_len; inner.emitted_cap = p->emitted_cap; }
     /* Its analysis is the statement's. */
@@ -6283,7 +6289,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
     }
     if (!failed) { p->emitted = inner.emitted; p->emitted_len = inner.emitted_len; p->emitted_cap = inner.emitted_cap; }
-    p->events = inner.events;
+    p->events = inner.events; p->completed = inner.completed;
     mem_free(inner.tokens); mem_free(inner.literal_error); mem_free(text.data);
     return result;
 }
@@ -8565,12 +8571,8 @@ static Node *type_params(Parser *p) {
         }
         if (take(p, '=')) {
             Node *value;
-            if (kind == 1 && at(p, '*')) {
-                value = node(p, N_STAR);
-                p->pos++;
-                if (value) value->a = apart_expression(p, expression, 4);
-                if (value && (!value->a || parse_children(p, value))) value = NULL;
-            } else value = apart_expression(p, expression, 0);
+            if (kind == 1 && at(p, '*')) value = apart_expression(p, starred_value, 4);
+            else value = apart_expression(p, expression, 0);
             if (!value) return NULL;
             if (!(param->c = lazy_function(p, param->name.text, value))) return NULL;
             defaults = 1;
@@ -9663,7 +9665,23 @@ static int annotated_recorded(Parser *, Node *);
 static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
 static int operation_of(Node *);
+/* A completed node's links, which nothing reads once another node
+ * completes: its parts are its owner's no more. */
+static void release_links(Node *n) {
+    for (Node *a = n->args, *next; a; a = next) next = a->next, a->next = NULL;
+    n->a = n->b = n->c = n->args = NULL;
+}
+static int parse_children_of(Parser *p, Node *n);
+/* Complete n: its analysis and summaries from its parts, whose own
+ * links go now (release_links). */
 static int parse_children(Parser *p, Node *n) {
+    if (p->completed && p->completed != n) release_links(p->completed);
+    p->completed = NULL;
+    if (parse_children_of(p, n)) return -1;
+    p->completed = n;
+    return 0;
+}
+static int parse_children_of(Parser *p, Node *n) {
     if (p->future_annotations && p->unevaluated && (expression_kind(n->kind) || n->kind == N_RETURN) && unparsed(p, n)) return -1;
     if ((n->kind == N_STAR || n->kind == N_MAPPING || n->kind == N_KEYWORD) && n->a && stand_parsed(p, n)) return -1;
     if ((n->kind == N_INDEX || n->kind == N_BINARY || (n->kind == N_COMPARE && n->args)) && !n->operation) n->operation = operation_of(n) + 1;
@@ -10398,6 +10416,7 @@ static void free_node(Node *n) {
 static void free_parsed(Parser *, Node **);
 static void free_lines(Parser *p, Node *start) {
     SPYValue *unit = p->unit;
+    if (p->completed) release_links(p->completed), p->completed = NULL;
     Node **at = &unit->as.unit.nodes;
     size_t count = 0;
     while (*at != start) { at = &(*at)->allocated; count++; }
@@ -10423,6 +10442,7 @@ static void free_parsed(Parser *p, Node **at) {
         p->deferred_node = NULL;
     }
     if (n == p->symbols.open) p->symbols.open = NULL;
+    if (n == p->completed) p->completed = NULL;
     *at = n->allocated;
     free_node(n);
 }
@@ -10430,7 +10450,10 @@ static void free_parsed(Parser *p, Node **at) {
  * since start, is analysed and compiled, free its nodes but those the
  * parse reads later (F_KEEP) and the body's first statement, which ends
  * its chain of statements now and its last compiled. */
+static void release_links(Node *);
 static void free_line(Parser *p, Node *start) {
+    /* The node completed last may be kept, but its parts go. */
+    if (p->completed) release_links(p->completed), p->completed = NULL;
     for (Node **at = &p->unit->as.unit.nodes; *at != start;) {
         Node *n = *at;
         if ((n->flags & F_KEEP) || n == p->body.head || node_root(p->unit, n->scope)) at = &n->allocated;
@@ -19545,7 +19568,7 @@ static int annotate_program(Parser *p, Node *fn) {
     if (pc != SIZE_MAX) program->items[pc].target = body->op == 1;
     for (Node *entry = body->args; entry && !c->error_type[0]; entry = entry->next) {
         size_t start = program->len;
-        apart_took(p, program, entry->a->kind == N_STAR ? entry->a->a : entry->a);
+        apart_took(p, program, entry->a);
         annotation_steps(c, program, body->op == 1, body, entry, start);
     }
     emit(c, program, BC_FLOW, body, FLOW_RETURN);
