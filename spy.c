@@ -20855,7 +20855,7 @@ static int definition_head(SPYContext *c, Node *n) {
 }
 static int compile_generator(SPYContext *c, Node *n) {
     /* A made __annotate__ function did not complete as parsed (annotation_function). */
-    if (definition_head(c, n)) return -1;
+    if ((n->flags & F_ANNOTATE) && definition_head(c, n)) return -1;
     /* A parsed def's or class's docstring was read with its first statement (body_statements). */
     if (n->kind != N_LAMBDA && !n->scope->flat && !n->scope->doc && !(n->scope->doc = docstring(c, n->b)) && c->error_type[0]) return -1;
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || (n->flags & F_YIELDS));
