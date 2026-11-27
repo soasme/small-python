@@ -179,7 +179,7 @@ Contents | - navigation
 13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings > 13.2.4.2 f-strings | FStrings
 13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings > 13.2.4.3 Self-documenting fields | FStrings
 13 Expressions > 13.2 Displays > 13.2.5 t-strings | TStrings
-13 Expressions > 13.2 Displays > 13.2.6 Comprehensions and generator expressions | Comprehensions
+13 Expressions > 13.2 Displays > 13.2.6 Comprehensions and generator expressions | Comprehensions, ForTargets
 13 Expressions > 13.3 Primaries | = sections
 13 Expressions > 13.3 Primaries > 13.3.1 Attribute references | Attributes
 13 Expressions > 13.3 Primaries > 13.3.2 Subscriptions | Subscripts
@@ -225,7 +225,7 @@ Contents | - navigation
 15 Compound Statements | = sections
 15 Compound Statements > 15.1 The `if` statement | Conditionals
 15 Compound Statements > 15.2 The `while` statement | Conditionals
-15 Compound Statements > 15.3 The `for` statement | = sections
+15 Compound Statements > 15.3 The `for` statement | ForTargets
 15 Compound Statements > 15.3 The `for` statement > 15.3.1 Runtime Semantics: Evaluation | Iteration
 15 Compound Statements > 15.3 The `for` statement > 15.3.2 The `async for` statement | AsyncFor
 15 Compound Statements > 15.4 The `try` statement | Exceptions

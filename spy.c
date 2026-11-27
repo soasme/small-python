@@ -7307,6 +7307,57 @@ static Node *assignment_error(Parser *p, size_t start) {
     if (bare_yield) return syntax_at(p, bad, "assignment to yield expression not possible");
     return target_error(p, bad, TARGETS_STAR);
 }
+/* invalid_for_target: a for target that is not star_targets before 'in',
+ * read again from first as star_expressions, is the error of its invalid
+ * part: 1 when that is raised (or another error is kept); else 0, the
+ * parser back at first and no error. */
+static int for_target_error(Parser *p, size_t first) {
+    SPYContext *c = p->ctx;
+    if (c->error_type[0] && !error_is(c, "SyntaxError")) return 1;
+    spy_clear_error(c);
+    Program *emitting = p->emitting;
+    p->emitting = NULL; p->pos = first;
+    Node *whole = expression_list(p, 0);
+    p->emitting = emitting;
+    /* A comparison not begun by 'in' has no invalid part. */
+    if (whole && !target_of(p, whole, TARGETS_FOR, 0) && (c->error_type[0] || (target_error(p, whole, TARGETS_FOR), strcmp(c->error_message, "invalid syntax"))))
+        return 1;
+    spy_clear_error(c); p->pos = first;
+    return 0;
+}
+/* A comprehension's for target, before its 'in', as for_if_clause reads
+ * it: star_targets; else invalid_for_if_clause, operands of a bitwise or
+ * that 'in' does not follow ("'in' expected", where reading them stopped);
+ * else invalid_for_target; else invalid syntax. */
+static Node *clause_target(Parser *p) {
+    size_t first = p->pos;
+    Node *t = expression_list(p, 4);
+    if (t && keyword(p, "in") && target_of(p, t, TARGETS_FOR, 0)) return t;
+    SPYContext *c = p->ctx;
+    if (c->error_type[0] && !error_is(c, "SyntaxError")) return NULL;
+    size_t reached = c->error_type[0] ? p->error_pos : p->pos;
+    spy_clear_error(c);
+    Program *emitting = p->emitting;
+    p->emitting = NULL; p->pos = first;
+    size_t end = first;
+    while (!at(p, '*') && expression(p, 4)) {
+        end = p->pos;
+        if (!take(p, ',')) break;
+        end = p->pos;
+    }
+    size_t stop = c->error_type[0] ? p->error_pos : end;
+    if (stop < reached) stop = reached;
+    spy_clear_error(c);
+    p->pos = end; p->emitting = emitting;
+    if (end > first && !keyword(p, "in")) { p->pos = stop; return syntax(p, "'in' expected after for-loop variables"); }
+    if (for_target_error(p, first)) return NULL;
+    p->emitting = NULL;
+    t = expression_list(p, 4);
+    p->emitting = emitting;
+    if (t && keyword(p, "in")) target_error(p, t, TARGETS_FOR);
+    else if (t) syntax(p, "invalid syntax");
+    return NULL;
+}
 /* Whether the first for clause of a comprehension follows, as
  * invalid_comprehension's for_if_clauses reads it: 1; else 0, the parser
  * back at it, unless its target's error is raised (-1). */
@@ -7315,12 +7366,9 @@ static int clause_ahead(Parser *p) {
     Program *emitting = p->emitting;
     p->emitting = NULL;
     take_word(p, "async");
-    Node *t = take_word(p, "for") ? expression_list(p, 4) : NULL;
+    Node *t = take_word(p, "for") ? clause_target(p) : NULL;
     int found = -1;
-    /* invalid_for_if_clause precedes invalid_for_target. */
-    if (t && !keyword(p, "in")) syntax(p, "'in' expected after for-loop variables");
-    else if (t && !target_of(p, t, TARGETS_FOR, 0)) { if (!p->ctx->error_type[0]) target_error(p, t, TARGETS_FOR); }
-    else if (t) { p->pos++; found = expression(p, 1) != NULL; }
+    if (t) { p->pos++; found = expression(p, 1) != NULL; }
     p->emitting = emitting;
     if (found <= 0 && (!p->ctx->error_type[0] || !strcmp(p->ctx->error_message, "invalid syntax"))) {
         spy_clear_error(p->ctx); p->pos = at; found = 0;
@@ -7383,11 +7431,9 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Pro
         Node *loop = node(p, N_FOR);
         p->emitting = body;
         EmitMark target_at = emit_mark(p);
-        if (!loop || !(loop->args = expression_list(p, 4))) return p->emitting = emitting, NULL;
+        if (!loop || !(loop->args = clause_target(p))) return p->emitting = emitting, NULL;
         loop->op = asynchronous; p->awaits += asynchronous;
-        /* invalid_for_if_clause precedes invalid_for_target. */
-        if (!keyword(p, "in")) return p->emitting = emitting, syntax(p, "'in' expected after for-loop variables");
-        if (!target(p, loop->args, TARGETS_FOR)) return p->emitting = emitting, p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
+        target(p, loop->args, TARGETS_FOR);
         p->pos++;
         int before = p->awaits, first = tail == &n->a;
         p->emitting = first ? emitting : body;
@@ -8808,9 +8854,19 @@ static Node *statement_body(Parser *p, int emits) {
         if (!n) return NULL;
         n->op = asynchronous;
         if (is_for) {
+            size_t first = p->pos;
             n->args = loop_target(p, emits);
-            if (n->args && !target_of(p, n->args, TARGETS_FOR, 0)) return p->ctx->error_type[0] ? NULL : target_error(p, n->args, TARGETS_FOR);
-            if (!n->args || !take_word(p, "in")) return syntax(p, "invalid syntax");
+            if (!n->args || !keyword(p, "in") || !target_of(p, n->args, TARGETS_FOR, 0)) {
+                if (for_target_error(p, first)) return NULL;
+                Program *emitting = p->emitting;
+                p->emitting = NULL;
+                n->args = expression_list(p, 4);
+                p->emitting = emitting;
+                if (!n->args) return NULL;
+                if (!target_of(p, n->args, TARGETS_FOR, 0)) return p->ctx->error_type[0] ? NULL : target_error(p, n->args, TARGETS_FOR);
+                return syntax(p, "invalid syntax");
+            }
+            p->pos++;
         }
         size_t condition = p->pos;
         /* A while's block begins before its test. */
