@@ -6690,6 +6690,17 @@ static int call_arguments(Parser *p, Node *n) {
         EmitMark before = emit_mark(p), element = before;
         Node *generator = NULL;
         Program *apart = NULL;
+        /* A keyword's name, NAME '=', is read as no expression: it emits
+         * nothing and is no use of the name. */
+        int named = at(p, T_NAME) && !reserved(peek(p)) && first + 1 < p->len && p->tokens[first + 1].kind == '=';
+        /* A generator expression's element, starred or not, whose program
+         * loads names unlike its own emits into its own (comprehension_apart). */
+        if (!named && !at(p, T_POW) && !n->args && n->kind != N_CLASS && p->emitting && comprehension_ahead(p)) {
+            if (!(generator = node(p, N_TUPLE))) return -1;
+            apart = comprehension_apart(p, generator);
+            if (p->ctx->error_type[0]) return -1;
+            if (apart) element = emit_mark(p);
+        }
         if (at(p, '*') || at(p, T_POW)) {
             size_t star = p->pos;
             int unpack_mapping = take(p, T_POW);
@@ -6736,17 +6747,6 @@ static int call_arguments(Parser *p, Node *n) {
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
             size_t start = p->pos;
-            /* A keyword's name, NAME '=', is read as no expression: it
-             * emits nothing and is no use of the name. */
-            int named = at(p, T_NAME) && !reserved(peek(p)) && start + 1 < p->len && p->tokens[start + 1].kind == '=';
-            /* A generator expression's element whose program loads names
-             * unlike its own emits into its own (comprehension_apart). */
-            if (!named && !n->args && n->kind != N_CLASS && p->emitting && comprehension_ahead(p)) {
-                if (!(generator = node(p, N_TUPLE))) return -1;
-                apart = comprehension_apart(p, generator);
-                if (p->ctx->error_type[0]) return -1;
-                if (apart) element = emit_mark(p);
-            }
             arg = named ? identifier(p) : expression_mode(p, 0, 2);
             if (arg && !named && at(p, '=')) {
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {

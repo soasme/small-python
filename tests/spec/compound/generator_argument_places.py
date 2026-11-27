@@ -41,3 +41,10 @@ assert_eq((E.v, E.w), ("name 'x' is not defined", [7]))
 # A first argument that never closes ends the search for its for.
 for source in ["f(x(", "f(x[", "f(x, (y", "f(x for x in (y"]:
     assert_eq(assert_syntax_error(source).msg[-16:], "was never closed", source)
+
+# A starred element emits into its generator's own program too.
+class S:
+    k = [[1, 2], [3]]
+    v = list(*x for x in k)
+    w = sorted(*x for x in k for _ in (0, 1))
+assert_eq((S.v, S.w), ([1, 2, 3], [1, 1, 2, 2, 3, 3]))
