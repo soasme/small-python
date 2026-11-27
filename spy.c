@@ -5689,11 +5689,12 @@ static size_t keyword_line(Parser *);
 static Node *subscript(Parser *p) {
     Node *first = NULL;
     if (at(p, '*')) {
-        /* PEP 646: a starred subscript element unpacks into the index tuple. */
+        /* PEP 646: a starred subscript element, a starred_expression,
+         * unpacks into the index tuple. */
         Node *star = node(p, N_STAR);
         size_t at = p->pos++;
         if (!star) return NULL;
-        if (!(star->a = expression(p, 4))) { star_expression_error(p, at); return NULL; }
+        if (!(star->a = plain_expression(p, 0))) { star_expression_error(p, at); return NULL; }
         return parse_children(p, star) ? NULL : star;
     }
     if (!at(p, ':')) first = expression(p, 0);

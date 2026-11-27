@@ -182,7 +182,7 @@ Contents | - navigation
 13 Expressions > 13.2 Displays > 13.2.6 Comprehensions and generator expressions | Comprehensions, ForTargets, StarredOperands
 13 Expressions > 13.3 Primaries | = sections
 13 Expressions > 13.3 Primaries > 13.3.1 Attribute references | Attributes
-13 Expressions > 13.3 Primaries > 13.3.2 Subscriptions | Subscripts
+13 Expressions > 13.3 Primaries > 13.3.2 Subscriptions | StarredOperands, Subscripts
 13 Expressions > 13.3 Primaries > 13.3.3 Slicings | Subscripts, Slices
 13 Expressions > 13.3 Primaries > 13.3.4 Calls | Calls, KeywordHashes, DuplicateKeywordName
 13 Expressions > 13.4 The `await` expression | Awaitables
