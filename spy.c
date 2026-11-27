@@ -5637,6 +5637,7 @@ static Node *syntax_at(Parser *, Node *, const char *);
 static Node *expression_list(Parser *, int);
 static Node *yield_expression(Parser *);
 static void star_expression_error(Parser *, size_t);
+static Node *group_star_error(Parser *, size_t, int);
 static int named_equals_error(Parser *, size_t);
 static const char *expression_name(Node *);
 static Node *comprehension(Parser *, Node *, int, EmitMark, Program *);
@@ -6524,7 +6525,8 @@ static Node *atom_node(Parser *p) {
                  * an expression, so invalid_expression sees it. */
                 size_t operand = p->pos;
                 item = node(p, N_STAR);
-                if (!item || !(item->a = expression(p, 4))) return NULL;
+                if (!item) return NULL;
+                if (!(item->a = expression(p, 4))) return open == '(' && !n->args ? group_star_error(p, item_at, 1) : NULL;
                 span(p, item, item_at);
                 if (parse_children(p, item)) return NULL;
                 if (p->pos > p->expr_end || (p->pos == p->expr_end && operand < p->expr_start)) {
@@ -6590,7 +6592,7 @@ static Node *atom_node(Parser *p) {
             }
             if (!take(p, ',')) {
                 if (open == '(' && n->args == item) {
-                    if (item->kind == N_STAR) return at(p, ')') ? syntax_at(p, item, "cannot use starred expression here") : syntax(p, "invalid syntax");
+                    if (item->kind == N_STAR) return at(p, ')') ? syntax_at(p, item, "cannot use starred expression here") : group_star_error(p, item_at, 0);
                     if (item->kind == N_NAMED) item->op = 1;
                     return expect(p, close, "invalid syntax") ? item : NULL;
                 }
@@ -6652,6 +6654,26 @@ static void star_expression_error(Parser *p, size_t star) {
     spy_clear_error(p->ctx);
     p->pos = star; syntax(p, "Invalid star expression");
     p->ctx->line = line; p->error_start = start; p->error_end = end;
+}
+/* A parenthesized first item at star that failed to parse (failed) or
+ * that no comma or ')' follows: invalid_group, '(' '*' expression ')',
+ * "cannot use starred expression here"; else the error it had, or
+ * "Invalid star expression" for an operand that fails at its first token. */
+static Node *group_star_error(Parser *p, size_t star, int failed) {
+    if (failed && !error_is(p->ctx, "SyntaxError")) return NULL;
+    spy_clear_error(p->ctx);
+    Program *emitting = p->emitting;
+    p->emitting = NULL; p->pos = star + 1;
+    if (plain_expression(p, 0) && at(p, ')')) {
+        p->emitting = emitting;
+        return syntax_span(p, star, p->pos, "cannot use starred expression here");
+    }
+    spy_clear_error(p->ctx); p->pos = star + 1;
+    /* invalid_starred_expression: an operand that fails at its first token. */
+    if (!expression(p, 4)) { if (p->error_pos == star + 1) star_expression_error(p, star); }
+    else syntax(p, "invalid syntax");
+    p->emitting = emitting;
+    return NULL;
 }
 static int call_arguments(Parser *p, Node *n) {
     Node **tail = &n->args;
@@ -9168,8 +9190,36 @@ static Node *assert_statement(Parser *p, Node *n) {
     return n;
 }
 /* The targets of del statement n. */
+/* A del statement's targets from first that fail to parse in a starred
+ * item: del_targets stop at its star, and invalid_del_stmt reads the items
+ * before it, so the error is their invalid part or else invalid syntax at
+ * the star. */
+static Node *delete_error(Parser *p, size_t first) {
+    size_t failed = p->pos, star = first, depth = 0;
+    if (!error_is(p->ctx, "SyntaxError")) return NULL;
+    for (; star < failed; star++) {
+        int kind = p->tokens[star].kind;
+        if (kind == '(' || kind == '[' || kind == '{') depth++;
+        else if (kind == ')' || kind == ']' || kind == '}') depth--;
+        else if (kind == '*' && !depth) break;
+    }
+    if (star == failed) return NULL;
+    spy_clear_error(p->ctx);
+    Program *emitting = p->emitting;
+    p->emitting = NULL; p->pos = first;
+    while (p->pos < star) {
+        Node *item = expression(p, 0);
+        if (!item || target_facts(p->ctx, item)) return p->emitting = emitting, NULL;
+        if (item->places[1 + TARGETS_DEL] || !target_of(p, item, TARGETS_DEL, 0))
+            return p->emitting = emitting, p->ctx->error_type[0] ? NULL : target_error(p, item, TARGETS_DEL);
+        take(p, ',');
+    }
+    p->emitting = emitting;
+    return syntax(p, "invalid syntax");
+}
 static Node *delete_statement(Parser *p, Node *n) {
-    if (!(n->a = expression_list(p, 0))) return NULL;
+    size_t first = p->pos;
+    if (!(n->a = expression_list(p, 0))) return delete_error(p, first);
     if (target_facts(p->ctx, n->a)) return NULL;
     if (n->a->places[1 + TARGETS_DEL]) return target_error(p, n->a, TARGETS_DEL);
     if (!target(p, n->a, TARGETS_DEL)) return p->ctx->error_type[0] ? NULL : target_error(p, n->a, TARGETS_DEL);

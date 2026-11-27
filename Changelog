@@ -865,6 +865,7 @@ Unreleased (0.10.0):
 - an unparenthesized annotated tuple target is reported at its first item
 - a with item's starred target that is not a target is invalid syntax where CPython stops, not "cannot assign to"
 - a for target such as `lambda: 0` or `a if b else c` is "cannot assign to" its part, as CPython reads it with the `in`
+- a del statement's or a parenthesized starred item that does not parse is reported where CPython does, `(*lambda: 0)` "cannot use starred expression here"
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 

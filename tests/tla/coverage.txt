@@ -197,7 +197,7 @@ Contents | - navigation
 13 Expressions > 13.12 Assignment expressions | Comprehensions, SimpleStatements
 13 Expressions > 13.13 Conditional expressions | Conditionals
 13 Expressions > 13.14 Lambdas | FunctionDefs
-13 Expressions > 13.15 Expression lists | Displays, Unpacking, StarTargetStage
+13 Expressions > 13.15 Expression lists | Displays, Unpacking, StarTargetStage, StarredOperands
 13 Expressions > 13.16 Yield expressions | Generators
 13 Expressions > 13.16 Yield expressions > 13.16.1 `yield` *expression* | Generators
 13 Expressions > 13.16 Yield expressions > 13.16.2 Asynchronous generators | AsyncGenerators, Awaitables
@@ -213,7 +213,7 @@ Contents | - navigation
 14 Simple Statements > 14.4 Annotated assignment statements | Annotations, AnnotatedTargets
 14 Simple Statements > 14.5 The `assert` statement | SimpleStatements
 14 Simple Statements > 14.6 The `pass` statement | SimpleStatements
-14 Simple Statements > 14.7 The `del` statement | SimpleStatements, Subscripts
+14 Simple Statements > 14.7 The `del` statement | SimpleStatements, Subscripts, StarredOperands
 14 Simple Statements > 14.8 The `raise` statement | Raise
 14 Simple Statements > 14.9 The `return` statement | FunctionDefs, Exceptions
 14 Simple Statements > 14.10 The `break` statement | Conditionals, Exceptions
