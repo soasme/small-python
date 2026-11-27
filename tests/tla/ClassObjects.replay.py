@@ -10,7 +10,7 @@ def source(p):
     meta = p.get("meta")
     bases = "(" + ", ".join(list(p["bases"]) + (["metaclass=M"] if meta else [])) + ")" if p["bases"] or meta else ""
     body = ("'doc'\n" if p["doc"] else "") + ("x: int\n" if p["ann"] else "") + \
-        "def m(self):\n    self.b = 1\n    self.a = 2\n"
+        "def m(self):\n    self.b = 1\n    self.a = 2\n    self.c += 1\n[0 for self.d in ()]\n"
     cls = "class C" + params + bases + ":\n" + "".join("    " + line + "\n" for line in body.splitlines())
     head = "class A:\n    w = 0\nclass B: pass\n".replace("class A:\n    w = 0\n", "class A: w = 0\n")
     if meta:

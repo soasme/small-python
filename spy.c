@@ -10445,10 +10445,11 @@ static int debug_error(SPYContext *c, Site *at, int deleting) {
 }
 /* Whether n is an attribute of self. */
 static int self_attribute(Node *n) { return n->self_attribute; }
-/* Stored attribute n of self is a static attribute of the class nearest
- * around scope. */
-/* Name, a stored attribute of self, is a static attribute of the class nearest around scope. */
+/* Attribute, a stored attribute of self, is a static attribute of the
+ * class nearest around scope's code: a list, set or dict comprehension's
+ * is its enclosing scope's, where it is inlined. */
 static int scope_static(SPYContext *c, Scope *scope, const char *attribute) {
+    while (scope->kind == S_COMPREHENSION && scope->op != N_TUPLE && scope->parent) scope = scope->parent;
     for (Scope *outer = scope->parent; outer; outer = outer->parent) {
         if (outer->kind != S_CLASS) continue;
         const char *name = scope_text(c, outer, attribute);
