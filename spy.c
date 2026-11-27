@@ -7232,6 +7232,7 @@ static Node *probe_bitwise_or(Parser *p, size_t at, size_t *end) {
     *end = p->pos; p->pos = saved;
     return n;
 }
+static int single_group(Parser *, size_t, size_t);
 static int probe_excluded(Parser *p, size_t at) {
     if (p->tokens[at].kind != '(' && p->tokens[at].kind != '[') {
         size_t saved = p->pos; p->pos = at;
@@ -7241,8 +7242,11 @@ static int probe_excluded(Parser *p, size_t at) {
     size_t saved = p->pos;
     p->pos = at;
     Node *n = atom(p);
+    size_t end = p->pos;
     if (!n) spy_clear_error(p->ctx);
     p->pos = saved;
+    /* Parentheses around one bracketed group make a group, not a tuple. */
+    if (n && p->tokens[at].kind == '(' && (p->tokens[at + 1].kind == '(' || p->tokens[at + 1].kind == '[') && single_group(p, at + 1, end - 1)) return 0;
     return n && (n->kind == N_LIST || n->kind == N_TUPLE || (n->kind == N_COMPREHENSION && n->op == N_TUPLE));
 }
 /* Whether tokens [first, end) are one bracketed group. */
@@ -7293,7 +7297,14 @@ static int assert_equals_error(Parser *p, Node *a) {
     else snprintf(message, sizeof(message), "cannot assign to %s here. Maybe you meant '==' instead of '='?", expression_name(a));
     syntax_at(p, a, message); p->error_end = last->start + last->len; return 1;
 }
-static Node *assignment_error(Parser *p, size_t start) {
+/* A statement E1 = E2 = ... from start failed at a target: generator, a
+ * generator expression target whose error target_of raised, which
+ * invalid_named_expression's precedes, or another that cannot be assigned. */
+static Node *assignment_error(Parser *p, size_t start, Node *generator) {
+    if (generator) {
+        if (!error_is(p->ctx, "SyntaxError")) return NULL;
+        spy_clear_error(p->ctx);
+    }
     p->pos = start;
     Node *first = NULL, *bad = NULL;
     size_t last_item = start;
@@ -7329,6 +7340,7 @@ static Node *assignment_error(Parser *p, size_t start) {
         p->pos++;
     }
     if (p->tokens[last_item].kind != '*' && named_equals_error(p, last_item)) return NULL;
+    if (generator) { target_of(p, generator, TARGETS_STAR, 0); return NULL; }
     if (!bad) return syntax(p, "invalid syntax");
     if (bare_yield) return syntax_at(p, bad, "assignment to yield expression not possible");
     return target_error(p, bad, TARGETS_STAR);
@@ -9307,7 +9319,7 @@ static Node *expression_statement(Parser *p, Node *n) {
             snprintf(message, sizeof(message), "'%s' is an illegal expression for augmented assignment", expression_name(n->a));
             return syntax_at(p, n->a, message);
         }
-        if (!target_of(p, n->a, TARGETS_STAR, 0)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
+        if (!target_of(p, n->a, TARGETS_STAR, 0)) return assignment_error(p, start, p->ctx->error_type[0] ? n->a : NULL);
         p->pos++; n->kind = N_ASSIGN; n->op = op;
         if (op == '=') target_parsed(p);
         else if (n->a->kind != N_NAME && p->emitting && augmented_target(p, n->a)) return NULL;
@@ -9315,7 +9327,7 @@ static Node *expression_statement(Parser *p, Node *n) {
         if (!n->b) return NULL;
         Node **tail = &n->args;
         while (op == '=' && take(p, '=')) {
-            if (!target_of(p, n->b, TARGETS_STAR, 0)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
+            if (!target_of(p, n->b, TARGETS_STAR, 0)) return assignment_error(p, start, p->ctx->error_type[0] ? n->b : NULL);
             target_parsed(p);
             *tail = n->b; tail = &n->b->next;
             n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);

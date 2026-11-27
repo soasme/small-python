@@ -868,6 +868,7 @@ Unreleased (0.10.0):
 - a del statement's or a parenthesized starred item that does not parse is reported where CPython does, `(*lambda: 0)` "cannot use starred expression here"
 - a class body's generator expression with a starred element passed as a call's only argument no longer crashes
 - a generator expression's starred element takes any expression, as `(*a or b for a, b in y)`
+- an assignment to a generator expression in redundant parentheses, or after `name = value,`, gets CPython's "Maybe you meant '=='" error
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 
