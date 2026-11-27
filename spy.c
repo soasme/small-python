@@ -147,7 +147,8 @@ static const char *const event_errors[] = {
     "lazy import not allowed inside try/except blocks", "lazy import not allowed inside functions",
     "lazy import not allowed inside classes", "lazy from ... import not allowed inside try/except blocks",
     "lazy from ... import not allowed inside functions", "lazy from ... import not allowed inside classes",
-    "lazy from ... import * is not allowed", "import * only allowed at module level"};
+    "lazy from ... import * is not allowed", "import * only allowed at module level",
+    "from __future__ imports must occur at the beginning of the file"};
 /* A name's binding, use or global declaration (EV_BIND, EV_USE, EV_ADD)
  * holds no node: its text and spelling, kept in the parse's log from
  * text, its line, and the site its error is at; a named expression's
@@ -4754,6 +4755,11 @@ typedef struct Parser {
     const char *constant_name; /* a name spelled to normalize to None, True, or False */
     char deferred_text[256], *deferred_long; /* a pattern's, of any length (case_checked) */
     size_t deferred_line;
+    /* The future pass's first error, which CPython finds before any scope
+     * analysis (future.c). */
+    const char *future_error, *future_start, *future_end;
+    char future_text[128];
+    size_t future_line;
     /* CPython's last_stmt_location: the start of the last compound statement
      * parsed, which a SyntaxError's _metadata records. */
     const char *last_stmt;
@@ -4770,6 +4776,11 @@ typedef struct Parser {
     /* Future statements: nesting of statement(), top-level statements seen,
      * whether one may still appear, and barry_as_FLUFL. */
     int statement_level, future_closed, barry, future_annotations;
+    /* The line of the module statement that ended its future statements,
+     * and whether the statement being parsed is a future statement after
+     * them: 1 found by scope analysis, 2 on that line, by the future pass. */
+    size_t future_closed_line;
+    int future_misplaced;
     int annotated, conditional_annotations; /* A body's annotated assignment; one in a conditional block, or a module's. */
     /* The simple annotations of the module or class body being parsed, in
      * order (annotated): collecting, how many compound statements enclose
@@ -5478,6 +5489,12 @@ static Node *syntax_span(Parser *p, size_t first, size_t end, const char *messag
     if (end > first) { Token *last = &p->tokens[end - 1]; p->error_end = last->start + last->len; }
     return NULL;
 }
+static void defer_future(Parser *p, const char *message) {
+    if (p->future_error) return;
+    put_text(p->future_text, sizeof(p->future_text), message);
+    p->future_error = p->future_text; p->future_line = peek(p)->line;
+    p->future_start = peek(p)->start; p->future_end = peek(p)->start + peek(p)->len;
+}
 static void defer(Parser *p, const char *message) {
     if (p->deferred) return;
     put_text(p->deferred_text, sizeof(p->deferred_text), message);
@@ -5543,12 +5560,12 @@ static void future_feature(Parser *p, size_t name) {
     if (token_is(t, "barry_as_FLUFL")) p->barry = 1;
     if (token_is(t, "annotations")) p->future_annotations = 1;
     for (size_t i = 0; i < sizeof(features) / sizeof(*features); i++) if (token_is(t, features[i])) return;
-    if (p->deferred) return;
+    if (p->future_error) return;
     char message[128];
     if (token_is(t, "braces")) snprintf(message, sizeof(message), "not a chance");
     else snprintf(message, sizeof(message), "future feature %.*s is not defined", (int)t->len, t->start);
     size_t pos = p->pos;
-    p->pos = name; defer(p, message); p->pos = pos;
+    p->pos = name; defer_future(p, message); p->pos = pos;
 }
 /* Attribute n's name, its identifier b's, moved onto n, which owns it. */
 static void attribute_takes_name(Node *n) {
@@ -8420,28 +8437,38 @@ static void soft_keyword_error(Parser *p, size_t start) {
     spy_error(c, "SyntaxError", message);
     c->line = line; p->pos = pos; p->error_start = error_start; p->error_end = error_end;
 }
-/* future.c: future statements come first, after at most a docstring. */
+/* future.c: future statements come first, after at most a docstring.
+ * The future pass reads the module's statements until one after them on
+ * a later line: a future statement it meets after them is its error;
+ * scope analysis finds any other (import_recorded). Neither checks the
+ * features a misplaced one names. */
 static Node *statement(Parser *p) {
     Token *first = peek(p);
     int future = token_is(first, "from") && p->pos + 2 < p->len && token_is(first + 1, "__future__") && token_is(first + 2, "import");
-    int misplaced = future && (p->statement_level || p->future_closed) && !p->deferred;
-    if (misplaced) defer(p, "from __future__ imports must occur at the beginning of the file");
+    int misplaced = future && (p->statement_level || p->future_closed);
+    int same_line = misplaced && !p->statement_level && first->line == p->future_closed_line;
+    if (same_line) defer_future(p, "from __future__ imports must occur at the beginning of the file");
+    int saved = p->future_misplaced;
+    p->future_misplaced = same_line ? 2 : misplaced;
     int emits = p->emits;
     p->emits = 0;
     docstring_unpass(p);
     p->statement_level++;
     Node *n = statement_body(p, emits);
     p->statement_level--;
+    p->future_misplaced = saved;
     /* Namespace stores are known when the statement's body finishes. A
      * nested definition has restored the enclosing parser context here. */
     if (n && (!p->definition || p->definition->kind == N_CLASS) &&
         (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) ||
          n->kind == N_DELETE || (n->kind == N_ASSIGN && n->op == '=' && n->args))) n->flags |= F_NAMESPACE;
-    if (n && misplaced) p->deferred_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
+    if (n && same_line) p->future_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
     if (n && !n->spanned) span_block(p, n, (size_t)(first - p->tokens));
     if (n && !p->ctx->error_type[0] && parse_children(p, n)) return NULL;
     if (!p->statement_level) {
-        if (!future && !(!p->top_statements && n && n->kind == N_EXPR && n->a && n->a->kind == N_STRING)) p->future_closed = 1;
+        if (!future && !(!p->top_statements && n && n->kind == N_EXPR && n->a && n->a->kind == N_STRING) && !p->future_closed) {
+            p->future_closed = 1; p->future_closed_line = first->line;
+        }
         p->top_statements++;
     }
     /* A statement its parse did not compile compiles as it ends, unless
@@ -8862,7 +8889,7 @@ static Node *statement_body(Parser *p, int emits) {
                 p->pos = lazy - 1;
                 return syntax(p, "lazy from __future__ import is not allowed");
             }
-            if (!n->op && !strcmp(source_name(n->a), "__future__") && at(p, '*')) defer(p, "future feature * is not defined");
+            if (!n->op && !strcmp(source_name(n->a), "__future__") && at(p, '*') && !p->future_misplaced) defer_future(p, "future feature * is not defined");
             if (at(p, '*')) { size_t star = p->pos++; n->args = span(p, node(p, N_STAR), star); return n->args && !import_recorded(p, n) ? n : NULL; }
         }
         int future = from && !n->op && !strcmp(source_name(n->a), "__future__");
@@ -8873,7 +8900,7 @@ static Node *statement_body(Parser *p, int emits) {
             size_t item_at = p->pos;
             Node *item = node(p, N_ASSIGN);
             if (!item || !(item->a = from ? identifier(p) : import_name(p))) return NULL;
-            if (future) future_feature(p, p->pos - 1);
+            if (future && !p->future_misplaced) future_feature(p, p->pos - 1);
             if (take_word(p, "as")) {
                 /* invalid_dotted_as_name and invalid_import_from_as_name */
                 size_t name = p->pos;
@@ -8925,6 +8952,8 @@ static int import_recorded(Parser *p, Node *n) {
         error = where >= 0 ? where + (n->kind == N_FROM) * 3 : n->args->kind == N_STAR ? 6 : -1;
     }
     if (error < 0 && n->args->kind == N_STAR && scope->kind != S_MODULE) error = 7;
+    /* A misplaced future statement, after its names (statement). */
+    int misplaced = error < 0 && p->future_misplaced == 1 && n->kind == N_FROM;
     if (error >= 0) {
         if (event_into(p->ctx, &p->events, EV_ERROR, (unsigned)error, scope, NULL, NULL)) return -1;
         p->events.items[p->events.len - 1].site = site_of(error == 7 ? n->args : n);
@@ -8932,6 +8961,10 @@ static int import_recorded(Parser *p, Node *n) {
     for (Node *item = n->args; error < 0 && item && item->kind != N_STAR; item = item->next) {
         Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
         if (name_event(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, binding, item)) return -1;
+    }
+    if (misplaced) {
+        if (event_into(p->ctx, &p->events, EV_ERROR, 8, scope, NULL, NULL)) return -1;
+        p->events.items[p->events.len - 1].site = site_of(n);
     }
     return parse_recorded(p, n, scope, 1);
 }
@@ -10923,6 +10956,10 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         /* What no line of statements analysed: an eval() expression. */
         Node *rest = p.analysed ? p.analysed->next : unit->as.unit.body;
         if (!c->error_type[0] && rest && analyse_statements(&p, rest)) {}
+        if (!c->error_type[0] && p.future_error) {
+            spy_error(c, "SyntaxError", p.future_error);
+            c->line = p.future_line; c->node_start = p.future_start; c->node_end = p.future_end;
+        }
         analysis_raise(c, &p.symbols);
         mem_free(p.symbols.message);
         if (!c->error_type[0] && !unit->as.unit.scope) unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
