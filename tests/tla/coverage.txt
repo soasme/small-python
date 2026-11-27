@@ -207,7 +207,7 @@ Contents | - navigation
 14 Simple Statements | = sections
 14 Simple Statements > 14.1 Expression statements | CompileModes
 14 Simple Statements > 14.2 Assignment statements | = sections
-14 Simple Statements > 14.2 Assignment statements > 14.2.1 Runtime Semantics: Evaluation | SimpleStatements, Evaluation
+14 Simple Statements > 14.2 Assignment statements > 14.2.1 Runtime Semantics: Evaluation | SimpleStatements, Evaluation, StarTargetStage
 14 Simple Statements > 14.2 Assignment statements > 14.2.2 AssignTarget ( *target*, *v* ) | Unpacking, Subscripts, Attributes, Grammar
 14 Simple Statements > 14.3 Augmented assignment statements | SimpleStatements, BinaryArith
 14 Simple Statements > 14.4 Annotated assignment statements | Annotations

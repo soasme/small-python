@@ -262,7 +262,7 @@ typedef struct { NameOperand *name; SPYValue *cls, *method; size_t epoch; int ki
 enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED };
 /* An error's place: none, its node, the current token, or a part's span
  * and name (Spot). */
-enum { SPOT_NONE, SPOT_SELF, SPOT_HERE, SPOT_AT };
+enum { SPOT_NONE, SPOT_SELF, SPOT_AT };
 enum { PLACE_DEBUG = 4, PLACES };
 typedef struct { const char *name, *start, *end; size_t line; int spanned; } Spot;
 /* How a value's steps become a test (test_plan): through the negations
@@ -5502,6 +5502,14 @@ static void defer(Parser *p, const char *message) {
     p->deferred = p->deferred_text; p->deferred_line = peek(p)->line;
     p->deferred_start = peek(p)->start; p->deferred_end = peek(p)->start + peek(p)->len;
 }
+/* The compiler's error at node n, deferred (defer); the node covers it until it ends. */
+static void defer_node(Parser *p, Node *n, const char *message) {
+    if (p->deferred) return;
+    defer(p, message);
+    p->deferred_line = n->line;
+    if (n->spanned) p->deferred_start = n->start, p->deferred_end = n->end;
+    else p->deferred_node = n;
+}
 static int expect(Parser *p, int kind, const char *message) {
     if (take(p, kind)) return 1;
     syntax(p, at(p, T_WALRUS) ? "invalid syntax" : message); return 0;
@@ -7078,7 +7086,6 @@ static Node *syntax_at(Parser *p, Node *n, const char *message) {
 }
 /* An error with message at place i of n (Node.places). */
 static Node *place_error(Parser *p, Node *n, int i, const char *message) {
-    if (n->places[i] == SPOT_HERE) return syntax(p, message);
     if (n->places[i] == SPOT_SELF) return syntax_at(p, n, message);
     Spot *at = &n->spots[i];
     syntax(p, message); p->ctx->line = at->line;
@@ -7093,12 +7100,27 @@ static int target_parts(SPYContext *, Node *);
 enum { TARGET_OK, TARGET_NOT, TARGET_GENERATOR, TARGET_STARS, TARGET_MANY };
 static const char *const target_errors[] = {NULL, NULL, "cannot assign to generator expression",
                                             "multiple starred expressions in assignment", "too many expressions in star-unpacking assignment"};
-static int target(Parser *p, Node *n) {
-    if (n->kind == N_STAR) { syntax_at(p, n, "starred assignment target must be in a list or tuple"); return 0; }
-    if (target_facts(p->ctx, n)) return 0;
-    if (n->targets > TARGET_NOT) place_error(p, n, 0, target_errors[n->targets]);
-    return n->targets == TARGET_OK;
+/* The compiler's error at n's place 0 (Node.places), deferred. */
+static void defer_place(Parser *p, Node *n, const char *message) {
+    if (p->deferred || n->places[0] != SPOT_AT) { defer_node(p, n, message); return; }
+    Spot *at = &n->spots[0];
+    defer(p, message);
+    p->deferred_line = at->line; p->deferred_start = at->start; p->deferred_end = at->end;
 }
+/* Whether n is a target of type; if a generator expression is its
+ * first part that cannot be, that error. A part that cannot be is the
+ * parser's error (target_error) and comes first; a star alone, two
+ * stars and too many names before one are the compiler's, which only
+ * a target taken defers. */
+static int target_of(Parser *p, Node *n, int type, int taken) {
+    if (target_facts(p->ctx, n)) return 0;
+    if (n->targets == TARGET_GENERATOR) { place_error(p, n, 0, target_errors[n->targets]); return 0; }
+    if (n->targets == TARGET_NOT || ((n->targets != TARGET_OK || n->kind == N_STAR) && n->places[1 + type])) return 0;
+    if (taken && n->kind == N_STAR) defer_node(p, n, "starred assignment target must be in a list or tuple");
+    else if (taken && n->targets != TARGET_OK) defer_place(p, n, target_errors[n->targets]);
+    return 1;
+}
+static int target(Parser *p, Node *n, int type) { return target_of(p, n, type, 1); }
 /* The error of n, which a target of type cannot assign: at its first part that cannot be. */
 static Node *target_error(Parser *p, Node *n, int type) {
     if (target_facts(p->ctx, n)) return NULL;
@@ -7156,7 +7178,7 @@ static int target_parts(SPYContext *c, Node *n) {
             for (int t = 1; t < PLACES; t++) if (!n->places[t] && item->places[t] && place_from(c, n, t, item, t)) return -1;
             if (n->targets != TARGET_OK) continue;
             if (item->kind == N_STAR && ++stars > 1) n->targets = TARGET_STARS, n->places[0] = SPOT_SELF;
-            else if (item->kind == N_STAR && before > 255) n->targets = TARGET_MANY, n->places[0] = SPOT_HERE;
+            else if (item->kind == N_STAR && before > 255) n->targets = TARGET_MANY, n->places[0] = SPOT_SELF;
             else if (item->targets != TARGET_OK && (n->targets = item->targets, place_from(c, n, 0, item, 0))) return -1;
             if (!stars) before++;
         }
@@ -7286,7 +7308,7 @@ static int clause_ahead(Parser *p) {
     int found = -1;
     /* invalid_for_if_clause precedes invalid_for_target. */
     if (t && !keyword(p, "in")) syntax(p, "'in' expected after for-loop variables");
-    else if (t && !target(p, t)) { if (!p->ctx->error_type[0]) target_error(p, t, TARGETS_FOR); }
+    else if (t && !target_of(p, t, TARGETS_FOR, 0)) { if (!p->ctx->error_type[0]) target_error(p, t, TARGETS_FOR); }
     else if (t) { p->pos++; found = expression(p, 1) != NULL; }
     p->emitting = emitting;
     if (found <= 0 && (!p->ctx->error_type[0] || !strcmp(p->ctx->error_message, "invalid syntax"))) {
@@ -7354,7 +7376,7 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Pro
         loop->op = asynchronous; p->awaits += asynchronous;
         /* invalid_for_if_clause precedes invalid_for_target. */
         if (!keyword(p, "in")) return p->emitting = emitting, syntax(p, "'in' expected after for-loop variables");
-        if (!target(p, loop->args)) return p->emitting = emitting, p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
+        if (!target(p, loop->args, TARGETS_FOR)) return p->emitting = emitting, p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
         p->pos++;
         int before = p->awaits, first = tail == &n->a;
         p->emitting = first ? emitting : body;
@@ -7385,7 +7407,8 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Pro
     p->emitting = emitting;
     if (p->awaits - awaits > outer) n->asynchronous = 1;
     if (n->op == N_TUPLE) p->awaits = awaits + outer;
-    if (n->scope && n->scope->code && comprehension_close(p, n, body, element, iterable, opening)) return NULL;
+    /* A clause it could not emit has a deferred error (target). */
+    if (n->scope && n->scope->code && body && comprehension_close(p, n, body, element, iterable, opening)) return NULL;
     return finished(p, n);
 }
 /* Whether token i is the keyword s. */
@@ -8555,7 +8578,7 @@ static Node *statement_body(Parser *p, int emits) {
                 Program *emitting = p->emitting; p->emitting = NULL;
                 Node *whole = plain_expression(p, 0);
                 p->emitting = emitting;
-                if (whole && (at(p, ',') || at(p, ')') || at(p, ':')) && !target(p, whole))
+                if (whole && (at(p, ',') || at(p, ')') || at(p, ':')) && !target_of(p, whole, TARGETS_STAR, 0))
                     return p->ctx->error_type[0] ? NULL : target_error(p, whole, TARGETS_STAR);
                 spy_clear_error(p->ctx); p->pos = as; p->expr_start = expr_start; p->expr_end = expr_end;
                 before = emit_mark(p);
@@ -8563,7 +8586,7 @@ static Node *statement_body(Parser *p, int emits) {
                     if (!(item->b = node(p, N_STAR)) || !(item->b->a = expression(p, 4))) return NULL;
                     span(p, item->b, as);
                 } else if (!(item->b = expression(p, 4))) return NULL;
-                if (!target(p, item->b)) return p->ctx->error_type[0] ? NULL : target_error(p, item->b, TARGETS_STAR);
+                if (!target(p, item->b, TARGETS_STAR)) return p->ctx->error_type[0] ? NULL : target_error(p, item->b, TARGETS_STAR);
                 if (emits && with_target(p, item, before)) return NULL;
             }
             if (emits && emit_pop(p, item)) return NULL;
@@ -8764,7 +8787,7 @@ static Node *statement_body(Parser *p, int emits) {
         n->op = asynchronous;
         if (is_for) {
             n->args = loop_target(p, emits);
-            if (n->args && !target(p, n->args)) return p->ctx->error_type[0] ? NULL : target_error(p, n->args, TARGETS_FOR);
+            if (n->args && !target_of(p, n->args, TARGETS_FOR, 0)) return p->ctx->error_type[0] ? NULL : target_error(p, n->args, TARGETS_FOR);
             if (!n->args || !take_word(p, "in")) return syntax(p, "invalid syntax");
         }
         size_t condition = p->pos;
@@ -8775,6 +8798,8 @@ static Node *statement_body(Parser *p, int emits) {
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
         if (emits) header_kept(p, n->a, from);
         if (!n->a) return NULL;
+        /* The compiler visits the iterable first. */
+        if (is_for) target(p, n->args, TARGETS_FOR);
         if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
         /* With emits compiled in place, as compile_statement does (loop_begin). */
         if (parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
@@ -9068,7 +9093,7 @@ static Node *delete_statement(Parser *p, Node *n) {
     if (!(n->a = expression_list(p, 0))) return NULL;
     if (target_facts(p->ctx, n->a)) return NULL;
     if (n->a->places[1 + TARGETS_DEL]) return target_error(p, n->a, TARGETS_DEL);
-    if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : target_error(p, n->a, TARGETS_DEL);
+    if (!target(p, n->a, TARGETS_DEL)) return p->ctx->error_type[0] ? NULL : target_error(p, n->a, TARGETS_DEL);
     return n;
 }
 /* The exception and cause of raise statement n. */
@@ -9142,7 +9167,7 @@ static Node *expression_statement(Parser *p, Node *n) {
             snprintf(message, sizeof(message), "'%s' is an illegal expression for augmented assignment", expression_name(n->a));
             return syntax_at(p, n->a, message);
         }
-        if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
+        if (!target_of(p, n->a, TARGETS_STAR, 0)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
         p->pos++; n->kind = N_ASSIGN; n->op = op;
         if (op == '=') target_parsed(p);
         else if (n->a->kind != N_NAME && p->emitting && augmented_target(p, n->a)) return NULL;
@@ -9150,15 +9175,20 @@ static Node *expression_statement(Parser *p, Node *n) {
         if (!n->b) return NULL;
         Node **tail = &n->args;
         while (op == '=' && take(p, '=')) {
-            if (!target(p, n->b)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
+            if (!target_of(p, n->b, TARGETS_STAR, 0)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
             target_parsed(p);
             *tail = n->b; tail = &n->b->next;
             n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->b) return NULL;
         }
         if (n->b->kind == N_STAR) return syntax_at(p, n->b, "can't use starred expression here");
+        /* The compiler visits the value, then the targets in order. */
+        if (op == '=') {
+            target(p, n->a, TARGETS_STAR);
+            for (Node *t = n->args; t; t = t->next) target(p, t, TARGETS_STAR);
+        }
     }
-    if (n->a->kind == N_STAR) return syntax_at(p, n->a, "can't use starred expression here");
+    if (n->kind != N_ASSIGN && n->a->kind == N_STAR) return syntax_at(p, n->a, "can't use starred expression here");
     if (n->kind == N_EXPR && n->a->kind == N_NAMED && !n->a->op) return syntax(p, "invalid syntax");
     return n;
 }
@@ -18983,6 +19013,7 @@ static int with_item(Parser *p, Node *item, EmitMark before, int asynchronous, u
 static int with_target(Parser *p, Node *item, EmitMark before) {
     Node *t = item->b;
     (void)before;
+    if (t->kind == N_STAR) return 0; /* a star alone, a deferred error (target) */
     return target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 0, TARGET_CHECK) &&
            target_steps(p->ctx, p->emitting, t, t->steps_at, NULL, 1, TARGET_STORE) ? 0 : -1;
 }
