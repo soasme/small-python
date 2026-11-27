@@ -158,7 +158,7 @@ Contents | - navigation
 12 Lexical Grammar > 12.5 String and bytes literals > 12.5.1 Syntax | StringLiterals
 12 Lexical Grammar > 12.5 String and bytes literals > 12.5.2 Raw literals | StringLiterals
 12 Lexical Grammar > 12.5 String and bytes literals > 12.5.3 Escape sequences | StringLiterals
-12 Lexical Grammar > 12.5 String and bytes literals > 12.5.4 Literal concatenation | StringLiterals
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.4 Literal concatenation | StringLiterals, StringMixing
 12 Lexical Grammar > 12.5 String and bytes literals > 12.5.5 Static Semantics: StringValue | StringLiterals
 12 Lexical Grammar > 12.5 String and bytes literals > 12.5.6 f-strings | FStrings
 12 Lexical Grammar > 12.5 String and bytes literals > 12.5.7 t-strings | TStrings

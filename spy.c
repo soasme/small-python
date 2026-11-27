@@ -6372,15 +6372,33 @@ static Node *string_node(Parser *p) {
     Node **tail = &n->args;
     Buffer literal = {.ctx = p->ctx};
     int formatted = 0, bytes = -1, template = -1;
+    /* The strings before a t-string are concatenated once all are read: a
+     * mix of bytes is reported after them, of t-strings over the two that
+     * differ. */
+    size_t end = p->pos;
+    for (; end < p->len && p->tokens[end].kind == T_STRING; end++) {
+        size_t prefix; int flags;
+        literal_prefix(p->tokens[end].start, &prefix, &flags);
+        if (flags & L_TEMPLATE) break;
+    }
     do {
         Token *t = peek(p);
         size_t prefix; int flags;
         literal_prefix(t->start, &prefix, &flags);
         if (template >= 0 && template != !!(flags & L_TEMPLATE)) {
-            mem_free(literal.data); return syntax(p, "cannot mix t-string literals with string or bytes literals");
+            mem_free(literal.data); return syntax_span(p, p->pos - 1, p->pos + 1, "cannot mix t-string literals with string or bytes literals");
         }
         if (bytes >= 0 && bytes != !!(flags & L_BYTES)) {
-            mem_free(literal.data); return syntax(p, "cannot mix bytes and nonbytes literals");
+            mem_free(literal.data); p->pos = end; syntax(p, "cannot mix bytes and nonbytes literals");
+            /* A t-string after them is reported at its start: prefix and quote. */
+            if (end < p->len && p->tokens[end].kind == T_STRING) {
+                Token *t = &p->tokens[end];
+                const char *q = t->start; size_t prefix;
+                literal_prefix(q, &prefix, &flags);
+                q += prefix;
+                p->error_end = q + (t->len >= prefix + 6 && q[1] == q[0] && q[2] == q[0] ? 3 : 1);
+            }
+            return NULL;
         }
         template = !!(flags & L_TEMPLATE);
         if (template) n->kind = N_TEMPLATE;
