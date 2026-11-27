@@ -8443,7 +8443,7 @@ static Node *match_statement(Parser *p) {
             case_check(item, &checked, deferred)) { free_program(guard); goto failed; }
         pending = 1;
         if (emits) case_begin(p, p->body.program, item, &k, guard, &checked.allowed);
-        if (!(item->c = suite_of(p, "'case' statement", case_line, emits))) { mem_free(k.fail.exits); mem_free(k.names); goto failed; }
+        if (!suite_of(p, "'case' statement", case_line, emits)) { mem_free(k.fail.exits); mem_free(k.names); goto failed; }
         if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
         *tail = item; tail = &item->next;
     }
@@ -8739,7 +8739,8 @@ static Node *statement_body(Parser *p, int emits) {
         if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
         if (emits) { p->emitting = NULL; p->emitted_len = 0; }
         if (parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
-        if (!(n->b = suite_of(p, "'with' statement", n->line, emits))) return NULL;
+        /* Its suite, compiled as it is parsed, is not kept. */
+        if (!suite_of(p, "'with' statement", n->line, emits)) return NULL;
         if (emits) { with_end(p->ctx, p->body.program, last, n->op); n->flags |= F_EMITTED; }
         return n;
     }
@@ -8794,13 +8795,14 @@ static Node *statement_body(Parser *p, int emits) {
         p->definition = n;
         Body enclosing = body_begin(p, n, p->depth + 1);
         p->scope = n->scope;
-        n->b = p->body.program ? suite_after(p, "class definition", n->line) : NULL;
+        /* Its body, compiled into its own program as it is parsed, is not kept. */
+        Node *body = p->body.program ? suite_after(p, "class definition", n->line) : NULL;
         p->definition = definition; p->returned = returned; p->scope = scope;
-        if (body_end(p, n->b, start, enclosing) || collect_end(p, n, &n->annotate, annotations)) return NULL;
+        if (body_end(p, body, start, enclosing) || collect_end(p, n, &n->annotate, annotations)) return NULL;
         if (n->scope) scope_define(n);
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
-        if (!n->b) return NULL;
+        if (!body) return NULL;
         return p->ctx->error_type[0] ? NULL : n;
     }
     if (take_word(p, "raise")) {
@@ -9010,11 +9012,12 @@ static Node *statement_body(Parser *p, int emits) {
         Scope *scope = p->scope;
         Body enclosing = body_begin(p, n, p->depth + 1);
         p->scope = n->scope;
-        n->b = p->body.program ? suite_after(p, "function definition", n->line) : NULL;
+        /* Its body, compiled into its own program as it is parsed, is not kept. */
+        Node *body = p->body.program ? suite_after(p, "function definition", n->line) : NULL;
         Site first_return = p->returned;
         p->definition = definition; p->returned = returned; p->collecting = collecting; p->scope = scope;
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
-        if (body_end(p, n->b, start, enclosing) || !body_scope(p->ctx, n)) return NULL;
+        if (body_end(p, body, start, enclosing) || !body_scope(p->ctx, n)) return NULL;
         /* The first valued return, whose error waits for resolution. */
         if (first_return.node) site_settle(&first_return);
         n->scope->returned_line = first_return.line;
