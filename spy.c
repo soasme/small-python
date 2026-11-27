@@ -7649,14 +7649,15 @@ static Node *if_statement(Parser *p, int emits) {
     if (n->a && at(p, '=')) return condition_equals_error(p, condition);
     if (!n->a || parse_children(p, n) || analyse_statements(p, n) || (emits && header_ready(p, start))) return NULL;
     if (emits) branch = branch_parsed(p->ctx, p->body.program, n->a, n);
-    if (!(n->b = suite_of(p, what, line, emits))) return NULL;
+    /* Its suites, compiled as they are parsed, are not kept. */
+    if (!suite_of(p, what, line, emits)) return NULL;
     if (emits) end = if_else(p->ctx, p->body.program, branch);
     if (take_word(p, "elif")) {
         if (++p->depth > 128) { p->depth--; return syntax(p, "too many elif clauses"); }
-        n->c = if_statement(p, emits); p->depth--;
-        if (!n->c) return NULL;
+        Node *elif = if_statement(p, emits); p->depth--;
+        if (!elif) return NULL;
     }
-    else if (take_word(p, "else")) { n->c = suite_of(p, "'else' statement", keyword_line(p), emits); if (!n->c) return NULL; }
+    else if (take_word(p, "else") && !suite_of(p, "'else' statement", keyword_line(p), emits)) return NULL;
     if (emits) { patch(p->body.program, end, program_len(p->body.program)); n->flags |= F_EMITTED; }
     return n;
 }
