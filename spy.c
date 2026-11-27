@@ -256,6 +256,11 @@ enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED 
 enum { SPOT_NONE, SPOT_SELF, SPOT_HERE, SPOT_AT };
 enum { PLACE_DEBUG = 4, PLACES };
 typedef struct { const char *name, *start, *end; size_t line; int spanned; } Spot;
+/* How a value's steps become a test (test_plan): through the negations
+ * a not chain takes, nothing, its fused step marked a test, or a fused
+ * step made for it, at its start when its right operand is fused, else
+ * at the program's split; that step's shapes, operation and line. */
+typedef struct { unsigned char negations, action, right, left, shape; int operation; uint32_t line; } TestPlan;
 /* A part of a target list, its items' in order after it, as its steps
  * become a target's (target_steps): its kind, whether it is a starred
  * item, emitted, and an item or attribute a fused step may store
@@ -299,6 +304,7 @@ struct Node {
     Spot *spots;
     Part *parts; /* A list or tuple of targets' parts, itself first (list_parts). */
     SPYValue *folded; /* A negated number's value, until its statement ends (nodes_finish). */
+    TestPlan *tested; /* A not's, emitted, as its operand's test (branch_parsed). */
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
@@ -1736,7 +1742,7 @@ static void free_value(SPYValue *v) {
         while (n) {
             Node *next = n->allocated;
             free_scope_tree(c, n->scope, 1);
-            mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n); n = next;
+            mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n); n = next;
         }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
@@ -9922,7 +9928,7 @@ static void free_node(Node *n) {
     if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
     else if (n->scope && n->scope->owner == n) n->scope->owner = NULL;
     spy_release(n->constant); spy_release(n->folded); spy_release(n->name.global_key);
-    mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n);
+    mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n);
 }
 /* After a line of module statements, parsed since start, is compiled
  * and analysed, free the nodes of the line before it, now compiled too,
@@ -18495,12 +18501,17 @@ static void operand_shapes(SPYContext *c, Node *n) {
     } else if (kind == N_UNARY && !n->arith) n->arith = n->a->arith;
     else if (kind == N_BINARY && n->op != O_AND && n->op != O_OR) n->arith = n->a->arith && n->b->arith;
 }
+static void fuse_at(SPYContext *c, Program *p, int left, int shape, int operation, size_t line, int truth, size_t start);
 static void fuse_steps(SPYContext *c, Program *p, Node *n, int truth, size_t start) {
-    int left = n->left - 1, shape = n->right - 1, steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
+    fuse_at(c, p, n->left - 1, n->right - 1, fused_operation(n), n->line, truth, start);
+}
+/* fuse_steps's step, of shapes left and shape, operation, on line. */
+static void fuse_at(SPYContext *c, Program *p, int left, int shape, int operation, size_t line, int truth, size_t start) {
+    int steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;
     /* An item operand is its plain steps alone. */
     for (size_t i = start; i < p->len; i++) if (p->items[i].op == BC_OPERATE) emit_drop(p, i--);
     size_t fused = c->error_type[0] ? SIZE_MAX :
-        emit_before(c, p, start, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, n, truth | left << 1 | shape << 4 | steps << 6 | fused_operation(n) << 8);
+        emit_line_before(c, p, start, left == SHAPE_STACK ? BC_STACKED : BC_OPERATE, line, truth | left << 1 | shape << 4 | steps << 6 | operation << 8);
     patch(p, fused, p->len);
     if (truth && fused != SIZE_MAX) p->tested = fused + 1;
 }
@@ -18512,15 +18523,26 @@ static void retest(SPYContext *, Program *, Node *, size_t);
  * its fused step tests it, or it takes one now; a constant folded from
  * an operand not at hand stays a value. */
 static int loads_name(Node *);
-static void retest(SPYContext *c, Program *p, Node *n, size_t start) {
-    if (c->error_type[0] || !n || at_hand(n) || expands(n, modes(p))) return;
+enum { TEST_NONE, TEST_MARK, TEST_FUSE };
+static TestPlan test_plan(Program *p, Node *n) {
+    TestPlan t = {0};
+    if (!n || at_hand(n) || expands(n, modes(p))) return t;
     int right = operator_right(n), stacked = stacked_right(n);
-    if (!right && (!stacked || n->constant)) return;
-    size_t at = right ? start : p->split;
+    if (!right && (!stacked || n->constant)) return t;
     int fused = !n->constant && (n->kind != N_COMPARE || right) && !(p->calls == PAUSING && loads_name(n));
-    if (!fused) { fuse_steps(c, p, n, 1, at); return; }
+    return (TestPlan){0, fused ? TEST_MARK : TEST_FUSE, (unsigned char)right, n->left, n->right, fused_operation(n), (uint32_t)n->line};
+}
+/* Make a value whose steps from start on compiled it a test, as t plans. */
+static void test_apply(SPYContext *c, Program *p, const TestPlan *t, size_t start) {
+    if (c->error_type[0] || !t->action) return;
+    size_t at = t->right ? start : p->split;
+    if (t->action == TEST_FUSE) { fuse_at(c, p, t->left - 1, t->shape - 1, t->operation, t->line, 1, at); return; }
     p->items[at].arg |= 1;
     p->tested = at + 1;
+}
+static void retest(SPYContext *c, Program *p, Node *n, size_t start) {
+    TestPlan t = test_plan(p, n);
+    test_apply(c, p, &t, start);
 }
 /* The applications of decorators, the last first, each on its own line. */
 static void compile_decorations(SPYContext *c, Program *p, Node *decorators) {
@@ -18705,6 +18727,12 @@ static Node *parsed_steps(Parser *p, Node *n, size_t at) {
     operand_shapes(c, n);
     expands(n, modes(p->emitting));
     if (n->kind == N_ATTR) expands(n->a, modes(p->emitting)), n->receiver_known = n->a->expands_known, n->receiver_value = n->a->expands_value;
+    /* A not, as a test, is its operand's, negated once more. */
+    if (n->kind == N_UNARY && n->op == O_NOT && !n->tested) {
+        TestPlan plan = n->a->tested ? *n->a->tested : test_plan(p->emitting, n->a);
+        if (!(n->tested = allocate(c, sizeof(*n->tested)))) return NULL;
+        *n->tested = plan; n->tested->negations++;
+    }
     return c->error_type[0] ? NULL : n;
 }
 /* An and or or n, compiled as it is parsed: its left operand's test and
@@ -19092,11 +19120,12 @@ static Node *display_end(Parser *p, Node *n, size_t display) {
  * no step, the branch's BC_FALSE jumping on a true operand instead (arg
  * 1). The branch, or SIZE_MAX. */
 static size_t branch_parsed(SPYContext *c, Program *program, Node *n, Node *at) {
-    int negated = 0;
-    for (; n->kind == N_UNARY && n->op == O_NOT; n = n->a) { negated ^= 1; emit_drop(program, program->len - 1); }
-    retest(c, program, n, n->steps_at);
-    if (negated) program->tested = 0;
-    return emit(c, program, BC_FALSE, at, negated);
+    TestPlan own = n->kind == N_UNARY && n->op == O_NOT ? (TestPlan){0} : test_plan(program, n);
+    const TestPlan *t = n->tested ? n->tested : &own;
+    for (int i = 0; i < t->negations; i++) emit_drop(program, program->len - 1);
+    test_apply(c, program, t, n->steps_at);
+    if (t->negations & 1) program->tested = 0;
+    return emit(c, program, BC_FALSE, at, t->negations & 1);
 }
 /* Conditional expression n as it is parsed, its value's steps from value
  * on, its test's from test on: once both were emitted, the test and its
