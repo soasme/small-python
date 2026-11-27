@@ -235,7 +235,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */,
        F_ANALYSED = 2097152 /* A statement, or a compound statement's header, analysed as it was parsed. */,
        F_EVENTS = 4194304 /* A construct whose analysis the parser recorded (events_at). */,
-       F_TARGETS = 8388608 /* Its facts as a target are known (target_facts). */ };
+       F_TARGETS = 8388608 /* Its facts as a target are known (target_facts). */,
+       F_SPEC = 16777216 /* A field's format specification, an f-string's body alone. */ };
 /* A text operand and its name-lookup cache. Literal nodes use only text.
  * Instructions can borrow this record without inspecting a syntax tree. */
 typedef struct {
@@ -6356,6 +6357,7 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
                 s++;
                 field->b = node(p, N_JOINED);
                 if (!field->b) return -1;
+                field->b->flags |= F_SPEC;
                 Node **parts = &field->b->args;
                 Buffer format = {.ctx = p->ctx};
                 int status = string_parts(p, &s, end, flags, 1, &parts, &format, depth + 1);
@@ -7700,6 +7702,7 @@ static int precedence(Node *n) {
 }
 static SPYValue *number_literal(SPYContext *, Node *);
 static int unparse_node(Buffer *b, Node *n, int level);
+static int expression_kind(int);
 /* Expression n at level: its text, once made (unparsed), parenthesized
  * above its precedence. */
 static int unparse(Buffer *b, Node *n, int level) {
@@ -7742,17 +7745,21 @@ static int unparse_fstring_body(Buffer *b, Node *parts) {
                 if (append(b, part->name.text + i, 1) || ((part->name.text[i] == '{' || part->name.text[i] == '}') && append(b, part->name.text + i, 1))) return -1;
             continue;
         }
-        Buffer field = {.ctx = b->ctx};
-        int status = unparse(&field, part->a, PR_TEST + 1);
-        status = status || puts_buffer(b, "{") || (field.len && field.data[0] == '{' && puts_buffer(b, " ")) ||
-                 append(b, field.data, field.len);
-        mem_free(field.data);
-        if (status) return -1;
-        if (part->op) { char conversion[] = {'!', (char)part->op, 0}; if (puts_buffer(b, conversion)) return -1; }
-        if (part->b && (puts_buffer(b, ":") || unparse_fstring_body(b, part->b->args))) return -1;
-        if (puts_buffer(b, "}")) return -1;
+        if (unparse(b, part, PR_TUPLE)) return -1;
     }
     return 0;
+}
+/* An f-string's field n: its expression, conversion and specification. */
+static int unparse_field(Buffer *b, Node *n) {
+    Buffer field = {.ctx = b->ctx};
+    int status = unparse(&field, n->a, PR_TEST + 1);
+    status = status || puts_buffer(b, "{") || (field.len && field.data[0] == '{' && puts_buffer(b, " ")) ||
+             append(b, field.data, field.len);
+    mem_free(field.data);
+    if (status) return -1;
+    if (n->op) { char conversion[] = {'!', (char)n->op, 0}; if (puts_buffer(b, conversion)) return -1; }
+    if (n->b && (puts_buffer(b, ":") || unparse(b, n->b, PR_TUPLE))) return -1;
+    return puts_buffer(b, "}");
 }
 static int unparse_lambda_arguments(Buffer *b, Node *args) {
     int first = 1, starred = 0;
@@ -7788,7 +7795,11 @@ static int unparse_node(Buffer *b, Node *n, int level) {
         int status = value ? format_value(b, value, 1) : -1;
         spy_release(value); return status;
     }
+    case N_FORMAT: case N_INTERPOLATION: return unparse_field(b, n);
+    /* A lambda's body. */
+    case N_RETURN: return unparse(b, n->a, PR_TEST);
     case N_JOINED: case N_TEMPLATE: {
+        if (n->flags & F_SPEC) return unparse_fstring_body(b, n->args);
         Buffer body = {.ctx = b->ctx};
         int status = unparse_fstring_body(&body, n->args);
         SPYValue *text = status ? NULL : spy_string(b->ctx, body.data ? body.data : "", body.len);
@@ -7828,7 +7839,7 @@ static int unparse_node(Buffer *b, Node *n, int level) {
     case N_LAMBDA: {
         int positional = n->args && (n->args->op == P_POSITIONAL || n->args->op == P_POSONLY);
         return (level > PR_TEST && puts_buffer(b, "(")) || puts_buffer(b, positional ? "lambda " : "lambda") ||
-               unparse_lambda_arguments(b, n->args) || puts_buffer(b, ": ") || unparse(b, n->b->a, PR_TEST) ||
+               unparse_lambda_arguments(b, n->args) || puts_buffer(b, ": ") || unparse(b, n->b, PR_TEST) ||
                (level > PR_TEST && puts_buffer(b, ")"));
     }
     case N_COND:
@@ -9653,7 +9664,7 @@ static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
 static int operation_of(Node *);
 static int parse_children(Parser *p, Node *n) {
-    if (p->future_annotations && p->unevaluated && (n->a || n->b || n->c || n->args) && unparsed(p, n)) return -1;
+    if (p->future_annotations && p->unevaluated && (expression_kind(n->kind) || n->kind == N_RETURN) && unparsed(p, n)) return -1;
     if ((n->kind == N_STAR || n->kind == N_MAPPING || n->kind == N_KEYWORD) && n->a && stand_parsed(p, n)) return -1;
     if ((n->kind == N_INDEX || n->kind == N_BINARY || (n->kind == N_COMPARE && n->args)) && !n->operation) n->operation = operation_of(n) + 1;
     /* A negated number's value, its constant once its statement ends (nodes_finish). */
@@ -10881,6 +10892,7 @@ static SPYValue *pattern_constant(SPYContext *c, Node *n) {
     case N_NONE: return spy_none(c);
     case N_BOOL: return spy_bool(c, n->op);
     case N_UNARY:
+        if (n->constant) return spy_retain(n->constant);
         a = pattern_constant(c, n->a);
         result = a ? unary(c, n->op, a) : NULL;
         spy_release(a); return result;
