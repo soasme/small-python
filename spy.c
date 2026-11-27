@@ -280,7 +280,8 @@ struct Node {
      * each mode, whether expands is known and its answer; and loads_name,
      * plus one. Expressions are whole when they compile. */
     unsigned char expands_known, expands_value, loads;
-    /* An attribute's object's expands summaries, as its own (receiver_expands). */
+    /* An attribute's object's, or a comprehension's first iterable's,
+     * expands summaries, as its own (receiver_expands). */
     unsigned char receiver_known, receiver_value;
     /* Its shapes, plus one, set before it compiles (operand_shapes): as an
      * operand at hand, and as an operator fused on its left and right
@@ -7278,6 +7279,8 @@ static Node *comprehension_items_error(Parser *p, Node *n, Token *comma) {
  * it runs inlined there. */
 /* Comprehension n, its element parsed since element: only its first
  * iterable is evaluated where it is, the rest in its own program. */
+static int expands(Node *, int);
+static int modes(Program *);
 static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Program *enclosing) {
     if (n->args->next) return comprehension_items_error(p, n, NULL);
     n->op = n->kind; n->kind = N_COMPREHENSION;
@@ -7317,7 +7320,11 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Pro
         loop->a = expression(p, 1);
         p->emitting = NULL;
         if (!loop->a) { p->emitting = emitting; return NULL; }
-        if (first) outer = p->awaits - before;
+        if (first) {
+            outer = p->awaits - before;
+            if (emitting) expands(loop->a, modes(emitting));
+            n->receiver_known = loop->a->expands_known; n->receiver_value = loop->a->expands_value;
+        }
         *tail = loop; tail = &loop->b;
         p->emitting = body;
         if (body && !(streams = comprehension_for(p, loop, target_at, at, first))) body = NULL;
@@ -18231,9 +18238,10 @@ static int list_expands(Node *n, int calls) {
 static int arithmetic(Node *n) { return n->arith; }
 static int expanding(Node *, int);
 static int expands(Node *, int);
-/* Whether attribute n's object expands in mode, as summarized when n's steps were emitted. */
+/* Whether attribute n's object, or comprehension n's first iterable,
+ * expands in mode, as summarized once it was parsed. */
 static int receiver_expands(Node *n, int mode) {
-    return n->receiver_known >> mode & 1 ? n->receiver_value >> mode & 1 : expands(n->a, mode);
+    return n->receiver_known >> mode & 1 ? n->receiver_value >> mode & 1 : expands(n->kind == N_ATTR ? n->a : n->a->a, mode);
 }
 /* Whether n's kind is an expression's, whose node is whole once it compiles. */
 static int expression_kind(int kind) {
@@ -18278,7 +18286,7 @@ static int expanding(Node *n, int calls) {
      * code holding it, which can pause in its body; while calls can pause,
      * so does a generator expression's iter() of its source. */
     if (n->kind == N_COMPREHENSION)
-        return (calls && n->op != N_TUPLE) || calls == PAUSING || expands(n->a->a, mode) || (n->op != N_TUPLE && n->asynchronous);
+        return (calls && n->op != N_TUPLE) || calls == PAUSING || receiver_expands(n, mode) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
     /* A loop whose iterable alone holds a call makes that call once. */
     if (calls && n->kind == N_FOR && !expands(n->args, mode) && !list_expands(n->b, mode) && !list_expands(n->c, mode))
@@ -19732,7 +19740,7 @@ static int pausing_loads(Program *p, Node *n) {
 static int assigns_at_hand(Program *p, Node *n) {
     if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, modes(p))) return 0;
     Node *t = n->a;
-    return (t->kind == N_NAME || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) &&
+    return (t->kind == N_NAME || (t->kind == N_INDEX && t->stores_fused)) &&
            (item_at_hand(n->b) || operator_right(n->b));
 }
 /* Whether n is an assignment as assigns_at_hand takes, of arithmetic or a
@@ -19740,7 +19748,7 @@ static int assigns_at_hand(Program *p, Node *n) {
 static int assigns_steps(Program *p, Node *n) {
     if (n->kind != N_ASSIGN || n->args || increment(n) || p->namespace || pausing_loads(p, n) || expands(n, modes(p))) return 0;
     Node *t = n->a;
-    return (t->kind == N_NAME || (t->kind == N_INDEX && at_hand(t->a) && at_hand(t->b))) && (operands_at_hand(n->b) || packed(n->b));
+    return (t->kind == N_NAME || (t->kind == N_INDEX && t->stores_fused)) && (operands_at_hand(n->b) || packed(n->b));
 }
 /* Assignment n at hand: a fused step that stores its value when no step
  * of it runs Python code, and jumps past n's plain steps after it; else
