@@ -218,10 +218,10 @@ Contents | - navigation
 14 Simple Statements > 14.9 The `return` statement | FunctionDefs, Exceptions
 14 Simple Statements > 14.10 The `break` statement | Conditionals, Exceptions
 14 Simple Statements > 14.11 The `continue` statement | Conditionals, Exceptions
-14 Simple Statements > 14.12 The `import` statement | Imports, LazyImports
+14 Simple Statements > 14.12 The `import` statement | Imports, LazyImports, HeaderErrors
 14 Simple Statements > 14.13 Future statements | Future, FutureErrorStage
 14 Simple Statements > 14.14 The `global` and `nonlocal` statements | ScopeErrors, Scopes
-14 Simple Statements > 14.15 The `type` statement | TypeAliases
+14 Simple Statements > 14.15 The `type` statement | TypeAliases, HeaderErrors
 15 Compound Statements | = sections
 15 Compound Statements > 15.1 The `if` statement | Conditionals
 15 Compound Statements > 15.2 The `while` statement | Conditionals
@@ -254,13 +254,13 @@ Contents | - navigation
 16 Functions and Classes > 16.4 Class definitions > 16.4.1 Runtime Semantics: Evaluation | ClassCreation, BuiltinsScope
 16 Functions and Classes > 16.4 Class definitions > 16.4.2 BuildClass ( *body*, *name*, *bases*, *kwds* ) | ClassCreation, Metaclasses
 16 Functions and Classes > 16.4 Class definitions > 16.4.3 `type.__new__` ( *meta*, *name*, *bases*, *ns*, **kwds* ) | ClassCreation, Metaclasses, MRO
-16 Functions and Classes > 16.5 Decorators | FunctionDefs, ClassCreation
+16 Functions and Classes > 16.5 Decorators | FunctionDefs, ClassCreation, HeaderErrors
 16 Functions and Classes > 16.6 Annotations | = sections
 16 Functions and Classes > 16.6 Annotations > 16.6.1 Annotate functions | Annotations
 16 Functions and Classes > 16.6 Annotations > 16.6.2 `__annotations__` | Annotations
 16 Functions and Classes > 16.6 Annotations > 16.6.3 Evaluation of annotation scopes | Annotations
 16 Functions and Classes > 16.6 Annotations > 16.6.4 Stringified annotations | Annotations, Future
-16 Functions and Classes > 16.7 Type parameters | Generics
+16 Functions and Classes > 16.7 Type parameters | Generics, HeaderErrors
 17 Modules and Imports | = sections
 17 Modules and Imports > 17.1 Modules | Imports
 17 Modules and Imports > 17.2 Module objects | ModuleObjects

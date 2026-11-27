@@ -8496,10 +8496,13 @@ static Node *type_params(Parser *p) {
         if (!param) return NULL;
         param->kind = N_TYPEPARAM; param->op = kind;
         if (take(p, ':')) {
-            if (kind) return syntax(p, kind == 1 ? "cannot use bound with TypeVarTuple" : "cannot use bound with ParamSpec");
+            static const char *const starred[2][2] = {{"cannot use bound with TypeVarTuple", "cannot use constraints with TypeVarTuple"},
+                                                      {"cannot use bound with ParamSpec", "cannot use constraints with ParamSpec"}};
+            size_t colon = p->pos - 1;
             /* A parenthesized tuple is a constraint list. */
             Node *bound = apart_expression(p, expression, 0);
             if (!bound) return NULL;
+            if (kind) return syntax_span(p, colon, p->pos, starred[kind - 1][bound->kind == N_TUPLE]);
             if (bound->kind == N_TUPLE) param->flags |= F_CONSTRAINTS;
             if (!(param->b = lazy_function(p, param->name.text, bound))) return NULL;
         }
@@ -8525,7 +8528,7 @@ static Node *type_params(Parser *p) {
         *tail = param; tail = &param->next;
         if (!take(p, ',')) break;
     }
-    return expect(p, ']', "expected ']'") ? generic : NULL;
+    return take(p, ']') ? generic : syntax(p, "invalid syntax");
 }
 /* `type` is a soft keyword: `type NAME [params] = value`. */
 static int type_alias_start(Parser *p) {
@@ -8539,7 +8542,7 @@ static Node *type_alias(Parser *p) {
     p->pos++;
     if (!(n->a = identifier(p))) return NULL;
     if (take(p, '[') && !(n->params = type_params(p))) return NULL;
-    if (!expect(p, '=', "expected '='")) return NULL;
+    if (!take(p, '=')) return syntax(p, "invalid syntax");
     Node *value = apart_expression(p, expression, 0);
     if (!value || !(n->b = lazy_function(p, source_name(n->a), value))) return NULL;
     return n;
@@ -8648,7 +8651,8 @@ static Node *statement_body(Parser *p, int emits) {
         if (at_body(p) && header_emit(p, &from)) return NULL;
         while (take(p, '@')) {
             Node *expr = expression(p, 0);
-            if (!expr || !expect(p, T_NL, "expected newline after decorator")) return NULL;
+            if (!expr) return NULL;
+            if (!take(p, T_NL)) return syntax(p, "invalid syntax");
             *tail = expr; tail = &expr->next;
         }
         if (!keyword(p, "def") && !keyword(p, "class") && !keyword(p, "async")) return syntax(p, "invalid syntax");
@@ -8970,7 +8974,18 @@ static Node *statement_body(Parser *p, int emits) {
         if (emits && !n->decorators && header_emit(p, &from)) return NULL;
         Program *emitting = p->emitting; p->emitting = NULL;
         if (!(n->a = identifier(p))) return NULL;
-        if (take(p, '[') && !(n->params = type_params(p))) return NULL;
+        size_t open = p->pos;
+        if (take(p, '[') && !(n->params = type_params(p))) {
+            /* invalid_def_raw: type parameters that do not parse leave its
+             * forced '(' at the '[', unless an expression in them ends where
+             * they fail (invalid_expression). */
+            if (error_is(p->ctx, "SyntaxError") && !strcmp(p->ctx->error_message, "invalid syntax") && p->expr_end != p->error_pos) {
+                spy_clear_error(p->ctx);
+                p->pos = open;
+                syntax(p, "expected '('");
+            }
+            return NULL;
+        }
         p->emitting = emitting;
         if (!expect(p, '(', "expected '('")) return NULL;
         n->op = asynchronous;
@@ -9066,7 +9081,7 @@ static Node *statement_body(Parser *p, int emits) {
             if (at(p, '*')) { size_t star = p->pos++; n->args = span(p, node(p, N_STAR), star); return n->args && !import_recorded(p, n) ? n : NULL; }
         }
         int future = from && !n->op && !strcmp(source_name(n->a), "__future__");
-        if (at(p, T_NL)) { syntax(p, "Expected one or more names after 'import'"); p->error_end = p->error_start; return NULL; }
+        if (at(p, T_NL) && (from || !lazy)) { syntax(p, "Expected one or more names after 'import'"); p->error_end = p->error_start; return NULL; }
         int grouped = from && take(p, '(');
         Node **tail = &n->args;
         do {
