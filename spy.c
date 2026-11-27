@@ -261,8 +261,14 @@ typedef struct { const char *name, *start, *end; size_t line; int spanned; } Spo
  * item, emitted, and an item or attribute a fused step may store
  * (stores_fused), its steps' count, its line and its item's (a starred
  * item's star), its count of parts, and a list's or tuple's count of
- * items and its starred item's index, or UINT32_MAX. */
-typedef struct { unsigned char kind, starred, emitted, fused; uint32_t length, line, item_line, size, count, star; } Part;
+ * items and its starred item's index, or UINT32_MAX. As its analysis
+ * (target_events): whether its events were recorded, where they are
+ * from the list's first, and an attribute of self's spelling in the
+ * parse's log (texts). */
+typedef struct {
+    unsigned char kind, starred, emitted, fused, recorded, self;
+    uint32_t length, line, item_line, size, count, star, events_at, events_end, text;
+} Part;
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -286,9 +292,9 @@ struct Node {
      * star target, and the places (SPOT_*) of that error and of its first
      * part each kind of target (TARGETS_*) cannot assign, and of its part
      * naming __debug__ (PLACE_DEBUG); those copied from a part are in
-     * spots. Whether it is an attribute of self, and an item or attribute
-     * of literals and names a fused step may store (stores_fused). */
-    unsigned char targets, star_ok, places[5], unstarred, self_attribute, stores_fused;
+     * spots. Whether it is an attribute of self, or of a name, and an item
+     * or attribute of literals and names a fused step may store. */
+    unsigned char targets, star_ok, places[5], unstarred, self_attribute, stores_fused, named_receiver;
     Spot *spots;
     Part *parts; /* A list or tuple of targets' parts, itself first (list_parts). */
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
@@ -6388,7 +6394,7 @@ static Node *finished(Parser *, Node *);
 /* Record name n's use. */
 static int name_used(Parser *p, Node *n) {
     parse_record(p, n);
-    if (name_event(p->ctx, &p->events, EV_USE, 0, NULL, n, NULL)) return -1;
+    if (name_event(p->ctx, &p->events, EV_USE, 0, NULL, n, n)) return -1;
     n->events_end = (uint32_t)p->events.len; n->flags |= F_EVENTS;
     return 0;
 }
@@ -7079,7 +7085,8 @@ static int target_parts(SPYContext *c, Node *n) {
     n->star_ok = (unsigned char)simple; n->targets = simple ? TARGET_OK : TARGET_NOT; n->places[0] = SPOT_NONE;
     for (int t = 1; t < PLACE_DEBUG; t++) n->places[t] = simple ? SPOT_NONE : SPOT_SELF;
     n->places[PLACE_DEBUG] = (simple || kind == N_KEYWORD) && kind != N_INDEX && !strcmp(n->name.text, "__debug__") ? SPOT_SELF : SPOT_NONE;
-    n->self_attribute = kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->name.text, "self");
+    n->named_receiver = kind == N_ATTR && n->a->kind == N_NAME;
+    n->self_attribute = n->named_receiver && !strcmp(n->a->name.text, "self");
     n->stores_fused = (kind == N_ATTR || (kind == N_INDEX && at_hand(n->b))) && at_hand(n->a);
     if (kind == N_STAR) {
         /* An item: its operand's facts, but a deletion's error is the star (target reports a star alone). */
@@ -9243,10 +9250,10 @@ static int scope_await(SPYContext *, Scope *, Node *);
 static int lambda_recorded(Parser *, Node *);
 static int comprehension_recorded(Parser *, Node *);
 static int annotated_recorded(Parser *, Node *);
-static int list_parts(SPYContext *, Node *);
+static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
 static int parse_children(Parser *p, Node *n) {
-    if (target_facts(p->ctx, n) || list_parts(p->ctx, n) || definition_head(p->ctx, n)) return -1;
+    if (target_facts(p->ctx, n) || list_parts(p, n) || definition_head(p->ctx, n)) return -1;
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_ANNASSIGN) return annotated_recorded(p, n);
@@ -9333,14 +9340,10 @@ static int debug_named(Node *n) { return n->places[PLACE_DEBUG] != SPOT_NONE; }
  * events (scope_target). */
 static int target_recorded(Node *t) {
     if (t->kind == N_STAR) return target_recorded(t->a);
-    if (t->kind == N_LIST || t->kind == N_TUPLE) {
-        for (Node *item = t->args; item; item = item->next) if (!target_recorded(item)) return 0;
-        return 1;
-    }
+    if (t->kind == N_LIST || t->kind == N_TUPLE) return t->parts && t->parts->recorded && (t->flags & F_EVENTS);
     if (!(t->flags & F_EVENTS) || (t->flags & F_ANALYSED)) return 0;
     return t->kind == N_NAME || t->kind == N_ATTR || t->kind == N_INDEX;
-}
-/* Move node t's events, the log's last, before node n's, just before
+}/* Move node t's events, the log's last, before node n's, just before
  * them, as t is visited first. */
 static int events_before(Parser *p, Node *t, Node *n) {
     Events *e = &p->events;
@@ -9376,6 +9379,32 @@ static int events_again(Parser *p, Node *t) {
  * first; a name bound in scope; a list's, tuple's or starred item's its
  * items', uncounted; a stored attribute of self a class's static
  * first. */
+/* Append the analysis of a recorded target list's parts, its events
+ * from first on, as target_events's: a name's use bound, an attribute
+ * or item's events again, a stored attribute of self a class's static
+ * first. */
+static int parts_events(Parser *p, Scope *scope, const Part *parts, size_t first, int store) {
+    Events *e = &p->events;
+    for (const Part *t = parts + 1; t < parts + parts->size; t++) {
+        if (t->kind == N_TUPLE || t->kind == N_LIST) continue;
+        size_t at = first + t->events_at, count = t->events_end - t->events_at;
+        if (t->kind == N_NAME) {
+            if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + 1, sizeof(Event))) return -1;
+            Event bind = e->items[at];
+            bind.kind = EV_BIND; bind.flags = S_LOCAL; bind.scope = scope;
+            e->items[e->len++] = bind;
+            continue;
+        }
+        if (store > 0 && t->self) {
+            if (event_into(p->ctx, e, EV_STATIC, 0, scope, NULL, NULL)) return -1;
+            e->items[e->len - 1].text = t->text; e->items[e->len - 1].line = t->line;
+        }
+        if (grow(p->ctx, (void **)&e->items, &e->cap, e->len + count, sizeof(Event))) return -1;
+        memcpy(e->items + e->len, e->items + at, count * sizeof(Event));
+        e->len += count;
+    }
+    return 0;
+}
 static int target_events(Parser *p, Scope *scope, Node *t, int store) {
     if (debug_named(t)) {
         if (event_into(p->ctx, &p->events, EV_TARGET, store == 0, NULL, NULL, NULL)) return -1;
@@ -9383,17 +9412,19 @@ static int target_events(Parser *p, Scope *scope, Node *t, int store) {
         return 0;
     }
     if (t->kind == N_STAR) return target_events(p, scope, t->a, store);
-    if (t->kind == N_LIST || t->kind == N_TUPLE) {
-        for (Node *item = t->args; item; item = item->next) if (target_events(p, scope, item, store)) return -1;
-        return 0;
-    }
+    if (t->kind == N_LIST || t->kind == N_TUPLE) return parts_events(p, scope, t->parts, t->events_at, store);
     if (t->kind == N_NAME) return name_event(p->ctx, &p->events, EV_BIND, S_LOCAL, scope, t, t);
     if (store > 0 && self_attribute(t) && text_event(p->ctx, &p->events, EV_STATIC, 0, scope, source_name(t), t->line, NULL)) return -1;
     return events_again(p, t);
 }
 /* Where target t's recorded events begin: its first name's or part's. */
 static size_t target_at(Node *t, size_t otherwise) {
-    while (t->kind == N_STAR || ((t->kind == N_LIST || t->kind == N_TUPLE) && t->args)) t = t->kind == N_STAR ? t->a : t->args;
+    if (t->kind == N_STAR) return target_at(t->a, otherwise);
+    if ((t->kind == N_LIST || t->kind == N_TUPLE) && t->parts && t->parts->count) {
+        const Part *leaf = t->parts + 1;
+        while ((leaf->kind == N_LIST || leaf->kind == N_TUPLE) && leaf->count) leaf++;
+        return leaf->recorded ? t->events_at + leaf->events_at : otherwise;
+    }
     return (t->flags & F_EVENTS) ? t->events_at : otherwise;
 }
 /* Record a with, except or del statement's (header's) analysis
@@ -18518,9 +18549,8 @@ static int literal_arguments(Node *n) {
  * count of arguments, and how far past it its BC_CALLN is. */
 static void call_operands(Program *p, size_t fused, Node *n) {
     int method = n->a->kind == N_ATTR, i = 0;
-    Node *callee = method ? n->a->a : n->a;
     Instruction *ins = &p->items[fused];
-    ins->arg = (callee->kind == N_NAME ? CALLF_NAMED : 0) | (method && !literal_arguments(n) ? CALLF_ATTR : 0) |
+    ins->arg = ((method ? n->a->named_receiver : n->a->kind == N_NAME) ? CALLF_NAMED : 0) | (method && !literal_arguments(n) ? CALLF_ATTR : 0) |
                (method ? CALLF_METHOD : 0) | (int)(p->len - 1 - fused) << CALLF_DISTANCE;
     for (Node *a = n->args; a; a = a->next, i++) {
         ins->arg += 1 << CALLF_COUNT;
@@ -19262,12 +19292,14 @@ static int empty_target(Node *t) { return (t->kind == N_TUPLE || t->kind == N_LI
 /* Part n of target t, as t's steps are now. */
 static Part part_of(Node *n, size_t item_line, int starred) {
     return (Part){(unsigned char)n->kind, (unsigned char)starred, !!(n->flags & F_EMITTED), n->stores_fused,
-                  n->steps_end - n->steps_at, (uint32_t)n->line, (uint32_t)item_line, 1, 0, UINT32_MAX};
+                  (n->flags & F_EVENTS) && !(n->flags & F_ANALYSED), n->self_attribute,
+                  n->steps_end - n->steps_at, (uint32_t)n->line, (uint32_t)item_line, 1, 0, UINT32_MAX, 0, 0, 0};
 }
 /* List or tuple n's parts when each item is a name, attribute, item, or
  * such a list or tuple, maybe starred, from their own: whether they
  * could not be made. */
-static int list_parts(SPYContext *c, Node *n) {
+static int list_parts(Parser *p, Node *n) {
+    SPYContext *c = p->ctx;
     if ((n->kind != N_TUPLE && n->kind != N_LIST) || n->parts) return 0;
     size_t size = 1, count = 0, star = UINT32_MAX;
     for (Node *item = n->args; item; item = item->next, count++) {
@@ -19282,15 +19314,29 @@ static int list_parts(SPYContext *c, Node *n) {
     }
     Part *parts = allocate(c, size * sizeof(Part));
     if (!parts) return -1;
-    parts[0] = (Part){(unsigned char)n->kind, 0, 0, 0, 0, (uint32_t)n->line, (uint32_t)n->line, (uint32_t)size, (uint32_t)count, (uint32_t)star};
+    /* Its items' events follow one another from its first's (parse_children). */
+    size_t first = n->args && (n->args->flags & F_EVENTS) ? n->args->events_at : 0;
+    parts[0] = (Part){(unsigned char)n->kind, 0, 0, 0, 1, 0, 0, (uint32_t)n->line, (uint32_t)n->line, (uint32_t)size, (uint32_t)count, (uint32_t)star, 0, 0, 0};
     Part *at = parts + 1;
     for (Node *item = n->args; item; item = item->next) {
         Node *value = item->kind == N_STAR ? item->a : item;
         Part own = part_of(value, item->line, item->kind == N_STAR);
+        uint32_t from = (value->flags & F_EVENTS) && value->events_at >= first ? (uint32_t)(value->events_at - first) : 0;
+        own.events_at = from; own.events_end = from + (value->events_end - value->events_at);
         if (value->parts) {
             memcpy(at, value->parts, value->parts->size * sizeof(Part));
-            own.size = at->size; own.count = at->count; own.star = at->star;
+            own.size = at->size; own.count = at->count; own.star = at->star; own.recorded = at->recorded;
+            for (Part *inner = at + 1; inner < at + at->size; inner++) inner->events_at += from, inner->events_end += from;
+        } else if (own.self && own.recorded) {
+            const char *name = source_name(value);
+            size_t len = strlen(name) + 1;
+            if (p->events.texts_len + len > UINT32_MAX) { mem_free(parts); spy_error(c, "MemoryError", "too many names"); return -1; }
+            if (grow(c, (void **)&p->events.texts, &p->events.texts_cap, p->events.texts_len + len, 1)) { mem_free(parts); return -1; }
+            memcpy(p->events.texts + p->events.texts_len, name, len);
+            own.text = (uint32_t)p->events.texts_len; p->events.texts_len += len;
         }
+        own.recorded &= value->kind == N_NAME || value->kind == N_ATTR || value->kind == N_INDEX || value->parts;
+        parts[0].recorded &= own.recorded;
         *at = own; at += at->size;
     }
     n->parts = parts;
