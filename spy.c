@@ -8420,11 +8420,11 @@ static Node *match_statement(Parser *p) {
     if (!expect(p, ':', at(p, T_NL) ? "expected ':'" : "invalid syntax") || !expect(p, T_NL, "invalid syntax")) return NULL;
     while (take(p, T_NL)) {}
     if (!take(p, T_INDENT)) return missing_block(p, "'match' statement", line);
-    Node **tail = &n->args;
     /* The last case's pattern check, until the next case shows it is not
-     * the match's last (case_checked). */
+     * the match's last (case_checked). Its cases, compiled as they are
+     * parsed, are not kept. */
     CaseCheck checked = {{.c = p->ctx}, {.c = p->ctx}, 0, 0};
-    int pending = 0;
+    int pending = 0, cases = 0;
     while (!at(p, T_DEDENT) && !at(p, T_END)) {
         if (take(p, T_NL)) continue;
         if (!keyword(p, "case")) { syntax(p, "invalid syntax"); goto failed; }
@@ -8445,10 +8445,10 @@ static Node *match_statement(Parser *p) {
         if (emits) case_begin(p, p->body.program, item, &k, guard, &checked.allowed);
         if (!suite_of(p, "'case' statement", case_line, emits)) { mem_free(k.fail.exits); mem_free(k.names); goto failed; }
         if (emits) case_end(p->ctx, p->body.program, item, &k, &exits);
-        *tail = item; tail = &item->next;
+        cases++;
     }
     if (pending) case_checked(p, &checked, 1);
-    if (!n->args) return syntax(p, "expected 'case' block");
+    if (!cases) return syntax(p, "expected 'case' block");
     if (emits) { match_end(p->ctx, p->body.program, n, exits); n->flags |= F_EMITTED; }
     return expect(p, T_DEDENT, "invalid syntax") ? n : NULL;
 failed:
@@ -18651,7 +18651,7 @@ static int expands(Node *, int);
 static int receiver_expands(Node *n, int mode) {
     return n->receiver_known >> mode & 1 ? n->receiver_value >> mode & 1 : expands(n->kind == N_ATTR ? n->a : n->a->a, mode);
 }
-/* Whether n's kind is an expression's, whose node is whole once it compiles. */
+/* Whether n's kind is an expression's. */
 static int expression_kind(int kind) {
     return kind <= N_COND || kind == N_STAR || kind == N_COMPREHENSION || kind == N_MAPPING || kind == N_SET ||
            kind == N_KEYWORD || kind == N_LAMBDA || kind == N_NAMED || kind == N_YIELD || kind == N_SLICE ||
@@ -18660,7 +18660,6 @@ static int expression_kind(int kind) {
 }
 static int expands(Node *n, int calls) {
     if (!n) return 0;
-    if (!expression_kind(n->kind)) return expanding(n, calls);
     if (!(n->expands_known >> calls & 1)) {
         n->expands_value |= (unsigned char)(expanding(n, calls) << calls);
         n->expands_known |= (unsigned char)(1 << calls);
