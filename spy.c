@@ -221,7 +221,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_YIELDS = 524288 /* The definition's own scope contains a yield. */,
        F_KEEP = 1048576 /* A module node the parse reads after its line (free_lines). */,
        F_ANALYSED = 2097152 /* A statement, or a compound statement's header, analysed as it was parsed. */,
-       F_EVENTS = 4194304 /* A construct whose analysis the parser recorded (events_at). */ };
+       F_EVENTS = 4194304 /* A construct whose analysis the parser recorded (events_at). */,
+       F_TARGETS = 8388608 /* Its facts as a target are known (target_facts). */ };
 /* A text operand and its name-lookup cache. Literal nodes use only text.
  * Instructions can borrow this record without inspecting a syntax tree. */
 typedef struct {
@@ -247,6 +248,10 @@ typedef struct { NameOperand *name; SPYValue *cls, *method; size_t epoch; int ki
  * it: a literal, a name, an item of those, or a name's attribute; a left
  * operand not at hand is atop the stack (compile_stacked). */
 enum { SHAPE_LOAD, SHAPE_NAME, SHAPE_ITEM, SHAPE_ATTR, SHAPE_STACK, SHAPE_FUSED };
+/* An error's place: none, its node, the current token, or a part's span
+ * and name (Spot). */
+enum { SPOT_NONE, SPOT_SELF, SPOT_HERE, SPOT_AT };
+typedef struct { const char *name, *start, *end; size_t line; } Spot;
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -260,8 +265,16 @@ struct Node {
     unsigned char expands_known, expands_value, loads;
     /* Its shapes, plus one, set before it compiles (operand_shapes): as an
      * operand at hand, and as an operator fused on its left and right
-     * operands'; and whether it is arithmetic on operands at hand. */
-    unsigned char hand, left, right, ops;
+     * operands'; whether it is arithmetic on operands at hand, and
+     * whether arithmetic at all (arithmetic). */
+    unsigned char hand, left, right, ops, arith;
+    /* As an assignment target, from its parts' as it completes
+     * (target_facts): TARGET_OK, TARGET_NOT or its error, whether it is a
+     * star target, and the places (SPOT_*) of that error and of its first
+     * part each kind of target (TARGETS_*) cannot assign; those copied from
+     * a part are in spots. */
+    unsigned char targets, star_ok, places[4];
+    Spot *spots;
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
     NameOperand name;
@@ -1699,7 +1712,7 @@ static void free_value(SPYValue *v) {
         while (n) {
             Node *next = n->allocated;
             free_scope_tree(c, n->scope, 1);
-            mem_free(n->name.text); mem_free(n->original); mem_free(n); n = next;
+            mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n); n = next;
         }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
@@ -6948,22 +6961,6 @@ static Node *expression_items(Parser *p, int min, int named) {
     return finished(p, span(p, tuple, start));
 }
 static Node *expression_list(Parser *p, int min) { return expression_items(p, min, 0); }
-static int target(Parser *p, Node *n) {
-    if (n->kind == N_NAME || n->kind == N_INDEX || n->kind == N_ATTR) return 1;
-    if (n->kind == N_STAR) { syntax_at(p, n, "starred assignment target must be in a list or tuple"); return 0; }
-    if (n->kind == N_COMPREHENSION && n->op == N_TUPLE) { syntax_at(p, n, "cannot assign to generator expression"); return 0; }
-    if (n->kind != N_TUPLE && n->kind != N_LIST) return 0;
-    size_t stars = 0, before = 0;
-    for (Node *item = n->args; item; item = item->next) {
-        if (item->kind == N_STAR) {
-            if (++stars > 1) { syntax_at(p, n, "multiple starred expressions in assignment"); return 0; }
-            if (before > 255) { syntax(p, "too many expressions in star-unpacking assignment"); return 0; }
-            if (!target(p, item->a)) return 0;
-        } else if (!target(p, item)) return 0;
-        if (!stars) before++;
-    }
-    return 1;
-}
 /* Assignment diagnostics replay CPython's second-pass rules: invalid_named_expression,
  * invalid_assignment, and RAISE_SYNTAX_ERROR_INVALID_TARGET. */
 enum { TARGETS_STAR, TARGETS_DEL, TARGETS_FOR };
@@ -6996,34 +6993,90 @@ static const char *expression_name(Node *n) {
     default: return "literal";
     }
 }
-static Node *invalid_target(Node *n, int type) {
-    switch (n->kind) {
-    case N_LIST: case N_TUPLE:
-        for (Node *item = n->args; item; item = item->next) {
-            Node *bad = invalid_target(item, type);
-            if (bad) return bad;
-        }
-        return NULL;
-    case N_STAR: return type == TARGETS_DEL ? n : invalid_target(n->a, type);
-    case N_COMPARE:
-        if (type == TARGETS_FOR) return n->args->op == O_IN ? invalid_target(n->a, type) : NULL;
-        return n;
-    case N_NAME: case N_INDEX: case N_ATTR: return NULL;
-    default: return n;
-    }
-}
 /* RAISE_SYNTAX_ERROR_KNOWN_LOCATION: the error covers node n. */
 static Node *syntax_at(Parser *p, Node *n, const char *message) {
     syntax(p, message); p->ctx->line = n->line;
     p->error_start = n->start; p->error_end = n->end; p->error_end_zero = 0;
     return NULL;
 }
+/* An error with message at place i of n (Node.places). */
+static Node *place_error(Parser *p, Node *n, int i, const char *message) {
+    if (n->places[i] == SPOT_HERE) return syntax(p, message);
+    if (n->places[i] == SPOT_SELF) return syntax_at(p, n, message);
+    Spot *at = &n->spots[i];
+    syntax(p, message); p->ctx->line = at->line;
+    p->error_start = at->start; p->error_end = at->end; p->error_end_zero = 0;
+    return NULL;
+}
+static int target_facts(SPYContext *, Node *);
+static int target_parts(SPYContext *, Node *);
+/* Whether n is an assignment target; if not, its error, unless it is
+ * simply not one. */
+enum { TARGET_OK, TARGET_NOT, TARGET_GENERATOR, TARGET_STARS, TARGET_MANY };
+static const char *const target_errors[] = {NULL, NULL, "cannot assign to generator expression",
+                                            "multiple starred expressions in assignment", "too many expressions in star-unpacking assignment"};
+static int target(Parser *p, Node *n) {
+    if (n->kind == N_STAR) { syntax_at(p, n, "starred assignment target must be in a list or tuple"); return 0; }
+    if (target_facts(p->ctx, n)) return 0;
+    if (n->targets > TARGET_NOT) place_error(p, n, 0, target_errors[n->targets]);
+    return n->targets == TARGET_OK;
+}
+/* The error of n, which a target of type cannot assign: at its first part that cannot be. */
 static Node *target_error(Parser *p, Node *n, int type) {
-    Node *bad = invalid_target(n, type);
-    if (!bad) return syntax(p, "invalid syntax");
+    if (target_facts(p->ctx, n)) return NULL;
+    int where = n->places[1 + type];
+    if (!where) return syntax(p, "invalid syntax");
     char message[96];
-    snprintf(message, sizeof(message), type == TARGETS_DEL ? "cannot delete %s" : "cannot assign to %s", expression_name(bad));
-    return syntax_at(p, bad, message);
+    snprintf(message, sizeof(message), type == TARGETS_DEL ? "cannot delete %s" : "cannot assign to %s",
+             where == SPOT_SELF ? expression_name(n) : n->spots[1 + type].name);
+    return place_error(p, n, 1 + type, message);
+}
+/* Place i of n, that of place j of its part o (o itself when SELF); -1 on an error. */
+static int place_from(SPYContext *c, Node *n, int i, Node *o, int j) {
+    int where = o->places[j];
+    if ((where == SPOT_SELF || where == SPOT_AT) && !n->spots && !(n->spots = allocate(c, 4 * sizeof(Spot)))) return -1;
+    if (where == SPOT_SELF || where == SPOT_AT) n->spots[i] = where == SPOT_AT ? o->spots[j] : (Spot){j ? expression_name(o) : NULL, o->start, o->end, o->line};
+    n->places[i] = (unsigned char)(where == SPOT_SELF ? SPOT_AT : where);
+    return 0;
+}
+/* n's facts as a target (Node.targets), from its parts', once; -1 on an error. */
+static int target_facts(SPYContext *c, Node *n) {
+    if (n->flags & F_TARGETS) return 0;
+    if (target_parts(c, n)) return -1;
+    n->flags |= F_TARGETS;
+    return 0;
+}
+static int target_parts(SPYContext *c, Node *n) {
+    int kind = n->kind, simple = kind == N_NAME || kind == N_INDEX || kind == N_ATTR;
+    n->star_ok = (unsigned char)simple; n->targets = simple ? TARGET_OK : TARGET_NOT; n->places[0] = SPOT_NONE;
+    for (int t = 1; t < 4; t++) n->places[t] = simple ? SPOT_NONE : SPOT_SELF;
+    if (kind == N_STAR) {
+        /* An item: its operand's facts, but a deletion's error is the star (target reports a star alone). */
+        Node *o = n->a;
+        if (target_facts(c, o)) return -1;
+        n->star_ok = o->star_ok; n->targets = o->targets;
+        for (int t = 0; t < 4; t++) if (t != 1 + TARGETS_DEL && place_from(c, n, t, o, t)) return -1;
+    } else if (kind == N_COMPREHENSION && n->op == N_TUPLE) n->targets = TARGET_GENERATOR, n->places[0] = SPOT_SELF;
+    else if (kind == N_COMPARE) {
+        /* A for target's in comparison is its left operand's. */
+        n->places[1 + TARGETS_FOR] = SPOT_NONE;
+        if (n->args->op == O_IN && (target_facts(c, n->a) || place_from(c, n, 1 + TARGETS_FOR, n->a, 1 + TARGETS_FOR))) return -1;
+    } else if (kind == N_TUPLE || kind == N_LIST) {
+        n->star_ok = 1; n->targets = TARGET_OK;
+        for (int t = 1; t < 4; t++) n->places[t] = SPOT_NONE;
+        size_t stars = 0, before = 0;
+        for (Node *item = n->args; item; item = item->next) {
+            if (target_facts(c, item)) return -1;
+            n->star_ok &= item->star_ok;
+            for (int t = 1; t < 4; t++) if (!n->places[t] && item->places[t] && place_from(c, n, t, item, t)) return -1;
+            if (n->targets != TARGET_OK) continue;
+            if (item->kind == N_STAR && ++stars > 1) n->targets = TARGET_STARS, n->places[0] = SPOT_SELF;
+            else if (item->kind == N_STAR && before > 255) n->targets = TARGET_MANY, n->places[0] = SPOT_HERE;
+            else if (item->targets != TARGET_OK && (n->targets = item->targets, place_from(c, n, 0, item, 0))) return -1;
+            if (!stars) before++;
+        }
+    }
+    return 0;
 }
 /* Parse a bitwise_or at token 'at' without side effects on the position;
  * failures do not match. Returns the node and the following token. */
@@ -7076,13 +7129,7 @@ static int named_equals_error(Parser *p, size_t at) {
     snprintf(message, sizeof(message), "cannot assign to %s here. Maybe you meant '==' instead of '='?", expression_name(a));
     p->pos = at; syntax_at(p, a, message); return 1;
 }
-static int star_target(Node *n) {
-    if (n->kind == N_NAME || n->kind == N_INDEX || n->kind == N_ATTR) return 1;
-    if (n->kind == N_STAR) return star_target(n->a);
-    if (n->kind != N_TUPLE && n->kind != N_LIST) return 0;
-    for (Node *item = n->args; item; item = item->next) if (!star_target(item)) return 0;
-    return 1;
-}
+static int star_target(SPYContext *c, Node *n) { return !target_facts(c, n) && n->star_ok; }
 static Node *condition_equals_error(Parser *p, size_t start) {
     if (!named_equals_error(p, start)) syntax(p, "invalid syntax");
     return NULL;
@@ -7134,7 +7181,7 @@ static Node *assignment_error(Parser *p, size_t start) {
         if (!at(p, '=')) break;
         /* invalid_assignment's yield_expr '=' ends the parse there. */
         if (bare && !bad) { bad = n; bare_yield = 1; break; }
-        if (!bad && !star_target(n)) bad = n;
+        if (!bad && !star_target(p->ctx, n)) bad = n;
         p->pos++;
     }
     if (p->tokens[last_item].kind != '*' && named_equals_error(p, last_item)) return NULL;
@@ -8859,20 +8906,9 @@ static Node *assert_statement(Parser *p, Node *n) {
 /* The targets of del statement n. */
 static Node *delete_statement(Parser *p, Node *n) {
     if (!(n->a = expression_list(p, 0))) return NULL;
-    if (invalid_target(n->a, TARGETS_DEL)) return target_error(p, n->a, TARGETS_DEL);
+    if (target_facts(p->ctx, n->a)) return NULL;
+    if (n->a->places[1 + TARGETS_DEL]) return target_error(p, n->a, TARGETS_DEL);
     if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : target_error(p, n->a, TARGETS_DEL);
-    /* Starred targets are only meaningful when consuming an iterable. */
-    Node *stack[256]; size_t count = 0;
-    stack[count++] = n->a;
-    while (count) {
-        Node *item = stack[--count];
-        if (item->kind == N_STAR) return syntax(p, "cannot delete starred");
-        if (item->kind == N_LIST || item->kind == N_TUPLE)
-            for (Node *child = item->args; child; child = child->next) {
-                if (count == 256) return syntax(p, "deletion target is too deeply nested");
-                stack[count++] = child;
-            }
-    }
     return n;
 }
 /* The exception and cause of raise statement n. */
@@ -9174,6 +9210,7 @@ static int lambda_recorded(Parser *, Node *);
 static int comprehension_recorded(Parser *, Node *);
 static int annotated_recorded(Parser *, Node *);
 static int parse_children(Parser *p, Node *n) {
+    if (target_facts(p->ctx, n)) return -1;
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_ANNASSIGN) return annotated_recorded(p, n);
@@ -9808,7 +9845,7 @@ static void free_node(Node *n) {
     if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
     else if (n->scope && n->scope->owner == n) n->scope->owner = NULL;
     spy_release(n->constant); spy_release(n->name.global_key);
-    mem_free(n->name.text); mem_free(n->original); mem_free(n);
+    mem_free(n->name.text); mem_free(n->original); mem_free(n->spots); mem_free(n);
 }
 /* After a line of module statements, parsed since start, is compiled
  * and analysed, free the nodes of the line before it, now compiled too,
@@ -18082,13 +18119,7 @@ static int list_expands(Node *n, int calls) {
 }
 /* Whether n is a name or literal, or unary, binary or comparison
  * arithmetic of those. */
-static int arithmetic(Node *n) {
-    if (at_hand(n) || n->constant || n->kind == N_NONE || n->kind == N_BOOL) return 1;
-    if (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR) return arithmetic(n->a) && arithmetic(n->b);
-    if (n->kind == N_UNARY) return arithmetic(n->a);
-    if (n->kind == N_COMPARE) { for (Node *c = n->args; c; c = c->next) if (!arithmetic(c->a)) return 0; return arithmetic(n->a); }
-    return 0;
-}
+static int arithmetic(Node *n) { return n->arith; }
 static int expanding(Node *, int);
 /* Whether n's kind is an expression's, whose node is whole once it compiles. */
 static int expression_kind(int kind) {
@@ -18323,6 +18354,12 @@ static void operand_shapes(SPYContext *c, Node *n) {
         for (Node *cmp = n->args; cmp && n->ops; cmp = cmp->next) n->ops = cmp->a->ops;
     } else if (kind == N_UNARY) n->ops = n->a->ops;
     else if (kind == N_BINARY && n->op != O_AND && n->op != O_OR) n->ops = n->a->ops && n->b->ops;
+    n->arith = at_hand(n) || n->constant;
+    if (kind == N_COMPARE) {
+        n->arith = n->a->arith;
+        for (Node *cmp = n->args; cmp && n->arith; cmp = cmp->next) n->arith = cmp->a->arith;
+    } else if (kind == N_UNARY && !n->arith) n->arith = n->a->arith;
+    else if (kind == N_BINARY && n->op != O_AND && n->op != O_OR) n->arith = n->a->arith && n->b->arith;
 }
 static void fuse_steps(SPYContext *c, Program *p, Node *n, int truth, size_t start) {
     int left = n->left - 1, shape = n->right - 1, steps = left == SHAPE_STACK ? 0 : left == SHAPE_ITEM ? 3 : left == SHAPE_ATTR ? 2 : 1;

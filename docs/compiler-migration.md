@@ -419,6 +419,21 @@ same, step for step, as before over those inputs. What still reads a
 node is a node's own step (its kind, operator and operands' shapes) and
 a statement's own steps at its end: the next stage replaces those reads.
 
+The sixteenth stage removes those reads, so that a node's operands can be
+freed as the node completes. A probe build marks a completed node's links
+to its operands unreadable (AddressSanitizer manual poisoning) and runs
+every specification test; each report is a read that still needs the
+tree. What the emitter and the target checks asked of a node's operands
+is now computed once, as the node completes, from its operands' own
+fields: its summary for the program's mode (`expands`), its analysis
+events (`parse_children`), its shape as an operand at hand and as a
+fused operator (`operand_shapes`), whether it is arithmetic, and its
+facts as an assignment target (`target_facts`): whether it is one, its
+error, and the first part each kind of target cannot assign, with that
+part's name and span copied. Every program is the same, step for step,
+and every target error the same, as before, but for a `del` of more than
+255 targets, which the walk it replaces rejected as too deeply nested.
+
 ## Remaining stages
 
 1. Emit expressions from the parser, in place of the finished

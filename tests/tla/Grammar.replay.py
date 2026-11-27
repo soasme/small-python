@@ -57,6 +57,7 @@ SNIPPETS = {
     "walrus_if": "if (n := 10) > 5:\n    pass",
     "walrus_unparenthesized_stmt": "n := 10",
     "walrus_parenthesized_target": "y = [(n) := 10]",
+    "del_many_targets": "del " + ", ".join("x%d" % i for i in range(300)),
     "unpack_targets": "(a, b), [c, *d], e.f, g[0] = h",
     "two_starred_targets": "*a, *b = c",
     "fstring_debug": "f'{x=!r:>10}'",

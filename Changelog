@@ -846,6 +846,7 @@ Unreleased (0.10.0):
   bytearray with a bytes subclass's instance, answers by its own method without calling the instance's reflected one
 - a `zip` or `map` reaching a generator that has ended stops that call, rather than taking more of the iterables before it
 - an assignment expression with a parenthesized name as its target, as in `[(x) := 1]`, is a SyntaxError
+- a `del` statement takes any number of targets; more than 255 were "deletion target is too deeply nested"
 - an import calls a Python `__contains__` of `__lazy_modules__`, the lazy-import filter and its verdict's `__bool__`
   without nesting on the C stack, so it can pause
 - a generic class is made in a frame named `<generic parameters of C>`, which its bases, keywords and body run in and tracebacks show
