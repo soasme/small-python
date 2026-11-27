@@ -5,7 +5,8 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 SOURCES = {"cond": "a b if c", "chain": "a b c if d", "not": "a not b if c", "assigned": "x = a b if c",
            "comma": "a, b c if d", "attribute": "a.b c if d", "number": "1 b if c", "call": "x f(*)",
-           "colon": "a b if c:", "bracketed": "(a b if c)"}
+           "colon": "a b if c:", "bracketed": "(a b if c)", "prefix": "f(Strict()value.)", "keyword_string": "(None 'm')",
+           "name_string": "(a 'm')", "print_prefix": "print 'a'(.x)"}
 
 
 def outcome(program):

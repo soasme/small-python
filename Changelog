@@ -877,6 +877,7 @@ Unreleased (0.10.0):
 - `a b if c` reports the missing `else`, as in CPython
 - a function's type parameters that do not parse report `expected '('` at the `[`, and a starred parameter's bound error spans the bound, as in CPython
 - a decorator line, a type statement's `=`, a type parameter list's `]` and a lazy import's names report `invalid syntax`, as in CPython
+- a missing comma before a broken postfix, as in `f(x()send., 1)`, and after `None` before a string, is reported as in CPython
 - a duplicate type parameter is reported over the whole repeated parameter, its star, bound and default included
 - `(a, b for x in y)`, a dictionary display's `for` and a set display's key are "invalid syntax" as in CPython; `[a, b, for x in y]` and other unparenthesized comprehension targets report the parenthesis hint only after a for clause that parses
 

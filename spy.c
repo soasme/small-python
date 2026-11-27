@@ -10919,6 +10919,20 @@ static size_t probe_expression(Parser *p, size_t at, int min) {
     p->pos = saved;
     return end;
 }
+/* The end of the longest expression at token 'at' that parses, as a PEG
+ * parser finds it by backtracking out of a failed postfix: the source cut
+ * before each token from where the whole fails; 0 when none parses. */
+static size_t probe_prefix(Parser *p, size_t at, int min) {
+    p->error_pos = at;
+    size_t end = probe_expression(p, at, min);
+    for (size_t cut = p->error_pos; !end && cut > at + 1; cut--) {
+        int kind = p->tokens[cut - 1].kind;
+        p->tokens[cut - 1].kind = T_NL;
+        end = probe_expression(p, at, min);
+        p->tokens[cut - 1].kind = kind;
+    }
+    return end;
+}
 /* CPython's invalid_expression alternatives that replace a plain "invalid
  * syntax": expressions between two strings, two adjacent expressions inside
  * brackets, and a statement used as a conditional expression's body. */
@@ -10954,14 +10968,14 @@ static void invalid_expression_error(Parser *p) {
         /* _PyPegen_check_legacy_stmt: "print x" and "exec x" */
         int legacy_name = first->kind == T_NAME && ((first->len == 5 && !memcmp(first->start, "print", 5)) ||
                                                     (first->len == 4 && !memcmp(first->start, "exec", 4)));
-        if (!message && !(legacy_name && f == a + 1) && !(first->kind == T_NAME && p->tokens[a + 1].kind == T_STRING)) {
+        if (!message && !(legacy_name && f == a + 1) && !(first->kind == T_NAME && !reserved(first) && p->tokens[a + 1].kind == T_STRING)) {
             static const char *soft[] = {"_", "case", "match", "type", "lazy"};
             int skip = 0;
             if (first->kind == T_NAME)
                 for (size_t i = 0; i < sizeof(soft) / sizeof(*soft); i++)
                     if (strlen(soft[i]) == first->len && !memcmp(soft[i], first->start, first->len)) skip = 1;
             /* expression_without_invalid: a disjunction when no conditional parses. */
-            if (!skip && ((end = probe_expression(p, f, 0)) || (end = probe_expression(p, f, 1))) && p->tokens[end - 1].level)
+            if (!skip && ((end = probe_expression(p, f, 0)) || (end = probe_prefix(p, f, 1))) && p->tokens[end - 1].level)
                 message = "invalid syntax. Perhaps you forgot a comma?";
         }
         /* invalid_legacy_expression: a name not called, then expressions,
@@ -10970,23 +10984,25 @@ static void invalid_expression_error(Parser *p) {
          * read without invalid rules first (invalid_expression), so an
          * error inside it is not raised. */
         for (size_t i = a; !message && p->tokens[i].kind == T_NAME && !reserved(&p->tokens[i]) && p->tokens[i + 1].kind != '('; i++) {
-            if (!probe_expression(p, i + 1, 1)) break;
-            size_t saved = p->pos;
-            p->pos = i + 1;
-            Node *items = expression_list(p, 0);
-            if (!items && c->error_type[0] && (!error_is(c, "SyntaxError") || strcmp(c->error_message, "invalid syntax"))) {
+            size_t saved = p->pos, stop = 0;
+            if (probe_expression(p, i + 1, 1)) {
+                p->pos = i + 1;
+                if (expression_list(p, 0)) stop = p->pos;
+                else if (c->error_type[0] && (!error_is(c, "SyntaxError") || strcmp(c->error_message, "invalid syntax"))) {
+                    p->pos = saved;
+                    return;
+                }
+                spy_clear_error(c);
                 p->pos = saved;
-                return;
             }
-            if (items && i == a && legacy_name) {
-                end = p->pos;
+            /* star_expressions: as much as parses. */
+            if (i == a && legacy_name && (stop || (end = probe_prefix(p, i + 1, 0)))) {
+                if (stop) end = stop;
                 snprintf(legacy, sizeof(legacy), "Missing parentheses in call to '%.*s'. Did you mean %.*s(...)?",
                          (int)first->len, first->start, (int)first->len, first->start);
                 message = legacy;
             }
-            spy_clear_error(c);
-            p->pos = saved;
-            if (!items) break;
+            if (!stop) break;
         }
     }
     /* A statement fails after its keyword, at the 'if'. */
