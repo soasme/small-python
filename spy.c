@@ -4827,7 +4827,11 @@ typedef struct Parser {
      * them. */
     Node *analysed;
     Analysis symbols;
+    /* The log of the parse's analysis, and the storage of a statement's
+     * events, kept for the next statement's (analyse_statements). */
     Events events;
+    Event *spare;
+    size_t spare_cap;
     Scope *scope;
     Node *decorators;
     /* The newest node and module child scope resolved (resolve_new), and
@@ -6263,7 +6267,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
     /* A field parsed for its value emits into its statement's program. */
     if (!failed) { inner.emitting = p->emitting; inner.emitted = p->emitted; inner.emitted_len = p->emitted_len; inner.emitted_cap = p->emitted_cap; }
     /* Its analysis is the statement's. */
-    inner.events = p->events;
+    inner.events = p->events; inner.spare = p->spare; inner.spare_cap = p->spare_cap;
     Node *result = NULL;
     const char *copy = text.data + 1, *copy_end = copy + (end - start);
     if (lex(&inner, text.data)) p->ctx->line += line - 1;
@@ -6312,7 +6316,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
     }
     if (!failed) { p->emitted = inner.emitted; p->emitted_len = inner.emitted_len; p->emitted_cap = inner.emitted_cap; }
-    p->events = inner.events; p->completed = inner.completed;
+    p->events = inner.events; p->spare = inner.spare; p->spare_cap = inner.spare_cap; p->completed = inner.completed;
     mem_free(inner.tokens); mem_free(inner.literal_error); mem_free(text.data);
     return result;
 }
@@ -10351,8 +10355,9 @@ static int analyse_statements(Parser *p, Node *n) {
     int status = 0;
     /* Taking the statements records their symbol steps, replayed after;
      * its own error comes after theirs. */
-    Events events = {.parsed = &p->events};
+    Events events = {.items = p->spare, .cap = p->spare_cap, .parsed = &p->events};
     Analysis taken = {0};
+    p->spare = NULL; p->spare_cap = 0;
     c->events = &events;
     int failed = 0;
     for (Node *s = n; s && !failed; s = s->next) failed = !(s->flags & F_ANALYSED) && events_take(c, scope, s);
@@ -10363,7 +10368,8 @@ static int analyse_statements(Parser *p, Node *n) {
         if (events_replay(c, &events)) { mem_free(taken.message); status = analysis_defer(p, &p->symbols); }
         else if (failed) p->symbols = taken;
     }
-    mem_free(events.items);
+    if (p->spare) mem_free(events.items);
+    else p->spare = events.items, p->spare_cap = events.cap;
     for (; n; n = n->next) n->flags |= F_ANALYSED;
     c->node_start = start; c->node_end = end;
     return status;
@@ -11362,7 +11368,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
-    mem_free(p.tokens); mem_free(p.deferred_long); mem_free(p.literal_error); mem_free(p.emitted); mem_free(p.events.items); mem_free(p.events.texts);
+    mem_free(p.tokens); mem_free(p.deferred_long); mem_free(p.literal_error); mem_free(p.emitted); mem_free(p.events.items); mem_free(p.events.texts); mem_free(p.spare);
     for (size_t i = 0; i < p.apart_len; i++) free_program(p.aparts[i].program);
     mem_free(p.aparts);
     if (c->error_type[0]) {
