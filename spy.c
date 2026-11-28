@@ -39476,16 +39476,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (x->type != SPY_INSTANCE && !metaclassed(x)) {
             /* A builtin's operator comes after the reflected method that
              * y's subclass of its type overrides, but a set's or dict's
-             * in-place one, a number method, before; its comparison after
-             * the subclass's reflected one. */
+             * in-place one, a number method, before. A builtin declines a
+             * comparison with an instance (rich_declines, above), so one
+             * here is native. */
+            if (!o) return NULL;
             SPYValue *left = value_class(c, x), *right = value_class(c, y);
-            int token = o ? o->token : 0;
-            if (!o) {
-                if (rich < 0 || right == left || !subclass(right, left) ||
-                    !(function = rich_special(c, y, rich_reflected[rich], &negated))) return NULL;
-                self = y; other = x; phase = OPERATOR_REFLECTED;
-                goto found;
-            }
+            int token = o->token;
             if (kind == OPERATE_INPLACE && (x->type == SPY_LIST || x->type == SPY_BYTEARRAY) && (token == '+' || token == '*') &&
                 special_dispatch(y)) {
                 /* list and bytearray have no number slots: y's reflected
@@ -43012,16 +43008,12 @@ static NO_INLINE SPYValue *sentinel_compared(SPYContext *c, Machine *m, SPYValue
     SPYValue *v = machine_pop(m), *round = machine_pop(m), *sentinel = machine_pop(m), *item = machine_pop(m), *result = NULL;
     SPYValue *self = round == c->booleans[1] ? sentinel : item, *other = self == item ? sentinel : item, *truth, *fn, *env;
     int length = 0;
+    size_t depth = m->len;
     if (round == c->converting) {
-        size_t depth = m->len - 3;
+        depth -= 3;
         test = item_converted(c, m, test, kind);
         /* An absent __bool__'s __len__ is the next call (item_converted). */
-        if (!test && c->k_fn) {
-            if (!sentinel_wait(c, m, v, item, sentinel, round)) goto done;
-            item = NULL;
-            spy_release(c->k_fn); spy_release(c->k_env); c->k_fn = c->k_env = NULL;
-            while (m->len > depth) spy_release(machine_pop(m));
-        }
+        if (!test && c->k_fn) goto wait;
     } else if (test == c->not_implemented && round != c->none) {
         /* The reflected method of the one not called: self now. */
         SPYValue *function = self->type == SPY_INSTANCE && !self->as.map.base ? class_lookup(self->as.map.parent, "__eq__") : NULL;
@@ -43037,15 +43029,11 @@ static NO_INLINE SPYValue *sentinel_compared(SPYContext *c, Machine *m, SPYValue
     }
     if (item && test && (test->type == SPY_INSTANCE || metaclassed(test)) && (truth = truth_special(c, test, &length))) {
         SPYValue *name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8);
-        size_t depth = m->len;
+        depth = m->len;
         if (name && convert_call(c, m, truth, test, name, NULL, &fn, &env) > 0) {
-            if (!sentinel_wait(c, m, v, item, sentinel, c->converting)) {
-                c->k_fn = fn; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
-                spy_release(test);
-                goto done;
-            }
-            item = NULL;
-            spy_release(fn); spy_release(env);
+            spy_release(test);
+            c->k_fn = fn; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = kind;
+            goto wait;
         }
         while (m->len > depth) spy_release(machine_pop(m));
         spy_release(test); test = NULL;
@@ -43053,6 +43041,14 @@ static NO_INLINE SPYValue *sentinel_compared(SPYContext *c, Machine *m, SPYValue
     int stop = test && truthy(test);
     spy_release(test);
     result = sentinel_tested(c, v, item, stop);
+    goto done;
+wait:
+    /* The next call, c->k_fn, returns here, the item waiting on m; without room it is dropped. */
+    if (sentinel_wait(c, m, v, item, sentinel, c->converting)) {
+        spy_release(c->k_fn); spy_release(c->k_env); c->k_fn = c->k_env = NULL;
+        while (m->len > depth) spy_release(machine_pop(m));
+        result = sentinel_tested(c, v, NULL, 0);
+    }
 done:
     spy_release(round); spy_release(sentinel); spy_release(v);
     return result;

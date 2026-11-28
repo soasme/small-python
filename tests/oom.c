@@ -439,6 +439,50 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    /* A callable iterator's sentinel test whose truth is a Python __bool__
+     * or __len__, an absent __bool__'s too: the waiting item's pushes
+     * fail (sentinel_wait). */
+    "class B:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __bool__(self): return self.v\n"
+    "class L:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __len__(self): return self.v\n"
+    "class Absent:\n"
+    "    def __get__(self, o, t): raise AttributeError\n"
+    "class AL(L):\n"
+    "    __bool__ = Absent()\n"
+    "class S:\n"
+    "    def __init__(self, k): self.k = k\n"
+    "    def __eq__(self, o): return self.k(o == 3)\n"
+    "def se():\n"
+    "    n = [0]\n"
+    "    def f():\n"
+    "        n[0] += 1\n"
+    "        return n[0]\n"
+    "    r = list(iter(f, S(B)))\n"
+    "    n[0] = 0\n"
+    "    r += list(iter(f, S(lambda t: L(int(t)))))\n"
+    "    n[0] = 0\n"
+    "    return r + list(iter(f, S(lambda t: AL(int(t)))))\n"
+    "print(se())\n",
+
+    /* A dict view's in and comparisons with instance keys: the step's
+     * state for them fails to allocate (view_step). */
+    "class U:\n"
+    "    __hash__ = None\n"
+    "class H:\n"
+    "    def __hash__(self): return 1\n"
+    "    def __eq__(self, o): return True\n"
+    "def vs():\n"
+    "    d = {1: 2}\n"
+    "    r = []\n"
+    "    for x in (U(), H()):\n"
+    "        try: r.append(x in d.keys())\n"
+    "        except TypeError: r.append('T')\n"
+    "    return r + [d.keys() == {H()}, (H(), 2) in d.items(), {H()} == d.keys()]\n"
+    "print(vs())\n",
+
     "class MI:\n"
     "    def __init__(self, v): self.v = v\n"
     "    def __index__(self):\n"

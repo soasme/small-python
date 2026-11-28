@@ -735,6 +735,22 @@ int main(int argc, char **argv) {
            !strcmp(spy_error_message(c), "'module' object is not callable. Did you mean: 'pp.pp(...)'?"));
     spy_clear_error(c);
     spy_release(host_pp);
+    /* The generator type's __del__ slot wrapper called from the host on a
+     * suspended generator closes it at its yield, in C, and returns None. */
+    execute(c, "host_closed = []\ndef host_gen():\n    try: yield 1\n    finally: host_closed.append(1)\n"
+               "host_g = host_gen()\nnext(host_g)\nhost_del = type(host_g).__del__\n");
+    SPYValue *host_del = spy_get_global(c, "host_del"), *host_g = spy_get_global(c, "host_g"), *deleted = spy_call(c, host_del, 1, &host_g);
+    assert(deleted && spy_type(deleted) == SPY_NONE);
+    spy_release(deleted); spy_release(host_del); spy_release(host_g);
+    execute(c, "assert host_closed == [1] and host_g.gi_frame is None\n");
+    /* A frozendict subclass's fromkeys from the host calls the subclass
+     * with the frozendict of the keys, in C. */
+    execute(c, "class HostFrozen(frozendict): pass\nhost_fromkeys = HostFrozen.fromkeys\nhost_keys = 'ab'\n");
+    SPYValue *host_fromkeys = spy_get_global(c, "host_fromkeys"), *host_keys = spy_get_global(c, "host_keys");
+    SPYValue *frozen = spy_call(c, host_fromkeys, 1, &host_keys);
+    assert(frozen && spy_set_global(c, "host_frozen", frozen) == 0);
+    spy_release(frozen); spy_release(host_fromkeys); spy_release(host_keys);
+    execute(c, "assert type(host_frozen) is HostFrozen and host_frozen == {'a': None, 'b': None}\n");
     /* close() of a coroutine awaiting anext() with a default, whose
      * __anext__ answers GeneratorExit with StopAsyncIteration, from the
      * host: the await takes the default and the coroutine returns it. */
