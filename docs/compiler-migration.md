@@ -457,7 +457,16 @@ outlives the node allocated at it. Only the nodes still being parsed,
 and their direct parts, are alive at once; a display's items still live
 until the display completes. The specification tests and the 2,060
 files of `Lib` again run under AddressSanitizer with no report, and every
-program is the same, step for step.
+program is the same, step for step. A probe build that poisons each list
+or tuple item once the next is appended finds what the display reads of
+its items when it completes: their count, facts as a target, target
+parts, analysis range, emitted steps and expansion summaries. Each is
+now folded as the next item is appended (`items_add`), so the items
+between a list's or tuple's first and last are freed then; a dictionary
+or set already emits each item as it is parsed. A check build that aborts
+on a target fact asked early, an expansion mode not folded, or items'
+events out of order reports none over the specification tests and
+`Lib`.
 
 ## Remaining stages
 

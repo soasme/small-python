@@ -285,6 +285,25 @@ typedef struct {
     unsigned char kind, starred, emitted, fused, recorded, self;
     uint32_t length, line, item_line, size, count, star, events_at, events_end, text;
 } Part;
+/* A list's or tuple's items, folded in order as each next one is
+ * appended (items_add) and the last as it completes (items_end), so
+ * that those between its first and last can go: their count, whether
+ * one is starred and how many follow the last that is; the counts its
+ * facts as a target come from (target_item); their parts, while each has
+ * some (list_parts), from the first's events; whether their events were
+ * recorded, from the first's, and how many; whether their steps were
+ * emitted one after another, to next, and each one's end and line
+ * (starred_parsed); and the modes in which each one's expands summary
+ * is known, and whether one expands (expands). */
+typedef struct { uint32_t end, line; unsigned char star; } ItemSteps;
+typedef struct {
+    Node **link; /* The link to its first item not folded; NULL once all are. */
+    uint32_t count, after, unstarred, stars, before, star;
+    unsigned char starred, parts_ok, recorded, emitted, known, expanding;
+    Part *parts; size_t parts_len, parts_cap, first;
+    size_t events_at, total, steps_next;
+    ItemSteps *steps; size_t steps_cap;
+} Items;
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -316,6 +335,7 @@ struct Node {
     unsigned char precedence; /* See unparsed. */
     Spot *spots;
     Part *parts; /* A list or tuple of targets' parts, itself first (list_parts). */
+    Items *items; /* A list's or tuple's items, folded. */
     SPYValue *folded; /* A negated number's value, until its statement ends (nodes_finish). */
     TestPlan *tested; /* A not's, emitted, as its operand's test (branch_parsed). */
     int operation; /* An operator's fused operation plus one, as it completes (fused_operation). */
@@ -870,6 +890,12 @@ static void put_text(char *to, size_t size, const char *from) {
 }
 static void *mem_malloc(SPYContext *, size_t);
 static NO_INLINE void mem_free(void *);
+/* Free node n and what it owns but its scope and values. */
+static void free_fields(Node *n) {
+    mem_free(n->name.text); mem_free(n->original); mem_free(n->unparsed); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested);
+    if (n->items) mem_free(n->items->parts), mem_free(n->items->steps), mem_free(n->items);
+    mem_free(n);
+}
 /* A new pending error of the named type, its message still to be set. */
 static void error_begin(SPYContext *c, const char *type) {
     spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
@@ -1765,7 +1791,7 @@ static void free_value(SPYValue *v) {
         while (n) {
             Node *next = n->allocated;
             free_scope_tree(c, n->scope, 1);
-            mem_free(n->name.text); mem_free(n->original); mem_free(n->unparsed); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n); n = next;
+            free_fields(n); n = next;
         }
         for (Parameter *arg = v->as.unit.signature; arg && arg->name; arg++) { mem_free(arg->name); mem_free(arg->local); }
         mem_free(v->as.unit.signature);
@@ -4870,6 +4896,7 @@ static int import_recorded(Parser *, Node *);
 static int parse_children(Parser *, Node *);
 static Node *too_complex(Parser *);
 static Node *finished(Parser *, Node *);
+static int items_add(Parser *, Node *, Node *);
 static Node *leaf(Parser *, Node *);
 static int call_stream(Parser *, Node *, Node *, Mark, int, Mark *);
 static Node *call_end(Parser *, Node *);
@@ -6650,6 +6677,7 @@ static Node *atom_node(Parser *p) {
                 n->kind = N_SET;
             }
             *tail = item; tail = &item->next;
+            if (n->kind != N_DICT && n->kind != N_SET && items_add(p, n, item)) return NULL;
             if (apart && !keyword(p, "for") && !keyword(p, "async")) { comprehension_apart_undo(p, n, element, apart); apart = NULL; display = SIZE_MAX; }
             if (keyword(p, "for") || keyword(p, "async")) {
                 display = SIZE_MAX;
@@ -6990,11 +7018,13 @@ static Node *expression_inner(Parser *p, int min, int named) {
                     Node *tuple = node(p, N_TUPLE);
                     if (!tuple) return NULL;
                     tuple->args = n->b; n->b = tuple;
+                    items_add(p, tuple, tuple->args);
                     Node **tail = &tuple->args->next;
                     while (more && !at(p, ']')) {
                         Node *item = subscript(p);
                         if (!item) return NULL;
                         *tail = item; tail = &item->next;
+                        if (items_add(p, tuple, item)) return NULL;
                         if (!take(p, ',')) break;
                     }
                     if (!finished(p, tuple)) return NULL;
@@ -7142,6 +7172,7 @@ static Node *expression_items(Parser *p, int min, int named) {
     Node *tuple = node(p, N_TUPLE);
     if (!tuple) return NULL;
     tuple->args = first;
+    items_add(p, tuple, first);
     Node **tail = &first->next;
     while (!at(p, T_NL) && !at(p, T_END) && !at(p, ';') && !at(p, '=') &&
            !at(p, ':') && !at(p, ')') && !at(p, ']') && !keyword(p, "in")) {
@@ -7156,6 +7187,7 @@ static Node *expression_items(Parser *p, int min, int named) {
         } else item = expression_mode(p, min, named);
         if (!item) return NULL;
         *tail = item; tail = &item->next;
+        if (items_add(p, tuple, item)) return NULL;
         if (!take(p, ',')) break;
     }
     return finished(p, span(p, tuple, start));
@@ -7284,23 +7316,23 @@ static int target_parts(SPYContext *c, Node *n) {
         n->places[1 + TARGETS_FOR] = SPOT_NONE;
         if (n->args->op == O_IN && (target_facts(c, n->a) || place_from(c, n, 1 + TARGETS_FOR, n->a, 1 + TARGETS_FOR))) return -1;
     } else if (kind == N_TUPLE || kind == N_LIST) {
-        int count = 0;
-        n->unstarred = n->args != NULL;
-        for (Node *item = n->args; item && n->unstarred; item = item->next) n->unstarred = item->kind != N_STAR && ++count <= 1 << 20;
-        n->star_ok = 1; n->targets = TARGET_OK;
+        /* Its items' come as they are folded (target_item). */
+        n->unstarred = n->args != NULL; n->star_ok = 1; n->targets = TARGET_OK;
         for (int t = 1; t < PLACES; t++) n->places[t] = SPOT_NONE;
-        size_t stars = 0, before = 0;
-        for (Node *item = n->args; item; item = item->next) {
-            if (target_facts(c, item)) return -1;
-            n->star_ok &= item->star_ok;
-            for (int t = 1; t < PLACES; t++) if (!n->places[t] && item->places[t] && place_from(c, n, t, item, t)) return -1;
-            if (n->targets != TARGET_OK) continue;
-            if (item->kind == N_STAR && ++stars > 1) n->targets = TARGET_STARS, n->places[0] = SPOT_SELF;
-            else if (item->kind == N_STAR && before > 255) n->targets = TARGET_MANY, n->places[0] = SPOT_SELF;
-            else if (item->targets != TARGET_OK && (n->targets = item->targets, place_from(c, n, 0, item, 0))) return -1;
-            if (!stars) before++;
-        }
     }
+    return 0;
+}
+/* Item, folded into list or tuple n's facts as a target, with d's counts. */
+static int target_item(SPYContext *c, Node *n, Items *d, Node *item) {
+    if (n->unstarred) n->unstarred = item->kind != N_STAR && ++d->unstarred <= 1 << 20;
+    if (target_facts(c, item)) return -1;
+    n->star_ok &= item->star_ok;
+    for (int t = 1; t < PLACES; t++) if (!n->places[t] && item->places[t] && place_from(c, n, t, item, t)) return -1;
+    if (n->targets != TARGET_OK) return 0;
+    if (item->kind == N_STAR && ++d->stars > 1) n->targets = TARGET_STARS, n->places[0] = SPOT_SELF;
+    else if (item->kind == N_STAR && d->before > 255) n->targets = TARGET_MANY, n->places[0] = SPOT_SELF;
+    else if (item->targets != TARGET_OK && (n->targets = item->targets, place_from(c, n, 0, item, 0))) return -1;
+    if (!d->stars) d->before++;
     return 0;
 }
 /* Parse a bitwise_or at token 'at' without side effects on the position;
@@ -7563,7 +7595,7 @@ static Node *comprehension(Parser *p, Node *n, int awaits, EmitMark element, Pro
         if (!loop->a) { p->emitting = emitting; return NULL; }
         if (first) {
             outer = p->awaits - before;
-            if (emitting) expands(loop->a, modes(emitting));
+            if (emitting) expands(loop->a, 0), expands(loop->a, modes(emitting));
             n->receiver_known = loop->a->expands_known; n->receiver_value = loop->a->expands_value;
         }
         *tail = loop; tail = &loop->b;
@@ -8954,9 +8986,10 @@ static Node *statement_body(Parser *p, int emits) {
                     Node *types = node(p, N_TUPLE);
                     if (!types) return NULL;
                     types->args = handler->a;
+                    items_add(p, types, types->args);
                     Node **items = &handler->a->next;
                     while (take(p, ',') && !at(p, ':') && !keyword(p, "as")) {
-                        if (!(*items = expression(p, 0))) return NULL;
+                        if (!(*items = expression(p, 0)) || items_add(p, types, *items)) return NULL;
                         items = &(*items)->next;
                     }
                     if (!(handler->a = finished(p, types))) return NULL;
@@ -9729,6 +9762,65 @@ static void release_links(Parser *p, Node *n, Node *completing) {
     for (int i = 0; i < 3; i++) if (parts[i] && parts[i] != completing && node_retires(p, parts[i])) free_parsed(p, parts[i]);
 }
 static int parse_children_of(Parser *p, Node *n);
+static int target_item(SPYContext *, Node *, Items *, Node *);
+static int parts_item(Parser *, Items *, Node *);
+/* List or tuple n's fold of its items begun, as a target its own facts (target_parts). */
+static int items_begin(Parser *p, Node *n) {
+    Items *d = allocate(p->ctx, sizeof(*d));
+    if (!d || !(d->parts = allocate(p->ctx, sizeof(Part)))) { mem_free(d); return -1; }
+    n->items = d;
+    d->link = &n->args; d->star = UINT32_MAX; d->parts_ok = d->recorded = d->emitted = 1; d->parts_len = d->parts_cap = 1;
+    d->parts->recorded = 1;
+    d->first = n->args && (n->args->flags & F_EVENTS) ? n->args->events_at : 0;
+    d->events_at = SIZE_MAX; d->known = 0xff;
+    return target_parts(p->ctx, n);
+}
+/* Item folded into list or tuple n's (Items). */
+static int items_fold(Parser *p, Node *n, Node *item) {
+    Items *d = n->items;
+    if (target_item(p->ctx, n, d, item) || parts_item(p, d, item)) return -1;
+    if (!(item->flags & F_EVENTS) || (item->flags & F_ANALYSED)) d->recorded = 0;
+    else { if (item->events_at < d->events_at) d->events_at = item->events_at; d->total += item->events_end - item->events_at; }
+    if (!(item->flags & F_EMITTED) || (d->count && d->steps_next != item->steps_at)) d->emitted = 0;
+    else if (grow(p->ctx, (void **)&d->steps, &d->steps_cap, d->count + 1, sizeof(ItemSteps))) return -1;
+    else d->steps[d->count] = (ItemSteps){item->steps_end, (uint32_t)item->line, item->kind == N_STAR};
+    d->steps_next = item->steps_end;
+    d->known &= item->expands_known; d->expanding |= item->expands_value;
+    d->starred |= item->kind == N_STAR;
+    d->after = item->kind == N_STAR ? 0 : d->after + 1;
+    d->count++;
+    return 0;
+}
+/* Item, just appended to list or tuple n: its expands summaries, while
+ * its parts are whole, in its program's mode and a loop iterable's
+ * (expanding); and the item before it folded. One between its first and
+ * last goes, which nothing reads once it is, while its program emits it
+ * as it is parsed and no annotation's text is made of it. */
+static int items_add(Parser *p, Node *n, Node *item) {
+    if (p->emitting) expands(item, 0), expands(item, modes(p->emitting));
+    if (item == n->args) return 0;
+    if (!n->items && items_begin(p, n)) return -1;
+    Items *d = n->items;
+    item = *d->link;
+    if (items_fold(p, n, item)) return -1;
+    if (item != n->args && p->emitting && !(p->future_annotations && p->unevaluated) && d->recorded && d->emitted && node_retires(p, item))
+        *d->link = item->next, free_parsed(p, item);
+    else d->link = &item->next;
+    return 0;
+}
+/* List or tuple n's items all folded as it completes; its parts, when each has some. */
+static int items_end(Parser *p, Node *n) {
+    if (!n->items && items_begin(p, n)) return -1;
+    Items *d = n->items;
+    if (!d->link) return 0;
+    for (Node *item; (item = *d->link); d->link = &item->next) if (items_fold(p, n, item)) return -1;
+    d->link = NULL;
+    n->flags |= F_TARGETS;
+    if (!d->parts_ok) return 0;
+    d->parts[0] = (Part){(unsigned char)n->kind, 0, 0, 0, d->parts->recorded, 0, 0, (uint32_t)n->line, (uint32_t)n->line, (uint32_t)d->parts_len, d->count, d->star, 0, 0, 0};
+    n->parts = d->parts; d->parts = NULL;
+    return 0;
+}
 /* Complete n: its analysis and summaries from its parts, whose own
  * links go now (release_links). */
 static int parse_children(Parser *p, Node *n) {
@@ -9749,7 +9841,7 @@ static int parse_children_of(Parser *p, Node *n) {
         if (operand && !(n->folded = unary(p->ctx, '-', operand))) return -1;
     }
     if (n->kind == N_ATTR || n->kind == N_INDEX) n->object_end = n->a->flags & F_EMITTED ? n->a->steps_end + 1 : 0;
-    if (target_facts(p->ctx, n) || list_parts(p, n) || definition_head(p->ctx, n)) return -1;
+    if (((n->kind == N_LIST || n->kind == N_TUPLE) && items_end(p, n)) || target_facts(p->ctx, n) || list_parts(p, n) || definition_head(p->ctx, n)) return -1;
     if (n->flags & (F_EVENTS | F_ANALYSED)) return 0;
     if (n->kind == N_COMPREHENSION) return comprehension_recorded(p, n);
     if (n->kind == N_ANNASSIGN) return annotated_recorded(p, n);
@@ -9796,7 +9888,10 @@ static int parse_children_of(Parser *p, Node *n) {
     size_t at = e->len, total = 0, next = e->len;
     int ordered = 1;
     Children k = {n, NULL, 0};
-    for (Node *o; (o = child_next(&k));) {
+    /* A list's or tuple's items', folded, follow one another. */
+    if (n->items && !n->items->recorded) return 0;
+    if (n->items) at = n->items->events_at < at ? n->items->events_at : at, total = n->items->total;
+    else for (Node *o; (o = child_next(&k));) {
         if (!(o->flags & F_EVENTS) || (o->flags & F_ANALYSED)) return 0;
         if (o->events_at < at) at = o->events_at;
         ordered &= total == 0 || o->events_at == next;
@@ -10466,7 +10561,7 @@ static void free_node(Node *n) {
     /* A lambda's scope, begun as it was parsed, is its node's until analysis adopts it. */
     if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
     spy_release(n->constant); spy_release(n->folded);
-    mem_free(n->name.text); mem_free(n->original); mem_free(n->unparsed); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n);
+    free_fields(n);
 }
 /* After a line of module statements, parsed since start, is compiled
  * and analysed, free the nodes of the line before it, now compiled too,
@@ -18769,7 +18864,8 @@ static int expands(Node *n, int calls);
 static int modes(Program *p) { return p->calls | (p->loads ? LOADS : 0); }
 /* Whether n is a list, tuple or set display with a starred item. */
 static int starred(Node *n) {
-    if (n->kind != N_LIST && n->kind != N_TUPLE && n->kind != N_SET) return 0;
+    if (n->items) return n->items->starred;
+    if (n->kind != N_SET) return 0;
     for (Node *item = n->args; item; item = item->next) if (item->kind == N_STAR) return 1;
     return 0;
 }
@@ -18845,6 +18941,8 @@ static int expanding(Node *n, int calls) {
     if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS)
         return (calls && (n->decorators || n->params || n->kind == N_CLASS)) ||
                list_expands(n->args, mode) || list_expands(n->decorators, mode);
+    /* A list's or tuple's items', folded (Items). */
+    if (n->items && n->items->known >> mode & 1) return n->items->expanding >> mode & 1;
     return list_expands(n->a, mode) || list_expands(n->b, mode) || list_expands(n->c, mode) || list_expands(n->args, mode);
 }
 static size_t emit_line(SPYContext *c, Program *p, int op, Node *n, size_t line, int arg);
@@ -19216,8 +19314,8 @@ static void compile_node(SPYContext *c, Program *p, Node *n) {
         /* A packed display or an empty one: BC_NEW takes the items atop
          * the stack, as many as arg's count (other displays add each item
          * as it is parsed). */
-        int count = 0;
-        for (Node *a = n->args; a; a = a->next) count++;
+        int count = n->items ? (int)n->items->count : 0;
+        for (Node *a = n->items ? NULL : n->args; a; a = a->next) count++;
         emit(c, p, BC_NEW, n, (n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : SPY_DICT) | count << 8);
         break;
     }
@@ -19837,15 +19935,15 @@ static Node *format_parsed(Parser *p, Node *n) {
 static Node *starred_parsed(Parser *p, Node *n) {
     SPYContext *c = p->ctx;
     Program *program = p->emitting;
-    if (!emitted_operands(program, (Node *[3]){NULL}, n->args)) return n;
-    size_t added = 0, start = n->args->steps_at;
-    for (Node *a = n->args; a; a = a->next, added++) {
-        if (emit_before(c, program, a->steps_end + added, a->kind == N_STAR ? BC_EXTEND : BC_ADD, a, n->kind == N_TUPLE && !a->next) == SIZE_MAX) return NULL;
+    Items *d = n->items;
+    size_t start = n->args->steps_at;
+    for (size_t i = 0; i < d->count; i++) {
+        ItemSteps *a = &d->steps[i];
+        if (emit_line_before(c, program, a->end + i, a->star ? BC_EXTEND : BC_ADD, a->line, n->kind == N_TUPLE && i + 1 == d->count) == SIZE_MAX) return NULL;
     }
     if (emit_before(c, program, start, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : SPY_TUPLE) == SIZE_MAX) return NULL;
     /* A tuple's count of items after its last starred one, as compile_node's. */
-    for (Node *a = n->args; a && n->kind == N_TUPLE; a = a->next)
-        program->items[start].other = a->kind == N_STAR ? 0 : program->items[start].other + 1;
+    if (n->kind == N_TUPLE) program->items[start].other = d->after;
     return parsed_steps(p, n, start);
 }
 /* Yield n, a statement of its own, emitted as parsed from its start to
@@ -19922,40 +20020,30 @@ static size_t parts_size(Node *value) {
  * could not be made. A starred item's are its value's, made as it
  * completed, their events from its own. */
 static int list_parts(Parser *p, Node *n) {
-    SPYContext *c = p->ctx;
-    if (n->kind == N_STAR) {
-        size_t size = n->parts ? 0 : parts_size(n->a);
-        if (!size) return 0;
-        if (!(n->parts = allocate(c, size * sizeof(Part)))) return -1;
-        return value_parts(p, n->parts, n->a, n->line, 1, n->a->events_at) < 0 ? -1 : 0;
-    }
-    if ((n->kind != N_TUPLE && n->kind != N_LIST) || n->parts) return 0;
-    size_t size = 1, count = 0, star = UINT32_MAX;
-    for (Node *item = n->args; item; item = item->next, count++) {
-        size_t own = item->kind == N_STAR ? item->parts ? item->parts->size : 0 : parts_size(item);
-        if (item->kind == N_STAR) star = count;
-        if (!own) return 0;
-        size += own;
-        if (size >= UINT32_MAX / 2) return 0;
-    }
-    Part *parts = allocate(c, size * sizeof(Part));
-    if (!parts) return -1;
-    /* Its items' events follow one another from its first's (parse_children). */
-    size_t first = n->args && (n->args->flags & F_EVENTS) ? n->args->events_at : 0;
-    parts[0] = (Part){(unsigned char)n->kind, 0, 0, 0, 1, 0, 0, (uint32_t)n->line, (uint32_t)n->line, (uint32_t)size, (uint32_t)count, (uint32_t)star, 0, 0, 0};
-    Part *at = parts + 1;
-    for (Node *item = n->args; item; item = item->next) {
-        int recorded;
-        if (item->kind == N_STAR) {
-            uint32_t from = (item->flags & F_EVENTS) && item->events_at >= first ? (uint32_t)(item->events_at - first) : 0;
-            memcpy(at, item->parts, item->parts->size * sizeof(Part));
-            for (Part *x = at; x < at + item->parts->size; x++) x->events_at += from, x->events_end += from;
-            recorded = at->recorded;
-        } else if ((recorded = value_parts(p, at, item, item->line, 0, first)) < 0) { mem_free(parts); return -1; }
-        parts[0].recorded &= recorded;
-        at += at->size;
-    }
-    n->parts = parts;
+    if (n->kind != N_STAR) return 0;
+    size_t size = n->parts ? 0 : parts_size(n->a);
+    if (!size) return 0;
+    if (!(n->parts = allocate(p->ctx, size * sizeof(Part)))) return -1;
+    return value_parts(p, n->parts, n->a, n->line, 1, n->a->events_at) < 0 ? -1 : 0;
+}
+/* Item, folded into list or tuple parts d, after its own, while each
+ * item has some; their events follow one another from its first's
+ * (parse_children). */
+static int parts_item(Parser *p, Items *d, Node *item) {
+    size_t own = !d->parts_ok ? 0 : item->kind == N_STAR ? item->parts ? item->parts->size : 0 : parts_size(item);
+    if (!own || d->parts_len + own >= UINT32_MAX / 2) { d->parts_ok = 0; return 0; }
+    if (grow(p->ctx, (void **)&d->parts, &d->parts_cap, d->parts_len + own, sizeof(Part))) return -1;
+    Part *at = d->parts + d->parts_len;
+    int recorded;
+    if (item->kind == N_STAR) {
+        uint32_t from = (item->flags & F_EVENTS) && item->events_at >= d->first ? (uint32_t)(item->events_at - d->first) : 0;
+        memcpy(at, item->parts, own * sizeof(Part));
+        for (Part *x = at; x < at + own; x++) x->events_at += from, x->events_end += from;
+        recorded = at->recorded;
+        d->star = d->count;
+    } else if ((recorded = value_parts(p, at, item, item->line, 0, d->first)) < 0) return -1;
+    d->parts->recorded &= recorded;
+    d->parts_len += at->size;
     return 0;
 }
 /* The steps of target part t from at on, emitted as it was parsed, made
@@ -20172,8 +20260,12 @@ static Node *finished(Parser *p, Node *n) {
     /* A field's conversion and format() call are steps between its value and spec. */
     else if (n->kind == N_FORMAT && (!n->b || (!n->op && program->calls != PAUSING))) fixed[1] = n->b;
     else if (n->kind == N_FORMAT) return format_parsed(p, n);
-    else if ((n->kind == N_LIST || n->kind == N_TUPLE) && packed(n)) { fixed[0] = NULL; list = n->args; }
-    else if ((n->kind == N_LIST || n->kind == N_TUPLE) && n->args) return starred_parsed(p, n);
+    else if ((n->kind == N_LIST || n->kind == N_TUPLE) && n->args) {
+        /* Its items' steps, one after another to the end (Items). */
+        Items *d = n->items;
+        if (!d->emitted || d->steps_next != program->len) return n;
+        return packed(n) ? emit_parsed(p, n, n->args->steps_at) : starred_parsed(p, n);
+    }
     else if ((n->kind == N_LIST || n->kind == N_TUPLE || n->kind == N_DICT || n->kind == N_SET) && !n->args) fixed[0] = NULL;
     else if (n->kind != N_UNARY && n->kind != N_ATTR) return n;
     Node *first = fixed[0] ? fixed[0] : list ? (list->kind == N_KEYWORD ? list->a : list) : NULL;
