@@ -434,6 +434,22 @@ part's name and span copied. Every program is the same, step for step,
 and every target error the same, as before, but for a `del` of more than
 255 targets, which the walk it replaces rejected as too deeply nested.
 
+The sixteenth stage is done. Statements keep no suites, handlers, cases
+or bodies, and what was still read from a completed node's operands is
+made as the node completes: a starred target's parts, a stand-in's
+expansion summary, the text of a PEP 563 annotation (built bottom-up from
+each operand's text with the parentheses its precedence needs), a
+docstring's flag, a mapping pattern's literal key, and an annotated
+target's object steps and error place. The probe build reports no read
+of a poisoned link over the specification tests. The parser then cuts a
+node's links to its operands when the next node completes
+(`release_links`), and before it frees a statement's nodes; a node is a
+record of its own fields from then on. The specification tests and all
+2,060 files of CPython's `Lib` compiled with `compile` run under
+AddressSanitizer with no report, and every program is the same, step for
+step, as before. The nodes are still allocated and freed with their
+statement; they are not yet replaced by fields of the parser's own.
+
 ## Remaining stages
 
 1. Emit expressions from the parser, in place of the finished
