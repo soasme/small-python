@@ -462,11 +462,15 @@ or tuple item once the next is appended finds what the display reads of
 its items when it completes: their count, facts as a target, target
 parts, analysis range, emitted steps and expansion summaries. Each is
 now folded as the next item is appended (`items_add`), so the items
-between a list's or tuple's first and last are freed then; a dictionary
-or set already emits each item as it is parsed. A check build that aborts
-on a target fact asked early, an expansion mode not folded, or items'
-events out of order reports none over the specification tests and
-`Lib`.
+between a list's or tuple's first and last are freed then. A check build
+that aborts on a target fact asked early, an expansion mode not folded,
+or items' events out of order reports none over the specification tests
+and `Lib`. A dictionary or set already emits each item as it is parsed;
+its items fold the same way, but analysis visits a dictionary's keys
+before its values, so the fold keeps each key's and value's event range
+and copies them in that order when the display completes. A check build
+that keeps every item and compares the folded ranges with the items'
+own reports no difference over the specification tests and `Lib`.
 
 ## Remaining stages
 
