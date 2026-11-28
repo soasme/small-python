@@ -8987,10 +8987,12 @@ static Node *statement_body(Parser *p, int emits) {
                     if (!types) return NULL;
                     types->args = handler->a;
                     items_add(p, types, types->args);
-                    Node **items = &handler->a->next;
+                    Node **tail = &handler->a->next;
                     while (take(p, ',') && !at(p, ':') && !keyword(p, "as")) {
-                        if (!(*items = expression(p, 0)) || items_add(p, types, *items)) return NULL;
-                        items = &(*items)->next;
+                        Node *item = expression(p, 0);
+                        if (!item) return NULL;
+                        *tail = item; tail = &item->next;
+                        if (items_add(p, types, item)) return NULL;
                     }
                     if (!(handler->a = finished(p, types))) return NULL;
                     if (keyword(p, "as")) {
