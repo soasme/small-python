@@ -329,7 +329,11 @@ struct Node {
     char *unparsed;
     size_t unparsed_len;
     unsigned char precedence;
-    Node *a, *b, *c, *args, *next, *allocated, *decorators;
+    Node *a, *b, *c, *args, *next, *decorators;
+    /* The unit's nodes, newest first: the one allocated before it and
+     * after it, and its place in that order (node). */
+    Node *allocated, *newer;
+    size_t serial;
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
     Scope *scope;
@@ -368,7 +372,7 @@ struct SPYValue {
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *annotate; Scope *definition; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; Parameter *signature; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
+        struct { Node *nodes, *body, *annotate; size_t serials; Scope *definition; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; Parameter *signature; size_t statements; int expression, setup_annotations, conditional_annotations, future_flags, string_source; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->signature. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Scope *def; Parameter *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
@@ -4838,10 +4842,10 @@ typedef struct Parser {
      * the first nonlocal error and async generator return error. */
     Scope *resolved_child;
     Analysis resolved, returns;
-    /* The nodes the last line of module statements allocated, freed after
-     * the next (free_lines); the last module statement; whether the
+    /* The first node the last line of module statements allocated, plus
+     * one (0: none), its nodes freed after the next's (free_lines); the last module statement; whether the
      * module's docstring and line are read (module_first). */
-    size_t line_nodes;
+    size_t line_mark;
     Node *last_statement;
     int module_begun;
     /* Within an annotation no code evaluates: a function local's, or one
@@ -5536,7 +5540,9 @@ static Node *node(Parser *p, int kind) {
     if (n) {
         n->kind = kind; n->line = peek(p)->line;
         n->start = peek(p)->start; n->end = peek(p)->start + peek(p)->len;
+        n->serial = ++p->unit->as.unit.serials;
         n->allocated = p->unit->as.unit.nodes;
+        if (n->allocated) n->allocated->newer = n;
         p->unit->as.unit.nodes = n;
     }
     return n;
@@ -5705,10 +5711,10 @@ static int emit_take(SPYContext *, Program *, Mark, size_t, size_t, Program *);
 static Node *statements(Parser *);
 static Node *suite_after(Parser *, const char *, size_t);
 static Body body_begin(Parser *, Node *, size_t);
-static int body_end(Parser *, Node *, Node *, Body);
+static int body_end(Parser *, Node *, size_t, Body);
 static int body_statements(Parser *, Node *, Node *);
 static size_t if_else(SPYContext *, Program *, size_t);
-static int nodes_finish(Parser *, Node *);
+static int nodes_finish(Parser *, size_t);
 static Scope *body_scope(SPYContext *, Node *);
 static void scope_define(Node *);
 static int scope_unhold(SPYContext *, Scope *);
@@ -7618,7 +7624,7 @@ static int analyse_statements(Parser *, Node *);
 /* Before a compound statement's header, whose nodes follow start, is
  * compiled in place: its nodes finished, and a statement the body held
  * back compiled first. */
-static int header_ready(Parser *p, Node *start) {
+static int header_ready(Parser *p, size_t start) {
     return nodes_finish(p, start) || body_statements(p, p->body.head, NULL);
 }
 /* A compound statement's header expression, emitted as it is parsed
@@ -7670,7 +7676,7 @@ static int def_header(Parser *p, Node *n, EmitMark from) {
 static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
     if (!emits) return suite_after(p, what, line);
     Body outer = p->body;
-    Node *start = p->unit->as.unit.nodes;
+    size_t start = p->unit->as.unit.serials;
     p->body = (Body){outer.program, NULL, NULL, NULL, p->depth + 1, 0, 0, outer.tries, 0, 0, 0, 0};
     Node *body = suite_after(p, what, line);
     int failed = !body || (!p->body.done && nodes_finish(p, start)) || body_statements(p, body, NULL);
@@ -7680,7 +7686,7 @@ static Node *suite_of(Parser *p, const char *what, size_t line, int emits) {
 /* if_stmt or elif_stmt after its keyword; with emits, compiled in place:
  * the test before its suite, the jump past the rest after it (if_else). */
 static Node *if_statement(Parser *p, int emits) {
-    Node *start = p->unit->as.unit.nodes, *n = node(p, N_IF);
+    size_t start = p->unit->as.unit.serials; Node *n = node(p, N_IF);
     if (!n) return NULL;
     size_t line = keyword_line(p), branch = 0, end = 0;
     const char *what = p->tokens[p->pos - 1].len == 4 ? "'elif' statement" : "'if' statement";
@@ -8493,7 +8499,7 @@ static Node *case_header(Parser *p, Program **guard) {
 }
 static Node *match_statement(Parser *p) {
     /* With emits compiled in place, as compile_statement does (case_begin). */
-    Node *start = p->unit->as.unit.nodes, *n = node(p, N_MATCH);
+    size_t start = p->unit->as.unit.serials; Node *n = node(p, N_MATCH);
     int emits = at_body(p);
     uint32_t exits = NO_STEP;
     if (!n) return NULL;
@@ -8525,7 +8531,7 @@ static Node *match_statement(Parser *p) {
         p->matching = emits;
         size_t recorded = p->events.len;
         int deferred = p->deferred != NULL;
-        Node *before = p->unit->as.unit.nodes, *item = case_header(p, emits ? &guard : NULL);
+        size_t before = p->unit->as.unit.serials; Node *item = case_header(p, emits ? &guard : NULL);
         p->matching = 0;
         if (!item || case_recorded(p, item, recorded) || analyse_statements(p, item) || (emits && header_ready(p, before)) ||
             case_check(item, &checked, deferred)) { free_program(guard); goto failed; }
@@ -8760,7 +8766,7 @@ static Node *statement_body(Parser *p, int emits) {
     if (!asynchronous && !p->inline_suite && keyword(p, "match") && line_ends_block(p)) return match_statement(p);
     if (!asynchronous && type_alias_start(p)) return type_alias(p);
     if (take_word(p, "with")) {
-        Node *start = p->unit->as.unit.nodes;
+        size_t start = p->unit->as.unit.serials;
         int emits = at_body(p);
         n = node(p, N_WITH);
         if (!n) return NULL;
@@ -8870,7 +8876,7 @@ static Node *statement_body(Parser *p, int emits) {
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
         Annotations annotations = collect_begin(p, 1, 0);
-        Node *start = p->unit->as.unit.nodes;
+        size_t start = p->unit->as.unit.serials;
         Scope *scope = p->scope;
         p->definition = definition;
         if (parse_children(p, n) || analyse_statements(p, n)) return NULL;
@@ -8897,7 +8903,7 @@ static Node *statement_body(Parser *p, int emits) {
     if (take_word(p, "try")) {
         /* With emits compiled in place, as compile_statement does (try_begin). */
         size_t line = keyword_line(p);
-        Node *start = p->unit->as.unit.nodes;
+        size_t start = p->unit->as.unit.serials;
         int emits = at_body(p);
         Program *program = p->body.program;
         Try t = emits ? try_shape(p) : (Try){0};
@@ -8929,7 +8935,7 @@ static Node *statement_body(Parser *p, int emits) {
                 return is_star ? syntax_span(p, except_at, p->pos, message) : (p->pos = except_at, syntax(p, message));
             }
             star = is_star;
-            Node *before = p->unit->as.unit.nodes, *handler = node(p, N_EXCEPT);
+            size_t before = p->unit->as.unit.serials; Node *handler = node(p, N_EXCEPT);
             if (!handler) return NULL;
             if (is_star && (at(p, ':') || at(p, T_NL))) return syntax(p, "expected one or more exception types");
             if (at(p, T_NL)) return syntax(p, "expected ':'");
@@ -9010,7 +9016,7 @@ static Node *statement_body(Parser *p, int emits) {
         int is_for = take_word(p, "for"), emits = at_body(p);
         if (!is_for) p->pos++;
         size_t line = keyword_line(p), loop = 0, branch = 0;
-        Node *start = p->unit->as.unit.nodes;
+        size_t start = p->unit->as.unit.serials;
         n = node(p, is_for ? N_FOR : N_WHILE);
         if (!n) return NULL;
         n->op = asynchronous;
@@ -9092,7 +9098,7 @@ static Node *statement_body(Parser *p, int emits) {
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
         int collecting = p->collecting;
         p->collecting = 0;
-        Node *start = p->unit->as.unit.nodes;
+        size_t start = p->unit->as.unit.serials;
         Scope *scope = p->scope;
         Body enclosing = body_begin(p, n, p->depth + 1);
         p->scope = n->scope;
@@ -9542,7 +9548,7 @@ static Node *inline_statements(Parser *p) {
     Node *head = NULL, **tail = &head;
     p->depth++;
     do {
-        Node *start = p->unit->as.unit.nodes, *n = line_statements(p, 1);
+        size_t start = p->unit->as.unit.serials; Node *n = line_statements(p, 1);
         if (!n || nodes_finish(p, start) || analyse_statements(p, n)) { head = NULL; break; }
         *tail = n;
         while (*tail) tail = &(*tail)->next;
@@ -9595,10 +9601,9 @@ static int comprehension_finish(SPYContext *, Node *);
  * statement's call finished: a negated number's value, folded as it
  * completed, its constant, as CPython folds it; the instructions of the
  * bodies among them, inner ones first. */
-static int nodes_finish(Parser *p, Node *start) {
+static int nodes_finish(Parser *p, size_t start) {
     SPYContext *c = p->ctx;
-    Node *newest = p->unit->as.unit.nodes;
-    for (Node *n = newest; n != start && !c->error_type[0]; n = n->allocated) {
+    for (Node *n = p->unit->as.unit.nodes; n && n->serial > start && !c->error_type[0]; n = n->allocated) {
         if (n->flags & F_FINISHED) continue;
         n->flags |= F_FINISHED;
         if (n->folded) { spy_release(n->constant); n->constant = n->folded; n->folded = NULL; }
@@ -10442,20 +10447,18 @@ static void free_node(Node *n) {
  * but those the parse reads when it ends (F_KEEP): the first statement
  * and the module's annotations. A deferred compiler error keeps the
  * source its node covers. */
-static void free_parsed(Parser *, Node **);
-static void free_lines(Parser *p, Node *start) {
+static void free_parsed(Parser *, Node *);
+static void free_lines(Parser *p, size_t start) {
     SPYValue *unit = p->unit;
     if (p->completed) release_links(p->completed), p->completed = NULL;
-    Node **at = &unit->as.unit.nodes;
-    size_t count = 0;
-    while (*at != start) { at = &(*at)->allocated; count++; }
-    for (size_t i = 0; i < p->line_nodes && *at; i++) {
-        Node *n = *at;
+    Node *n = unit->as.unit.nodes;
+    while (n && n->serial > start) n = n->allocated;
+    for (Node *next; n && p->line_mark && n->serial >= p->line_mark; n = next) {
+        next = n->allocated;
         /* A root scope's node goes with the unit, whose scopes it may hold. */
-        if ((n->flags & F_KEEP) || node_root(unit, n->scope)) { at = &n->allocated; continue; }
-        free_parsed(p, at);
+        if (!(n->flags & F_KEEP) && !node_root(unit, n->scope)) free_parsed(p, n);
     }
-    p->line_nodes = count;
+    p->line_mark = start + 1;
 }
 /* Free node *at, which nothing reads, unlinked from the parse's nodes; a
  * deferred error at it keeps the source it covers. */
@@ -10463,8 +10466,7 @@ static void site_settle(Site *s) {
     Node *n = s->node;
     *s = (Site){NULL, n->line, n->spanned ? n->start : NULL, n->spanned ? n->end : NULL};
 }
-static void free_parsed(Parser *p, Node **at) {
-    Node *n = *at;
+static void free_parsed(Parser *p, Node *n) {
     if (n == p->returned.node) site_settle(&p->returned);
     if (n == p->deferred_node) {
         if (n->spanned) { p->deferred_start = n->start; p->deferred_end = n->end; }
@@ -10472,7 +10474,9 @@ static void free_parsed(Parser *p, Node **at) {
     }
     if (n == p->symbols.open) p->symbols.open = NULL;
     if (n == p->completed) p->completed = NULL;
-    *at = n->allocated;
+    if (n->newer) n->newer->allocated = n->allocated;
+    else p->unit->as.unit.nodes = n->allocated;
+    if (n->allocated) n->allocated->newer = n->newer;
     free_node(n);
 }
 /* After a line of statements of a body that holds none back, parsed
@@ -10480,13 +10484,12 @@ static void free_parsed(Parser *p, Node **at) {
  * parse reads later (F_KEEP) and the body's first statement, which ends
  * its chain of statements now and its last compiled. */
 static void release_links(Node *);
-static void free_line(Parser *p, Node *start) {
+static void free_line(Parser *p, size_t start) {
     /* The node completed last may be kept, but its parts go. */
     if (p->completed) release_links(p->completed), p->completed = NULL;
-    for (Node **at = &p->unit->as.unit.nodes; *at != start;) {
-        Node *n = *at;
-        if ((n->flags & F_KEEP) || n == p->body.head || node_root(p->unit, n->scope)) at = &n->allocated;
-        else free_parsed(p, at);
+    for (Node *n = p->unit->as.unit.nodes, *next; n && n->serial > start; n = next) {
+        next = n->allocated;
+        if (!(n->flags & F_KEEP) && n != p->body.head && !node_root(p->unit, n->scope)) free_parsed(p, n);
     }
     p->body.head->next = NULL;
     p->body.done = p->body.head;
@@ -10510,7 +10513,7 @@ static Node *statements(Parser *p) {
     while (!at(p, T_END) && !at(p, T_DEDENT)) {
         if (take(p, T_NL)) continue;
         int line = !p->line_open;
-        Node *start = p->unit->as.unit.nodes, *n = line_statements(p, 1);
+        size_t start = p->unit->as.unit.serials; Node *n = line_statements(p, 1);
         if (!n || nodes_finish(p, start)) return NULL;
         if (!p->depth && line) p->unit->as.unit.statements++;
         *tail = n;
@@ -11332,7 +11335,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         unit->as.unit.string_source = c->string_source != 0;
         c->node_start = c->node_end = NULL;
-        Node *start = unit->as.unit.nodes;
+        size_t start = unit->as.unit.serials;
         if (!c->error_type[0]) collect_end(&p, NULL, &unit->as.unit.annotate, annotations);
         if (!c->error_type[0]) nodes_finish(&p, start);
         if (c->optimize > 1 && !p.module_begun) drop_docstring(unit->as.unit.body);
@@ -20946,7 +20949,7 @@ static Body body_begin(Parser *p, Node *n, size_t depth) {
  * on the header's line, whose statements no statement end finished or
  * compiled, is finished and compiled now. Then the enclosing body
  * resumes. */
-static int body_end(Parser *p, Node *head, Node *start, Body enclosing) {
+static int body_end(Parser *p, Node *head, size_t start, Body enclosing) {
     int failed = !head || (!p->body.done && nodes_finish(p, start)) || body_statements(p, head, NULL);
     p->body = enclosing;
     return failed;
