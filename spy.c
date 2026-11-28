@@ -21003,13 +21003,14 @@ static SPYValue *frame_module_name(SPYContext *, size_t);
 static int oserror_use_init(SPYContext *, SPYValue *);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *new_generator(SPYContext *, Frame *, SPYValue *);
-/* A list or tuple of the count items atop m's stack, which it takes; or
- * NULL, the items left. */
+/* A list or tuple of the count items atop m's stack, which it takes, a
+ * tuple sealed (seal_tuple); or NULL, the items left. */
 static SPYValue *display_pack(SPYContext *c, Machine *m, int type, size_t count) {
     SPYValue *v = value_alloc(c, type, count);
     if (!v || sequence_grow(c, v, count)) { spy_release(v); return NULL; }
     memcpy(v->as.seq.items, &m->stack[m->len - count], count * sizeof(*v->as.seq.items));
     v->as.seq.len = count; m->len -= count;
+    if (type == SPY_TUPLE) seal_tuple(c, v);
     return v;
 }
 static int display_add(SPYContext *c, SPYValue *result, SPYValue *item) {
