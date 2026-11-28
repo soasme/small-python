@@ -5568,9 +5568,31 @@ static void extend(Parser *p, Node *n, Node *from) {
     scope_spanned(n);
 }
 static int reserved(Token *t) {
-    static const char *words[] = {"False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"};
-    for (size_t i = 0; i < sizeof(words) / sizeof(*words); i++)
-        if (strlen(words[i]) == t->len && !memcmp(words[i], t->start, t->len)) return 1;
+    const char *s = t->start;
+    size_t n = t->len;
+#define WORD(w) (n == sizeof(w) - 1 && !memcmp(s, w, n))
+    switch (*s) {
+    case 'F': return WORD("False");
+    case 'N': return WORD("None");
+    case 'T': return WORD("True");
+    case 'a': return WORD("and") || WORD("as") || WORD("assert") || WORD("async") || WORD("await");
+    case 'b': return WORD("break");
+    case 'c': return WORD("class") || WORD("continue");
+    case 'd': return WORD("def") || WORD("del");
+    case 'e': return WORD("elif") || WORD("else") || WORD("except");
+    case 'f': return WORD("finally") || WORD("for") || WORD("from");
+    case 'g': return WORD("global");
+    case 'i': return WORD("if") || WORD("import") || WORD("in") || WORD("is");
+    case 'l': return WORD("lambda");
+    case 'n': return WORD("nonlocal") || WORD("not");
+    case 'o': return WORD("or");
+    case 'p': return WORD("pass");
+    case 'r': return WORD("raise") || WORD("return");
+    case 't': return WORD("try");
+    case 'w': return WORD("while") || WORD("with");
+    case 'y': return WORD("yield");
+    }
+#undef WORD
     return 0;
 }
 static int token_is(Token *t, const char *text) { return t->kind == T_NAME && t->len == strlen(text) && !memcmp(t->start, text, t->len); }
