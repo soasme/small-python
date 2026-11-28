@@ -4079,6 +4079,7 @@ static int unicode_has(uint32_t code, const uint8_t *table, const uint8_t *index
 #define UNICODE_HAS(name, code) unicode_has(code, unicode_prop_##name, unicode_prop_##name##_index, sizeof(unicode_prop_##name##_index) / 3)
 static int unicode_printable(unsigned code) { return UNICODE_HAS(printable, code); }
 static int identifier_character(unsigned code, int first) {
+    if (code < 128) return (code | 32) - 'a' < 26 || code == '_' || (!first && code - '0' < 10);
     return first ? UNICODE_HAS(identifier_start, code) : UNICODE_HAS(identifier_continue, code);
 }
 /* Index of the last row of a sorted table whose start (row >> shift) is at
