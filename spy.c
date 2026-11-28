@@ -217,7 +217,7 @@ typedef struct { const char *name; unsigned flags; size_t line; const char *decl
 /* A name a comprehension's loop binds (scope_named_owner): its clause's
  * index, its text in the parse's log, and its site. */
 typedef struct { size_t clause; uint32_t text; Site site; } LoopName;
-struct Scope { Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics, **held; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes, statics_len, statics_cap, held_len, held_cap; int kind, stars, iterables, cells, kept_len; const char *within, *returned_start, *returned_end; size_t returned_line, clause; LoopName *loops; size_t loops_len, loops_cap; Site site; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
+struct Scope { Scope *annotate, *generic; size_t line, first_line; int form, op, asynchronous, flags; char *name, *spelling; SPYValue *doc; Program *code, *flat; Parameter *signature; SPYValue *code_value; const char **statics, **held; Scope *parent, *children, *sibling; Symbol *symbols; TypeParameter *type_params; size_t len, cap, *order, order_len, entry, positional, parameters, positionals, nodes, statics_len, statics_cap, held_len, held_cap; int kind, stars, iterables, cells, kept_len; const char *within, *returned_start, *returned_end; size_t returned_line, clause; LoopName *loops; size_t loops_len, loops_cap; Site site; SPYValue *kept, *static_attributes; char **texts; size_t texts_len, texts_cap; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4, CELLS_MARKED = 8 /* its S_CELL symbols */ };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -21991,6 +21991,8 @@ static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
         if (!symbol->key && !(symbol->key = spy_string(c, symbol->name, strlen(symbol->name)))) { mem_free(order); return -1; }
     }
     scope->order = order; scope->order_len = len;
+    /* A def's or lambda's call of its positional parameters alone binds them in order (function_env). */
+    scope->entry = scope->kind == S_FUNCTION && scope->positional != SIZE_MAX ? scope->positional + 1 : 0;
     return 0;
 }
 static ALWAYS_INLINE int scope_order(SPYContext *c, Scope *scope) {
@@ -22940,7 +22942,7 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
  * ordered: exactly the parameters, by position. */
 static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
     Scope *scope = fn->as.function.def;
-    if (fn->as.function.signature || (keywords && keywords->as.map.len) || !scope->order || scope->positional != argc || scope->kind != S_FUNCTION)
+    if (scope->entry != argc + 1 || fn->as.function.signature || (keywords && keywords->as.map.len))
         return keyword_env(c, fn, argc, argv, keywords ? map_items(keywords) : NULL, keywords ? keywords->as.map.len : 0, keywords, take);
     SPYValue *env = kept_env(c, scope);
     if (!env && !(env = value_new(c, V_ENV))) { if (take) release_all(argc, argv); return NULL; }
