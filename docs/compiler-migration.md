@@ -447,8 +447,17 @@ node's links to its operands when the next node completes
 record of its own fields from then on. The specification tests and all
 2,060 files of CPython's `Lib` compiled with `compile` run under
 AddressSanitizer with no report, and every program is the same, step for
-step, as before. The nodes are still allocated and freed with their
-statement; they are not yet replaced by fields of the parser's own.
+step, as before. Then the nodes themselves go: when the next node
+completes, a completed node's parts are freed, but those the parse reads
+later (an except clause's name until the handler ends, a class's name
+while its body mangles private names, a definition, comprehension or
+folded number until its statement ends, and the kept nodes of a module
+line). Marks of a line or header are allocation serials, so a mark
+outlives the node allocated at it. Only the nodes still being parsed,
+and their direct parts, are alive at once; a display's items still live
+until the display completes. The specification tests and the 2,060
+files of `Lib` again run under AddressSanitizer with no report, and every
+program is the same, step for step.
 
 ## Remaining stages
 

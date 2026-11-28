@@ -334,6 +334,7 @@ struct Node {
      * after it, and its place in that order (node). */
     Node *allocated, *newer;
     size_t serial;
+    uint32_t emitted_at; /* Its place in the parser's emitted nodes, plus one, while it is there. */
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
     Scope *scope;
@@ -7195,12 +7196,15 @@ static const char *expression_name(Node *n) {
     default: return "literal";
     }
 }
-/* RAISE_SYNTAX_ERROR_KNOWN_LOCATION: the error covers node n. */
-static Node *syntax_at(Parser *p, Node *n, const char *message) {
-    syntax(p, message); p->ctx->line = n->line;
-    p->error_start = n->start; p->error_end = n->end; p->error_end_zero = 0;
+/* RAISE_SYNTAX_ERROR_KNOWN_LOCATION: the error covers the source from
+ * start to end, which begins on line. */
+static Node *syntax_span_at(Parser *p, size_t line, const char *start, const char *end, const char *message) {
+    syntax(p, message); p->ctx->line = line;
+    p->error_start = start; p->error_end = end; p->error_end_zero = 0;
     return NULL;
 }
+/* The error covers node n. */
+static Node *syntax_at(Parser *p, Node *n, const char *message) { return syntax_span_at(p, n->line, n->start, n->end, message); }
 /* An error with message at place i of n (Node.places). */
 static Node *place_error(Parser *p, Node *n, int i, const char *message) {
     if (n->places[i] == SPOT_SELF) return syntax_at(p, n, message);
@@ -8872,8 +8876,11 @@ static Node *statement_body(Parser *p, int emits) {
         Node *definition = p->definition;
         Site returned = p->returned;
         p->definition = n; p->returned = (Site){0};
+        /* The class's name, which mangles its body's private names, is read until the body ends. */
         const char *private_name = p->private_name;
         p->private_name = source_name(n->a);
+        Node *name = n->a;
+        name->flags |= F_KEEP;
         p->loops = p->functions = p->async_function = p->star = 0;
         Annotations annotations = collect_begin(p, 1, 0);
         size_t start = p->unit->as.unit.serials;
@@ -8891,6 +8898,7 @@ static Node *statement_body(Parser *p, int emits) {
         if (body_end(p, body, start, enclosing) || collect_end(p, n, &n->annotate, annotations)) return NULL;
         if (n->scope) scope_define(n);
         p->private_name = private_name;
+        name->flags &= ~F_KEEP;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
         if (!body) return NULL;
         return p->ctx->error_type[0] ? NULL : n;
@@ -8987,10 +8995,14 @@ static Node *statement_body(Parser *p, int emits) {
             if (parse_children(p, handler) || analyse_statements(p, handler) || (emits && header_ready(p, before))) return NULL;
             if (emits) match = except_begin(p->ctx, program, handler, &t, &final);
             if (is_star) p->star = p->loops + 1;
-            Node *name = handler->c, *body = suite_of(p, is_star ? "'except*' statement" : "'except' statement", except_line, emits);
+            /* The name is read again as the handler ends (except_end). */
+            Node *name = handler->c;
+            if (name) name->flags |= F_KEEP;
+            Node *body = suite_of(p, is_star ? "'except*' statement" : "'except' statement", except_line, emits);
             p->star = saved;
             if (!body) return NULL;
             if (emits) except_end(p->ctx, program, handler, name, &t, match, final);
+            if (name) name->flags &= ~F_KEEP;
             span_block(p, handler, except_at);
             handlers++;
         }
@@ -9329,7 +9341,7 @@ static void emitted_drop(Parser *p) { emit_back(p, p->emitting_from); }
 static EmitMark emit_mark(Parser *p) { return p->emitting ? (EmitMark){emitted(p->emitting), p->emitted_len} : (EmitMark){0}; }
 static void emit_back(Parser *p, EmitMark m) {
     if (!p->emitting) return;
-    for (size_t i = m.nodes; i < p->emitted_len; i++) p->emitted[i]->flags &= ~F_EMITTED;
+    for (size_t i = m.nodes; i < p->emitted_len; i++) if (p->emitted[i]) p->emitted[i]->flags &= ~F_EMITTED;
     p->emitted_len = m.nodes;
     emit_undo(p->emitting, m.steps);
 }
@@ -9428,10 +9440,13 @@ static Node *expression_statement(Parser *p, Node *n) {
     if (op == ':') {
         /* An unparenthesized tuple's error is at its first item (invalid_ann_assign_target). */
         Node *target = n->a, *place = target->kind == N_TUPLE && !single_group(p, start, p->pos) ? target->args : target;
+        /* Where its error is, before the probe below completes nodes that free the tuple's items. */
+        size_t place_line = place->line;
+        const char *place_start = place->start, *place_end = place->end;
         /* invalid_assignment's annotation errors need an expression after the ':'. */
         int invalid = target->kind != N_NAME && target->kind != N_ATTR && target->kind != N_INDEX;
         if (invalid && target->kind != N_STAR && !probe_expression(p, p->pos + 1, 0)) return syntax(p, "invalid syntax");
-        if (target->kind == N_TUPLE) return syntax_at(p, place, "only single target (not tuple) can be annotated");
+        if (target->kind == N_TUPLE) return syntax_span_at(p, place_line, place_start, place_end, "only single target (not tuple) can be annotated");
         if (target->kind == N_LIST) return syntax_at(p, target, "only single target (not list) can be annotated");
         /* A starred target ends the expression statement it began. */
         if (target->kind == N_STAR) return syntax(p, "invalid syntax");
@@ -9697,18 +9712,32 @@ static int annotated_recorded(Parser *, Node *);
 static int list_parts(Parser *, Node *);
 static int definition_head(SPYContext *, Node *);
 static int operation_of(Node *);
+/* Whether completed node n goes with its owner's links: not when the
+ * parse reads it later (F_KEEP, a body's head, a root scope's node, the
+ * node completed last) or its statement's end finishes it (nodes_finish). */
+static int node_retires(Parser *p, Node *n) {
+    return !(n->flags & F_KEEP) && n != p->body.head && n != p->completed && !node_root(p->unit, n->scope) && !n->folded &&
+           n->kind != N_DEF && n->kind != N_LAMBDA && n->kind != N_CLASS && n->kind != N_COMPREHENSION;
+}
+static void free_parsed(Parser *, Node *);
 /* A completed node's links, which nothing reads once another node
- * completes: its parts are its owner's no more. */
-static void release_links(Node *n) {
-    for (Node *a = n->args, *next; a; a = next) next = a->next, a->next = NULL;
+ * completes: its parts go, but completing and those the parse reads later. */
+static void release_links(Parser *p, Node *n, Node *completing) {
+    Node *parts[3] = {n->a, n->b, n->c};
+    for (Node *a = n->args, *next; a; a = next) {
+        next = a->next, a->next = NULL;
+        if (a != completing && node_retires(p, a)) free_parsed(p, a);
+    }
     n->a = n->b = n->c = n->args = NULL;
+    for (int i = 0; i < 3; i++) if (parts[i] && parts[i] != completing && node_retires(p, parts[i])) free_parsed(p, parts[i]);
 }
 static int parse_children_of(Parser *p, Node *n);
 /* Complete n: its analysis and summaries from its parts, whose own
  * links go now (release_links). */
 static int parse_children(Parser *p, Node *n) {
-    if (p->completed && p->completed != n) release_links(p->completed);
+    Node *completed = p->completed;
     p->completed = NULL;
+    if (completed && completed != n) release_links(p, completed, n);
     if (parse_children_of(p, n)) return -1;
     p->completed = n;
     return 0;
@@ -10450,7 +10479,7 @@ static void free_node(Node *n) {
 static void free_parsed(Parser *, Node *);
 static void free_lines(Parser *p, size_t start) {
     SPYValue *unit = p->unit;
-    if (p->completed) release_links(p->completed), p->completed = NULL;
+    if (p->completed) { Node *completed = p->completed; p->completed = NULL; release_links(p, completed, NULL); }
     Node *n = unit->as.unit.nodes;
     while (n && n->serial > start) n = n->allocated;
     for (Node *next; n && p->line_mark && n->serial >= p->line_mark; n = next) {
@@ -10474,6 +10503,7 @@ static void free_parsed(Parser *p, Node *n) {
     }
     if (n == p->symbols.open) p->symbols.open = NULL;
     if (n == p->completed) p->completed = NULL;
+    if (n->emitted_at && n->emitted_at <= p->emitted_len && p->emitted[n->emitted_at - 1] == n) p->emitted[n->emitted_at - 1] = NULL;
     if (n->newer) n->newer->allocated = n->allocated;
     else p->unit->as.unit.nodes = n->allocated;
     if (n->allocated) n->allocated->newer = n->newer;
@@ -10483,10 +10513,10 @@ static void free_parsed(Parser *p, Node *n) {
  * since start, is analysed and compiled, free its nodes but those the
  * parse reads later (F_KEEP) and the body's first statement, which ends
  * its chain of statements now and its last compiled. */
-static void release_links(Node *);
+static void release_links(Parser *, Node *, Node *);
 static void free_line(Parser *p, size_t start) {
     /* The node completed last may be kept, but its parts go. */
-    if (p->completed) release_links(p->completed), p->completed = NULL;
+    if (p->completed) { Node *completed = p->completed; p->completed = NULL; release_links(p, completed, NULL); }
     for (Node *n = p->unit->as.unit.nodes, *next; n && n->serial > start; n = next) {
         next = n->allocated;
         if (!(n->flags & F_KEEP) && n != p->body.head && !node_root(p->unit, n->scope)) free_parsed(p, n);
@@ -19229,7 +19259,7 @@ static Node *parsed_steps(Parser *p, Node *n, size_t at) {
     if (grow(c, (void **)&p->emitted, &p->emitted_cap, p->emitted_len + 1, sizeof(*p->emitted))) return NULL;
     n->steps_at = (uint32_t)at; n->steps_end = (uint32_t)p->emitting->len;
     n->flags |= F_EMITTED;
-    p->emitted[p->emitted_len++] = n;
+    n->emitted_at = (uint32_t)++p->emitted_len; p->emitted[p->emitted_len - 1] = n;
     /* Its analysis and its summary in its program's mode, while its
      * operands are whole (parse_children, expands). */
     if (!c->error_type[0] && parse_children(p, n)) return NULL;
@@ -19692,7 +19722,7 @@ static int stand_parsed(Parser *p, Node *n) {
     if (grow(p->ctx, (void **)&p->emitted, &p->emitted_cap, p->emitted_len + 1, sizeof(*p->emitted))) return -1;
     n->steps_at = value->steps_at; n->steps_end = value->steps_end;
     n->flags |= F_EMITTED;
-    p->emitted[p->emitted_len++] = n;
+    n->emitted_at = (uint32_t)++p->emitted_len; p->emitted[p->emitted_len - 1] = n;
     /* Its summary in its program's mode, as an emitted node's (parsed_steps). */
     if (p->emitting) expands(n, modes(p->emitting));
     return 0;
