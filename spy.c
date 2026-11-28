@@ -291,7 +291,7 @@ struct Node {
     /* The source the node covers, for error locations; spanned once the
      * innermost rule that matched it has set the range. */
     const char *start, *end;
-    int spanned;
+    unsigned char spanned;
     /* An expression's summaries, once asked (expands, loads_name): for
      * each mode, whether expands is known and its answer; and loads_name,
      * plus one. Expressions are whole when they compile. */
@@ -312,34 +312,33 @@ struct Node {
      * spots. Whether it is an attribute of self, or of a name, and an item
      * or attribute of literals and names a fused step may store. */
     unsigned char targets, star_ok, places[5], unstarred, self_attribute, stores_fused, named_receiver;
+    unsigned char leaf_yield; /* Whether a yield, compiled, yields a leaf in its own step (yields_leaf). */
+    unsigned char precedence; /* See unparsed. */
     Spot *spots;
     Part *parts; /* A list or tuple of targets' parts, itself first (list_parts). */
     SPYValue *folded; /* A negated number's value, until its statement ends (nodes_finish). */
     TestPlan *tested; /* A not's, emitted, as its operand's test (branch_parsed). */
     int operation; /* An operator's fused operation plus one, as it completes (fused_operation). */
-    unsigned char leaf_yield; /* Whether a yield, compiled, yields a leaf in its own step (yields_leaf). */
     uint32_t steps_at, steps_end; /* Its steps, once emitted as it was parsed (F_EMITTED). */
     uint32_t object_end; /* An attribute's or item's object's steps' end plus one, once emitted, as it completes. */
     uint32_t events_at, events_end; /* Its analysis, the parse's events, once recorded (F_EVENTS). */
-    NameOperand name;
+    uint32_t emitted_at; /* Its place in the parser's emitted nodes, plus one, while it is there. */
+    struct { char *text; } name; /* A name's or literal's text, owned. */
     char *original;
     /* Under PEP 563, an annotation's expression's text, made as it
      * completes, and its precedence: the level it is parenthesized above
      * (unparsed). */
     char *unparsed;
     size_t unparsed_len;
-    unsigned char precedence;
     Node *a, *b, *c, *args, *next, *decorators;
     /* The unit's nodes, newest first: the one allocated before it and
      * after it, and its place in that order (node). */
     Node *allocated, *newer;
     size_t serial;
-    uint32_t emitted_at; /* Its place in the parser's emitted nodes, plus one, while it is there. */
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
     Scope *scope;
     SPYValue *constant; /* A literal's value, made once. */
-    AttributeOperand attribute; /* An N_ATTR's, its name b's. */
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->name.text; }
 static const char *scope_name(Scope *s) { return s->spelling ? s->spelling : s->name; }
@@ -1501,7 +1500,6 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         VISIT(v->as.unit.replaced);
         for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
             VISIT(node->constant); VISIT(node->folded);
-            VISIT(node->name.global_key);
             if (node_root(v, node->scope)) scope_tree_edges(node->scope, visit, data);
         }
         scope_tree_edges(v->as.unit.scope, visit, data);
@@ -5625,8 +5623,7 @@ static void future_feature(Parser *p, size_t name) {
 /* Attribute n's name, its identifier b's, moved onto n, which owns it. */
 static void attribute_takes_name(Node *n) {
     n->name = n->b->name; n->original = n->b->original;
-    n->b->name = (NameOperand){0}; n->b->original = NULL;
-    n->attribute.name = &n->name; n->attribute.line = n->line;
+    n->b->name.text = NULL; n->b->original = NULL;
 }
 static Node *identifier(Parser *p) {
     if (!at(p, T_NAME) || reserved(peek(p))) return syntax(p, "invalid syntax");
@@ -10468,7 +10465,7 @@ static void analysis_raise(SPYContext *c, Analysis *a) {
 static void free_node(Node *n) {
     /* A lambda's scope, begun as it was parsed, is its node's until analysis adopts it. */
     if (n->scope && !n->scope->parent && !n->scope->children) free_scope(n->scope);
-    spy_release(n->constant); spy_release(n->folded); spy_release(n->name.global_key);
+    spy_release(n->constant); spy_release(n->folded);
     mem_free(n->name.text); mem_free(n->original); mem_free(n->unparsed); mem_free(n->spots); mem_free(n->parts); mem_free(n->tested); mem_free(n);
 }
 /* After a line of module statements, parsed since start, is compiled
@@ -18866,9 +18863,9 @@ static Operand *operand_new(SPYContext *c, Program *p, const char *text, int use
 }
 /* The operand of attribute node n for p. */
 static AttributeOperand *attribute_operand(SPYContext *c, Program *p, Node *n) {
-    Operand *o = operand_new(c, p, n->attribute.name->text, USE_ALWAYS);
+    Operand *o = operand_new(c, p, n->name.text, USE_ALWAYS);
     if (!o) return NULL;
-    o->attribute.line = n->attribute.line;
+    o->attribute.line = (int)n->line;
     return &o->attribute;
 }
 /* Emit op with arg, its operands from n, at n's line. */
